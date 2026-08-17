@@ -76,6 +76,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SessionCmd,
     },
+    /// Inspect or adjust a live session's GitHub App repository access.
+    Github {
+        #[command(subcommand)]
+        cmd: GithubCmd,
+    },
     /// Manage watches: periodic / triggered watch programs over the fleet.
     ///
     /// A watch wakes on a trigger (a cron tick or a session event),
@@ -596,6 +601,27 @@ enum SessionCmd {
         session: String,
         #[arg(long)]
         keep_branch: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GithubCmd {
+    /// Grant or revoke one repository on a live session's refreshable token.
+    Access {
+        /// GitHub repository in owner/name form.
+        repository: String,
+        /// Session key. Defaults to the session containing this command.
+        #[arg(long)]
+        session: Option<String>,
+        /// `write` grants the App's reviewed write policy; `none` revokes it.
+        #[arg(long, default_value = "write")]
+        mode: String,
+    },
+    /// List explicit access overrides for a live session.
+    Ls {
+        /// Session key. Defaults to the session containing this command.
+        #[arg(long)]
+        session: Option<String>,
     },
 }
 
@@ -1289,6 +1315,7 @@ async fn run() -> Result<()> {
         Cmd::Mcp { cmd } => run_mcp(cmd).await,
         Cmd::Server { cmd } => run_server(cmd).await,
         Cmd::Session { cmd } => run_session(cmd).await,
+        Cmd::Github { cmd } => run_github(cmd).await,
         Cmd::Issue { cmd } => run_issue(cmd).await,
         Cmd::Review { cmd } => run_review(cmd).await,
         Cmd::Watch { cmd } => run_watch(cmd).await,
@@ -1720,6 +1747,55 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             session,
             keep_branch,
         } => cmd_rm(session, keep_branch).await,
+    }
+}
+
+fn github_access_session(explicit: Option<String>) -> Result<String> {
+    explicit
+        .or_else(|| std::env::var("LOOM_SESSION_ID").ok())
+        .or_else(|| std::env::var("WEAVER_BRANCH").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .context("not inside a loom session — pass the target explicitly with --session <session>")
+}
+
+async fn run_github(cmd: GithubCmd) -> Result<()> {
+    let client = client::default()?;
+    match cmd {
+        GithubCmd::Access {
+            repository,
+            session,
+            mode,
+        } => {
+            let session = github_access_session(session)?;
+            let grant = client
+                .set_session_github_access(
+                    &session,
+                    &weaver_api::SetSessionGithubAccessReq { repository, mode },
+                )
+                .await?;
+            println!(
+                "{} access for {} is {} (by {})",
+                session, grant.repository, grant.mode, grant.granted_by
+            );
+            Ok(())
+        }
+        GithubCmd::Ls { session } => {
+            let session = github_access_session(session)?;
+            let grants = client.session_github_access(&session).await?;
+            if grants.is_empty() {
+                println!("no explicit GitHub access overrides for {session}");
+                return Ok(());
+            }
+            println!("{:<42}  {:<6}  GRANTED BY", "REPOSITORY", "MODE");
+            for grant in grants {
+                println!(
+                    "{:<42}  {:<6}  {}",
+                    grant.repository, grant.mode, grant.granted_by
+                );
+            }
+            Ok(())
+        }
     }
 }
 

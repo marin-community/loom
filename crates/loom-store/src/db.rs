@@ -135,6 +135,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "user-roles-preferences",
         include_str!("../migrations/0025_user_roles_preferences.sql"),
     ),
+    (
+        26,
+        "session-github-access",
+        include_str!("../migrations/0026_session_github_access.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

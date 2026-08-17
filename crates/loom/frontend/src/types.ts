@@ -77,6 +77,14 @@ export interface ChannelSubscription {
   updated_at: string;
 }
 
+/** Explicit override layered onto a session's launch-time GitHub App scope. */
+export interface SessionGithubAccess {
+  repository: string;
+  mode: 'write' | 'none';
+  granted_by: string;
+  granted_at: string;
+}
+
 /** A branch is the engine's view of "what the agent is working on": one
  *  `(repo_root, branch)` pair with a goal, a title, and a free-form
  *  description. Branches are owned by `weaver-core` and exist whether or not

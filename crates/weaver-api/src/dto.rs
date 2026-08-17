@@ -1036,6 +1036,23 @@ pub struct GithubTokenView {
     pub token: String,
 }
 
+/// One explicit repository grant layered onto a session's launch-time GitHub
+/// policy. GitHub App credentials currently expose one reviewed write policy;
+/// `none` is accepted only as the mutation that revokes a grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionGithubAccessView {
+    pub repository: String,
+    pub mode: String,
+    pub granted_by: String,
+    pub granted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetSessionGithubAccessReq {
+    pub repository: String,
+    pub mode: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutProfileEnvReq {
     /// A write-only literal. Exactly one of `value` and `secret_ref` is required.

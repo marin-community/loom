@@ -78,6 +78,7 @@ mod diagnostics;
 mod discussion;
 mod env;
 mod eventmux;
+mod github_access;
 mod issues;
 mod launches;
 mod logview;
@@ -106,6 +107,7 @@ use diagnostics::*;
 use discussion::*;
 use env::*;
 use eventmux::*;
+use github_access::*;
 use issues::*;
 use launches::*;
 use logview::*;
@@ -887,7 +889,11 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/send", post(send_session))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/preview", get(preview_session))
-        .route("/sessions/{id}/github-token", post(github_token))
+        .route("/sessions/{id}/github/token", post(github_token))
+        .route(
+            "/sessions/{id}/github/access",
+            get(list_github_access).put(set_github_access),
+        )
         // The ACP chat journal + live stream, and the ACP drive routes (a
         // `session/prompt` queueing send, a permission answer, a mode change).
         .route("/sessions/{id}/chat", get(get_session_chat))

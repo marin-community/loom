@@ -288,105 +288,24 @@ local SQLite.
 ## REST API
 
 Routes live under `/api`; the Vue SPA and CLIs are clients of the same surface.
-This table catalogs the stable operator/client contract. The router in
+This map groups that surface by architectural responsibility. The router in
 [`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs) is the exhaustive
 route truth, including internal proxy and compatibility paths.
 
-| Method + path | What it does |
+| Area | Route families and responsibility |
 |---|---|
-| `GET /api/health` / `GET /api/health/live` | public, process-only liveness probes (`/api/health` is the compatibility alias) |
-| `GET /api/ready` | public structured readiness: database access plus core and loom migration versions; optional future remote runner degradation will be reported without failing the whole API |
-| `GET /metrics` | public OpenMetrics scrape derived from durable session/profile/run/migration state; labels are bounded operational dimensions and never contain session/branch/path/user/token/error values (deployments normally restrict this at the public edge) |
-| `GET /api/self` | session-credential bootstrap context: the caller's session, branch, repository root, default channel, dashboard URL, and canonical REST links |
-| `GET /api/diagnostics` | human-user redacted counts, profile capacity, automation failures/staleness, orphan/error inventory, migration state, and non-secret federation metadata; backs Settings → Diagnostics |
-| `GET /api/events?topics=…` | every live stream the caller names, multiplexed onto one SSE connection — the browser holds 6 per origin, so the SPA subscribes here rather than opening one EventSource per view. Topics are `layout`, `logs`, `session:{id}`, `chat:{id}`; each frame is the default `message` event carrying `{topic, event, data}`, where `event` is the name the single-stream route below uses. Every topic is authorized against the route it stands in for, so this widens no credential; an unresolvable topic reports one `error` frame on its own topic and leaves the rest streaming |
-| `POST /api/session-launches/resolve` | resolve a canonical profile selection plus one-launch overrides into concrete selectors, provenance, policy, capacity, validation, and profile/resolver revisions without provisioning |
-| `GET /api/sessions` / `POST /api/sessions` | list / create sessions (list takes `archived` — default `false` — `automation` — default `false` — and admin-only `managed` — default `false`; canonical create requires both revisions from resolve and returns 409 plus a fresh preview on drift/admission change; flattened selectors remain compatible; valid Scratch input is decoded before provisioning; visible creates atomically assign configured origin/profile placement and a same-id default channel while managed warm infrastructure has no placement or layout revision effect; create stamps `resolved_launch`; `tracking_issue` is present only for an explicit claimed/imported work item) |
-| `GET POST /api/channels`; `GET DELETE /api/channels/{id}` | list/create communication contexts, inspect one, or archive a custom channel; session channels follow their session lifecycle |
-| `GET /api/channels/{id}/bindings` | inspect server-owned runtime and origin-delivery destinations without exposing provider credentials or raw routing authority |
-| `GET POST /api/channels/{id}/messages` | read the ordered append-only stream (`after`, optional bounded `limit`) or append a typed goal/message/status/result/system item; appends accept an idempotency key and return durable per-binding receipts, including external ids and failures; a session-authored message/result on a Slack-origin channel is delivered back to its bound thread |
-| `PUT /api/channels/{id}/{subscription,read-marker}` | set the caller's observe/deliver mode or monotonic read-through sequence |
-| `GET /api/sessions/summary` | compact fleet row projection for polling and search; accepts `archived`, `archived_only`, `automation`, `q`, `status`, and `attention`, searches goal text server-side without returning goals, and omits launch/MCP/title-generation/runtime detail retained by `GET /api/sessions/{id}` |
-| `GET /api/sessions/search` | case-insensitive fleet search across qualified placement, title/prompt, repo/branch, issue/PR, tags, status, profile, and provenance; optional widening `history`, archived-only `archived_only`, `status`, and `attention` filters |
-| `GET /api/session-layout`; `GET /api/session-layout/events` | human-user read of the ordered Spaces → Groups → Sessions model plus defaults/revision; SSE is invalidation-only and every membership/layout change emits one so clients reload canonical state |
-| `POST PATCH DELETE /api/session-layout/{spaces,groups}[/{id}]` | create/rename/delete spaces and groups; non-empty deletion requires a destination and moves sessions/defaults atomically |
-| `POST /api/session-layout/{moves,reorder,restores}` | atomic session moves, space/group reorder, and complete multi-group restore with an exact `expected_revision`; stale mutations return 409 plus the current layout |
-| `PUT /api/session-layout/groups/{id}/preference` | set the authenticated operator's collapse preference without changing shared layout revision |
-| `PUT DELETE /api/session-layout/defaults[/{kind}/{value}]` | configure or remove origin/profile placement defaults; watch programs launch visible automation through accepted `ops`/`actions` producer origins, while hidden warm infrastructure is not placed |
-| `GET POST /api/profiles`; `GET PUT DELETE /api/profiles/{name}` | named launch-template CRUD, including provider-neutral `mcp_access`, prelude, and the runtime-permission compatibility escape hatch; POST is atomic insert-only; edits and environment mutations share an optimistic revision; deletion leaves a monotonic tombstone while watches and non-terminal sessions block it |
-| `POST /api/profiles/{name}/clone` | atomically create (never overwrite) an optionally edited template from a resolved source; checks source-profile and resolver revisions, can copy write-only environment in the same transaction, and returns 409 plus a fresh preview on resolver drift |
-| `GET /api/profiles/{name}/effective`; `POST /api/profiles/{name}/probe` | inspect the exact profile-revision capability sets, custom revisions, runtime permission translation, and MCP processes without launching; probe also reports retired builtins and removed/disabled pinned custom definitions |
-| `GET /api/mcps` | merged trusted-builtin and operator-authored MCP registry |
-| `GET POST /api/mcps/custom`; `GET PUT DELETE /api/mcps/custom/{path}` | admin-only custom MCP CRUD; every write creates an immutable revision and validates real MCP discovery plus optional tests through `uv` |
-| `PUT DELETE /api/profiles/{profile}/env/{name}` | write-only profile environment management; a write supplies exactly one literal `value` or a full GCP Secret Manager `secret_ref`, and reads expose only source/reference metadata |
-| `POST /api/deployment/reconcile` | admin-only idempotent reconciliation of deployment setting defaults, profiles, environment references, and federation mappings; runtime setting overrides and other operator-managed rows are never pruned |
-| `POST /api/auth/federate` | exchange an exact mapped, signature-verified GitHub or Google OIDC identity for a ten-minute Ed25519-signed, profile-scoped Loom automation token |
-| `GET POST /api/runs`; `GET /api/runs/{id}` | durable, subject-scoped automation runs with idempotency reservation; an optional channel routes distinct deliveries through one live ACP session, and verified GitHub callers may provide a validated deterministic key or use the workflow run/attempt |
-| `POST /api/sessions/{id}/restricted-github/{tool}` | session-token-scoped fixed GitHub operations for a restricted session; checks stamped tool policy, fixes the target repository and thread from the session, and resolves a GitHub App token or explicit App-less profile token server-side |
-| `GET PATCH DELETE /api/sessions/{id}` | session CRUD (status, title, goal, description); legacy placement fields are read-only derivatives of canonical placement; DELETE also accepts an unmatched automation run's reserved session id, tearing down and removing the failed launch attempt |
-| `POST /api/sessions/{id}/title/regenerate`; `PUT /api/sessions/{id}/title-generation` | explicit provenance-aware title regeneration / per-session opt-out; generation uses a one-prompt economy model on the session's ACP runtime with no environment authority, tools, or MCP, commits through a goal/title/provenance CAS, and emits a session `metadata` invalidation at terminal completion |
-| `GET POST /api/sessions/{id}/resumption-cue` | model-free current cue/cache read / explicit or inactivity-gated ensure; the ensure starts a detached flight and returns `generating` immediately, so no request is held open across a model call — clients follow the generation on the GET. One in-process flight per session, with bounded lazy prompt preparation and a content + immutable-artifact source fingerprint |
-| `PUT DELETE /api/sessions/{id}/tags/{key}` | set (upsert) / clear one branch tag — the well-known `attention` and `triage` keys plus any free-form key |
-| `PUT /api/sessions/{id}/tags` | atomically replace one author's complete tag set, with optional exact `(key, value)` clears for lifecycle marks; the watch-safe write path |
-| `GET /api/sessions/{id}/url` | the session's dashboard URL as `{url}`, built from the externally-visible origin (`auth.base_url`, else the request's own Host) — what `loom session url` prints, so an agent can link a PR back to its session without inventing a loopback link |
-| `POST /api/sessions/{id}/{archive,adopt,recover}` | lifecycle actions; recover rebuilds an archived worktree or restarts a live/orphaned ACP provider in place while preserving its worktree and journal; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
-| `POST /api/sessions/{id}/handoff/resolve` | session-derived canonical handoff preview: resolves the target profile's true class, capacity (crediting only a slot-consuming source), policy, provenance, and optimistic revisions |
-| `POST /api/sessions/{id}/handoff` | replace an idle ACP runtime while preserving the loom session, worktree, branch, and journal; canonical `selection` requires preview revisions, holds target-profile admission through the final write, and stamps a new snapshot; legacy flattened agent/model/effort/mode input remains runtime-only and preserves the session's stamped profile/policy even after template edits or retirement; the incoming runtime also receives a best-effort digest and recent authored messages |
-| `POST PUT DELETE /api/sessions/{id}/github` | re-poll, explicitly set, or clear the session's GitHub association |
-| `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
-| `GET /api/sessions/{id}/files?q=…` | bounded worktree resource search for ACP `@file` completion; the old browser file editor routes are gone |
-| `GET /api/sessions/{id}/ide-info`; `ANY /api/sessions/{id}/ide[/…]` | availability probe and authenticated same-origin HTTP/WebSocket proxy for the optional code-server side panel |
-| `GET /api/shell/terminal`; `POST /api/shell/restart` | admin-only open or reset of the global operator shell; it runs beside the Loom server, can reach machine credentials, and is distinct from a user's per-session debug shells |
-| `GET /api/sessions/{id}/shells`; `DELETE /api/sessions/{id}/shell/{idx}`; `GET /api/sessions/{id}/shell/{idx}/terminal` | list, close, or open per-session debug shells through WebSocket |
-| `GET /api/sessions/{id}/artifacts` | list the branch's [artifacts](artifacts.md) plus repo-shared ones |
-| `GET PUT /api/sessions/{id}/artifacts/{name}` | read content + projected refs (`rev=N` for a revision) / write a user edit as a new revision |
-| `GET /api/sessions/{id}/artifacts/{name}/raw` | serve a stored image artifact's bytes for Markdown embedding (`rev=N` optionally pins a revision) |
-| `GET /api/sessions/{id}/changes` | bounded typed worktree change set relative to the session base: file status/totals plus hunk lines with stable old/new line coordinates; backs the SPA and `loom session changes` |
-| `GET POST /api/sessions/{id}/reviews` | list submitted reviews plus the caller's private draft / create or recover a draft for an exact artifact revision or Changes version |
-| `GET PATCH /api/reviews/{id}` | inspect a review by stable ID (including history after artifact deletion) / persist a draft's overall summary or guarded target version |
-| `POST /api/reviews/{id}/retarget-current` | guarded overall-only draft mutation that moves its target to the subject's current version |
-| `POST /api/reviews/{id}/comments` / `PATCH DELETE /api/reviews/{id}/comments/{comment_id}` | add, edit/re-anchor, or delete pending review comments; every draft mutation carries the current `expected_revision` |
-| `POST /api/reviews/{id}/comments/{comment_id}/resolve` | any authenticated operator may resolve or reopen the one mutable lifecycle bit on an otherwise immutable submitted comment |
-| `DELETE /api/reviews/{id}` / `POST /api/reviews/{id}/submit` | guarded discard / atomically check the subject version, freeze the exact server-rendered message, record its event, and enqueue it |
-| `POST /api/reviews/{id}/retry-delivery` | any authenticated operator may retry a failed submitted-review delivery using its stable delivery key |
-| `GET /api/branches/{id}/events` | canonical bounded branch event history |
-| `GET /api/sessions/{id}/log` | compatibility route for bounded branch event history |
-| `GET /api/sessions/{id}/events` | SSE stream of session events |
-| `GET /api/sessions/{id}/conversation` | the agent conversation as a normalized iris log (live transcript, else the archive capture); 404 when there is none — backs the Conversation tab |
-| `GET /api/sessions/{id}/history` | a bounded newest-tail page of provider-neutral records in chronological display order; `before`, `limit`, and `kinds` own backward pagination/filtering |
-| `GET /api/sessions/{id}/history/search` | case-insensitive literal `q` search over the same session-scoped records and cursor/filter contract |
-| `GET /api/sessions/{id}/terminal` | WebSocket: xterm.js ⇄ the session's tapestry PTY (the interaction surface) |
-| `POST /api/sessions/{id}/send` | deliver `{text}` to the agent (`submit`, default true, follows terminal input with Enter); for an `acp` session a live turn is cancelled and immediately replaced by a new turn, keeping the same `nudge` audit |
-| `POST /api/sessions/{id}/interrupt` | stop the current turn — a break (Escape) to the terminal for a `terminal` session, `session/cancel` for an `acp` one |
-| `GET /api/sessions/{id}/preview?lines=N` | capture the screen as `{screen}`; `lines` adds scrollback above the visible screen (for an `acp` session, `{screen}` is the last `lines` journal blocks rendered as compact text) |
-| `GET /api/sessions/{id}/chat` | The newest 200 blocks of the ACP session's DB-backed journal, `older_cursor`, live-turn state, pending prompt, effective mode, and durable composer metadata (the last provider-advertised controls remain after provider exit/restart); pass the cursor as `before_turn` + `before_seq` to page backward |
-| `GET /api/sessions/{id}/chat/stream` | SSE tail of the live journal: `block` (a committed block), `delta` (a streaming message/thought chunk), `tool` (a live tool-call update), `turn` (started / ended), `resync` (the bounded live buffer overran; reload the durable snapshot) |
-| `POST /api/sessions/{id}/prompt` | `{text, send_now?}` → 202 `{queued, turn}` — dispatch a user message as a `session/prompt`; the default queues behind a live turn, while `send_now` steers a receptive turn or cancels and replaces one blocked behind a tool or permission |
-| `DELETE /api/sessions/{id}/prompt` | atomically retract unseen next-turn feedback and return `{text}` for editing; 409 when the current ACP state has no queue available to retract |
-| `POST /api/sessions/{id}/permissions/{request_id}` | `{option_id}` → answer an open permission request (200 / 404 unknown / 409 already resolved) |
-| `PUT /api/sessions/{id}/mode` | `{mode_id}` → change the ACP session's permission mode (`session/set_mode`), journaled as a `mode_change` |
-| `GET /api/branches` / `GET PATCH /api/branches/{id}` | list / inspect / edit tracked branches |
-| `GET POST /api/branches/{id}/issues` | issues claimed by the branch / create one |
-| `GET /api/issues?all=…` | the cross-repo intentional-work board (every repo's explicit issues; `all=true` includes closed, `automation=true` includes automation-class sessions' claimed items, otherwise hidden) — what the loom Backlog pane reads |
-| `POST /api/issues/actions` | atomically close, reopen, tag/untag, or delete a validated set of issue IDs; returns updated views/deleted IDs or structured precondition details with no mutation |
-| `GET PATCH DELETE /api/issues/{id}` | per-issue CRUD |
-| `PUT DELETE /api/issues/{id}/tags/{key}` | set (upsert) / clear a free-form issue label — quiet `(key, value)` pills, no loud `attention`/`triage` ladder |
-| `GET POST /api/repos/issues?repo_root=…` | repo-wide board (`scope=repo\|backlog`) / create a backlog item |
-| `GET /api/repos/recent` / `GET /api/repos/branches?cwd=…` | recent repos / branches in a repo |
-| `GET /api/agents` | first-class agent types, their advertised model/effort selectors, and their execution `protocol` (`terminal`\|`acp`) — backs the create-session form and server-side validation |
-| `GET PATCH /api/settings` | deployment settings registry; human-readable, admin-mutable |
-| `GET PATCH /api/preferences` | effective personal preferences and per-user overrides |
-| `GET /api/logs`; `GET /api/logs/stream` | human-user server-log snapshot/tail; admins receive the raw operator stream, while user roles receive known deployment credentials and token-shaped values redacted |
-| `GET /api/auth/me` | caller identity, human role, and sign-in methods (public; never 401s) |
-| `POST /api/auth/login` / `POST /api/auth/logout` | username/password login / drop the session (public) |
-| `GET /api/auth/github/{login,callback}` | the GitHub OAuth dance (public) |
-| `GET POST /api/auth/tokens` / `DELETE /api/auth/tokens/{id}` | list / mint / revoke the caller's personal API tokens |
-| `POST /api/auth/password` | set the caller's own password |
-| `GET POST /api/auth/users`; `PUT /api/auth/users/{username}/role`; `DELETE /api/auth/users/{username}` | admin-only approved-user and role management |
-| `GET PUT /api/auth/github/config` | admin-only GitHub OAuth app config (secret write-only) |
-| `GET POST /api/watches` / `GET PATCH DELETE /api/watches/{id}` | human-readable, admin-mutable watch definitions (see [Watches](#watches)) |
-| `GET /api/watches/programs` | the builtin program registry: titles, suggested defaults, read-only script sources |
-| `POST /api/watches/{id}/run` / `GET /api/watches/{id}/runs` | admin-only fire a round now (`{dry_run}` stubs mutations) / human-readable round-history audit |
+| Operations | `/api/{health,ready,diagnostics,events,logs}` and `/metrics` expose bounded health, observability, diagnostics, and authorized event streams. |
+| Identity and access | `/api/self` and `/api/auth/*` cover session bootstrap, human authentication, OAuth, API tokens, federation, and admin user/access configuration. |
+| Sessions and launch policy | `/api/sessions*`, `/api/session-launches/*`, and `/api/agents` cover fleet views and search, launch resolution, admission, creation, and session metadata. |
+| Channels and delivery | `/api/channels/*` owns durable communication contexts, typed messages, delivery bindings and receipts, subscriptions, and read markers. |
+| Session layout | `/api/session-layout/*` owns the revisioned Spaces → Groups → Sessions model, placement defaults, ordering, moves, restores, and per-user presentation preferences. |
+| Profiles and capabilities | `/api/profiles/*`, `/api/mcps/*`, `/api/deployment/*`, `/api/settings`, and `/api/preferences` cover launch templates, effective capabilities, write-only environment, deployment reconciliation, and operator/user configuration. |
+| Automation | `/api/runs/*` and `/api/watches/*` provide idempotent automation runs, watch definitions, program discovery, execution, and audit history. |
+| Session lifecycle and integrations | `/api/sessions/{id}/*` covers metadata, tags, title generation, resumption cues, archive/adopt/recover, runtime handoff, and GitHub association and credentials. Lifecycle changes preserve the branch and durable conversation unless the operation explicitly removes the session. |
+| Session workspace | `/api/scratch/*`, `/api/sessions/{id}/{scratch,files,changes,artifacts,ide,shells}*`, and `/api/shell/*` expose bounded file exchange, diffs, artifacts, IDE proxying, and isolated debug terminals. |
+| Reviews | `/api/sessions/{id}/reviews` and `/api/reviews/*` own optimistic review drafts, anchored comments, immutable submission, resolution, and durable delivery/retry. |
+| Session runtime | `/api/sessions/{id}/{events,conversation,history,terminal,send,interrupt,preview,chat,prompt,permissions,mode}*` exposes the live terminal or ACP interaction model, durable journal/history, streaming updates, queued input, and permission/mode controls. |
+| Work planning | `/api/branches/*`, `/api/issues/*`, and `/api/repos/*` cover tracked branches, branch events, claimed and backlog work, bulk issue actions, tags, and repository discovery. |
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -766,6 +685,12 @@ grace period, and per-session `auto-archive: disabled` opt-out before archiving
 a Slack conversation.
 
 ## GitHub integration
+
+An agent can request access to an additional repository when a live task
+expands beyond its launch policy. A human grants or revokes that session-only
+access from `loom github access` or Session Details, without restarting it.
+Loom validates write access against the GitHub App installation before storing
+the audited override.
 
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import type { Session } from '../types';
+import { getSessionGithubAccess, setSessionGithubAccess } from '../api';
+import type { Session, SessionGithubAccess } from '../types';
 
 // The Details popover for the page header. Holds everything low-frequency so it
 // stays out of the always-visible header run, yet reachable from any scroll
@@ -14,6 +15,34 @@ import type { Session } from '../types';
 const props = defineProps<{ ws: Session; open: boolean }>();
 const emit = defineEmits<{ close: [reason: 'escape' | 'outside'] }>();
 const panel = ref<HTMLElement | null>(null);
+const githubAccess = ref<SessionGithubAccess[]>([]);
+const githubRepository = ref('');
+const githubAccessError = ref('');
+const githubAccessBusy = ref(false);
+
+async function loadGithubAccess() {
+  try {
+    githubAccess.value = await getSessionGithubAccess(props.ws.id);
+    githubAccessError.value = '';
+  } catch (error) {
+    githubAccessError.value = (error as Error).message;
+  }
+}
+
+async function updateGithubAccess(mode: SessionGithubAccess['mode']) {
+  const repository = githubRepository.value.trim();
+  if (!repository) return;
+  githubAccessBusy.value = true;
+  try {
+    await setSessionGithubAccess(props.ws.id, repository, mode);
+    githubRepository.value = '';
+    await loadGithubAccess();
+  } catch (error) {
+    githubAccessError.value = (error as Error).message;
+  } finally {
+    githubAccessBusy.value = false;
+  }
+}
 
 function close(reason: 'escape' | 'outside') {
   emit('close', reason);
@@ -30,10 +59,11 @@ function onOutsidePointerDown(event: PointerEvent) {
 }
 
 watch(
-  () => props.open,
-  async (open) => {
+  () => [props.open, props.ws.id] as const,
+  async ([open]) => {
     document.removeEventListener('pointerdown', onOutsidePointerDown, true);
     if (!open) return;
+    void loadGithubAccess();
     await nextTick();
     if (!props.open) return;
     document.addEventListener('pointerdown', onOutsidePointerDown, true);
@@ -76,6 +106,45 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
 
         <div v-if="$slots.context" class="mt-3 border-t border-line px-2 pt-3">
           <slot name="context" />
+        </div>
+
+        <div class="mt-3 border-t border-line px-2 pt-3">
+          <h3 class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">
+            GitHub access
+          </h3>
+          <ul v-if="githubAccess.length" class="mb-2 space-y-1 text-xs text-muted">
+            <li v-for="grant in githubAccess" :key="grant.repository" class="flex gap-2">
+              <code class="min-w-0 flex-1 break-all">{{ grant.repository }}</code>
+              <span>{{ grant.mode }}</span>
+            </li>
+          </ul>
+          <p v-else class="mb-2 text-xs text-faint">No explicit overrides.</p>
+          <input
+            v-model="githubRepository"
+            class="mb-2 w-full rounded border border-line bg-canvas px-2 py-1 text-xs"
+            placeholder="owner/repository"
+            aria-label="GitHub repository"
+            @keydown.enter.prevent="updateGithubAccess('write')"
+          />
+          <div class="flex gap-2">
+            <button
+              type="button"
+              class="rounded border border-line px-2 py-1 text-xs text-muted hover:text-default"
+              :disabled="githubAccessBusy || !githubRepository.trim()"
+              @click="updateGithubAccess('write')"
+            >
+              Grant write
+            </button>
+            <button
+              type="button"
+              class="rounded border border-line px-2 py-1 text-xs text-muted hover:text-default"
+              :disabled="githubAccessBusy || !githubRepository.trim()"
+              @click="updateGithubAccess('none')"
+            >
+              Revoke
+            </button>
+          </div>
+          <p v-if="githubAccessError" class="mt-2 text-xs text-danger">{{ githubAccessError }}</p>
         </div>
 
         <h3
