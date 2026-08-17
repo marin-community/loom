@@ -1,8 +1,9 @@
-//! The inbound GitHub trigger end-to-end over HTTP: a signed `issue_comment` or
-//! `issues` delivery to `POST /api/github/webhook` turns `@loom work on this`
-//! into a session and replies with its URL. The security boundary is exercised
-//! here — a bad/missing signature is a hard 401, a replay is a no-op, and a
-//! non-trigger or unauthorized request launches nothing.
+//! The inbound GitHub trigger end-to-end over HTTP: a signed `issue_comment`,
+//! `issues`, or `pull_request_review` delivery to `POST /api/github/webhook`
+//! turns `@loom work on this` into a session and replies with its URL. The
+//! security boundary is exercised here — a bad/missing signature is a hard 401,
+//! a replay is a no-op, and a non-trigger or unauthorized request launches
+//! nothing.
 //!
 //! No network and no real `gh`: the clone source is a *local bare repo* and the
 //! GitHub gateway (permission check + reply) is a recording fake installed into
@@ -204,6 +205,28 @@ fn trigger_body_pr(login: &str, number: i64, comment: &str) -> Vec<u8> {
             "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7"}
         },
         "comment": {"body": comment, "user": {"login": login}},
+        "repository": {"full_name": "acme/widgets"},
+        "sender": {"login": login}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// A `pull_request_review.submitted` event with a review body from `login`.
+fn submitted_review_event(login: &str, number: i64, review_body: &str) -> Vec<u8> {
+    json!({
+        "action": "submitted",
+        "pull_request": {
+            "number": number,
+            "title": "Fix the tests",
+            "body": "they are red"
+        },
+        "review": {
+            "id": 3001,
+            "body": review_body,
+            "state": "commented",
+            "user": {"login": login}
+        },
         "repository": {"full_name": "acme/widgets"},
         "sender": {"login": login}
     })
@@ -1101,6 +1124,42 @@ async fn pr_trigger_attaches_to_pr_head_branch() {
     );
 
     let id = sessions[0]["id"].as_str().unwrap().to_string();
+    ts.client
+        .delete(&format!("/api/sessions/{id}"))
+        .await
+        .unwrap();
+}
+
+/// A submitted PR review mention launches a session on the PR head.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn submitted_pr_review_mention_triggers_a_session() {
+    let (ts, fake) = boot().await;
+    let _remotes = prepare_repo(&ts).await;
+    *fake.pr_head.lock().unwrap() = Some(loom::github_trigger::PrHead {
+        head_ref: "feature".to_string(),
+        cross_repo: false,
+    });
+
+    let body = submitted_review_event("rjpower", 7, "@loom fix the review comments");
+    assert_eq!(
+        post_event(
+            &ts,
+            "pull_request_review",
+            "d-pr-review",
+            Some(sign(SECRET, &body)),
+            &body,
+        )
+        .await
+        .status(),
+        200
+    );
+    wait_for_sessions(&ts, 1).await;
+
+    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    assert_eq!(sessions[0]["branch"]["branch"].as_str(), Some("feature"));
+
+    let id = sessions[0]["id"].as_str().unwrap();
     ts.client
         .delete(&format!("/api/sessions/{id}"))
         .await

@@ -1,7 +1,7 @@
-//! The inbound GitHub trigger: a webhook that turns an `@loom` issue body or
-//! issue/PR comment into a session and replies with its URL (shared-loom design
-//! §6.3). This is the **untrusted-input boundary** — the receiver is exposed to
-//! the internet, so every step here is a gate:
+//! The inbound GitHub trigger: a webhook that turns an `@loom` issue body,
+//! issue/PR comment, or submitted PR review into a session and replies with its
+//! URL (shared-loom design §6.3). This is the **untrusted-input boundary** — the
+//! receiver is exposed to the internet, so every step here is a gate:
 //!
 //! 1. **Authenticate the delivery cryptographically.** GitHub signs each
 //!    delivery with HMAC-SHA256 over the raw body; [`verify_signature`] checks it
@@ -9,8 +9,8 @@
 //!    rejected before its body is even parsed.
 //! 2. **Dedupe** on the `X-GitHub-Delivery` GUID ([`record_delivery`]) so a
 //!    replayed or GitHub-retried delivery never launches a second session.
-//! 3. **Filter** to new or body-edited `issue_comment` and `issues` events,
-//!    ignoring the bot's own events.
+//! 3. **Filter** to new or body-edited `issue_comment` and `issues` events, plus
+//!    submitted `pull_request_review` events, ignoring the bot's own events.
 //! 4. **Match** the trigger phrase ([`is_trigger`]) — a standalone mention
 //!    newly introduced into the request prose, quotes and code excluded.
 //! 5. **Authorize the requester** ([`authorize`]) against loom's approved-user
@@ -263,8 +263,8 @@ fn closing_run(chars: &[char], from: usize, run: usize) -> Option<usize> {
     None
 }
 
-/// A normalized trigger request from a new or edited issue body or issue/PR
-/// comment.
+/// A normalized trigger request from an issue body, issue/PR comment, or
+/// submitted PR review.
 #[derive(Debug)]
 pub struct TriggerEvent {
     pub issue: IssuePayload,
@@ -287,6 +287,7 @@ pub enum TriggerSource {
     CommentEdited,
     IssueOpened,
     IssueEdited,
+    PullRequestReviewSubmitted,
 }
 
 /// The raw `issue_comment` webhook payload, narrowed to fields used here.
@@ -310,6 +311,31 @@ struct IssuesEvent {
     sender: UserPayload,
     #[serde(default)]
     changes: Option<ChangesPayload>,
+}
+
+/// The raw `pull_request_review` webhook payload, narrowed to fields used here.
+#[derive(Debug, Deserialize)]
+struct PullRequestReviewEvent {
+    action: String,
+    pull_request: PullRequestPayload,
+    review: ReviewPayload,
+    repository: RepoPayload,
+    sender: UserPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct PullRequestPayload {
+    number: i64,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    body: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReviewPayload {
+    #[serde(default)]
+    body: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -426,6 +452,29 @@ impl TriggerEvent {
                         user: event.sender,
                         comment_id: None,
                         source,
+                    },
+                }))
+            }
+            "pull_request_review" => {
+                let event: PullRequestReviewEvent =
+                    serde_json::from_slice(body).context("parsing pull_request_review payload")?;
+                if event.action != "submitted" {
+                    return Ok(None);
+                }
+                Ok(Some(Self {
+                    issue: IssuePayload {
+                        number: event.pull_request.number,
+                        title: event.pull_request.title,
+                        body: event.pull_request.body,
+                        pull_request: Some(serde_json::Value::Null),
+                    },
+                    repository: event.repository,
+                    request: TriggerRequest {
+                        body: event.review.body.unwrap_or_default(),
+                        previous_body: None,
+                        user: event.sender,
+                        comment_id: None,
+                        source: TriggerSource::PullRequestReviewSubmitted,
                     },
                 }))
             }

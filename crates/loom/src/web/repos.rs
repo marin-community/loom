@@ -132,8 +132,9 @@ pub(super) async fn github_webhook(
         }
     }
 
-    // 3. Normalize new requests and body edits. Other event kinds and actions
-    //    (including deletes and setup pings) are acknowledged and ignored.
+    // 3. Normalize new requests, body edits, and submitted reviews. Other event
+    //    kinds and actions (including deletes and setup pings) are acknowledged
+    //    and ignored.
     let event_kind = headers
         .get("x-github-event")
         .and_then(|v| v.to_str().ok())
@@ -650,6 +651,15 @@ fn trigger_goal(
             ),
             String::new(),
         ),
+        github_trigger::TriggerSource::PullRequestReviewSubmitted => (
+            format!(
+                "You've been tagged into GitHub {kind} #{number} of {repo} ({url}) via a submitted review by @{author}."
+            ),
+            format!(
+                "\n\n## Triggering review\n{}",
+                event.request_body().trim()
+            ),
+        ),
     };
     format!(
         "{introduction}\n\n## {title_kind}\n{}\n\n{body}{trigger_context}\n\n## How to respond\n{respond}",
@@ -678,6 +688,7 @@ async fn forward_trigger_to_session(
         github_trigger::TriggerSource::CommentEdited => "edited comment",
         github_trigger::TriggerSource::IssueOpened => "request in the issue body",
         github_trigger::TriggerSource::IssueEdited => "edited request in the issue body",
+        github_trigger::TriggerSource::PullRequestReviewSubmitted => "submitted review",
     };
     let note = format!(
         "New {phrase} {source} from @{author} on {thread} #{number}:\n\n{}\n\n\
