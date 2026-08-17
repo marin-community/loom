@@ -350,6 +350,9 @@ async fn handle_trigger(
                 )
                 .await
                 {
+                    if is_pr {
+                        associate_triggered_pr(&st, &sess, &b, number).await;
+                    }
                     crate::events::record(
                         &st.db,
                         &st.bus,
@@ -582,8 +585,31 @@ async fn handle_trigger(
         )
         .await
         .ok();
+        associate_triggered_pr(&st, &created.session, &created.branch, number).await;
     }
     Ok(Some(created.session.id))
+}
+
+/// A PR trigger already knows the exact association and has an authenticated
+/// GitHub App context. Persist that number immediately, then hydrate the normal
+/// snapshot so the PR-open event wakes reactive watches (including the stock
+/// labeller). Failure to refresh never discards the known association.
+async fn associate_triggered_pr(
+    st: &AppState,
+    session: &Session,
+    branch: &weaver_core::branch::Branch,
+    number: i64,
+) {
+    if let Err(error) = crate::github::set_mapping(&st.db, &branch.id, number).await {
+        tracing::warn!(session = %session.id, pr = number, error = %error, "GitHub trigger: saving PR association failed");
+        return;
+    }
+    if !crate::github::gh_available().await {
+        return;
+    }
+    if let Err(error) = crate::github::refresh(st, session, branch, false).await {
+        tracing::warn!(session = %session.id, pr = number, error = %error, "GitHub trigger: hydrating PR association failed");
+    }
 }
 
 /// Build the opening goal for a trigger-launched session from its thread context

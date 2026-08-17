@@ -332,7 +332,7 @@ route truth, including internal proxy and compatibility paths.
 | `POST /api/sessions/{id}/{archive,adopt,recover}` | lifecycle actions; recover rebuilds an archived worktree or restarts a live/orphaned ACP provider in place while preserving its worktree and journal; archive also accepts an unmatched automation run's reserved session id, cancelling its runtime while preserving run history |
 | `POST /api/sessions/{id}/handoff/resolve` | session-derived canonical handoff preview: resolves the target profile's true class, capacity (crediting only a slot-consuming source), policy, provenance, and optimistic revisions |
 | `POST /api/sessions/{id}/handoff` | replace an idle ACP runtime while preserving the loom session, worktree, branch, and journal; canonical `selection` requires preview revisions, holds target-profile admission through the final write, and stamps a new snapshot; legacy flattened agent/model/effort/mode input remains runtime-only and preserves the session's stamped profile/policy even after template edits or retirement; the incoming runtime also receives a best-effort digest and recent authored messages |
-| `POST PUT DELETE /api/sessions/{id}/github` | re-poll, explicitly set, or clear the session's GitHub association |
+| `POST PUT DELETE /api/sessions/{id}/github`; `POST /api/sessions/{id}/github/labels` | re-poll, explicitly set, or clear the session's GitHub association; idempotently add a label to the associated PR through loom's GitHub gateway |
 | `GET /api/scratch/limits`; `GET POST DELETE /api/sessions/{id}/scratch` | shared Scratch contract and live list/drop/remove: 20 files, 25 MiB each, 50 MiB decoded total; accepted dotfiles count, while `.gitignore` is reserved |
 | `GET /api/sessions/{id}/files?q=…` | bounded worktree resource search for ACP `@file` completion; the old browser file editor routes are gone |
 | `GET /api/sessions/{id}/ide-info`; `ANY /api/sessions/{id}/ide[/…]` | availability probe and authenticated same-origin HTTP/WebSocket proxy for the optional code-server side panel |
@@ -794,11 +794,14 @@ than a failure.
 
 The session header always renders PR and issue association pills, including an
 empty state. Existing associations are direct GitHub links; adjacent edit
-controls keep reassociation secondary. The PR editor can pin an explicit number
-or return to live-branch discovery through `PUT` / `DELETE
-/api/sessions/{id}/github`; the issue editor patches the GitHub link on the
-session's weaver tracking issue, which remains the source of truth for that
-association.
+controls keep reassociation secondary. The compact PR editor can pin an explicit
+number or return to live-branch discovery through `PUT` / `DELETE
+/api/sessions/{id}/github`; background polling owns refresh. An `@loom` trigger
+on an existing PR persists its already-known number immediately and hydrates the
+snapshot through the same GitHub App-first credential ladder, so it never needs
+an unrelated server `gh` login to discover the thread again. The issue editor
+patches the GitHub link on the session's weaver tracking issue, which remains the
+source of truth for that association.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session
@@ -1014,11 +1017,11 @@ A round runs the **program** the watch names:
   external review — `review_decision` `REVIEW_REQUIRED` — with a quiet
   `awaiting: review` mark that sinks it below the calm default in the fleet
   sort, and clear it once review lands, the PR merges, or it un-drafts; needs
-  `mark`), `builtin:pr-label` (flag sessions whose open PR lacks the loom label)
-  and `builtin:archive-merged` (flag live sessions whose PR has merged, excluding
-  those with `auto-archive: disabled`). The last two are **read-only**: they
-  record `would:` actions and mutate nothing — the actual archive is still
-  `github.archive_on_merge`, above — and are opt-in. Watches granted the
+  `mark`), `builtin:pr-label` (idempotently add the configured GitHub label when
+  a PR first appears; needs `mark`) and `builtin:archive-merged` (flag live
+  sessions whose PR has merged, excluding those with `auto-archive: disabled`).
+  The archive advisor is read-only and opt-in — the actual archive is still
+  `github.archive_on_merge`, above. The stock PR labeller is enabled. Watches granted the
   `judge` capability are agentic and the engine limits their automatic rounds
   to at most one every 15 minutes; manual runs still bypass the interval.
   Agent judgements use the watch's selected automation-safe ACP profile. The

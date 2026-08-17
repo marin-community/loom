@@ -154,6 +154,17 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
         StubClient().run("ops", "alert-1842", session_request)
 
 
+def test_add_pr_label_is_mark_gated_and_uses_the_session_route():
+    client = StubClient(capabilities=["mark"])
+    client.add_pr_label("s1", "weaver")
+    assert client.requests == [
+        ("POST", "/sessions/s1/github/labels", {"label": "weaver"})
+    ]
+
+    with pytest.raises(CapabilityDenied):
+        StubClient().add_pr_label("s1", "weaver")
+
+
 def session(id, status="running", tags=None, repo_root="/repo", session_class="interactive"):
     return {
         "id": id,

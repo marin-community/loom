@@ -927,11 +927,9 @@ async fn rest_watch_lifecycle_and_validation() {
 
 use loom::builtins::python3_available;
 
-/// A github watch shells out to `gh` (reading PR labels/state); loom must inject
-/// the operator's `GH_TOKEN` (Settings → Agents & profiles) into the otherwise
-/// env-stripped watch subprocess, or every github watch (pr-label, review-wait,
-/// archive-merged) is blind. The explicit inject wins over any ambient value, so
-/// the exact token reaches the process.
+/// Custom programs can use `weaver_loom.gh_json`; loom injects the operator's
+/// `GH_TOKEN` (Settings → Agents & profiles) into the otherwise env-stripped
+/// subprocess. Stock GitHub writes use loom's App-first REST gateway instead.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_subprocess_receives_operator_gh_token() {
@@ -1013,7 +1011,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     }
 
     // review-wait wakes on the review-decision edge and opts into `mark` so it
-    // can park / un-park the row (the others here are read-only).
+    // can park / un-park the row.
     let review = arr
         .iter()
         .find(|p| p["program"] == "builtin:review-wait")
@@ -1026,6 +1024,18 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
             .iter()
             .any(|c| c == "mark"),
         "review-wait requests the mark capability to park the row"
+    );
+    let labeller = arr
+        .iter()
+        .find(|p| p["program"] == "builtin:pr-label")
+        .unwrap();
+    assert!(
+        labeller["defaults"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c == "mark"),
+        "pr-label requests mark so it can apply the GitHub label"
     );
 
     // The resume builtin wakes on the quiet signals and opts into `nudge`.
@@ -1091,10 +1101,9 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
 
 /// The embedded builtin scripts end to end: each runs as a real `python3`
 /// subprocess against the live test server's REST API. `archive-merged` flags
-/// the session whose stored PR snapshot is merged; `pr-label` flags the one
-/// with an open PR (the fixture repo has no GitHub remote, so the label read
-/// degrades to the ensure-label report). Both are read-only — the fleet is
-/// untouched afterward.
+/// the session whose stored PR snapshot is merged; a deliberately observe-only
+/// `pr-label` reports the open PR without writing. (The Python program tests
+/// cover its mark-capable GitHub write; this fixture has no GitHub remote.)
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_scripts_report_merged_and_unlabelled_prs() {
@@ -1165,7 +1174,7 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["session"], merged_id.as_str());
     assert_eq!(actions[0]["pr"], 41);
 
-    // pr-label: exactly the open PR is reported, with the default label.
+    // An observe-only pr-label reports exactly the open PR with the default label.
     enabled_watch(
         &state,
         watch_store::NewWatch {
@@ -1198,7 +1207,7 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["session"], open_id.as_str());
     assert_eq!(actions[0]["label"], "weaver");
 
-    // Read-only: neither session was archived or otherwise mutated.
+    // This observe-only round and archive advisory mutate neither session.
     for id in [&merged_id, &open_id] {
         let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
         assert_ne!(view["status"], "archived", "builtin scripts mutate nothing");

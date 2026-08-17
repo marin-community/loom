@@ -67,6 +67,12 @@ order:
    react), or the request came from an issue body, loom uses the ack comment so
    the feedback isn't lost.
 
+For a PR trigger, loom also persists the PR number it already learned from the
+webhook and hydrates its normal PR snapshot with the GitHub App installation
+credential. That emits the same `pr.opened` edge as branch discovery, so the
+stock PR labeller runs for an existing PR tagged with `@loom` as well as for a
+new PR opened later by a session.
+
 Steps 6–8 (clone, create-or-forward, reply) run in a **detached task**: the
 handler returns `200` as soon as the gates pass. Cloning a large repo can outlast
 GitHub's ~10s delivery timeout, and a timed-out delivery would cancel an inline

@@ -614,6 +614,37 @@ impl GithubApi for GithubApp {
         })
     }
 
+    async fn add_issue_label(&self, repo: &str, number: i64, label: &str) -> Result<()> {
+        if !self.is_configured().await {
+            tracing::debug!(
+                repo,
+                number,
+                label,
+                "app not configured; adding label via gh fallback"
+            );
+            return self.fallback.add_issue_label(repo, number, label).await;
+        }
+        let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
+        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
+        let url = format!(
+            "{}/repos/{}/{}/issues/{number}/labels",
+            self.api_base, slug.owner, slug.name
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "labels": [label] }))
+            .send()
+            .await
+            .context("adding the issue label")?;
+        check_status(resp, "adding the issue label").await?;
+        tracing::info!(repo, number, label, "added GitHub label");
+        Ok(())
+    }
+
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
         if !self.is_configured().await {
             tracing::debug!(
@@ -828,6 +859,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         comments: Mutex<Vec<Value>>,
         updates: Mutex<Vec<Value>>,
         reactions: Mutex<Vec<Value>>,
+        labels: Mutex<Vec<Value>>,
         last_comment_auth: Mutex<Option<String>>,
     }
 
@@ -841,6 +873,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 comments: Mutex::new(Vec::new()),
                 updates: Mutex::new(Vec::new()),
                 reactions: Mutex::new(Vec::new()),
+                labels: Mutex::new(Vec::new()),
                 last_comment_auth: Mutex::new(None),
             })
         }
@@ -938,6 +971,19 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         }))
     }
 
+    async fn mock_add_labels(
+        State(s): State<Arc<MockState>>,
+        Path((owner, name, number)): Path<(String, String, i64)>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        s.labels.lock().unwrap().push(json!({
+            "repo": format!("{owner}/{name}"),
+            "number": number,
+            "labels": body["labels"],
+        }));
+        Json(body)
+    }
+
     /// Spawn the mock GitHub REST server on a random port; returns its base URL.
     async fn spawn_mock(state: Arc<MockState>) -> String {
         let app = Router::new()
@@ -951,6 +997,10 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 post(mock_comments),
             )
             .route("/repos/{owner}/{name}/issues/{number}", get(mock_issue))
+            .route(
+                "/repos/{owner}/{name}/issues/{number}/labels",
+                post(mock_add_labels),
+            )
             .route(
                 "/repos/{owner}/{name}/issues/comments/{comment_id}",
                 patch(mock_update_comment),
@@ -1020,6 +1070,10 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 title: "fallback".to_string(),
                 updated_at: "2026-07-18T00:00:00Z".to_string(),
             })
+        }
+
+        async fn add_issue_label(&self, _repo: &str, _number: i64, _label: &str) -> Result<()> {
+            Ok(())
         }
     }
 
@@ -1162,6 +1216,26 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         assert_eq!(issue.title, "issue 7 of acme/widgets");
         assert_eq!(issue.body, "issue body");
         assert_eq!(issue.url, "https://github.com/acme/widgets/issues/7");
+    }
+
+    #[tokio::test]
+    async fn add_issue_label_uses_the_installation_gateway() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock.clone()).await;
+        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+
+        app.add_issue_label("acme/widgets", 7, "weaver")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            mock.labels.lock().unwrap().as_slice(),
+            &[json!({
+                "repo": "acme/widgets",
+                "number": 7,
+                "labels": ["weaver"],
+            })]
+        );
     }
 
     #[tokio::test]

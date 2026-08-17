@@ -1183,7 +1183,7 @@ pub(super) async fn refresh_github_session(
     }
     github::refresh(&st, &session, &branch, false)
         .await
-        .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?;
+        .map_err(|e| github_request_error("refresh this pull request", e))?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
@@ -1210,21 +1210,61 @@ pub(super) async fn set_github_session(
             "the GitHub CLI (`gh`) is not available on the server",
         ));
     }
-    let token = crate::agent_env::get(&st.db, "GH_TOKEN").await;
-    let snap = github::fetch_pr(
-        &PathBuf::from(&branch.repo_root),
-        &req.pr_number.to_string(),
-        token.as_deref(),
-    )
-    .await
-    .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?
-    .ok_or_else(|| {
-        AppError::bad_request(format!("pull request #{} was not found", req.pr_number))
-    })?;
+    let snap = github::fetch_pr_for_branch(&st, &branch, req.pr_number)
+        .await
+        .map_err(|e| github_request_error("find this pull request", e))?
+        .ok_or_else(|| {
+            AppError::bad_request(format!("pull request #{} was not found", req.pr_number))
+        })?;
     github::set_mapping(&st.db, &branch.id, req.pr_number).await?;
     github::apply_snapshot(&st, &session, &branch, &snap, false).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GithubLabelBody {
+    pub label: String,
+}
+
+/// Add one label to the session's associated pull request. The watch client
+/// gates this route behind its `mark` capability; the server uses the GitHub
+/// App credential ladder, so a watch never needs a broad ambient token.
+pub(super) async fn add_github_session_label(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<GithubLabelBody>,
+) -> ApiResult<Json<Value>> {
+    let (_session, branch) = require_session(&st.db, &key).await?;
+    let label = req.label.trim();
+    if label.is_empty() {
+        return Err(AppError::bad_request("label must not be empty"));
+    }
+    let pr = github::get_mapping(&st.db, &branch.id).await?;
+    let pr = match pr {
+        Some(number) => number,
+        None => github::get_status(&st.db, &branch.id)
+            .await?
+            .map(|status| status.pr_number)
+            .ok_or_else(|| AppError::conflict("this session has no associated pull request"))?,
+    };
+    let repo = repo::github_slug_for_root(&st.db, &PathBuf::from(&branch.repo_root))
+        .await?
+        .ok_or_else(|| AppError::bad_request("this session is not in a GitHub repository"))?;
+    st.trigger
+        .gh()
+        .add_issue_label(&repo, pr, label)
+        .await
+        .map_err(|e| github_request_error("add the pull request label", e))?;
+    Ok(Json(json!({ "pr_number": pr, "label": label })))
+}
+
+fn github_request_error(action: &str, error: anyhow::Error) -> AppError {
+    tracing::warn!(error = ?error, action, "GitHub request failed");
+    AppError::new(
+        StatusCode::BAD_GATEWAY,
+        format!("Loom couldn't {action} on GitHub. Check Settings > Access or try again."),
+    )
 }
 
 /// Clear an explicit PR mapping and return to automatic current-open-PR

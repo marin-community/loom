@@ -590,6 +590,11 @@ pub trait GithubApi: Send + Sync {
     /// Fetch the live state of issue-or-PR `number` of `repo` — the minimal
     /// snapshot `weaver issue show` renders beside the weaver ledger.
     async fn issue_state(&self, repo: &str, number: i64) -> Result<IssueState>;
+
+    /// Add one label to an issue or pull request. GitHub's endpoint is
+    /// idempotent for labels already present, which lets a reactive watch make
+    /// one write on the PR-open edge without a read-before-write race.
+    async fn add_issue_label(&self, repo: &str, number: i64, label: &str) -> Result<()>;
 }
 
 /// A thread's live state as GitHub reports it: `open`/`closed`, its title, and
@@ -657,6 +662,14 @@ impl GithubApi for GhCli {
             title: v["title"].as_str().unwrap_or_default().to_string(),
             updated_at: v["updated_at"].as_str().unwrap_or_default().to_string(),
         })
+    }
+
+    async fn add_issue_label(&self, repo: &str, number: i64, label: &str) -> Result<()> {
+        let path = format!("repos/{repo}/issues/{number}/labels");
+        let field = format!("labels[]={label}");
+        gh_capture(&["api", "-X", "POST", &path, "-f", &field]).await?;
+        tracing::info!(repo, number, label, "added GitHub label");
+        Ok(())
     }
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
@@ -1070,6 +1083,10 @@ mod tests {
                 title: "t".to_string(),
                 updated_at: "2026-07-18T00:00:00Z".to_string(),
             })
+        }
+
+        async fn add_issue_label(&self, _repo: &str, _number: i64, _label: &str) -> Result<()> {
+            Ok(())
         }
     }
 

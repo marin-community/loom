@@ -453,6 +453,15 @@ class Client:
         query = f"?by={urllib.parse.quote(by, safe='')}" if by else ""
         return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}{query}")
 
+    def add_pr_label(self, key, label):
+        """Add ``label`` to a session's associated GitHub PR; needs ``mark``.
+
+        GitHub label addition is idempotent, so reactive watches can call this
+        once per open edge without a separate read-before-write round trip.
+        """
+        self._gate("mark")
+        return self._request("POST", f"/sessions/{key}/github/labels", {"label": label})
+
     def mark(self, key, level, note="", by=None):
         """Stamp the watch's ``triage`` mark; needs ``mark``. A ``level``
         of ``attention``/``blocked`` sets it; empty or ``ok`` clears it."""

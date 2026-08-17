@@ -35,6 +35,8 @@ fn sign(secret: &str, body: &[u8]) -> String {
 #[derive(Default)]
 struct FakeGithub {
     comments: Mutex<Vec<(String, i64, String)>>,
+    /// Every label addition as `(repo, issue-or-pr, label)`.
+    labels: Mutex<Vec<(String, i64, String)>>,
     /// Every `update_issue_comment` call as `(repo, comment_id, body)`.
     updates: Mutex<Vec<(String, i64, String)>>,
     /// What `pr_head` returns; a PR-flow test sets this to a branch it created in
@@ -110,6 +112,14 @@ impl loom::github_trigger::GithubApi for FakeGithub {
             title: "fixture issue".to_string(),
             updated_at: "2026-07-18T00:00:00Z".to_string(),
         })
+    }
+
+    async fn add_issue_label(&self, repo: &str, number: i64, label: &str) -> anyhow::Result<()> {
+        self.labels
+            .lock()
+            .unwrap()
+            .push((repo.to_string(), number, label.to_string()));
+        Ok(())
     }
 }
 
@@ -337,6 +347,21 @@ async fn wait_for_session_tag(ts: &TestServer, session_id: &str, key: &str) -> s
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     panic!("session {session_id} never acquired tag {key}");
+}
+
+async fn wait_for_pr_mapping(ts: &TestServer, session_id: &str, number: i64) -> serde_json::Value {
+    for _ in 0..200 {
+        let session = ts
+            .client
+            .get(&format!("/api/sessions/{session_id}"))
+            .await
+            .unwrap();
+        if session["branch"]["github_pr"] == number {
+            return session;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("session {session_id} never acquired PR #{number}");
 }
 
 /// Poll until the fake gateway has recorded at least `n` reactions.
@@ -1094,13 +1119,29 @@ async fn pr_trigger_attaches_to_pr_head_branch() {
     let sessions = ts.client.get("/api/sessions").await.unwrap();
     let sessions = sessions.as_array().unwrap();
     assert_eq!(sessions.len(), 1, "the PR trigger launched one session");
+    let id = sessions[0]["id"].as_str().unwrap().to_string();
+    let session = wait_for_pr_mapping(&ts, &id, 7).await;
     assert_eq!(
-        sessions[0]["branch"]["branch"].as_str(),
+        session["branch"]["branch"].as_str(),
         Some("feature"),
         "the session is attached to the PR's head branch, not a fresh one"
     );
+    assert_eq!(
+        session["branch"]["github_pr"], 7,
+        "the trigger's known PR number is associated without rediscovery"
+    );
 
-    let id = sessions[0]["id"].as_str().unwrap().to_string();
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/github/labels"),
+            json!({ "label": "weaver" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.labels.lock().unwrap().as_slice(),
+        &[("acme/widgets".to_string(), 7, "weaver".to_string())]
+    );
     ts.client
         .delete(&format!("/api/sessions/{id}"))
         .await
