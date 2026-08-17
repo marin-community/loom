@@ -86,16 +86,14 @@ pub const BUILTINS: &[BuiltinProgram] = &[
     BuiltinProgram {
         name: "pr-label",
         title: "PR labeller",
-        description: "Flag sessions whose open pull request lacks the loom \
-                      label (params.label, default 'weaver'), so PRs born from \
-                      sessions are identifiable on GitHub. Read-only: it \
-                      reports would-label actions.",
+        description: "Add the loom label (params.label, default 'weaver') when \
+                      a session's pull request first appears.",
         source: include_str!("../watches/pr_label.py"),
         default_trigger: r#"{"on":["pr.opened"]}"#,
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
-        default_capabilities: &["observe"],
-        default_enabled: false,
+        default_capabilities: &["observe", "mark"],
+        default_enabled: true,
     },
     BuiltinProgram {
         name: "review-wait",
@@ -184,7 +182,9 @@ mod tests {
     #[test]
     fn find_resolves_builtin_refs_only() {
         assert_eq!(find("builtin:status").unwrap().name, "status");
-        assert_eq!(find("builtin:pr-label").unwrap().name, "pr-label");
+        let labeller = find("builtin:pr-label").unwrap();
+        assert!(labeller.default_enabled);
+        assert!(labeller.default_capabilities.contains(&"mark"));
         assert!(find("builtin:nope").is_none());
         assert!(find("/abs/path.py").is_none());
         assert!(find("status").is_none());

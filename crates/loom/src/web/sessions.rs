@@ -1183,7 +1183,7 @@ pub(super) async fn refresh_github_session(
     }
     github::refresh(&st, &session, &branch, false)
         .await
-        .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?;
+        .map_err(|e| github_request_error("refresh this pull request", e))?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
@@ -1210,21 +1210,26 @@ pub(super) async fn set_github_session(
             "the GitHub CLI (`gh`) is not available on the server",
         ));
     }
-    let token = crate::agent_env::get(&st.db, "GH_TOKEN").await;
-    let snap = github::fetch_pr(
-        &PathBuf::from(&branch.repo_root),
-        &req.pr_number.to_string(),
-        token.as_deref(),
-    )
-    .await
-    .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, format!("gh: {e}")))?
-    .ok_or_else(|| {
-        AppError::bad_request(format!("pull request #{} was not found", req.pr_number))
-    })?;
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let (token, _) = github::gh_environment(&st, Some(&repo_root)).await;
+    let snap = github::fetch_pr(&repo_root, &req.pr_number.to_string(), token.as_deref())
+        .await
+        .map_err(|e| github_request_error("find this pull request", e))?
+        .ok_or_else(|| {
+            AppError::bad_request(format!("pull request #{} was not found", req.pr_number))
+        })?;
     github::set_mapping(&st.db, &branch.id, req.pr_number).await?;
     github::apply_snapshot(&st, &session, &branch, &snap, false).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))
+}
+
+fn github_request_error(action: &str, error: anyhow::Error) -> AppError {
+    tracing::warn!(%error, action, "GitHub request failed");
+    AppError::new(
+        StatusCode::BAD_GATEWAY,
+        format!("Loom couldn't {action} on GitHub. Check Settings > Access or try again."),
+    )
 }
 
 /// Clear an explicit PR mapping and return to automatic current-open-PR

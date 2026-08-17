@@ -942,11 +942,11 @@ A round runs the **program** the watch names:
   external review — `review_decision` `REVIEW_REQUIRED` — with a quiet
   `awaiting: review` mark that sinks it below the calm default in the fleet
   sort, and clear it once review lands, the PR merges, or it un-drafts; needs
-  `mark`), `builtin:pr-label` (flag sessions whose open PR lacks the loom label)
-  and `builtin:archive-merged` (flag live sessions whose PR has merged, excluding
-  those with `auto-archive: disabled`). The last two are **read-only**: they
-  record `would:` actions and mutate nothing — the actual archive is still
-  `github.archive_on_merge`, above — and are opt-in. Watches granted the
+  `mark`), `builtin:pr-label` (add the configured label when a PR first appears;
+  enabled by default and needs `mark`) and `builtin:archive-merged` (flag live
+  sessions whose PR has merged, excluding those with `auto-archive: disabled`).
+  The archive advisor is read-only and opt-in — the actual archive is still
+  `github.archive_on_merge`, above. Watches granted the
   `judge` capability are agentic and the engine limits their automatic rounds
   to at most one every 15 minutes; manual runs still bypass the interval.
   Agent judgements use the watch's selected automation-safe ACP profile. The

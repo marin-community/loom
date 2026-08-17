@@ -754,6 +754,44 @@ pub async fn fetch_open_pr(
     Ok(rows.pop().map(PrJson::into_status))
 }
 
+async fn operator_gh_environment(state: &AppState) -> (Option<String>, Option<String>) {
+    (
+        crate::agent_env::get(&state.db, "GH_TOKEN").await,
+        crate::agent_env::get(&state.db, "GH_HOST").await,
+    )
+}
+
+async fn gh_environment_for_slug(state: &AppState, slug: &str) -> (Option<String>, Option<String>) {
+    if let (Some(app), Ok(repo)) = (state.trigger.app(), crate::repo::parse_slug(slug)) {
+        if app.is_configured().await {
+            match app.token_for_repo(&repo.owner, &repo.name).await {
+                Ok(token) => return (Some(token), None),
+                Err(error) => tracing::debug!(repo = slug, %error, "GitHub App token unavailable"),
+            }
+        }
+    }
+    operator_gh_environment(state).await
+}
+
+/// The `gh` environment for one repository: its App installation token when
+/// available, otherwise the operator credential configured in Settings.
+pub async fn gh_environment(
+    state: &AppState,
+    repo_root: Option<&Path>,
+) -> (Option<String>, Option<String>) {
+    let Some(repo_root) = repo_root else {
+        return operator_gh_environment(state).await;
+    };
+    match crate::repo::github_slug_for_root(&state.db, repo_root).await {
+        Ok(Some(slug)) => gh_environment_for_slug(state, &slug).await,
+        Ok(None) => operator_gh_environment(state).await,
+        Err(error) => {
+            tracing::debug!(repo = %repo_root.display(), %error, "GitHub repository lookup failed");
+            operator_gh_environment(state).await
+        }
+    }
+}
+
 /// Fetch every active branch's current open PR plus every previously-known PR
 /// in one GraphQL request. Aliases multiplex the independent branch/number
 /// lookups without downloading a repository's unrelated PRs. Exact-number
@@ -998,10 +1036,8 @@ pub async fn refresh(
     branch: &Branch,
     archive_on_merge: bool,
 ) -> Result<Option<GithubStatus>> {
-    // loom's own token for `gh` — the operator's `GH_TOKEN` from Settings →
-    // Environment (the server process has no ambient GitHub auth of its own).
-    let token = crate::agent_env::get(&state.db, "GH_TOKEN").await;
     let repo_root = PathBuf::from(&branch.repo_root);
+    let (token, _) = gh_environment(state, Some(&repo_root)).await;
     let previous = get_status(&state.db, &branch.id).await?;
     let mapping = get_mapping(&state.db, &branch.id).await?;
     let fetched = if let Some(number) = mapping {
@@ -1409,14 +1445,13 @@ async fn poll_once(state: &AppState) -> Result<()> {
             .push(candidate);
     }
 
-    let token = crate::agent_env::get(&state.db, "GH_TOKEN").await;
-    let host = crate::agent_env::get(&state.db, "GH_HOST").await;
     for (repo_root, candidates) in repositories {
         let path = PathBuf::from(&repo_root);
         let Some(slug) = crate::repo::github_slug_for_root(&state.db, &path).await? else {
             tracing::debug!(repo = %repo_root, "github batch skipped: repository has no GitHub remote");
             continue;
         };
+        let (token, host) = gh_environment_for_slug(state, &slug).await;
         let heads: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.head.clone())

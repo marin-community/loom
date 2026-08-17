@@ -7,10 +7,8 @@ branches, dry-run, and the summary all live here. The Rust integration suite
 keeps only the wiring proof — that the script runs under the engine against a
 live loom and its writes/audit rows land.
 
-pr-label and archive-merged carry no logic beyond a one-line predicate over the
-PR snapshot, so their coverage stays in the Rust end-to-end test
-(`builtin_scripts_report_merged_and_unlabelled_prs`) — a pytest double of a
-one-liner would be duplication, not coverage.
+The PR labeller gets one focused write test here; archive-merged remains a
+one-line advisory predicate covered by the Rust end-to-end test.
 """
 
 import importlib.util
@@ -30,6 +28,7 @@ def load_program(name):
 
 
 status = load_program("status")
+pr_label = load_program("pr_label")
 
 TAGS = '[{"key": "human-review", "value": "attention", "note": "looks done"}]'
 
@@ -89,6 +88,33 @@ def run_main(client, capsys, **config):
 
 def batches(client):
     return [c for c in client.calls if c[0] == "set_tags"]
+
+
+def test_pr_label_uses_the_trigger_repo_environment(monkeypatch, capsys):
+    client = StubClient(
+        capabilities=["mark"],
+        sessions=[
+            {
+                "id": "s",
+                "status": "running",
+                "branch": {
+                    "repo_root": "/repo",
+                    "github": {"pr_state": "OPEN", "pr_number": 17},
+                },
+            }
+        ],
+    )
+    calls = []
+    monkeypatch.setattr(pr_label, "gh_json", lambda args, cwd=None: calls.append((args, cwd)))
+    rnd = make_round(client, capabilities=client.capabilities)
+    pr_label.main(rnd)
+
+    assert calls == [
+        (["api", "-X", "POST", "repos/{owner}/{repo}/issues/17/labels", "-f", "labels[]=weaver"], "/repo")
+    ]
+    assert json.loads(capsys.readouterr().out)["actions"] == [
+        {"action": "label", "session": "s", "pr": 17, "label": "weaver"}
+    ]
 
 
 # -- judge: parse the agent's tag set, no-judgement vs calm verdict ------------

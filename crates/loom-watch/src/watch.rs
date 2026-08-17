@@ -1026,13 +1026,19 @@ async fn spawn_script(
     for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
-    // github watches shell out to `gh` (reading PR labels/state) from this
-    // otherwise env-stripped process; hand them the operator's `GH_TOKEN`
-    // (Settings → Agents & profiles) so those reads authenticate. Set after the strip so
-    // it wins. Nothing else from the agent env leaks in — a watch still reaches the
-    // fleet only through the REST API.
-    if let Some(token) = crate::agent_env::get(&state.db, "GH_TOKEN").await {
+    command.env_remove("GH_TOKEN").env_remove("GH_HOST");
+    // A reactive GitHub watch concerns one repository, so run its `gh` calls
+    // with that repo's App token; manual rounds fall back to operator auth.
+    let repo = config
+        .pointer("/trigger/repo")
+        .and_then(Value::as_str)
+        .map(std::path::Path::new);
+    let (token, host) = crate::github::gh_environment(state, repo).await;
+    if let Some(token) = token {
         command.env("GH_TOKEN", token);
+    }
+    if let Some(host) = host {
+        command.env("GH_HOST", host);
     }
 
     let started = std::time::Instant::now();
