@@ -129,6 +129,8 @@ export const setSessionGithubAccess = (
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
 export const listRuns = () => get('/runs') as Promise<AutomationRun[]>;
+export const retryRun = (id: string) =>
+  post(`/runs/${encodeURIComponent(id)}/retry`) as Promise<AutomationRun>;
 export const archiveSession = (id: string) => post(`/sessions/${encodeURIComponent(id)}/archive`);
 export const removeSession = (id: string) => del(`/sessions/${encodeURIComponent(id)}`);
 export const clearSessionTag = (id: string, key: string) =>

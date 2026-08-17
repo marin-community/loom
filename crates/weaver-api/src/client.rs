@@ -1512,6 +1512,15 @@ impl Client {
         self.send_typed(Method::POST, "/api/runs", Some(req)).await
     }
 
+    pub async fn retry_run(&self, id: &str) -> Result<RunView> {
+        self.send_typed::<Value, RunView>(
+            Method::POST,
+            &format!("/api/runs/{}/retry", Self::seg(id)),
+            None,
+        )
+        .await
+    }
+
     /// List the user-managed API tokens (`GET /api/auth/tokens`).
     pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {
         self.get_typed("/api/auth/tokens").await

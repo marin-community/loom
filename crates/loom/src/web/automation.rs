@@ -225,17 +225,19 @@ async fn launch_run(
                         }
                     }
                 }
-                LaunchFailure::Retryable => match crate::runs::waiting(&st.db, &run.id).await {
-                    Ok(owned) => owned,
-                    Err(record_error) => {
-                        tracing::warn!(
-                            run = %run.id,
-                            error = %record_error,
-                            "could not return automation launch to waiting"
-                        );
-                        true
+                LaunchFailure::Retryable => {
+                    match crate::runs::waiting(&st.db, &run.id, &error.to_string()).await {
+                        Ok(owned) => owned,
+                        Err(record_error) => {
+                            tracing::warn!(
+                                run = %run.id,
+                                error = %record_error,
+                                "could not return automation launch to waiting"
+                            );
+                            true
+                        }
                     }
-                },
+                }
             };
             if !still_owned {
                 remove_late_session(st, &run.session_id).await;
@@ -254,18 +256,14 @@ async fn prompt_channel_run(
         .await?
         .filter(|session| session.status == "running" && session.protocol == "acp")
     else {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "automation channel session is not ready; retry this delivery",
-        ));
+        let message = "automation channel session is not ready; retry this delivery";
+        crate::runs::waiting(&st.db, &run.id, message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     };
     let Some(handle) = st.acp.get(&session.id) else {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "automation channel session is being adopted; retry this delivery",
-        ));
+        let message = "automation channel session is being adopted; retry this delivery";
+        crate::runs::waiting(&st.db, &run.id, message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     };
     let channel = run
         .channel
@@ -281,11 +279,9 @@ async fn prompt_channel_run(
         .stop_and_send(goal.clone(), Some(by.clone()), Vec::new())
         .await
     {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("automation channel rejected the update: {error}"),
-        ));
+        let message = format!("automation channel rejected the update: {error}");
+        crate::runs::waiting(&st.db, &run.id, &message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     }
     crate::events::record(
         &st.db,
@@ -520,6 +516,40 @@ pub(super) async fn get_run(
         return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
     }
     Ok(Json(run.into()))
+}
+
+pub(super) async fn retry_run(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<RunView>> {
+    let run = crate::runs::get(&st.db, &id)
+        .await?
+        .ok_or_else(|| AppError::not_found("automation run"))?;
+    let profiles = match &principal.grant {
+        Grant::Admin | Grant::User => vec![run.profile.clone()],
+        Grant::Automation { subject, profiles }
+            if subject == &run.actor_subject
+                && profiles.iter().any(|profile| profile == &run.profile) =>
+        {
+            profiles.clone()
+        }
+        Grant::Automation { .. } | Grant::Session { .. } => {
+            return Err(AppError::new(StatusCode::FORBIDDEN, "run retry forbidden"));
+        }
+    };
+    if run.status != "waiting" {
+        return Err(AppError::conflict(
+            "automation run is not waiting for retry",
+        ));
+    }
+    if run.channel.is_none() {
+        return Err(AppError::conflict(
+            "automation run does not use a retryable channel",
+        ));
+    }
+    let subject = run.actor_subject.clone();
+    dispatch_channel_run(&st, subject, profiles, run).await
 }
 
 #[cfg(test)]

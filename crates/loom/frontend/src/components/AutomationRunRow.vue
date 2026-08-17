@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue';
-import { archiveSession, removeSession } from '../api';
+import { archiveSession, removeSession, retryRun } from '../api';
 import type { AutomationRun } from '../types';
 import type { UnmatchedRunProjection } from '../lib/automationSessions';
+import { unmatchedRunTitle } from '../lib/automationRunLabels';
 import { exactTime, timeAgo } from '../lib/time';
 import ConfirmDialog from './ConfirmDialog.vue';
 import StatusBadge from './StatusBadge.vue';
@@ -18,12 +19,8 @@ const pendingAction = ref<'archive' | 'remove' | ''>('');
 const canArchive = computed(
   () => props.run.status !== 'cancelled' && props.run.status !== 'completed',
 );
-
-const title = computed(() => {
-  if (props.projection === 'intervention') return `Launch ${props.run.status}`;
-  if (props.projection === 'history') return `Run ${props.run.status}`;
-  return `Provisioning · ${props.run.status}`;
-});
+const canRetry = computed(() => props.run.status === 'waiting' && props.run.channel !== null);
+const title = computed(() => unmatchedRunTitle(props.run, props.projection));
 
 async function act(name: string, fn: () => Promise<void>) {
   open.value = false;
@@ -36,6 +33,12 @@ async function act(name: string, fn: () => Promise<void>) {
   } finally {
     busy.value = '';
   }
+}
+
+function retry() {
+  void act('retry', async () => {
+    await retryRun(props.run.id);
+  });
 }
 
 function requestConfirmation(action: 'archive' | 'remove') {
@@ -107,6 +110,16 @@ function onKeydown(event: KeyboardEvent) {
         {{ timeAgo(run.updated_at) }}
       </time>
     </div>
+    <button
+      v-if="canRetry"
+      type="button"
+      data-testid="run-action-retry"
+      class="shrink-0 rounded border border-line bg-surface px-2 py-1 text-xs font-medium text-fg transition-colors hover:bg-subtle disabled:opacity-50"
+      :disabled="!!busy"
+      @click="retry"
+    >
+      {{ busy === 'retry' ? 'Retrying…' : 'Retry launch' }}
+    </button>
     <div class="relative z-10 shrink-0">
       <button
         ref="trigger"

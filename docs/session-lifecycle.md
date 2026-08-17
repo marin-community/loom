@@ -18,9 +18,14 @@ stateDiagram-v2
     [*] --> Created: session row created
 
     Reserved --> Created: provisioning reaches session creation
-    Reserved --> FailedAttempt: validation / capacity / repository failure
+    Reserved --> RetryableAttempt: channel launch blocked
+    Reserved --> FailedAttempt: one-shot launch failure
     Reserved --> CancelledAttempt: archive
     Reserved --> Removed: remove
+    RetryableAttempt --> Created: retry succeeds
+    RetryableAttempt --> RetryableAttempt: retry remains blocked
+    RetryableAttempt --> CancelledAttempt: archive
+    RetryableAttempt --> Removed: remove
     FailedAttempt --> CancelledAttempt: archive
     FailedAttempt --> Removed: remove
     CancelledAttempt --> Removed: remove history
@@ -54,6 +59,7 @@ stateDiagram-v2
     Adopting --> Running: resume complete
 
     state "Launch failed" as FailedAttempt
+    state "Launch blocked" as RetryableAttempt
     state "Launch cancelled" as CancelledAttempt
     state "Deleted" as Removed
 ```
@@ -78,10 +84,17 @@ recoverable stable state before ordinary supervisor reconciliation.
 liveness: `creating`, `waiting`, `delivering`, `running`, `failed`,
 `cancelled`, or `completed`.
 
+A channel run that cannot launch stays `waiting` with the failure reason in its
+summary. Redelivering the original request with the same idempotency key or
+calling `POST /api/runs/{id}/retry` retries that durable attempt. Retry resolves
+the profile again and rechecks its concurrency limit; it does not bypass launch
+policy. A successful retry clears the stale failure summary.
+
 ## Actions
 
 - **Adopt** recreates a missing supervisor for an orphaned worktree.
 - **Recover** recreates an archived worktree and resumes its agent.
+- **Retry launch** retries a waiting channel run against current profile capacity.
 - **Archive** tears down terminal, debug shells, editor, credentials, and
   worktree while keeping the session/attempt and branch history.
 - **Remove** performs the same teardown and deletes the durable record. A
