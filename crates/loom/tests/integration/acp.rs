@@ -2281,6 +2281,108 @@ async fn interrupting_a_review_turn_does_not_redeliver_it() {
     assert_eq!(state, "consumed");
 }
 
+/// Submitting a review is user input, so it replaces an ordinary long-running
+/// turn immediately. The protected inbox still gives that replacement exactly
+/// one visible delivery across later background wakes.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn review_notification_replaces_an_ordinary_live_turn_once() {
+    let ts = TestServer::start().await;
+    let id = "acp-live-review";
+    let delivery_key = "review:replace-live";
+    let payload = "say:review-received";
+    start_new(&ts, id, None, None).await;
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "wait:30000|say:stale-work" }),
+        )
+        .await
+        .unwrap();
+    insert_protected_review(&ts, id, delivery_key, payload).await;
+
+    let sent = ts
+        .state
+        .acp
+        .get(id)
+        .unwrap()
+        .notify_pending()
+        .await
+        .unwrap();
+    assert!(!sent.queued);
+    assert_eq!(sent.turn, Some(1));
+
+    let chat = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "review-received"
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|block| {
+                block["kind"] == "user_message" && block["payload"]["delivery_key"] == delivery_key
+            })
+            .count(),
+        1
+    );
+
+    loom::review_delivery::drain(&ts.state).await.unwrap();
+    let after_retry = ts
+        .client
+        .get(&format!("/api/sessions/{id}/chat"))
+        .await
+        .unwrap();
+    assert_eq!(
+        after_retry["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| {
+                block["kind"] == "user_message" && block["payload"]["delivery_key"] == delivery_key
+            })
+            .count(),
+        1
+    );
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "wait:30000|say:must-survive" }),
+        )
+        .await
+        .unwrap();
+    ts.state
+        .acp
+        .get(id)
+        .unwrap()
+        .notify_pending()
+        .await
+        .unwrap_err();
+    let ordinary = ts
+        .client
+        .get(&format!("/api/sessions/{id}/chat"))
+        .await
+        .unwrap();
+    assert_eq!(ordinary["live_turn"], 2);
+    assert!(!ordinary["blocks"].as_array().unwrap().iter().any(|block| {
+        block["turn"] == 2
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    ts.client
+        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .await
+        .unwrap();
+}
+
 /// Stop also fences protected feedback that was queued behind some other turn.
 /// Background notifications leave it queued until a new explicit user send
 /// clears the stop boundary.
@@ -2299,6 +2401,10 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
         )
         .await
         .unwrap();
+    ts.client
+        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .await
+        .unwrap();
     insert_protected_review(&ts, id, delivery_key, payload).await;
     let queued = ts
         .state
@@ -2310,10 +2416,6 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
         .unwrap();
     assert!(queued.queued);
 
-    ts.client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
-        .await
-        .unwrap();
     assert!(ts.state.acp.stop(id), "the stopped task was registered");
     tokio::time::sleep(Duration::from_millis(150)).await;
     acp::attach(&ts.state.acp_ctx(), id)

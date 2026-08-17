@@ -638,8 +638,9 @@ impl AcpHandle {
     }
 
     /// Notice immutable submitted feedback in the protected conversation inbox.
-    /// Start it when idle; while a turn is live, leave it queued for the normal
-    /// turn boundary. The editable prompt lane is never read or modified here.
+    /// Start it immediately unless Stop has paused automatic work or another
+    /// protected review already owns the live turn. The editable prompt lane is
+    /// never read or modified here.
     pub async fn notify_pending(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -2580,19 +2581,18 @@ impl Task {
         self.dispatch_pending_prompt().await;
     }
 
-    async fn dispatch_review_inbox(&mut self) -> bool {
+    async fn claim_pending_review(
+        &self,
+    ) -> Option<(crate::review_inbox::ReviewInboxItem, ActiveReviewClaim)> {
         if self.automatic_dispatch_paused {
-            return false;
+            return None;
         }
         if self.refuse_if_turn_capped().await.is_err() {
-            return false;
+            return None;
         }
-        let Some(active_claim) = self
+        let active_claim = self
             .registry
-            .activate_review_claim(&self.session_id, self.generation)
-        else {
-            return false;
-        };
+            .activate_review_claim(&self.session_id, self.generation)?;
         let item = match crate::review_inbox::claim_review_inbox(
             &self.db,
             &self.branch_id,
@@ -2609,12 +2609,17 @@ impl Task {
                     %error,
                     "could not claim protected review feedback"
                 );
-                return false;
+                return None;
             }
         };
-        let Some(item) = item else {
-            return false;
-        };
+        item.map(|item| (item, active_claim))
+    }
+
+    async fn dispatch_claimed_review(
+        &mut self,
+        item: crate::review_inbox::ReviewInboxItem,
+        active_claim: ActiveReviewClaim,
+    ) -> bool {
         match self.start_review_turn(&item, active_claim).await {
             Ok(outcome) if outcome.blocks_followup_dispatch() => {
                 if let crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
@@ -2669,6 +2674,13 @@ impl Task {
                 ..
             }) => unreachable!("held review outcomes matched the dispatch gate"),
         }
+    }
+
+    async fn dispatch_review_inbox(&mut self) -> bool {
+        let Some((item, active_claim)) = self.claim_pending_review().await else {
+            return false;
+        };
+        self.dispatch_claimed_review(item, active_claim).await
     }
 
     async fn dispatch_pending_prompt(&mut self) {
@@ -3410,14 +3422,48 @@ impl Task {
             }
             Command::NotifyPending { reply } => {
                 // Submitted review feedback lives in the protected inbox, not
-                // the user-editable pending prompt. A live task picks it up at
-                // its next turn boundary; an idle task can start it now.
-                if self.turn_live || self.automatic_dispatch_paused {
+                // the user-editable pending prompt. Submission is user input:
+                // replace ordinary live work with one visible review turn
+                // instead of hiding it behind an arbitrarily long boundary.
+                // A wake for the review already in flight is only a retry of
+                // the notifier and must never interrupt that same review.
+                if self.inflight_review.is_some() || self.automatic_dispatch_paused {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
                         turn: Some(self.current_turn),
                     }));
-                } else if self.dispatch_review_inbox().await {
+                    return;
+                }
+                let Some((item, active_claim)) = self.claim_pending_review().await else {
+                    let _ = reply.send(Err(anyhow!(
+                        "there is no protected review feedback ready to send"
+                    )));
+                    return;
+                };
+                if self.turn_live {
+                    if let Err(error) = self.cancel_live_turn().await {
+                        if let Err(release_error) = crate::review_inbox::release_review_inbox(
+                            &self.db,
+                            &item.delivery_key,
+                            &item.claim_token,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                session = %self.session_id,
+                                delivery_key = %item.delivery_key,
+                                error = %release_error,
+                                "could not release protected review after cancellation failure"
+                            );
+                        }
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                    // This cancellation is the review submission's own clear
+                    // turn boundary, not a standalone Stop request.
+                    self.automatic_dispatch_paused = false;
+                }
+                if self.dispatch_claimed_review(item, active_claim).await {
                     let _ = reply.send(Ok(PromptAck {
                         queued: false,
                         turn: Some(self.current_turn),

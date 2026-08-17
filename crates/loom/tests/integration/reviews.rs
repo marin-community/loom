@@ -644,16 +644,6 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        ts.client
-            .post(
-                "/api/sessions/acp-review/prompt",
-                json!({ "text": "say:editable feedback" }),
-            )
-            .await
-            .unwrap()["queued"],
-        true
-    );
 
     let draft = draft_with_comment(&ts, &session, "Protected immutable feedback.").await;
     let payload = draft.message.clone();
@@ -669,13 +659,6 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
         .await
         .unwrap();
     assert_eq!(submitted.delivery_state, "delivered");
-    assert_eq!(
-        ts.client
-            .delete("/api/sessions/acp-review/prompt")
-            .await
-            .unwrap()["text"],
-        "say:editable feedback"
-    );
     let chat = poll_review_turn(&ts, &session.id, &payload).await;
     let protected = chat["blocks"]
         .as_array()
@@ -734,6 +717,13 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
             "/api/sessions/acp-review-rehome/prompt",
             json!({ "text": "wait:30000|say:keep-busy" }),
         )
+        .await
+        .unwrap();
+    // A standalone Stop deliberately pauses automatic delivery. This leaves
+    // the subsequently submitted review in the protected inbox so a successor
+    // can prove the cross-runtime rehome path.
+    ts.client
+        .post("/api/sessions/acp-review-rehome/interrupt", json!({}))
         .await
         .unwrap();
     let rehomed = draft_with_comment(&ts, &original, "Rehome this immutable review.").await;
