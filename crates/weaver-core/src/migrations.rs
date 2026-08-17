@@ -113,11 +113,6 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "deployment_settings",
         include_str!("../migrations/0018_deployment_settings.sql"),
     ),
-    (
-        19,
-        "activate_pr_labeller",
-        include_str!("../migrations/0019_activate_pr_labeller.sql"),
-    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -652,54 +647,6 @@ mod tests {
             vec!["watch"],
             "the additive profile migration selects the stock watch profile"
         );
-    }
-
-    #[tokio::test]
-    async fn pr_labeller_activation_only_updates_the_untouched_stock_row() {
-        let pool = empty_pool().await;
-        run(&pool).await.unwrap();
-        for (id, name, params) in [
-            ("stock", "pr-label", r#"{"label":"weaver"}"#),
-            ("custom", "custom-label", r#"{"label":"team"}"#),
-        ] {
-            sqlx::query(
-                "INSERT INTO watches
-                    (id, name, enabled, trigger_spec, scope, program, params,
-                     capabilities, model, effort, cooldown_secs)
-                 VALUES (?, ?, 0, '{\"on\":[\"pr.opened\"]}', '{}',
-                         'builtin:pr-label', ?, '[\"observe\"]', '', '', 0)",
-            )
-            .bind(id)
-            .bind(name)
-            .bind(params)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        let migration = MIGRATIONS.iter().find(|(v, _, _)| *v == 19).unwrap().2;
-        for stmt in split_statements(migration) {
-            sqlx::query(&stmt).execute(&pool).await.unwrap();
-        }
-
-        let stock: (bool, String) =
-            sqlx::query_as("SELECT enabled, capabilities FROM watches WHERE id = 'stock'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(stock.0);
-        assert!(serde_json::from_str::<Vec<String>>(&stock.1)
-            .unwrap()
-            .iter()
-            .any(|cap| cap == "mark"));
-
-        let custom: (bool, String) =
-            sqlx::query_as("SELECT enabled, capabilities FROM watches WHERE id = 'custom'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert!(!custom.0, "a customized copy keeps its enabled state");
-        assert_eq!(custom.1, r#"["observe"]"#);
     }
 
     #[tokio::test]

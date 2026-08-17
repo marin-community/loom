@@ -7,9 +7,10 @@ branches, dry-run, and the summary all live here. The Rust integration suite
 keeps only the wiring proof — that the script runs under the engine against a
 live loom and its writes/audit rows land.
 
-The PR labeller's capability/dry-run/write behavior has its own focused module;
-archive-merged remains a one-line advisory predicate covered by the Rust
-end-to-end test.
+pr-label and archive-merged carry no logic beyond a one-line predicate over the
+PR snapshot, so their coverage stays in the Rust end-to-end test
+(`builtin_scripts_report_merged_and_unlabelled_prs`) — a pytest double of a
+one-liner would be duplication, not coverage.
 """
 
 import importlib.util

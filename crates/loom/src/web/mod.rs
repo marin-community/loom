@@ -810,10 +810,6 @@ pub fn router(state: AppState) -> Router {
                 .put(set_github_session)
                 .delete(clear_github_session),
         )
-        .route(
-            "/sessions/{id}/github/labels",
-            post(add_github_session_label),
-        )
         .route("/sessions/{id}/raw", get(raw_session))
         // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`
         // is the UI's availability probe; the `ide`/`ide/`/`ide/*` routes serve

@@ -1026,11 +1026,11 @@ async fn spawn_script(
     for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
-    // Custom watch programs may shell out to `gh` through `weaver_loom.gh_json`.
-    // Hand them the operator's `GH_TOKEN` (Settings → Agents & profiles) so
-    // those calls authenticate. Stock GitHub writes go through loom's REST
-    // gateway and prefer the GitHub App; nothing else from the agent env leaks
-    // in, and fleet mutations remain capability-gated REST calls.
+    // github watches shell out to `gh` (reading PR labels/state) from this
+    // otherwise env-stripped process; hand them the operator's `GH_TOKEN`
+    // (Settings → Agents & profiles) so those reads authenticate. Set after the strip so
+    // it wins. Nothing else from the agent env leaks in — a watch still reaches the
+    // fleet only through the REST API.
     if let Some(token) = crate::agent_env::get(&state.db, "GH_TOKEN").await {
         command.env("GH_TOKEN", token);
     }

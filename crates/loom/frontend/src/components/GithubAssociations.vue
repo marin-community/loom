@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Session } from '../types';
-import { clearSessionGithub, patchIssue, setSessionGithub } from '../api';
+import { clearSessionGithub, patchIssue, refreshSessionGithub, setSessionGithub } from '../api';
 
 // The two high-frequency GitHub destinations a workstream accumulates: the issue
 // it came from and the PR it produces. A mapped pill is a direct link; its
@@ -70,7 +70,7 @@ function togglePrEditor() {
   prDraft.value = String(props.ws.branch.github_pr ?? props.ws.branch.github?.pr_number ?? '');
 }
 
-async function updatePr(action: 'set' | 'auto') {
+async function updatePr(action: 'set' | 'auto' | 'refresh') {
   if (prBusy.value) return;
   const number = Number(prDraft.value);
   if (action === 'set' && (!Number.isInteger(number) || number <= 0)) {
@@ -81,7 +81,8 @@ async function updatePr(action: 'set' | 'auto') {
   prError.value = '';
   try {
     if (action === 'set') await setSessionGithub(props.ws.id, number);
-    else await clearSessionGithub(props.ws.id);
+    else if (action === 'auto') await clearSessionGithub(props.ws.id);
+    else await refreshSessionGithub(props.ws.id);
     closeEditor(true);
     emit('reload');
   } catch (e) {
@@ -225,21 +226,28 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
             />
           </label>
           <p class="text-2xs text-faint">
-            {{ ws.branch.github_pr ? 'Pinned to this PR.' : 'Following the current branch.' }}
+            {{ ws.branch.github_pr ? 'Pinned manually.' : 'Following the worktree branch.' }}
           </p>
-          <p v-if="prError" class="break-words text-xs text-block">{{ prError }}</p>
+          <p v-if="prError" class="text-xs text-block">{{ prError }}</p>
           <div class="flex flex-wrap gap-1.5">
             <button type="submit" class="btn-primary px-2 py-1 text-xs" :disabled="!!prBusy">
-              {{ prBusy === 'set' ? 'Saving…' : 'Save' }}
+              {{ prBusy === 'set' ? 'Saving…' : 'Pin PR' }}
             </button>
             <button
-              v-if="ws.branch.github_pr"
               type="button"
               class="btn-secondary px-2 py-1 text-xs"
               :disabled="!!prBusy"
               @click="updatePr('auto')"
             >
-              Follow branch
+              Use current
+            </button>
+            <button
+              type="button"
+              class="btn-secondary px-2 py-1 text-xs"
+              :disabled="!!prBusy"
+              @click="updatePr('refresh')"
+            >
+              Refresh
             </button>
           </div>
         </form>

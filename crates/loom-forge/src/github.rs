@@ -754,65 +754,6 @@ pub async fn fetch_open_pr(
     Ok(rows.pop().map(PrJson::into_status))
 }
 
-#[derive(Debug, Default)]
-struct GithubCredential {
-    token: Option<String>,
-    host: Option<String>,
-}
-
-async fn operator_credential(state: &AppState) -> GithubCredential {
-    GithubCredential {
-        token: crate::agent_env::get(&state.db, "GH_TOKEN").await,
-        host: crate::agent_env::get(&state.db, "GH_HOST").await,
-    }
-}
-
-/// Resolve the credential loom itself should use for one repository. Prefer
-/// the configured GitHub App's short-lived installation token, then fall back
-/// to the operator token for App-less and GitHub Enterprise installations.
-async fn credential_for_slug(state: &AppState, slug: &str) -> GithubCredential {
-    if let Some(app) = state.trigger.app() {
-        if app.is_configured().await {
-            match crate::repo::parse_slug(slug) {
-                Ok(parsed) => match app.token_for_repo(&parsed.owner, &parsed.name).await {
-                    Ok(token) => {
-                        return GithubCredential {
-                            token: Some(token),
-                            host: None,
-                        };
-                    }
-                    Err(error) => tracing::warn!(
-                        repo = slug,
-                        error = %error,
-                        "GitHub App token unavailable; falling back to operator credential"
-                    ),
-                },
-                Err(error) => tracing::debug!(repo = slug, error, "invalid GitHub slug"),
-            }
-        }
-    }
-    operator_credential(state).await
-}
-
-async fn credential_for_repo_root(state: &AppState, repo_root: &Path) -> Result<GithubCredential> {
-    match crate::repo::github_slug_for_root(&state.db, repo_root).await? {
-        Some(slug) => Ok(credential_for_slug(state, &slug).await),
-        None => Ok(operator_credential(state).await),
-    }
-}
-
-/// Fetch one explicit PR using loom's GitHub credential ladder. This keeps the
-/// mapping endpoint from duplicating App-vs-operator token resolution.
-pub async fn fetch_pr_for_branch(
-    state: &AppState,
-    branch: &Branch,
-    number: i64,
-) -> Result<Option<GithubStatus>> {
-    let repo_root = PathBuf::from(&branch.repo_root);
-    let credential = credential_for_repo_root(state, &repo_root).await?;
-    fetch_pr(&repo_root, &number.to_string(), credential.token.as_deref()).await
-}
-
 /// Fetch every active branch's current open PR plus every previously-known PR
 /// in one GraphQL request. Aliases multiplex the independent branch/number
 /// lookups without downloading a repository's unrelated PRs. Exact-number
@@ -1057,24 +998,26 @@ pub async fn refresh(
     branch: &Branch,
     archive_on_merge: bool,
 ) -> Result<Option<GithubStatus>> {
+    // loom's own token for `gh` — the operator's `GH_TOKEN` from Settings →
+    // Environment (the server process has no ambient GitHub auth of its own).
+    let token = crate::agent_env::get(&state.db, "GH_TOKEN").await;
     let repo_root = PathBuf::from(&branch.repo_root);
-    let credential = credential_for_repo_root(state, &repo_root).await?;
     let previous = get_status(&state.db, &branch.id).await?;
     let mapping = get_mapping(&state.db, &branch.id).await?;
     let fetched = if let Some(number) = mapping {
-        fetch_pr(&repo_root, &number.to_string(), credential.token.as_deref()).await?
+        fetch_pr(&repo_root, &number.to_string(), token.as_deref()).await?
     } else {
         // Automatic mode always asks GitHub which open PR is current instead of
         // treating yesterday's cached number as authoritative. Only when the
         // branch has no open PR do we revisit the previous number once, to
         // preserve its close/merge transition before the snapshot is cleared.
         let head = discovery_branch(session, branch).await;
-        let current = fetch_open_pr(&repo_root, &head, credential.token.as_deref()).await?;
+        let current = fetch_open_pr(&repo_root, &head, token.as_deref()).await?;
         if current.is_some() {
             current
         } else if previous.as_ref().is_some_and(|pr| pr.pr_state == "OPEN") {
             let number = previous.as_ref().expect("checked above").pr_number;
-            fetch_pr(&repo_root, &number.to_string(), credential.token.as_deref()).await?
+            fetch_pr(&repo_root, &number.to_string(), token.as_deref()).await?
         } else {
             None
         }
@@ -1466,13 +1409,14 @@ async fn poll_once(state: &AppState) -> Result<()> {
             .push(candidate);
     }
 
+    let token = crate::agent_env::get(&state.db, "GH_TOKEN").await;
+    let host = crate::agent_env::get(&state.db, "GH_HOST").await;
     for (repo_root, candidates) in repositories {
         let path = PathBuf::from(&repo_root);
         let Some(slug) = crate::repo::github_slug_for_root(&state.db, &path).await? else {
             tracing::debug!(repo = %repo_root, "github batch skipped: repository has no GitHub remote");
             continue;
         };
-        let credential = credential_for_slug(state, &slug).await;
         let heads: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.head.clone())
@@ -1498,8 +1442,8 @@ async fn poll_once(state: &AppState) -> Result<()> {
             &slug,
             &heads,
             &known_numbers,
-            credential.token.as_deref(),
-            credential.host.as_deref(),
+            token.as_deref(),
+            host.as_deref(),
         )
         .await
         {

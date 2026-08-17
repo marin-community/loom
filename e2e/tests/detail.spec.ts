@@ -287,7 +287,7 @@ test.describe('session detail view', () => {
     await prPill.click();
     const form = page.getByTestId('pr-mapping-form');
     await form.getByLabel('PR number').fill('37');
-    await form.getByRole('button', { name: 'Save' }).click();
+    await form.getByRole('button', { name: 'Pin PR' }).click();
 
     await expect.poll(() => requestBody).toEqual({ pr_number: 37 });
     await expect(form).toBeHidden();

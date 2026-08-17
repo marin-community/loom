@@ -411,7 +411,9 @@ export const patchIssue = (
   },
 ) => patch(`/issues/${id}`, body) as Promise<Issue>;
 
-/** Pin or clear a session's PR association. */
+/** Refresh, pin, or clear a session's PR association. */
+export const refreshSessionGithub = (id: string) =>
+  post(`/sessions/${id}/github`, {}) as Promise<Session>;
 export const setSessionGithub = (id: string, prNumber: number) =>
   put(`/sessions/${id}/github`, { pr_number: prNumber }) as Promise<Session>;
 export const clearSessionGithub = (id: string) => del(`/sessions/${id}/github`) as Promise<Session>;

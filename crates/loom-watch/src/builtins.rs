@@ -86,16 +86,16 @@ pub const BUILTINS: &[BuiltinProgram] = &[
     BuiltinProgram {
         name: "pr-label",
         title: "PR labeller",
-        description: "Add the loom label (params.label, default 'weaver') to \
-                      each pull request when loom first sees it, so work born \
-                      from sessions and existing PRs tagged with @loom are \
-                      identifiable on GitHub.",
+        description: "Flag sessions whose open pull request lacks the loom \
+                      label (params.label, default 'weaver'), so PRs born from \
+                      sessions are identifiable on GitHub. Read-only: it \
+                      reports would-label actions.",
         source: include_str!("../watches/pr_label.py"),
         default_trigger: r#"{"on":["pr.opened"]}"#,
         default_scope: "{}",
         default_params: r#"{"label":"weaver"}"#,
-        default_capabilities: &["observe", "mark"],
-        default_enabled: true,
+        default_capabilities: &["observe"],
+        default_enabled: false,
     },
     BuiltinProgram {
         name: "review-wait",
