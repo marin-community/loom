@@ -119,9 +119,12 @@ may mutate or discard draft content.
 ACP delivery enters a protected conversation inbox separate from retractable
 operator prompts. Inbox consumption, journal delivery key, and live-turn claim
 share one logical boundary so recovery cannot start a second turn for a review
-already recorded in the journal. Offline delivery remains queued without
-consuming an attempt, and fenced leases prevent a stale worker from regressing
-state. Terminal delivery is at-least-once.
+already recorded in the journal. A newly submitted review replaces ordinary
+live ACP work with one visible review turn instead of waiting behind an
+unbounded agent turn; a standalone Stop still pauses automatic delivery, and a
+retry never interrupts the review already in flight. Offline delivery remains
+queued without consuming an attempt, and fenced leases prevent a stale worker
+from regressing state. Terminal delivery is at-least-once.
 
 If the reviewed artifact is later removed, submitted history remains readable by
 stable review ID. Legacy artifact discussion threads are accepted only as
