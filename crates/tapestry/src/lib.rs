@@ -14,8 +14,8 @@
 //! * [`spawn_detached`] — launch a session's supervisor in its own session, so
 //!   it outlives the launcher.
 //! * [`Client`] — drive a session: [`Client::is_alive`], [`Client::capture`],
-//!   [`Client::send`], [`Client::resize`], [`Client::kill`], and the interactive
-//!   [`Client::attach`].
+//!   [`Client::send`], [`Client::resize`], [`Client::derive`], [`Client::kill`],
+//!   and the interactive [`Client::attach`].
 //! * [`list_sessions`] — every session with a live supervisor.
 //! * [`supervisor::run`] — the supervisor event loop (the `tapestry supervise`
 //!   binary entry point; tests call it in-process).
@@ -80,6 +80,46 @@ pub struct LaunchOptions<'a> {
     /// `loom`, must point this at the sibling `tapestry` binary, which carries
     /// the `supervise` subcommand.
     pub supervisor_bin: Option<&'a Path>,
+}
+
+/// Shell-specific overrides for a sibling supervisor derived from an existing
+/// session. The owning supervisor supplies the complete, already-materialized
+/// child environment; callers choose only the new identity, location, and
+/// command.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DerivedLaunch {
+    pub name: String,
+    pub cwd: std::path::PathBuf,
+    pub script: String,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// Launch a detached PTY sibling from an owning supervisor's materialized
+/// environment. Clearing ambient inheritance is intentional: `environment`
+/// already is the owner's effective launch environment, so consulting the
+/// current process again would make a later shell differ from its agent.
+pub(crate) async fn spawn_derived(
+    environment: &[(String, String)],
+    launch: &DerivedLaunch,
+) -> Result<()> {
+    let env: Vec<_> = environment
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    spawn_detached(&LaunchOptions {
+        name: &launch.name,
+        cwd: &launch.cwd,
+        script: &launch.script,
+        env: &env,
+        env_clear: true,
+        cols: launch.cols,
+        rows: launch.rows,
+        mode: Mode::Pty,
+        segment_max_bytes: None,
+        supervisor_bin: None,
+    })
+    .await
 }
 
 /// Encode the supervisor launch spec exactly as [`spawn_detached`] sends it.

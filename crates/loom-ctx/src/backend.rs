@@ -107,6 +107,13 @@ echo 'loom: warning: could not apply the {memory_max_gb}g session memory limit' 
     )
 }
 
+fn session_script(name: &str, script: &str, memory_max_gb: u64) -> String {
+    match memory_max_gb {
+        0 => script.to_string(),
+        gb => format!("{}{}", memory_prelude(name, gb), script),
+    }
+}
+
 /// Create a detached session running `script` via `sh -c` in `cwd`, with `env`
 /// applied to the child's process environment. A non-zero `memory_max_gb`
 /// prepends the [`memory_prelude`] confining the session to that many GiB.
@@ -149,36 +156,43 @@ pub async fn new_session_on_host(
     new_session_with_placement(name, cwd, script, env, env_clear, 0, SessionPlacement::Host).await
 }
 
-/// Create a detached PTY session in the same runner placement as `owner`.
+/// Ask `owner`'s Tapestry supervisor to launch a sibling PTY session.
 ///
-/// With the Docker runner this starts another Tapestry supervisor inside the
-/// owner's existing container. With the local runner both supervisors already
-/// share the same host, so placement is unchanged.
-pub async fn new_session_colocated(
+/// The sibling inherits the owner's complete materialized environment rather
+/// than resolving policy or ambient variables again. With the Docker runner it
+/// naturally starts inside the owner's container; with the local runner it is
+/// another detached process beside the owner.
+pub async fn new_session_derived(
     name: &str,
     cwd: &std::path::Path,
     script: &str,
-    env: &[(&str, &str)],
-    env_clear: bool,
     memory_max_gb: u64,
     owner: &str,
 ) -> Result<()> {
-    new_session_with_placement(
-        name,
-        cwd,
-        script,
-        env,
-        env_clear,
-        memory_max_gb,
-        SessionPlacement::Colocated(owner),
-    )
-    .await
+    tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, owner, "spawning derived terminal session");
+    let script = session_script(name, script, memory_max_gb);
+    let result = tapestry::Client::connect(owner)
+        .await?
+        .derive(&tapestry::DerivedLaunch {
+            name: name.to_string(),
+            cwd: cwd.to_path_buf(),
+            script,
+            cols: 80,
+            rows: 24,
+        })
+        .await;
+    match &result {
+        Ok(()) => tracing::info!(session = %name, owner, "derived terminal session spawned"),
+        Err(error) => {
+            tracing::warn!(session = %name, owner, %error, "failed to spawn derived terminal session")
+        }
+    }
+    result
 }
 
-enum SessionPlacement<'a> {
+enum SessionPlacement {
     Configured,
     Host,
-    Colocated(&'a str),
 }
 
 async fn new_session_with_placement(
@@ -188,13 +202,10 @@ async fn new_session_with_placement(
     env: &[(&str, &str)],
     env_clear: bool,
     memory_max_gb: u64,
-    placement: SessionPlacement<'_>,
+    placement: SessionPlacement,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
-    let script = match memory_max_gb {
-        0 => script.to_string(),
-        gb => format!("{}{}", memory_prelude(name, gb), script),
-    };
+    let script = session_script(name, script, memory_max_gb);
     let supervisor_bin = tapestry_bin();
     let options = tapestry::LaunchOptions {
         name,
@@ -211,9 +222,6 @@ async fn new_session_with_placement(
     let result = match placement {
         SessionPlacement::Configured => runner::spawn(&options, memory_max_gb).await,
         SessionPlacement::Host => runner::spawn_on_host(&options).await,
-        SessionPlacement::Colocated(owner) => {
-            runner::spawn_colocated(&options, memory_max_gb, owner).await
-        }
     };
     match &result {
         Ok(()) => tracing::info!(session = %name, "terminal session spawned"),

@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use serial_test::serial;
-use tapestry::Client;
+use tapestry::{Client, DerivedLaunch, LaunchOptions, Mode};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -79,6 +79,83 @@ async fn detached_supervisor_outlives_its_launcher() {
 
     // Clean up the detached process.
     let _ = Client::connect(&name).await.unwrap().kill().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn pty_and_relay_supervisors_derive_shells_with_their_exact_environment() {
+    let home = TempDir::new().unwrap();
+    std::env::set_var("WEAVER_HOME", home.path());
+    std::env::set_var("TAPESTRY_OWNER_AMBIENT", "captured-before-launch");
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_tapestry"));
+    let explicit = [
+        ("LOOM_SESSION_ID", "session-id"),
+        ("LOOM_TOKEN", "session-token"),
+        ("PROFILE_VALUE", "profile-value"),
+    ];
+
+    for (tag, mode) in [("pty", Mode::Pty), ("relay", Mode::Relay)] {
+        let owner = format!("tap-derive-owner-{}-{tag}", std::process::id());
+        tapestry::spawn_detached(&LaunchOptions {
+            name: &owner,
+            cwd: &std::env::temp_dir(),
+            script: "exec sleep 60",
+            env: &explicit,
+            env_clear: false,
+            cols: 80,
+            rows: 24,
+            mode,
+            segment_max_bytes: None,
+            supervisor_bin: Some(bin),
+        })
+        .await
+        .unwrap();
+
+        // A shell derives from the owner's launch snapshot, not ambient state
+        // at the later moment the shell opens.
+        std::env::set_var("TAPESTRY_OWNER_AMBIENT", "changed-after-launch");
+        std::env::set_var("TAPESTRY_AFTER_OWNER", "must-not-appear");
+        let shell = format!("tap-derive-shell-{}-{tag}", std::process::id());
+        Client::connect(&owner)
+            .await
+            .unwrap()
+            .derive(&DerivedLaunch {
+                name: shell.clone(),
+                cwd: std::env::temp_dir(),
+                script: "printf '%s:%s:%s:%s:%s\\n' \"$TAPESTRY_OWNER_AMBIENT\" \"${TAPESTRY_AFTER_OWNER-unset}\" \"$PROFILE_VALUE\" \"$LOOM_SESSION_ID\" \"$LOOM_TOKEN\"; exec sleep 60".to_string(),
+                cols: 80,
+                rows: 24,
+            })
+            .await
+            .unwrap();
+
+        let mut screen = String::new();
+        for _ in 0..200 {
+            screen = Client::connect(&shell)
+                .await
+                .unwrap()
+                .capture(0)
+                .await
+                .unwrap();
+            if screen
+                .contains("captured-before-launch:unset:profile-value:session-id:session-token")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            screen.contains("captured-before-launch:unset:profile-value:session-id:session-token"),
+            "derived {tag} shell did not inherit the exact owner environment: {screen:?}"
+        );
+
+        let _ = Client::connect(&shell).await.unwrap().kill().await;
+        let _ = Client::connect(&owner).await.unwrap().kill().await;
+        std::env::set_var("TAPESTRY_OWNER_AMBIENT", "captured-before-launch");
+        std::env::remove_var("TAPESTRY_AFTER_OWNER");
+    }
+
+    std::env::remove_var("TAPESTRY_OWNER_AMBIENT");
 }
 
 /// The supervisor is its session's subreaper: a process the agent detaches and

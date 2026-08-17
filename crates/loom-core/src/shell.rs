@@ -14,9 +14,9 @@
 //!   lazily by [`ensure`], reset with [`restart`].
 //!
 //! * Per-session **debug shells** ([`ensure_debug`]): one or more login shells
-//!   in the session agent's runner placement (the same container with the
-//!   Docker runner), rooted in its worktree and carrying its `WEAVER_BRANCH`,
-//!   for poking at the agent's checkout beside the live agent.
+//!   derived by the session agent's Tapestry supervisor with its exact launch
+//!   environment and rooted in its worktree, for poking at the agent's checkout
+//!   beside the live agent.
 //!   They are spawned lazily on first attach and swept with the session on
 //!   archive/remove ([`kill_debug_all`]) so a worktree shell never outlives the
 //!   worktree it sits in. The UI rediscovers open ones after a reload via
@@ -29,7 +29,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use weaver_core::branch::Branch;
 
 use crate::agent;
 use crate::backend;
@@ -50,34 +49,32 @@ fn shell_cwd() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// Build the launch script **and** environment for a scratch/debug login shell.
-/// The env is the operator surface an agent session gets — `WEAVER_API` +
-/// `LOOM_TOKEN` so the in-place `weaver`/`loom` CLIs work, the operator-managed
-/// [`agent_env`] vars, and (for a per-session debug shell) the session's
-/// `WEAVER_BRANCH`. The script just `exec`s the login shell via
+fn bare_shell_script() -> String {
+    let loom_exe = std::env::current_exe().ok();
+    let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
+    agent::bare_shell_script(weaver_dir)
+}
+
+/// Build the launch script **and** environment for the operator scratch shell.
+/// The env is `WEAVER_API` + `LOOM_TOKEN` so the in-place `weaver`/`loom` CLIs
+/// work, plus the operator-managed [`agent_env`] vars. The script just `exec`s
+/// the login shell via
 /// [`agent::bare_shell_script`] (no inner agent command); the env is delivered
 /// out of band by the [`backend`] launch helpers, not `export`-ed into the script, so
 /// secrets stay off argv. This is a plain shell, not an agent, so it does not go
 /// through the agent launch path.
-async fn shell_script(st: &Ctx, branch_id: Option<&str>) -> (String, Vec<(String, String)>) {
+async fn shell_script(st: &Ctx) -> (String, Vec<(String, String)>) {
     let api_url = format!("http://{}", st.addr);
     let local_token = agent::read_local_token();
     let extra = agent_env::pairs(&st.db).await.unwrap_or_default();
 
     let mut env: Vec<(String, String)> = vec![("WEAVER_API".to_string(), api_url)];
-    // A debug shell is rooted in a branch's worktree, so it gets that branch; the
-    // operator scratch shell has none and is deliberately left without one.
-    if let Some(branch) = branch_id {
-        env.push(("WEAVER_BRANCH".to_string(), branch.to_string()));
-    }
     if let Some(token) = local_token {
         env.push(("LOOM_TOKEN".to_string(), token));
     }
     env.extend(extra);
 
-    let loom_exe = std::env::current_exe().ok();
-    let weaver_dir = loom_exe.as_deref().and_then(Path::parent);
-    (agent::bare_shell_script(weaver_dir), env)
+    (bare_shell_script(), env)
 }
 
 /// Borrow an owned env pair list as the `&[(&str, &str)]` slice
@@ -93,7 +90,7 @@ pub async fn ensure(st: &Ctx) -> Result<()> {
     if backend::has_session(SHELL_SESSION).await {
         return Ok(());
     }
-    let (script, env) = shell_script(st, None).await;
+    let (script, env) = shell_script(st).await;
     let cwd = shell_cwd();
     tracing::info!(session = SHELL_SESSION, cwd = %cwd.display(), "spawning operator scratch shell");
     backend::new_session_on_host(SHELL_SESSION, &cwd, &script, &env_refs(&env), false).await
@@ -134,28 +131,22 @@ pub fn debug_session(session_id: &str, idx: u32) -> String {
 
 /// Ensure session `session`'s worktree debug shell `idx` is up, spawning it if
 /// not. Idempotent: a live shell is reattached (a refresh reconnects to the same
-/// one). The shell lands in the session's worktree and carries `branch`'s
-/// `WEAVER_BRANCH`, so its in-worktree `weaver`/`loom` resolve to this branch.
-/// Returns the supervisor name to bridge to.
-pub async fn ensure_debug(
-    st: &Ctx,
-    session: &Session,
-    branch: &Branch,
-    idx: u32,
-) -> Result<String> {
+/// one). The shell lands in the session's worktree and inherits the owner's
+/// complete environment, including its branch, profile/repository variables,
+/// session-scoped Loom identity, and GitHub credential-broker access. Returns
+/// the supervisor name to bridge to.
+pub async fn ensure_debug(st: &Ctx, session: &Session, idx: u32) -> Result<String> {
     let name = debug_session(&session.id, idx);
     if backend::has_session(&name).await {
         return Ok(name);
     }
-    let (script, env) = shell_script(st, Some(&branch.id)).await;
+    let script = bare_shell_script();
     let cwd = PathBuf::from(&session.work_dir);
     tracing::info!(session = %name, cwd = %cwd.display(), "spawning session debug shell");
-    backend::new_session_colocated(
+    backend::new_session_derived(
         &name,
         &cwd,
         &script,
-        &env_refs(&env),
-        false,
         backend::memory_max_gb(&st.db).await,
         &session.term_session,
     )

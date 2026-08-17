@@ -36,6 +36,9 @@ pub mod op {
     pub const KILL: u8 = 0x13;
     /// Liveness + info probe. No payload. Answered with [`PONG`].
     pub const PING: u8 = 0x14;
+    /// Launch a sibling PTY supervisor with this supervisor's exact environment.
+    /// Payload: JSON [`crate::DerivedLaunch`].
+    pub const DERIVE: u8 = 0x15;
     /// Switch this connection to the live terminal stream. Payload: `u16` cols,
     /// `u16` rows (the attaching client's initial size).
     pub const ATTACH: u8 = 0x20;
@@ -246,6 +249,9 @@ pub mod req {
     }
     pub fn ping() -> Frame {
         Frame::new(op::PING, Vec::new())
+    }
+    pub fn derive(payload: Vec<u8>) -> Frame {
+        Frame::new(op::DERIVE, payload)
     }
     pub fn attach(cols: u16, rows: u16) -> Frame {
         Frame::size(op::ATTACH, cols, rows)
