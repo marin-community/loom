@@ -733,6 +733,112 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 }
 
 #[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capacity_blocked_automation_launch_can_be_retried() {
+    let _adapter = EnvVarGuard::set(
+        "WEAVER_CLAUDE_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let _github_token = EnvVarGuard::set("GH_TOKEN", "test-token");
+    let ts = TestServer::start().await;
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "single-ops",
+                "description": "single operations intake",
+                "agent_kind": "claude",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "automation",
+                "strict": true,
+                "env_clear": true,
+                "max_concurrent": 1,
+                "turn_budget": 20,
+                "prelude": "none"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let first = ts
+        .client
+        .post(
+            "/api/runs",
+            json!({
+                "profile": "single-ops",
+                "source": "grafana",
+                "channel": "first",
+                "idempotency_key": "capacity:first",
+                "session": {
+                    "cwd": ts.cwd(),
+                    "title": "First operator",
+                    "goal": "hold the only profile slot"
+                }
+            }),
+        )
+        .await
+        .unwrap();
+
+    let blocked = ts
+        .client
+        .post(
+            "/api/runs",
+            json!({
+                "profile": "single-ops",
+                "source": "grafana",
+                "channel": "second",
+                "idempotency_key": "capacity:second",
+                "session": {
+                    "cwd": ts.cwd(),
+                    "title": "Second operator",
+                    "goal": "wait for profile capacity"
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        blocked
+            .to_string()
+            .contains("profile 'single-ops' has reached its max_concurrent limit (1)"),
+        "capacity error should reach the caller: {blocked}"
+    );
+
+    let runs = ts.client.get("/api/runs").await.unwrap();
+    let blocked = runs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|run| run["idempotency_key"] == "capacity:second")
+        .unwrap();
+    assert_eq!(blocked["status"], "waiting");
+    assert_eq!(
+        blocked["summary"],
+        "profile 'single-ops' has reached its max_concurrent limit (1)"
+    );
+    let blocked_id = blocked["id"].as_str().unwrap().to_string();
+    let initial_session_id = blocked["session_id"].as_str().unwrap().to_string();
+
+    ts.client
+        .post(
+            &format!(
+                "/api/sessions/{}/archive",
+                first["session_id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    let retried = ts.client.retry_run(&blocked_id).await.unwrap();
+
+    assert_eq!(retried.id, blocked_id);
+    assert_eq!(retried.status, "running");
+    assert_eq!(retried.summary, "");
+    assert_ne!(retried.session_id, initial_session_id);
+}
+
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deployment_reconcile_rest_journey() {
     let ts = TestServer::start_api_only().await;

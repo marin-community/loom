@@ -1105,6 +1105,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/auth/federations/{id}", delete(remove_federation))
         .route("/runs", get(list_runs).post(create_run))
+        .route("/runs/{id}/retry", post(retry_run))
         .route("/runs/{id}", get(get_run))
         .route("/auth/password", post(set_own_password))
         // The caller's own GitHub token (a fine-grained PAT), injected as

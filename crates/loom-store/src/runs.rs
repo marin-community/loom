@@ -190,7 +190,8 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
         {
             if owner.owner_run_id == run.id {
                 sqlx::query(
-                    "UPDATE automation_runs SET status = 'running', session_id = ?, updated_at = ?
+                    "UPDATE automation_runs
+                     SET status = 'running', session_id = ?, summary = '', updated_at = ?
                      WHERE id = ?",
                 )
                 .bind(&owner.session_id)
@@ -263,7 +264,7 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
             .await?;
             sqlx::query(
                 "UPDATE automation_runs
-                 SET status = 'creating', session_id = ?, updated_at = ?
+                 SET status = 'creating', session_id = ?, summary = '', updated_at = ?
                  WHERE id = ?",
             )
             .bind(&session_id)
@@ -322,7 +323,7 @@ pub async fn list_for(db: &Db, subject: Option<&str>) -> Result<Vec<Run>> {
 /// the caller uses the `false` result to tear down its late-created session.
 pub async fn launched(db: &Db, id: &str, session_id: &str) -> Result<bool> {
     Ok(sqlx::query(
-        "UPDATE automation_runs SET status = 'running', updated_at = ?
+        "UPDATE automation_runs SET status = 'running', summary = '', updated_at = ?
          WHERE id = ? AND session_id = ?
            AND status IN ('creating', 'waiting', 'delivering')",
     )
@@ -366,11 +367,12 @@ pub async fn claim_stale_delivery(db: &Db, id: &str) -> Result<bool> {
         == 1)
 }
 
-pub async fn waiting(db: &Db, id: &str) -> Result<bool> {
+pub async fn waiting(db: &Db, id: &str, summary: &str) -> Result<bool> {
     Ok(sqlx::query(
-        "UPDATE automation_runs SET status = 'waiting', updated_at = ?
+        "UPDATE automation_runs SET status = 'waiting', summary = ?, updated_at = ?
          WHERE id = ? AND status IN ('creating', 'delivering', 'waiting')",
     )
+    .bind(summary)
     .bind(now_iso())
     .bind(id)
     .execute(db)
