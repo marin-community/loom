@@ -6,7 +6,7 @@
 //! weaver issues it was working — once its PR merges. The snapshot rides along
 //! on `BranchView`; the dashboard renders it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -474,14 +474,81 @@ struct BatchSnapshots {
 /// One entry in `statusCheckRollup`. The array is a union of GitHub's CheckRun
 /// (carries `status` + `conclusion`) and StatusContext (carries `state`); we
 /// accept whichever fields are present.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct CheckJson {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
     #[serde(default)]
     state: Option<String>,
+    #[serde(rename = "startedAt", default)]
+    started_at: Option<String>,
+    // `gh pr view --json statusCheckRollup` flattens this field, while the
+    // background GraphQL query retains the native check-suite nesting.
+    #[serde(rename = "workflowName", default)]
+    workflow_name: Option<String>,
+    #[serde(rename = "checkSuite", default)]
+    check_suite: Option<CheckSuiteJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckSuiteJson {
+    #[serde(rename = "workflowRun", default)]
+    workflow_run: Option<WorkflowRunJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowRunJson {
+    #[serde(default)]
+    event: Option<String>,
+    #[serde(default)]
+    workflow: Option<WorkflowJson>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowJson {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl CheckJson {
+    fn workflow_name(&self) -> &str {
+        self.workflow_name
+            .as_deref()
+            .or_else(|| {
+                self.check_suite
+                    .as_ref()?
+                    .workflow_run
+                    .as_ref()?
+                    .workflow
+                    .as_ref()?
+                    .name
+                    .as_deref()
+            })
+            .unwrap_or("")
+    }
+
+    fn event(&self) -> &str {
+        self.check_suite
+            .as_ref()
+            .and_then(|suite| suite.workflow_run.as_ref())
+            .and_then(|run| run.event.as_deref())
+            .unwrap_or("")
+    }
+
+    fn identity(&self) -> Option<String> {
+        if let Some(context) = self.context.as_deref() {
+            return Some(format!("context\0{context}"));
+        }
+        self.name
+            .as_deref()
+            .map(|name| format!("run\0{name}\0{}\0{}", self.workflow_name(), self.event()))
+    }
 }
 
 impl PrJson {
@@ -507,16 +574,40 @@ impl PrJson {
     }
 }
 
-/// Roll a PR's individual checks up to a single verdict, the way `gh pr checks`
+/// Keep only the newest attempt for each logical check. GitHub's raw
+/// `statusCheckRollup` includes superseded runs, including failures and
+/// cancellations that the web UI and `gh pr checks` no longer count. Check-run
+/// identity matches `gh pr checks`: job name + workflow + event. Legacy commit
+/// statuses are keyed by context.
+fn latest_checks(items: &[CheckJson]) -> Vec<&CheckJson> {
+    let mut newest_first = items.iter().collect::<Vec<_>>();
+    // GitHub timestamps are RFC 3339 UTC, so their textual order is
+    // chronological. The stable sort preserves API order when timestamps are
+    // absent or tied.
+    newest_first.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+    let mut seen = HashSet::new();
+    newest_first
+        .into_iter()
+        .filter(|check| {
+            check
+                .identity()
+                .is_none_or(|identity| seen.insert(identity))
+        })
+        .collect()
+}
+
+/// Roll a PR's current checks up to a single verdict, the way `gh pr checks`
 /// does: any failure ⇒ `failing`, else anything still running ⇒ `pending`, else
-/// `passing`. `None` when the PR has no checks at all.
+/// `passing`. Cancelled checks are reported separately by GitHub and do not make
+/// the command fail. `None` when the PR has no checks at all.
 fn rollup_checks(items: &[CheckJson]) -> Option<String> {
     if items.is_empty() {
         return None;
     }
     let mut any_pending = false;
     let mut any_fail = false;
-    for it in items {
+    for it in latest_checks(items) {
         if let Some(status) = it.status.as_deref() {
             // CheckRun: only COMPLETED runs have a meaningful conclusion.
             if status != "COMPLETED" {
@@ -524,17 +615,22 @@ fn rollup_checks(items: &[CheckJson]) -> Option<String> {
                 continue;
             }
             match it.conclusion.as_deref().unwrap_or("") {
-                "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
-                "" => any_pending = true,
-                _ => any_fail = true, // FAILURE / CANCELLED / TIMED_OUT / ACTION_REQUIRED / …
+                "SUCCESS" | "NEUTRAL" | "SKIPPED" | "CANCELLED" => {}
+                "ERROR" | "FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" => any_fail = true,
+                // EXPECTED / STALE / STARTUP_FAILURE / an empty or future state
+                // have no successful terminal verdict yet.
+                _ => any_pending = true,
             }
         } else if let Some(state) = it.state.as_deref() {
             // StatusContext (legacy commit statuses).
             match state {
                 "SUCCESS" => {}
                 "PENDING" | "EXPECTED" => any_pending = true,
-                _ => any_fail = true, // FAILURE / ERROR
+                "FAILURE" | "ERROR" => any_fail = true,
+                _ => any_pending = true,
             }
+        } else {
+            any_pending = true;
         }
     }
     Some(
@@ -659,8 +755,11 @@ fragment PrFields on PullRequest {{
     contexts(first: 100) {{
       nodes {{
         __typename
-        ... on CheckRun {{ status conclusion }}
-        ... on StatusContext {{ state }}
+        ... on CheckRun {{
+          name status conclusion startedAt
+          checkSuite {{ workflowRun {{ event workflow {{ name }} }} }}
+        }}
+        ... on StatusContext {{ context state startedAt: createdAt }}
       }}
     }}
   }}
@@ -1359,6 +1458,31 @@ mod tests {
             status: status.map(str::to_string),
             conclusion: conclusion.map(str::to_string),
             state: state.map(str::to_string),
+            ..CheckJson::default()
+        }
+    }
+
+    fn named_check(
+        name: &str,
+        workflow: &str,
+        event: &str,
+        started_at: &str,
+        status: &str,
+        conclusion: Option<&str>,
+    ) -> CheckJson {
+        CheckJson {
+            name: Some(name.to_string()),
+            status: Some(status.to_string()),
+            conclusion: conclusion.map(str::to_string),
+            started_at: Some(started_at.to_string()),
+            workflow_name: Some(workflow.to_string()),
+            check_suite: Some(CheckSuiteJson {
+                workflow_run: Some(WorkflowRunJson {
+                    event: Some(event.to_string()),
+                    workflow: None,
+                }),
+            }),
+            ..CheckJson::default()
         }
     }
 
@@ -1412,6 +1536,100 @@ mod tests {
             check(Some("COMPLETED"), Some("FAILURE"), None),
         ];
         assert_eq!(rollup_checks(&failing).as_deref(), Some("failing"));
+    }
+
+    #[test]
+    fn rollup_ignores_superseded_cancelled_attempt() {
+        let items = [
+            named_check(
+                "cleanup",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:29:31Z",
+                "COMPLETED",
+                Some("CANCELLED"),
+            ),
+            named_check(
+                "cleanup",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:30:20Z",
+                "COMPLETED",
+                Some("SKIPPED"),
+            ),
+            named_check(
+                "lint",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:29:33Z",
+                "COMPLETED",
+                Some("SUCCESS"),
+            ),
+        ];
+
+        assert_eq!(rollup_checks(&items).as_deref(), Some("passing"));
+    }
+
+    #[test]
+    fn rollup_uses_pending_rerun_instead_of_superseded_failure() {
+        let items = [
+            named_check(
+                "test",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:26:07Z",
+                "COMPLETED",
+                Some("FAILURE"),
+            ),
+            named_check(
+                "test",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:33:43Z",
+                "IN_PROGRESS",
+                None,
+            ),
+        ];
+
+        assert_eq!(rollup_checks(&items).as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn rollup_keeps_same_named_checks_from_distinct_workflows() {
+        let items = [
+            named_check(
+                "test",
+                "CI",
+                "PULL_REQUEST",
+                "2026-08-18T22:29:33Z",
+                "COMPLETED",
+                Some("SUCCESS"),
+            ),
+            named_check(
+                "test",
+                "Nightly",
+                "SCHEDULE",
+                "2026-08-18T22:29:34Z",
+                "COMPLETED",
+                Some("FAILURE"),
+            ),
+        ];
+
+        assert_eq!(rollup_checks(&items).as_deref(), Some("failing"));
+    }
+
+    #[test]
+    fn rollup_does_not_treat_current_cancellation_as_failure() {
+        let items = [named_check(
+            "cleanup",
+            "CI",
+            "PULL_REQUEST",
+            "2026-08-18T22:29:31Z",
+            "COMPLETED",
+            Some("CANCELLED"),
+        )];
+
+        assert_eq!(rollup_checks(&items).as_deref(), Some("passing"));
     }
 
     #[test]
@@ -1529,6 +1747,7 @@ mod tests {
         assert!(query.contains("headRefName: \"quoted\\\"branch\""));
         assert!(query.contains("known0: pullRequest(number: 7)"));
         assert!(query.contains("known1: pullRequest(number: 42)"));
+        assert!(query.contains("workflowRun { event workflow { name } }"));
         assert_eq!(query.matches("repository(owner:").count(), 1);
     }
 
@@ -1577,6 +1796,56 @@ mod tests {
         assert_eq!(snapshots.by_number[&7].checks.as_deref(), Some("passing"));
         assert_eq!(snapshots.by_number[&42].pr_state, "MERGED");
         assert_eq!(snapshots.by_number[&42].checks.as_deref(), Some("failing"));
+    }
+
+    #[test]
+    fn batch_response_rolls_up_only_the_latest_check_attempt() {
+        let check = |status: &str, conclusion: Option<&str>, started_at: &str| {
+            json!({
+                "__typename": "CheckRun",
+                "name": "test",
+                "status": status,
+                "conclusion": conclusion,
+                "startedAt": started_at,
+                "checkSuite": { "workflowRun": {
+                    "event": "PULL_REQUEST",
+                    "workflow": { "name": "CI" },
+                }},
+            })
+        };
+        let body = json!({
+            "data": { "repository": {
+                "branch0": { "nodes": [{
+                    "number": 7,
+                    "url": "https://example/pr/7",
+                    "state": "OPEN",
+                    "title": "PR 7",
+                    "isDraft": false,
+                    "reviewDecision": "",
+                    "mergeable": "MERGEABLE",
+                    "mergedAt": null,
+                    "headRefOid": "head-7",
+                    "updatedAt": "2026-08-18T22:33:43Z",
+                    "statusCheckRollup": { "contexts": { "nodes": [
+                        check("COMPLETED", Some("FAILURE"), "2026-08-18T22:26:07Z"),
+                        check("IN_PROGRESS", None, "2026-08-18T22:33:43Z"),
+                    ]}},
+                }]},
+            }}
+        });
+
+        let snapshots = parse_batch_response(
+            &serde_json::to_vec(&body).unwrap(),
+            "acme/widgets",
+            &["weaver/one".to_string()],
+            &[],
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshots.by_head["weaver/one"].checks.as_deref(),
+            Some("pending")
+        );
     }
 
     #[test]
