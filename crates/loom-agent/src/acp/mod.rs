@@ -579,8 +579,8 @@ impl AcpHandle {
             .await
     }
 
-    /// Deliver external control input now by cancelling a live turn and
-    /// starting the message normally.
+    /// Deliver immediate input by cancelling a live turn and starting the
+    /// message normally.
     pub async fn stop_and_send(
         &self,
         text: String,
@@ -1163,7 +1163,7 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
 enum PromptDelivery {
     /// Preserve the conversation composer's queue-first behavior.
     Queue,
-    /// Cross-session control: cancel and restart immediately.
+    /// Immediate input: cancel and restart immediately.
     StopAndSend,
 }
 
