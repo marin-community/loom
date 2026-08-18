@@ -2989,7 +2989,7 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch() {
-    let ts = TestServer::start().await;
+    let ts = TestServer::start_with_app().await;
     loom::repo::register(
         &ts.state.db,
         "marin-community/marin",
@@ -3838,8 +3838,6 @@ async fn preview_renders_the_journal_tail_as_text() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_codex_launches_over_codex_acp() {
-    // A builtin launch passes the GitHub-token gate; CI has no ambient token.
-    let _token = EnvVarSet::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
     weaver_core::config::apply(
         &ts.state.db,

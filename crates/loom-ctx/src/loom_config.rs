@@ -12,12 +12,9 @@
 //! Every field resolves from **either** `loom.toml` **or** a same-named
 //! environment variable — [`resolve`] layers the process environment over
 //! whatever's on disk (env wins), the standard "env overrides a config file"
-//! expectation (the same reason `GH_TOKEN` in your shell already overrides
-//! the `gh` CLI's own stored auth). That layering only happens on the
+//! expectation. That layering only happens on the
 //! *consuming* path (`render-env`, `push-secrets`) — [`load`]/[`upsert`], the
-//! *authoring* path `loom setup` writes through, never touch the
-//! environment, so an operator's ambient `GH_TOKEN` (say, for their own `gh`
-//! usage) can't silently get baked into the committed `loom.toml`.
+//! *authoring* path `loom setup` writes through, never touch the environment.
 
 use std::path::Path;
 
@@ -60,8 +57,6 @@ pub struct LoomConfig {
     pub anthropic_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gh_token: Option<String>,
     /// Slack app-level token (`xapp-…`, needs `connections:write`) — opens the
     /// Socket Mode websocket. With both this and `slack_bot_token` set, loom
     /// connects to Slack and the `/marinbot` trigger goes live.
@@ -165,12 +160,6 @@ pub static FIELDS: &[FieldSpec] = &[
         set_fn: |c, v| c.openai_api_key = Some(v),
     },
     FieldSpec {
-        env_name: "GH_TOKEN",
-        secret: true,
-        get_fn: |c| c.gh_token.as_deref(),
-        set_fn: |c, v| c.gh_token = Some(v),
-    },
-    FieldSpec {
         env_name: "LOOM_SLACK_APP_TOKEN",
         secret: true,
         get_fn: |c| c.slack_app_token.as_deref(),
@@ -240,8 +229,8 @@ pub fn resolve(path: &Path) -> Result<LoomConfig> {
 
 /// [`resolve`], plus the `ENV_NAME`s where an ambient env var overrode a
 /// *different* value already present in `path` — the footgun on a deploy
-/// workstation, where a personal `GH_TOKEN`/`ANTHROPIC_API_KEY` etc. is
-/// commonly exported and would otherwise silently outrank `loom.toml` in
+/// workstation, where an `ANTHROPIC_API_KEY` or similar setting is commonly
+/// exported and would otherwise silently outrank `loom.toml` in
 /// exactly the run that pushes secrets to the shared deploy. `render-env` and
 /// `push-secrets` (`bin/loom.rs`) use this instead of bare [`resolve`] so they
 /// can warn; a value that merely fills in a field the file never had isn't a
@@ -314,9 +303,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("loom.toml");
         upsert(&path, &[("LOOM_DOMAIN", "loom.example.com")]).unwrap();
-        let config = upsert(&path, &[("GH_TOKEN", "ghp_new")]).unwrap();
+        let config = upsert(&path, &[("OPENAI_API_KEY", "sk-new")]).unwrap();
         assert_eq!(config.domain.as_deref(), Some("loom.example.com"));
-        assert_eq!(config.gh_token.as_deref(), Some("ghp_new"));
+        assert_eq!(config.openai_api_key.as_deref(), Some("sk-new"));
     }
 
     #[test]
@@ -431,7 +420,6 @@ mod tests {
                 "LOOM_GITHUB_CLIENT_SECRET",
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",
-                "GH_TOKEN",
                 "LOOM_SLACK_APP_TOKEN",
                 "LOOM_SLACK_BOT_TOKEN",
             ]

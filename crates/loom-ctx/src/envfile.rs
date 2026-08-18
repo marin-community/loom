@@ -108,33 +108,33 @@ mod tests {
 
     #[test]
     fn replaces_an_existing_key_in_place_and_leaves_the_rest_untouched() {
-        let input = "# a comment\nLOOM_DOMAIN=loom.example.com\nGH_TOKEN=old\nHOST_UID=1000\n";
-        let out = upsert(input, &[("GH_TOKEN", "ghp_new")]);
+        let input = "# a comment\nLOOM_DOMAIN=loom.example.com\nAPI_TOKEN=old\nHOST_UID=1000\n";
+        let out = upsert(input, &[("API_TOKEN", "new")]);
         assert_eq!(
             out,
-            "# a comment\nLOOM_DOMAIN=loom.example.com\nGH_TOKEN=ghp_new\nHOST_UID=1000\n"
+            "# a comment\nLOOM_DOMAIN=loom.example.com\nAPI_TOKEN=new\nHOST_UID=1000\n"
         );
     }
 
     #[test]
     fn appends_missing_keys_after_a_blank_separator() {
         let input = "LOOM_DOMAIN=loom.example.com\n";
-        let out = upsert(input, &[("GH_TOKEN", "ghp_new")]);
-        assert_eq!(out, "LOOM_DOMAIN=loom.example.com\n\nGH_TOKEN=ghp_new\n");
+        let out = upsert(input, &[("API_TOKEN", "new")]);
+        assert_eq!(out, "LOOM_DOMAIN=loom.example.com\n\nAPI_TOKEN=new\n");
     }
 
     #[test]
     fn does_not_double_up_the_blank_separator() {
         let input = "LOOM_DOMAIN=loom.example.com\n\n";
-        let out = upsert(input, &[("GH_TOKEN", "ghp_new")]);
-        assert_eq!(out, "LOOM_DOMAIN=loom.example.com\n\nGH_TOKEN=ghp_new\n");
+        let out = upsert(input, &[("API_TOKEN", "new")]);
+        assert_eq!(out, "LOOM_DOMAIN=loom.example.com\n\nAPI_TOKEN=new\n");
     }
 
     #[test]
     fn ignores_commented_out_keys_when_matching() {
-        let input = "# GH_TOKEN=disabled\n";
-        let out = upsert(input, &[("GH_TOKEN", "ghp_new")]);
-        assert_eq!(out, "# GH_TOKEN=disabled\n\nGH_TOKEN=ghp_new\n");
+        let input = "# API_TOKEN=disabled\n";
+        let out = upsert(input, &[("API_TOKEN", "new")]);
+        assert_eq!(out, "# API_TOKEN=disabled\n\nAPI_TOKEN=new\n");
     }
 
     #[test]

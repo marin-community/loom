@@ -90,7 +90,7 @@ def batches(client):
     return [c for c in client.calls if c[0] == "set_tags"]
 
 
-def test_pr_label_uses_the_trigger_repo_environment(monkeypatch, capsys):
+def test_pr_label_uses_the_loom_github_api(capsys):
     client = StubClient(
         capabilities=["mark"],
         sessions=[
@@ -104,14 +104,13 @@ def test_pr_label_uses_the_trigger_repo_environment(monkeypatch, capsys):
             }
         ],
     )
-    calls = []
-    monkeypatch.setattr(pr_label, "gh_json", lambda args, cwd=None: calls.append((args, cwd)))
+    client.add_github_labels = lambda key, labels: client.calls.append(
+        ("add_github_labels", key, labels)
+    )
     rnd = make_round(client, capabilities=client.capabilities)
     pr_label.main(rnd)
 
-    assert calls == [
-        (["api", "-X", "POST", "repos/{owner}/{repo}/issues/17/labels", "-f", "labels[]=weaver"], "/repo")
-    ]
+    assert client.calls == [("add_github_labels", "s", ["weaver"])]
     assert json.loads(capsys.readouterr().out)["actions"] == [
         {"action": "label", "session": "s", "pr": 17, "label": "weaver"}
     ]

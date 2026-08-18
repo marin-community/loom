@@ -310,24 +310,19 @@ export const validateRepoRevision = (cwd: string, revision: string) => {
 
 // --- Your GitHub token (per-user) ------------------------------------------
 
-/** Whether the signed-in user has set a personal GitHub token. The token itself
- *  is write-only — set/cleared but never read back. */
+/** Write-only status for the signed-in user's Loom-stored GitHub PAT. */
 export interface GithubTokenStatus {
   set: boolean;
   updated_at: string | null;
 }
 
-/** Whether you've set a personal GitHub token (`GET /api/auth/github-token`). */
 export const getMyGithubToken = () => get('/auth/github-token') as Promise<GithubTokenStatus>;
 
-/** Set/replace your personal GitHub token, injected as GH_TOKEN into the
- *  sessions you launch so your agents act as you (`PUT /api/auth/github-token`).
- *  Returns the refreshed status (never the token). */
+/** Store the PAT Loom will inject into this user's ordinary interactive sessions. */
 export const setMyGithubToken = (token: string) =>
   put('/auth/github-token', { token }) as Promise<GithubTokenStatus>;
 
-/** Clear your personal GitHub token; new interactive sessions retain any
- *  credential supplied by their selected profile (`DELETE /api/auth/github-token`). */
+/** Remove the PAT; new sessions fall back to profile-approved GitHub App access. */
 export const deleteMyGithubToken = () => del('/auth/github-token');
 
 interface RepoEnvEnvelope {

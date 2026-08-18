@@ -130,6 +130,12 @@ pub struct TestServer {
     _home: TempDir,
 }
 
+enum GithubFixture {
+    Production,
+    Gateway(std::sync::Arc<dyn loom::github_trigger::GithubApi>),
+    ConfiguredApp,
+}
+
 impl Drop for TestServer {
     fn drop(&mut self) {
         // Tear down detached terminal supervisors before the home (and its
@@ -143,29 +149,31 @@ impl TestServer {
     /// answer `/api/health`. The caller must be `#[serial]`: setup writes
     /// process-global env.
     pub async fn start() -> Self {
-        Self::start_inner(None, true).await
+        Self::start_inner(GithubFixture::Production, true).await
     }
 
     /// Boot the REST server and database without initializing the fixture
     /// directory as a Git repository. API journeys that never provision a
     /// session should use this cheaper boundary.
     pub async fn start_api_only() -> Self {
-        Self::start_inner(None, false).await
+        Self::start_inner(GithubFixture::Production, false).await
     }
 
-    /// Like [`start`](Self::start) but installs `gh` as the GitHub trigger's
-    /// gateway, so the webhook suite can drive the permission check + reply with
-    /// a fake instead of the real `gh` CLI.
+    /// Like [`start`](Self::start) but installs a fake GitHub trigger gateway so
+    /// the webhook suite can drive the permission check and reply in-process.
     pub async fn start_with_github(
         gh: std::sync::Arc<dyn loom::github_trigger::GithubApi>,
     ) -> Self {
-        Self::start_inner(Some(gh), true).await
+        Self::start_inner(GithubFixture::Gateway(gh), true).await
     }
 
-    async fn start_inner(
-        gh: Option<std::sync::Arc<dyn loom::github_trigger::GithubApi>>,
-        initialize_repo: bool,
-    ) -> Self {
+    /// Boot with a configured App client pointed at Loom's mock GitHub REST
+    /// service. Used by journeys that exercise App-owned server operations.
+    pub async fn start_with_app() -> Self {
+        Self::start_inner(GithubFixture::ConfiguredApp, true).await
+    }
+
+    async fn start_inner(github: GithubFixture, initialize_repo: bool) -> Self {
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
         // at the sibling supervisor binary.
@@ -187,9 +195,21 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let pool = db::connect(&db::default_db_path()).await.unwrap();
-        let trigger = match gh {
-            Some(gh) => loom::github_trigger::GithubTrigger::with_gateway(gh),
-            None => loom::github_trigger::GithubTrigger::production(pool.clone()),
+        let trigger = match github {
+            GithubFixture::Gateway(gh) => {
+                let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
+                loom::github_trigger::GithubTrigger::with_gateway_and_app(
+                    gh,
+                    std::sync::Arc::new(app),
+                )
+            }
+            GithubFixture::ConfiguredApp => {
+                let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
+                loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app))
+            }
+            GithubFixture::Production => {
+                loom::github_trigger::GithubTrigger::production(pool.clone())
+            }
         };
         let state = AppState {
             ctx: Ctx {

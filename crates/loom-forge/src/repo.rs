@@ -302,9 +302,8 @@ pub async fn registered_path(db: &Db, input: &str) -> std::result::Result<PathBu
 ///
 /// `app` (when the GitHub App is configured and installed on the repo) mints a
 /// short-lived installation token for the clone/fetch — least-privilege, in
-/// place of the ambient shared `GH_TOKEN` credential helper. Any failure to
-/// mint one (unconfigured App, no installation on this repo, API error) is
-/// non-fatal: it falls back to the ambient helper, same as `app: None`.
+/// place of a persisted PAT. Any failure to mint one is fatal; `app: None` is
+/// reserved for local/public test and library callers that request no credential.
 pub async fn resolve_clone(
     db: &Db,
     input: &str,
@@ -314,24 +313,17 @@ pub async fn resolve_clone(
     let (slug, registered) = registration(db, input).await?;
     let slug_str = slug.slug();
     let dest = PathBuf::from(&registered.path);
-    let token = match app {
-        Some(app) => match app.token_for_repo(&slug.owner, &slug.name).await {
-            Ok(token) => {
-                tracing::debug!(repo = %slug_str, "minted GitHub App installation token for repo");
-                Some(token)
-            }
-            Err(e) => {
-                tracing::debug!(
-                    repo = %slug_str,
-                    error = %e,
-                    "no GitHub App installation token for repo; falling back to the ambient \
-                     credential helper"
-                );
-                None
-            }
-        },
-        None => None,
-    };
+    let token =
+        match app {
+            Some(app) => Some(app.token_for_repo(&slug.owner, &slug.name).await.map_err(
+                |error| {
+                    ResolveError::Clone(format!(
+                        "minting GitHub App credential for {slug_str}: {error}"
+                    ))
+                },
+            )?),
+            None => None,
+        };
     tracing::info!(repo = %slug_str, dest = %dest.display(), authenticated = token.is_some(), "acquiring managed repo clone");
     git::clone(&registered.remote_url, &dest, token.as_deref())
         .await
@@ -554,10 +546,9 @@ mod tests {
     }
 
     /// An unconfigured GitHub App (`Some(&app)`, but no App id/key stored) can't
-    /// mint an installation token — `resolve_clone` must fall back to the
-    /// ambient credential helper rather than fail the whole clone.
+    /// mint the installation token required for an authenticated clone.
     #[tokio::test]
-    async fn resolve_clone_falls_back_when_the_app_cannot_mint_a_token() {
+    async fn resolve_clone_fails_when_the_app_cannot_mint_a_token() {
         let db = connect_in_memory().await.unwrap();
 
         let src = tempfile::tempdir().unwrap();
@@ -594,9 +585,14 @@ mod tests {
         .unwrap();
 
         let app = crate::github_app::GithubApp::new(db.clone());
-        let path = resolve_clone(&db, "acme/gizmos", Some(&app)).await.unwrap();
-        assert_eq!(path, dest);
-        assert!(dest.join(".git").exists());
+        let error = resolve_clone(&db, "acme/gizmos", Some(&app))
+            .await
+            .unwrap_err();
+        let ResolveError::Clone(message) = error else {
+            panic!("expected clone failure")
+        };
+        assert!(message.contains("GitHub App id is not configured"));
+        assert!(!dest.exists());
     }
 
     /// Run `git` in `dir` for the resolve test (the crate has no test-only git

@@ -45,9 +45,9 @@ an embedded VS Code), so the image is large and self-contained.
 - A **domain** whose DNS `A`/`AAAA` record points at the host. Caddy needs `:80`
   reachable for the ACME challenge and your domain resolving to the host *before*
   first start, or the certificate won't issue.
-- The credentials in the [env reference](#required-environment) — at minimum a
-  `GH_TOKEN`, a webhook secret, and an Anthropic key (or an interactive Claude
-  login).
+- The credentials in the [env reference](#required-environment) — the GitHub
+  App id, private key, and webhook secret, plus an Anthropic key (or an
+  interactive Claude login).
 
 ## Quick start
 
@@ -104,7 +104,7 @@ and why; you don't hand-edit `.env` itself.
 |---|---|---|
 | `LOOM_DOMAIN` | **yes** | Public domain Caddy serves and gets a cert for (e.g. `loom.team.dev`); `localhost` for local testing. Also seeded as `auth.base_url`. |
 | `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database — the only account that can sign in until it approves others. Approved users are also who may drive the `@loom` trigger; add more in **Settings → Approved users**. |
-| `GH_TOKEN` | **yes** | GitHub token loom uses to clone private repos, push branches, and reply to `@loom` requests. |
+| `LOOM_GITHUB_APP_ID` / `_PRIVATE_KEY` | **yes** | GitHub App identity Loom uses to mint repository-scoped installation tokens for clones, polling, replies, server-side GitHub tools, and profile-approved interactive sessions. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
 | `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
@@ -122,15 +122,17 @@ invocation without touching `loom.toml`, by exporting the same-named env var:
 `loom config render-env`/`push-secrets` resolve `loom.toml` *and* the process
 environment, with the environment winning (see `loom_config`'s module docs).
 
-`GH_TOKEN` and `ANTHROPIC_API_KEY` here cover the daemon's own ambient use
-(cloning private repos; the Claude launch-gate). Every *session* loom launches
-also needs them — `loom setup secrets --config /home/app/loom.toml` (run via
-`docker compose exec loom` against the running deploy, or as part of the
-[Quick start](#quick-start) sequence before first start) prompts for the agent
-keys (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) and `GH_TOKEN`,
-and stores them as operator environment variables, live for every session from
-then on, no restart. Leave a key blank to skip it. Run it in addition to (not
-instead of) rendering them into `.env` above.
+Loom uses its GitHub App for daemon and server-side GitHub operations. For
+ordinary interactive sessions, users may set an Account PAT under **Settings →
+Account**; Loom prefers that identity and otherwise brokers the selected
+profile's allowlisted App access. Session runtimes also need their
+model-provider keys. Run
+`loom setup secrets --config /home/app/loom.toml` via `docker compose exec loom`
+against the running deploy, or as part of the [Quick start](#quick-start)
+sequence before first start. It prompts for `ANTHROPIC_API_KEY` and
+`OPENAI_API_KEY`, and stores them as operator environment variables, live for
+every session from then on, no restart. Leave a key blank to skip it. Run it in
+addition to (not instead of) rendering them into `.env` above.
 
 ## Security posture
 
@@ -326,9 +328,10 @@ docker compose exec loom codex login    # follow the prompts, then exit
 The shared Codex login is used only for model access. At startup, Loom disables
 Codex account-level apps in the container, so a GitHub connector authorized on
 that account cannot become a session's write identity. The terminal and ACP
-launch paths enforce the same setting. GitHub CLI access instead uses the
-credential Loom injects into the agent environment; restricted profiles perform
-GitHub mutations through Loom's server-side tool endpoint.
+launch paths enforce the same setting. GitHub CLI access instead uses either
+the launching user's Loom-stored Account PAT or a session-brokered App token;
+restricted profiles perform GitHub mutations through Loom's server-side
+App-backed endpoint.
 
 ## Wire the `@loom` GitHub trigger
 

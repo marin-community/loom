@@ -807,9 +807,8 @@ fn has_pep723(source: &str) -> bool {
     source.lines().any(|l| l.trim() == "# /// script")
 }
 
-/// Whether the `uv` CLI is usable. Probed once and cached, like
-/// [`crate::github::gh_available`] — absence is normal and shouldn't cost a
-/// process spawn every round.
+/// Whether the `uv` CLI is usable. Probed once and cached because absence is
+/// normal and shouldn't cost a process spawn every round.
 async fn uv_available() -> bool {
     static AVAILABLE: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
     *AVAILABLE
@@ -933,8 +932,8 @@ struct ScriptOutput {
 }
 
 /// Calling-agent credentials and lifecycle markers that a watch program must
-/// not inherit. Watch scripts receive only their explicit REST capability
-/// token (and the operator's GitHub token when needed).
+/// not inherit. Watch scripts receive only their explicit Loom REST capability
+/// token; GitHub state reaches builtins through Loom's API snapshots.
 const WATCH_SCRIPT_STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "CLAUDECODE",
@@ -942,6 +941,9 @@ const WATCH_SCRIPT_STRIPPED_ENV: &[&str] = &[
     "CLAUDE_CODE_EXECPATH",
     "CLAUDE_CODE_SESSION_ID",
     "CLAUDE_CODE_SSE_PORT",
+    "GH_HOST",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
     "WEAVER_BRANCH",
 ];
 
@@ -1026,21 +1028,6 @@ async fn spawn_script(
     for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
-    command.env_remove("GH_TOKEN").env_remove("GH_HOST");
-    // A reactive GitHub watch concerns one repository, so run its `gh` calls
-    // with that repo's App token; manual rounds fall back to operator auth.
-    let repo = config
-        .pointer("/trigger/repo")
-        .and_then(Value::as_str)
-        .map(std::path::Path::new);
-    let (token, host) = crate::github::gh_environment(state, repo).await;
-    if let Some(token) = token {
-        command.env("GH_TOKEN", token);
-    }
-    if let Some(host) = host {
-        command.env("GH_HOST", host);
-    }
-
     let started = std::time::Instant::now();
     let out = command.output().await.map_err(|e| {
         anyhow::anyhow!("spawning {interpreter} failed: {e} (is {interpreter} installed?)")

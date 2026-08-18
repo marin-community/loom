@@ -21,18 +21,17 @@
 //! lives in [`crate::web::github_webhook`], which has access to the session
 //! create path; the security primitives live here so they can be unit-tested in
 //! isolation. External GitHub calls (the permission check and the reply) go
-//! through the [`GithubApi`] gateway so a test can substitute a fake for `gh`.
+//! through the [`GithubApi`] gateway so tests can substitute a fake for the App.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 use std::sync::Arc;
-use tokio::process::Command;
 
 use crate::auth;
 use crate::db::Db;
@@ -610,10 +609,8 @@ pub struct PrHead {
 }
 
 /// The GitHub operations loom performs against a thread — posting and editing
-/// comments, resolving a PR's head branch — behind a trait so the `gh`-backed
-/// implementation ([`GhCli`]) and a test fake are interchangeable. The
-/// production impl is the GitHub **App** (short-lived installation tokens); the
-/// [`GhCli`] fallback uses the ambient `GH_TOKEN`.
+/// comments, resolving a PR's head branch — behind a trait so the production
+/// GitHub App implementation and test fakes are interchangeable.
 #[async_trait::async_trait]
 pub trait GithubApi: Send + Sync {
     /// Post a comment on `issue` of `repo` (`owner/name`), returning the new
@@ -651,119 +648,15 @@ pub struct IssueState {
     pub updated_at: String,
 }
 
-/// The production [`GithubApi`]: shells out to the `gh` CLI with the ambient
-/// `GH_TOKEN`.
-pub struct GhCli;
-
-#[async_trait::async_trait]
-impl GithubApi for GhCli {
-    async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
-        // `gh api` rather than the `gh issue comment` porcelain: the raw REST
-        // response carries the comment id (porcelain prints only an HTML URL),
-        // and the same route serves issues and pull requests alike.
-        let path = format!("repos/{repo}/issues/{issue}/comments");
-        let field = format!("body={body}");
-        let out = gh_capture(&["api", &path, "-f", &field]).await?;
-        let v: serde_json::Value =
-            serde_json::from_str(&out).context("parsing created-comment json")?;
-        let id = v["id"]
-            .as_i64()
-            .context("created-comment json carries no id")?;
-        tracing::info!(repo, issue, comment = id, "posted issue comment");
-        Ok(id)
-    }
-
-    async fn update_issue_comment(&self, repo: &str, comment_id: i64, body: &str) -> Result<bool> {
-        let path = format!("repos/{repo}/issues/comments/{comment_id}");
-        let field = format!("body={body}");
-        match gh_capture(&["api", "-X", "PATCH", &path, "-f", &field]).await {
-            Ok(_) => {
-                tracing::info!(repo, comment = comment_id, "updated issue comment");
-                Ok(true)
-            }
-            // `gh api` reports "gh: Not Found (HTTP 404)" on stderr.
-            Err(e) if e.to_string().contains("HTTP 404") => Ok(false),
-            Err(e) => Err(e),
-        }
-    }
-
-    async fn react_to_comment(&self, repo: &str, comment_id: i64, content: &str) -> Result<()> {
-        let path = format!("repos/{repo}/issues/comments/{comment_id}/reactions");
-        let field = format!("content={content}");
-        gh_capture(&["api", "-X", "POST", &path, "-f", &field]).await?;
-        tracing::info!(repo, comment = comment_id, content, "reacted to comment");
-        Ok(())
-    }
-
-    async fn issue_state(&self, repo: &str, number: i64) -> Result<IssueState> {
-        // The `issues` route serves PR threads too (state/title/updated_at are
-        // thread-level), so one call covers both kinds of tracking link.
-        let path = format!("repos/{repo}/issues/{number}");
-        let out = gh_capture(&["api", &path]).await?;
-        let v: serde_json::Value = serde_json::from_str(&out).context("parsing issue json")?;
-        Ok(IssueState {
-            state: v["state"].as_str().unwrap_or_default().to_string(),
-            title: v["title"].as_str().unwrap_or_default().to_string(),
-            updated_at: v["updated_at"].as_str().unwrap_or_default().to_string(),
-        })
-    }
-
-    async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
-        let n = number.to_string();
-        let out = gh_capture(&[
-            "pr",
-            "view",
-            &n,
-            "--repo",
-            repo,
-            "--json",
-            "headRefName,isCrossRepository",
-        ])
-        .await?;
-        #[derive(Deserialize)]
-        struct View {
-            #[serde(rename = "headRefName")]
-            head_ref: String,
-            #[serde(rename = "isCrossRepository")]
-            cross_repo: bool,
-        }
-        let view: View = serde_json::from_str(&out).context("parsing `gh pr view` json")?;
-        Ok(PrHead {
-            head_ref: view.head_ref,
-            cross_repo: view.cross_repo,
-        })
-    }
-}
-
-/// Run `gh args…` (no repo working dir — every call passes `--repo` or a full
-/// API path), returning trimmed stdout. A non-zero exit is an error carrying the
-/// trimmed stderr.
-async fn gh_capture(args: &[&str]) -> Result<String> {
-    tracing::debug!(args = %args.join(" "), "running gh (trigger)");
-    let out = Command::new("gh")
-        .args(args)
-        .output()
-        .await
-        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
-    if !out.status.success() {
-        bail!(
-            "gh {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
 /// Shared trigger state held on [`crate::AppState`]: the GitHub gateway and
 /// the per-repo rate limiter. One instance per server; the gateway is an `Arc`
 /// so a test can install a fake.
 pub struct GithubTrigger {
     gh: Arc<dyn GithubApi>,
-    /// The GitHub **App** client, when production-built: the same object the
-    /// `gh` gateway points at, kept concretely so the webhook can query
-    /// installations (the implicit allowlist, §6.3). `None` when a test installs
-    /// a bare [`GithubApi`] fake via [`with_gateway`](Self::with_gateway).
+    /// The GitHub **App** client, when available: normally the same object the
+    /// gateway points at, kept concretely so the webhook can query installations
+    /// and server operations can mint credentials. Tests may pair a recording
+    /// [`GithubApi`] fake with a configured App client.
     app: Option<Arc<crate::github_app::GithubApp>>,
     /// Per-repo trigger timestamps, pruned to [`RATE_WINDOW`] on each check.
     limiter: Mutex<HashMap<String, Vec<Instant>>>,
@@ -771,8 +664,7 @@ pub struct GithubTrigger {
 
 impl GithubTrigger {
     /// The production trigger: a GitHub **App** gateway that mints short-lived
-    /// installation tokens for the permission check and reply, falling back to
-    /// the `gh` CLI (ambient `GH_TOKEN`) when the App is unconfigured.
+    /// installation tokens for the permission check and reply.
     pub fn production(db: crate::db::Db) -> Arc<Self> {
         let app = Arc::new(crate::github_app::GithubApp::new(db));
         Arc::new(Self {
@@ -802,14 +694,26 @@ impl GithubTrigger {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_gateway_and_app(
+        gh: Arc<dyn GithubApi>,
+        app: Arc<crate::github_app::GithubApp>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            gh,
+            app: Some(app),
+            limiter: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The GitHub gateway, for the permission check and the reply.
     pub fn gh(&self) -> &dyn GithubApi {
         self.gh.as_ref()
     }
 
-    /// The GitHub App client, when one is configured on this trigger. The
-    /// webhook uses it to treat an App-installed repo as implicitly allowlisted,
-    /// and restricted GitHub tools use its repo-scoped installation tokens.
+    /// The concrete GitHub App client available to server operations. Callers
+    /// that require credentials also check `is_configured`; focused trigger
+    /// unit tests may install only a fake gateway and expose no App client.
     pub fn app(&self) -> Option<&crate::github_app::GithubApp> {
         self.app.as_deref()
     }

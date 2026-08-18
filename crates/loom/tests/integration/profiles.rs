@@ -3,7 +3,6 @@
 use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use crate::fixtures::TestServer;
@@ -429,41 +428,12 @@ print("custom tests passed")
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let gh = dir.path().join("gh");
-    std::fs::write(
-        &gh,
-        "#!/bin/sh\n\
-         case \"$GH_TOKEN\" in\n\
-           server-only-token) printf 'profile:' ;;\n\
-           *) exit 17 ;;\n\
-         esac\n\
-         printf '%s' \"$*\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!(
-        "{}:{}",
-        dir.path().display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
-    let _path = EnvVarGuard::set("PATH", &path);
+async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
     );
-    let ts = TestServer::start().await;
-    ts.client
-        .put(
-            "/api/profiles/github_comment/env/GH_TOKEN",
-            json!({ "value": "server-only-token" }),
-        )
-        .await
-        .unwrap();
-    loom::user_token::set(&ts.state.db, "rjpower", "requester-token")
-        .await
-        .unwrap();
+    let ts = TestServer::start_with_app().await;
     let goal = "say:ready";
     let session = ts
         .client
@@ -487,6 +457,26 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token()
         .unwrap()
         .starts_with("sha256:"));
     let id = session["id"].as_str().unwrap();
+    let stored_session = loom::session::get(&ts.state.db, id).await.unwrap().unwrap();
+    let session_token = loom::auth::create_session_token(
+        &ts.state.db,
+        stored_session.created_by.as_deref(),
+        id,
+        &stored_session.branch_id,
+    )
+    .await
+    .unwrap();
+    let token_response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/{id}/github/token", ts.addr))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_response.status(),
+        StatusCode::FORBIDDEN,
+        "restricted agents must not retrieve the server-side credential"
+    );
     assert!(ts
         .client
         .put(
@@ -572,14 +562,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token()
         .await
         .unwrap();
     let text = response["text"].as_str().unwrap();
-    assert!(text.contains("profile:issue edit 7 --repo octo/fixed --body clean body"));
-    assert!(!text.contains("server-only-token"));
-    let config_mode = std::fs::metadata(loom::db::run_dir(id).join("restricted-gh-config"))
-        .unwrap()
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(config_mode, 0o700);
+    assert!(text.contains("GitHub issue_edit completed for octo/fixed#7"));
 
     let second_response = ts
         .client
@@ -589,10 +572,10 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token()
         )
         .await
         .unwrap();
-    assert!(second_response["text"]
-        .as_str()
-        .unwrap()
-        .contains("profile:issue view 7 --repo octo/fixed"));
+    let viewed: serde_json::Value =
+        serde_json::from_str(second_response["text"].as_str().unwrap()).unwrap();
+    assert_eq!(viewed["number"], 7);
+    assert_eq!(viewed["title"], "issue 7 of octo/fixed");
     assert!(ts
         .client
         .post(
@@ -624,7 +607,6 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
     );
-    let _github_token = EnvVarGuard::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
     ts.client
         .post(
@@ -645,7 +627,6 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
         )
         .await
         .unwrap();
-
     let first_request = json!({
         "profile": "ops",
         "source": "grafana",

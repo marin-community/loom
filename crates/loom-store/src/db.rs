@@ -140,6 +140,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "session-github-access",
         include_str!("../migrations/0026_session_github_access.sql"),
     ),
+    (
+        27,
+        "loom-owned-github-auth",
+        include_str!("../migrations/0027_loom_owned_github_auth.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -489,6 +494,60 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn github_auth_migration_removes_environment_tokens_but_keeps_user_tokens() {
+        let db = weaver_core::db::connect_in_memory().await.unwrap();
+        migrate_through(&db, 26).await;
+        sqlx::query("INSERT INTO users (username) VALUES ('alice')")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_github_tokens (username, token, updated_at)
+             VALUES ('alice', 'github_pat_alice', '2026-08-18T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO profile_env (profile_name, name, value, updated_at)
+             VALUES ('default', 'GH_TOKEN', 'legacy-profile', '2026-08-18T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO repo_env (repo_root, name, value, updated_at)
+             VALUES ('/repo', 'GITHUB_TOKEN', 'legacy-repo', '2026-08-18T00:00:00Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        migrate_loom(&db).await.unwrap();
+
+        let profile_tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM profile_env WHERE name IN ('GH_TOKEN', 'GITHUB_TOKEN')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let repo_tokens: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM repo_env WHERE name IN ('GH_TOKEN', 'GITHUB_TOKEN')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let user_token: String =
+            sqlx::query_scalar("SELECT token FROM user_github_tokens WHERE username = 'alice'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(profile_tokens, 0);
+        assert_eq!(repo_tokens, 0);
+        assert_eq!(user_token, "github_pat_alice");
     }
 
     #[tokio::test]

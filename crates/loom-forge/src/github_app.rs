@@ -1,6 +1,5 @@
-//! The GitHub **App** identity (shared-loom design §6.3): the hardening that
-//! replaces the v1 webhook's reliance on a long-lived, over-scoped ambient
-//! `GH_TOKEN` with **short-lived, least-privilege, per-installation** tokens.
+//! Loom's GitHub **App** identity (shared-loom design §6.3), which provides
+//! short-lived, least-privilege, per-installation tokens.
 //!
 //! An App is configured with an `app_id` and an RSA **private key** (a PEM,
 //! held outside the settings registry like the OAuth client secret — never
@@ -20,19 +19,18 @@
 //!
 //! [`GithubApp`] implements the [`GithubApi`] gateway the trigger calls for the
 //! commenter permission check and the issue reply, performing both over the
-//! **REST API with the installation token** instead of the `gh` CLI. When the
-//! App is **not configured** it transparently **falls back** to the ambient
-//! `GH_TOKEN` path ([`GhCli`]), so the v1 flow keeps working unchanged.
+//! **REST API with the installation token**. App-backed operations require the
+//! App id and private key to be configured.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 
-use crate::github_trigger::{GhCli, GithubApi, PrHead};
+use crate::github_trigger::{GithubApi, PrHead};
 use crate::repo::RepoSlug;
 use weaver_core::db::Db;
 
@@ -152,8 +150,7 @@ pub async fn app_slug(db: &Db) -> Option<String> {
     config_value(db, "LOOM_GITHUB_APP_SLUG", APP_SLUG_KEY).await
 }
 
-/// Whether the App is fully configured (both id and private key present) — the
-/// switch between the App path and the `gh`-fallback path.
+/// Whether the App is fully configured (both id and private key present).
 pub async fn is_configured(db: &Db) -> bool {
     app_id(db).await.is_some() && private_key(db).await.is_some()
 }
@@ -164,8 +161,7 @@ pub async fn is_configured(db: &Db) -> bool {
 
 /// loom's GitHub App client: mints App JWTs, exchanges them for per-installation
 /// access tokens (cached until expiry), and performs the trigger's GitHub calls
-/// over REST with those tokens — falling back to `gh` when the App is
-/// unconfigured. One instance per server, shared behind an `Arc`.
+/// over REST with those tokens. One instance per server, shared behind an `Arc`.
 pub struct GithubApp {
     db: Db,
     http: reqwest::Client,
@@ -173,19 +169,32 @@ pub struct GithubApp {
     api_base: String,
     /// Installation tokens cached by their exact repository scope.
     tokens: Mutex<HashMap<TokenScope, CachedToken>>,
-    /// The ambient-`GH_TOKEN` gateway used when the App is not configured.
-    fallback: Arc<dyn GithubApi>,
+}
+
+/// The two GitHub thread resources exposed by restricted-session tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubThreadKind {
+    Issue,
+    PullRequest,
+}
+
+impl GithubThreadKind {
+    fn resource(self) -> &'static str {
+        match self {
+            Self::Issue => "issues",
+            Self::PullRequest => "pulls",
+        }
+    }
 }
 
 impl GithubApp {
-    /// The production client: the real GitHub API, falling back to the `gh` CLI.
+    /// The production client for the real GitHub API.
     pub fn new(db: Db) -> Self {
-        Self::with_parts(db, DEFAULT_API_BASE.to_string(), Arc::new(GhCli))
+        Self::with_parts(db, DEFAULT_API_BASE.to_string())
     }
 
-    /// Construct with an explicit API base and fallback gateway — the seam tests
-    /// use to point at a mock GitHub and observe the fallback.
-    pub fn with_parts(db: Db, api_base: String, fallback: Arc<dyn GithubApi>) -> Self {
+    /// Construct with an explicit API base; tests point this at a mock GitHub.
+    pub fn with_parts(db: Db, api_base: String) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .build()
@@ -195,7 +204,6 @@ impl GithubApp {
             http,
             api_base: api_base.trim_end_matches('/').to_string(),
             tokens: Mutex::new(HashMap::new()),
-            fallback,
         }
     }
 
@@ -213,10 +221,156 @@ impl GithubApp {
         private_key(&self.db).await
     }
 
-    /// Whether the App is fully configured (both id and private key present). The
-    /// switch between the App path and the `gh`-fallback path.
+    /// Whether the App is fully configured (both id and private key present).
     pub async fn is_configured(&self) -> bool {
         is_configured(&self.db).await
+    }
+
+    /// Execute a GraphQL query as the App installation for `repo`.
+    pub async fn graphql(&self, repo: &RepoSlug, query: &str) -> Result<Vec<u8>> {
+        let token = self.token_for_repo(&repo.owner, &repo.name).await?;
+        let response = self
+            .http
+            .post(format!("{}/graphql", self.api_base))
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "query": query }))
+            .send()
+            .await
+            .context("executing GitHub GraphQL query")?;
+        let response = check_status(response, "executing GitHub GraphQL query").await?;
+        Ok(response
+            .bytes()
+            .await
+            .context("reading GitHub GraphQL response")?
+            .to_vec())
+    }
+
+    async fn repo_request(
+        &self,
+        repo: &RepoSlug,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        action: &str,
+    ) -> Result<reqwest::Response> {
+        let token = self.token_for_repo(&repo.owner, &repo.name).await?;
+        let url = format!(
+            "{}/repos/{}/{}/{}",
+            self.api_base,
+            repo.owner,
+            repo.name,
+            path.trim_start_matches('/')
+        );
+        let mut request = self
+            .http
+            .request(method, url)
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(token);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("{action} on GitHub"))?;
+        check_status(response, action).await
+    }
+
+    /// Fetch one issue or pull request for a restricted session and return the
+    /// stable, bounded field set exposed by the MCP tool.
+    pub async fn thread_view(
+        &self,
+        repo: &RepoSlug,
+        kind: GithubThreadKind,
+        number: i64,
+    ) -> Result<serde_json::Value> {
+        let response = self
+            .repo_request(
+                repo,
+                reqwest::Method::GET,
+                &format!("{}/{number}", kind.resource()),
+                None,
+                "fetching the GitHub thread",
+            )
+            .await?;
+        let value: serde_json::Value = response
+            .json()
+            .await
+            .context("parsing the GitHub thread response")?;
+        Ok(serde_json::json!({
+            "number": value["number"],
+            "title": value["title"],
+            "body": value["body"],
+            "url": value["html_url"],
+            "state": value["state"],
+        }))
+    }
+
+    /// Add a comment to an issue or pull request and return its id. GitHub
+    /// exposes comments for both through the issue-comment endpoint.
+    pub async fn thread_comment(&self, repo: &RepoSlug, number: i64, body: &str) -> Result<i64> {
+        let response = self
+            .repo_request(
+                repo,
+                reqwest::Method::POST,
+                &format!("issues/{number}/comments"),
+                Some(&serde_json::json!({ "body": body })),
+                "commenting on the GitHub thread",
+            )
+            .await?;
+        let created: serde_json::Value = response
+            .json()
+            .await
+            .context("parsing created-comment json")?;
+        created["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("created-comment json carries no id"))
+    }
+
+    /// Edit the body and optional title of an issue or pull request.
+    pub async fn thread_edit(
+        &self,
+        repo: &RepoSlug,
+        kind: GithubThreadKind,
+        number: i64,
+        title: Option<&str>,
+        body: &str,
+    ) -> Result<()> {
+        let mut payload = serde_json::json!({ "body": body });
+        if let Some(title) = title {
+            payload["title"] = serde_json::Value::String(title.to_string());
+        }
+        self.repo_request(
+            repo,
+            reqwest::Method::PATCH,
+            &format!("{}/{number}", kind.resource()),
+            Some(&payload),
+            "editing the GitHub thread",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Add labels to an issue or pull request. GitHub exposes PR labels through
+    /// the issue endpoint, so the caller only needs the thread number.
+    pub async fn add_thread_labels(
+        &self,
+        repo: &RepoSlug,
+        number: i64,
+        labels: &[String],
+    ) -> Result<()> {
+        self.repo_request(
+            repo,
+            reqwest::Method::POST,
+            &format!("issues/{number}/labels"),
+            Some(&serde_json::json!({ "labels": labels })),
+            "labelling the GitHub thread",
+        )
+        .await?;
+        Ok(())
     }
 
     /// A freshly-signed App JWT for the configured App.
@@ -489,52 +643,13 @@ impl GithubApp {
 #[async_trait::async_trait]
 impl GithubApi for GithubApp {
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
-        if !self.is_configured().await {
-            tracing::debug!(
-                repo,
-                issue,
-                "app not configured; posting comment via gh fallback"
-            );
-            return self.fallback.post_issue_comment(repo, issue, body).await;
-        }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
-        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
-        let url = format!(
-            "{}/repos/{}/{}/issues/{issue}/comments",
-            self.api_base, slug.owner, slug.name
-        );
-        let resp = self
-            .http
-            .post(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await
-            .context("posting the issue comment")?;
-        let resp = check_status(resp, "posting the issue comment").await?;
-        let created: serde_json::Value =
-            resp.json().await.context("parsing created-comment json")?;
-        let id = created["id"]
-            .as_i64()
-            .ok_or_else(|| anyhow!("created-comment json carries no id"))?;
+        let id = self.thread_comment(&slug, issue, body).await?;
         tracing::info!(repo, issue, comment = id, "posted issue comment");
         Ok(id)
     }
 
     async fn update_issue_comment(&self, repo: &str, comment_id: i64, body: &str) -> Result<bool> {
-        if !self.is_configured().await {
-            tracing::debug!(
-                repo,
-                comment_id,
-                "app not configured; updating comment via gh fallback"
-            );
-            return self
-                .fallback
-                .update_issue_comment(repo, comment_id, body)
-                .await;
-        }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
         let token = self.token_for_repo(&slug.owner, &slug.name).await?;
         let url = format!(
@@ -560,17 +675,6 @@ impl GithubApi for GithubApp {
     }
 
     async fn react_to_comment(&self, repo: &str, comment_id: i64, content: &str) -> Result<()> {
-        if !self.is_configured().await {
-            tracing::debug!(
-                repo,
-                comment_id,
-                "app not configured; reacting via gh fallback"
-            );
-            return self
-                .fallback
-                .react_to_comment(repo, comment_id, content)
-                .await;
-        }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
         let token = self.token_for_repo(&slug.owner, &slug.name).await?;
         let url = format!(
@@ -597,14 +701,6 @@ impl GithubApi for GithubApp {
         repo: &str,
         number: i64,
     ) -> Result<crate::github_trigger::IssueState> {
-        if !self.is_configured().await {
-            tracing::debug!(
-                repo,
-                number,
-                "app not configured; fetching issue state via gh fallback"
-            );
-            return self.fallback.issue_state(repo, number).await;
-        }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
         let v = self.issue_json(&slug.owner, &slug.name, number).await?;
         Ok(crate::github_trigger::IssueState {
@@ -615,14 +711,6 @@ impl GithubApi for GithubApp {
     }
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
-        if !self.is_configured().await {
-            tracing::debug!(
-                repo,
-                number,
-                "app not configured; fetching pr head via gh fallback"
-            );
-            return self.fallback.pr_head(repo, number).await;
-        }
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
         let token = self.token_for_repo(&slug.owner, &slug.name).await?;
         let url = format!(
@@ -715,6 +803,7 @@ pub mod tests {
 
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     use axum::body::Bytes;
     use axum::extract::{Json, Path, State};
@@ -930,12 +1019,30 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     async fn mock_issue(Path((owner, name, number)): Path<(String, String, i64)>) -> Json<Value> {
         Json(json!({
+            "number": number,
             "state": "closed",
             "title": format!("issue {number} of {owner}/{name}"),
             "body": "issue body",
             "html_url": format!("https://github.com/{owner}/{name}/issues/{number}"),
             "updated_at": "2026-07-18T12:00:00Z",
         }))
+    }
+
+    async fn mock_edit_thread(
+        Path((owner, name, number)): Path<(String, String, i64)>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        Json(json!({
+            "number": number,
+            "title": body["title"],
+            "body": body["body"],
+            "html_url": format!("https://github.com/{owner}/{name}/issues/{number}"),
+            "state": "open",
+        }))
+    }
+
+    async fn mock_labels() -> Json<Value> {
+        Json(json!([]))
     }
 
     /// Spawn the mock GitHub REST server on a random port; returns its base URL.
@@ -950,7 +1057,18 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 "/repos/{owner}/{name}/issues/{issue}/comments",
                 post(mock_comments),
             )
-            .route("/repos/{owner}/{name}/issues/{number}", get(mock_issue))
+            .route(
+                "/repos/{owner}/{name}/issues/{number}",
+                get(mock_issue).patch(mock_edit_thread),
+            )
+            .route(
+                "/repos/{owner}/{name}/pulls/{number}",
+                get(mock_issue).patch(mock_edit_thread),
+            )
+            .route(
+                "/repos/{owner}/{name}/issues/{number}/labels",
+                post(mock_labels),
+            )
             .route(
                 "/repos/{owner}/{name}/issues/comments/{comment_id}",
                 patch(mock_update_comment),
@@ -968,74 +1086,15 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         format!("http://{addr}")
     }
 
-    /// A recording fallback gateway, standing in for the `gh`/`GH_TOKEN` path, to
-    /// prove the App delegates to it when unconfigured.
-    #[derive(Default)]
-    struct RecordingFallback {
-        comment_calls: Mutex<Vec<(String, i64, String)>>,
-    }
-
-    #[async_trait::async_trait]
-    impl GithubApi for RecordingFallback {
-        async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
-            self.comment_calls
-                .lock()
-                .unwrap()
-                .push((repo.to_string(), issue, body.to_string()));
-            Ok(7)
-        }
-
-        async fn update_issue_comment(
-            &self,
-            _repo: &str,
-            _comment_id: i64,
-            _body: &str,
-        ) -> Result<bool> {
-            Ok(true)
-        }
-
-        async fn pr_head(&self, _repo: &str, _number: i64) -> Result<PrHead> {
-            Ok(PrHead {
-                head_ref: "fallback-head".to_string(),
-                cross_repo: false,
-            })
-        }
-
-        async fn react_to_comment(
-            &self,
-            _repo: &str,
-            _comment_id: i64,
-            _content: &str,
-        ) -> Result<()> {
-            Ok(())
-        }
-
-        async fn issue_state(
-            &self,
-            _repo: &str,
-            _number: i64,
-        ) -> Result<crate::github_trigger::IssueState> {
-            Ok(crate::github_trigger::IssueState {
-                state: "open".to_string(),
-                title: "fallback".to_string(),
-                updated_at: "2026-07-18T00:00:00Z".to_string(),
-            })
-        }
-    }
-
     /// A configured `GithubApp` pointed at `api_base`, with the App id + test
     /// private key written to its (in-memory) settings — never via env, so unit
     /// tests stay parallel-safe.
-    async fn configured_app(api_base: String, fallback: Arc<dyn GithubApi>) -> GithubApp {
+    async fn configured_app(api_base: String) -> GithubApp {
         let db = crate::db::connect_in_memory().await.unwrap();
-        configured_app_for_db(db, api_base, fallback).await
+        configured_app_for_db(db, api_base).await
     }
 
-    async fn configured_app_for_db(
-        db: Db,
-        api_base: String,
-        fallback: Arc<dyn GithubApi>,
-    ) -> GithubApp {
+    async fn configured_app_for_db(db: Db, api_base: String) -> GithubApp {
         weaver_core::config::apply(
             &db,
             &[
@@ -1048,12 +1107,12 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         )
         .await
         .unwrap();
-        GithubApp::with_parts(db, api_base, fallback)
+        GithubApp::with_parts(db, api_base)
     }
 
     pub async fn configured_test_app(db: Db) -> GithubApp {
         let base = spawn_mock(MockState::new(3600)).await;
-        configured_app_for_db(db, base, Arc::new(crate::github_trigger::GhCli)).await
+        configured_app_for_db(db, base).await
     }
 
     // -- installation token exchange + caching ------------------------------
@@ -1064,7 +1123,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn installation_token_is_cached_while_fresh() {
         let mock = MockState::new(3600); // expires an hour out
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         let t1 = app.installation_token(42).await.unwrap();
         let t2 = app.installation_token(42).await.unwrap();
@@ -1081,7 +1140,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn repository_token_is_downscoped_and_cached_by_allowlist() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
         let repositories = vec![
             "marin-community/marin".to_string(),
             "marin-community/vllm".to_string(),
@@ -1113,7 +1172,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn installation_token_refreshes_once_expired() {
         let mock = MockState::new(-10); // already expired (inside the skew window)
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         app.installation_token(42).await.unwrap();
         app.installation_token(42).await.unwrap();
@@ -1131,7 +1190,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn post_issue_comment_uses_installation_token() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         let id = app
             .post_issue_comment("acme/widgets", 7, "On it — http://loom/s/abc")
@@ -1155,7 +1214,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn issue_fetch_maps_github_response() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         let issue = app.issue("acme", "widgets", 7).await.unwrap();
 
@@ -1168,7 +1227,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn update_issue_comment_edits_in_place_and_flags_a_deleted_comment() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         let updated = app
             .update_issue_comment("acme/widgets", MOCK_COMMENT_ID, "On it — now with a trail")
@@ -1204,7 +1263,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn installed_repo_is_auto_registered() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         let slug = crate::repo::parse_slug("acme/widgets").unwrap();
         assert!(
@@ -1233,7 +1292,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     async fn uninstalled_repo_is_not_auto_registered() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let app = configured_app(base, Arc::new(RecordingFallback::default())).await;
+        let app = configured_app(base).await;
 
         // The mock 404s the installation lookup for the "uninstalled" owner.
         let slug = crate::repo::parse_slug("uninstalled/evil").unwrap();
@@ -1255,7 +1314,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let db = crate::db::connect_in_memory().await.unwrap();
-        let app = GithubApp::with_parts(db, base, Arc::new(RecordingFallback::default()));
+        let app = GithubApp::with_parts(db, base);
 
         let slug = crate::repo::parse_slug("acme/widgets").unwrap();
         app.ensure_installed_repo_registered(&slug).await;
@@ -1270,29 +1329,22 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         assert_eq!(mock.token_mints.load(Ordering::SeqCst), 0);
     }
 
-    // -- fallback when unconfigured -----------------------------------------
+    // -- missing configuration ----------------------------------------------
 
-    /// With no App configured, the gateway falls back to the ambient-`GH_TOKEN`
-    /// path (`gh`) and never touches the REST API.
     #[tokio::test]
-    async fn falls_back_to_gh_when_unconfigured() {
-        // A mock that would record a mint if (wrongly) reached.
+    async fn unconfigured_app_fails_instead_of_using_an_ambient_credential() {
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
-        let fallback = Arc::new(RecordingFallback::default());
-        // An empty db and no env → not configured.
         let db = crate::db::connect_in_memory().await.unwrap();
-        let app = GithubApp::with_parts(db, base, fallback.clone());
+        let app = GithubApp::with_parts(db, base);
 
         assert!(!app.is_configured().await);
-
-        app.post_issue_comment("acme/widgets", 7, "hi")
+        let error = app
+            .post_issue_comment("acme/widgets", 7, "hi")
             .await
-            .unwrap();
-
-        // The fallback handled the reply…
-        assert_eq!(fallback.comment_calls.lock().unwrap().len(), 1);
-        // …and the REST API was never reached.
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GitHub App id is not configured"));
         assert_eq!(mock.token_mints.load(Ordering::SeqCst), 0);
         assert!(mock.comments.lock().unwrap().is_empty());
     }

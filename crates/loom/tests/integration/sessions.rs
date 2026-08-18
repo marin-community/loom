@@ -1,6 +1,7 @@
 //! Session lifecycle over the REST API: create → list → recent-repos → delete,
 //! plus adoption of an externally-killed session and the no-goal create path.
 
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 use serde_json::json;
@@ -16,12 +17,6 @@ struct EnvVarGuard {
 }
 
 impl EnvVarGuard {
-    fn unset(name: &'static str) -> Self {
-        let value = std::env::var_os(name);
-        std::env::remove_var(name);
-        Self { name, value }
-    }
-
     fn set(name: &'static str, new_value: &str) -> Self {
         let value = std::env::var_os(name);
         std::env::set_var(name, new_value);
@@ -169,14 +164,23 @@ async fn session_creation_waits_for_the_repository_launch_gate() {
         .unwrap();
 }
 
-/// A real agent launch needs a user token, a profile token, or an allowlisted
-/// GitHub App credential. Without one, reject before provisioning anything.
+/// A real agent launch against a GitHub repository needs either the launching
+/// user's Account PAT or allowlisted App access. Without either, reject before
+/// provisioning anything.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_agent_without_github_token_is_rejected_before_provisioning() {
-    let _env = EnvVarGuard::unset("GH_TOKEN");
+async fn real_agent_without_github_access_is_rejected_before_provisioning() {
     let ts = TestServer::start().await;
     let client = &ts.client;
+    let repo_root = ts.repo_path().canonicalize().unwrap();
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
 
     let err = client
         .post(
@@ -206,12 +210,71 @@ async fn real_agent_without_github_token_is_rejected_before_provisioning() {
     );
 }
 
+/// A user's Account token is Loom's sole direct-token source. It permits an
+/// interactive GitHub launch without App access and reaches the stock client
+/// adapters together with the explicit `direct` mode stamp.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_session_uses_the_launching_users_account_token() {
+    let ts = TestServer::start().await;
+    let repo_root = ts.repo_path().canonicalize().unwrap();
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    loom::user_token::set(&ts.state.db, "rjpower", "github_pat_test_user")
+        .await
+        .unwrap();
+
+    let capture = ts.repo_path().join("credential-capture.txt");
+    let wrapper = ts.repo_path().join("capture-acp.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n%s\\n' \"$LOOM_GITHUB_AUTH_MODE\" \"$GH_TOKEN\" > '{}'\nexec {}\n",
+            capture.display(),
+            crate::fixtures::fake_acp_agent_cmd(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _adapter = EnvVarGuard::set("WEAVER_CODEX_ACP_CMD", &wrapper.to_string_lossy());
+
+    let session = ts
+        .client
+        .post(
+            "/api/sessions",
+            json!({
+                "goal": "use my GitHub identity",
+                "cwd": ts.cwd(),
+                "agent": "codex",
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&capture).unwrap(),
+        "direct\ngithub_pat_test_user\n"
+    );
+
+    ts.client
+        .delete(&format!(
+            "/api/sessions/{}",
+            session["id"].as_str().unwrap()
+        ))
+        .await
+        .unwrap();
+}
+
 /// An interactive profile can use the configured GitHub App as its default
 /// credential while stamping only the current allowlisted repository.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_profile_brokers_its_current_github_repository() {
-    let _ambient = EnvVarGuard::unset("GH_TOKEN");
     let _adapter = EnvVarGuard::set(
         "WEAVER_CODEX_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),

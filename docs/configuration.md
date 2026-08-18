@@ -7,7 +7,7 @@ should apply:
 
 | Owner | Configure in | Use for |
 |---|---|---|
-| User | **Settings → Account** and **Preferences** | Personal sign-in, password, API and GitHub tokens, and terminal appearance |
+| User | **Settings → Account** and **Preferences** | Personal sign-in, password, API tokens, optional interactive-session GitHub PAT, and terminal appearance |
 | Session profile | **Settings → Agents & profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, shared environment, and write-only session secrets |
 | Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
 | Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
@@ -30,14 +30,13 @@ on the `default` profile. Other profiles keep their write-only environment
 beside their launch policy. Do not put personal tokens or deployment
 credentials in repository configuration.
 
-An ordinary interactive session selects GitHub access in this order: the
-launching user's personal token, an explicit `GH_TOKEN` from the resolved
-session environment (normally its profile), then a short-lived GitHub App token
-when the profile allowlists the current repository. The first two are exported
-as `GH_TOKEN` because `git` and `gh` expect that name; the App fallback remains
-repository-scoped and short-lived. See [Restricted GitHub
+An ordinary interactive session uses the launching user's write-only GitHub PAT
+from **Settings → Account** when one is set. Otherwise, `git` and `gh` ask Loom
+for a short-lived GitHub App installation token, limited to repositories
+allowlisted by the selected profile. Loom presents the selected credential
+through the image's managed Git and GitHub CLI adapters. See [Restricted GitHub
 sessions](restricted-sessions.md#github-credential-policy) for automation's
-different boundary.
+tighter tool boundary.
 
 Files under a shared session home are deployment resources, not environment
 variables. An operator deployment may materialize them from its secret backend,
@@ -108,10 +107,10 @@ starter text lives under `crates/loom-policy/profiles/<name>/instructions.md`.
 The origin profiles are opt-in so an upgrade does not silently change the
 environment or runtime used by existing triggers.
 
-Profiles may declare `github_repositories`. Inside sessions launched from such
-a profile, `git` and `gh` transparently request a short-lived GitHub App
-installation token from Loom. Interactive profiles use the list as an
-allowlist and stamp only the session's current repository. Strict,
+Profiles may declare `github_repositories` to define the GitHub App broker's
+scope. Ordinary interactive sessions select the launching user's Account PAT
+first and use this broker when the App path is selected. Interactive profiles
+stamp only the session's current allowlisted repository. Strict,
 environment-cleared automation profiles retain the complete list for reviewed
 cross-repository workflows, so their entries must use one owner. Tokens grant
 write access to repository contents, issues, pull requests, Actions, and

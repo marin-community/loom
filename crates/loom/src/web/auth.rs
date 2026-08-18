@@ -633,20 +633,16 @@ pub(super) async fn set_own_password(
 }
 
 // -- Per-user GitHub token ---------------------------------------------------
-// The caller's own GitHub token (a fine-grained PAT), injected as GH_TOKEN into
-// the sessions they launch so their agents' `git push` / `gh` act as them (see
-// `crate::user_token`). Self-service: every handler acts on the authenticated
-// principal, never an arbitrary username. Write-only — the token is never read
-// back over the API.
+// Loom stores the caller's fine-grained PAT and injects it only into ordinary
+// interactive sessions they launch. It is the sole direct credential source;
+// sessions without one use their profile-approved GitHub App credential.
+// Self-service and write-only: no endpoint ever returns the token value.
 
-/// Body for `PUT /api/auth/github-token`.
 #[derive(Debug, Deserialize)]
 pub(super) struct SetGithubTokenReq {
     token: String,
 }
 
-/// `GET /api/auth/github-token` — whether the caller has set a personal GitHub
-/// token, and when (status only; the token itself is never returned).
 pub(super) async fn get_github_token(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -654,8 +650,6 @@ pub(super) async fn get_github_token(
     Ok(Json(user_token::status(&st.db, &principal.username).await?))
 }
 
-/// `PUT /api/auth/github-token` — set/replace the caller's personal GitHub token.
-/// Returns the refreshed status (never the token).
 pub(super) async fn set_github_token(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -669,9 +663,6 @@ pub(super) async fn set_github_token(
     Ok(Json(user_token::status(&st.db, &principal.username).await?))
 }
 
-/// `DELETE /api/auth/github-token` — clear the caller's personal GitHub token;
-/// new interactive sessions then retain any credential supplied by the selected
-/// profile.
 pub(super) async fn delete_github_token(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,

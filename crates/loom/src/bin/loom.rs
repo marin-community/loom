@@ -183,8 +183,8 @@ enum Cmd {
     ///
     ///     loom setup github-app --base-url https://loom.team.dev
     ///
-    /// `loom setup secrets` prompts for paste-once agent secrets (an Anthropic
-    /// API key, a GitHub token) and stores them on the default profile. They
+    /// `loom setup secrets` prompts for paste-once model-provider secrets
+    /// (Anthropic and OpenAI API keys) and stores them on the default profile. They
     /// apply to future sessions launched with that profile:
     ///
     ///     loom setup secrets
@@ -795,7 +795,7 @@ enum WatchCmd {
 enum SetupCmd {
     /// Create the GitHub App loom uses, via GitHub's manifest flow.
     GithubApp(GithubAppOpts),
-    /// Prompt for and store default-profile agent secrets (Anthropic key, GitHub token).
+    /// Prompt for and store default-profile model-provider secrets.
     Secrets(SecretsOpts),
 }
 
@@ -2888,7 +2888,7 @@ struct ExistingApp {
 }
 
 /// Read the configured App from the settings table. `None` when no App id is
-/// stored (a fresh instance, or one that only ever used the ambient `GH_TOKEN`).
+/// stored on a fresh or incompletely configured instance.
 async fn existing_app(db: &Db) -> Option<ExistingApp> {
     let nonempty = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let id = nonempty(weaver_core::config::get(db, loom::github_app::APP_ID_KEY).await)?;
@@ -3279,9 +3279,8 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
         existing_names.contains("ANTHROPIC_API_KEY"),
     )?;
     let openai = prompt_secret("OPENAI_API_KEY", existing_names.contains("OPENAI_API_KEY"))?;
-    let gh_token = prompt_secret("GH_TOKEN", existing_names.contains("GH_TOKEN"))?;
 
-    if anthropic.is_none() && openai.is_none() && gh_token.is_none() {
+    if anthropic.is_none() && openai.is_none() {
         println!("nothing entered — existing values kept unchanged");
         return Ok(());
     }
@@ -3295,34 +3294,24 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
         loom::agent_env::set(&db, "OPENAI_API_KEY", v).await?;
         stored.push("OPENAI_API_KEY");
     }
-    if let Some(v) = &gh_token {
-        loom::agent_env::set(&db, "GH_TOKEN", v).await?;
-        stored.push("GH_TOKEN");
-    }
     println!();
     println!(
         "Stored {} on the default profile — future sessions using that profile get them \
          (Settings → Agents & profiles in the web UI, or `GET /api/env`).",
         stored.join(", ")
     );
-    println!(
-        "Note: the loom daemon's own process (cloning private repos, and the `gh` \
-         fallback when no GitHub App is configured) still reads these ambiently — set \
-         them as real environment variables before the daemon starts for that to apply."
-    );
-
     let mut updates: Vec<(&str, &str)> = Vec::new();
     if let Some(v) = &anthropic {
         updates.push(("ANTHROPIC_API_KEY", v.as_str()));
     }
-    if let Some(v) = &gh_token {
-        updates.push(("GH_TOKEN", v.as_str()));
+    if let Some(v) = &openai {
+        updates.push(("OPENAI_API_KEY", v.as_str()));
     }
     loom::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the paste-once secrets into loom.toml")?;
     println!(
         "Also wrote them to {} — run `loom config render-env` then restart the daemon (e.g. \
-         `docker compose up -d`) to apply the ambient-process use.",
+         `docker compose up -d`) to apply them.",
         opts.config.config.display()
     );
     Ok(())
@@ -3426,7 +3415,7 @@ async fn cmd_config_set(key: String, value: String) -> Result<()> {
 
 /// Warn to stderr, naming each field, when an ambient env var silently
 /// outranked `loom.toml` for this run — the footgun a deploy workstation hits
-/// when a personal `GH_TOKEN`/`ANTHROPIC_API_KEY` etc. happens to be exported
+/// when an `ANTHROPIC_API_KEY` or similar setting happens to be exported
 /// (see `loom_config::resolve_reporting_shadows`).
 fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path) {
     for name in shadowed {

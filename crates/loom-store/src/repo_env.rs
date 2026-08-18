@@ -14,7 +14,8 @@
 //! exported environment. See the shared-loom design §6.4.
 //!
 //! Names are validated as POSIX shell identifiers and may not use loom's reserved
-//! `WEAVER_`/`LOOM_` prefixes — the same rule as `agent_env`, reused via
+//! `WEAVER_`/`LOOM_` prefixes or GitHub client token names — the same rule as
+//! `agent_env`, reused via
 //! [`crate::agent_env::validate_name`], since `repo_env` is exported by the same
 //! launch script.
 

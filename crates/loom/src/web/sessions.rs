@@ -1176,11 +1176,6 @@ pub(super) async fn refresh_github_session(
     Path(key): Path<String>,
 ) -> ApiResult<Json<SessionView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    if !github::gh_available().await {
-        return Err(AppError::bad_request(
-            "the GitHub CLI (`gh`) is not available on the server",
-        ));
-    }
     github::refresh(&st, &session, &branch, false)
         .await
         .map_err(|e| github_request_error("refresh this pull request", e))?;
@@ -1191,6 +1186,57 @@ pub(super) async fn refresh_github_session(
 #[derive(Debug, Deserialize)]
 pub(super) struct GithubMappingBody {
     pub pr_number: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GithubLabelsBody {
+    pub labels: Vec<String>,
+}
+
+/// Add labels to the pull request currently associated with a session. Watch
+/// programs use this Loom-owned API instead of receiving a GitHub credential
+/// and invoking `gh` themselves.
+pub(super) async fn add_github_session_labels(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<GithubLabelsBody>,
+) -> ApiResult<Json<Value>> {
+    let (_, branch) = require_session(&st.db, &key).await?;
+    if req.labels.is_empty() || req.labels.len() > 10 {
+        return Err(AppError::bad_request(
+            "GitHub labels must contain between 1 and 10 entries",
+        ));
+    }
+    let labels = req
+        .labels
+        .into_iter()
+        .map(|label| label.trim().to_string())
+        .collect::<Vec<_>>();
+    if labels
+        .iter()
+        .any(|label| label.is_empty() || label.len() > 100)
+    {
+        return Err(AppError::bad_request(
+            "each GitHub label must contain between 1 and 100 bytes",
+        ));
+    }
+    let status = github::get_status(&st.db, &branch.id)
+        .await?
+        .ok_or_else(|| AppError::bad_request("session has no associated pull request"))?;
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let slug = crate::repo::github_slug_for_root(&st.db, &repo_root)
+        .await?
+        .ok_or_else(|| AppError::bad_request("session repository has no GitHub identity"))?;
+    let repo = crate::repo::parse_slug(&slug)
+        .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
+    let app = super::configured_github_app(&st).await?;
+    app.add_thread_labels(&repo, status.pr_number, &labels)
+        .await
+        .map_err(|e| github_request_error("label this pull request", e))?;
+    Ok(Json(json!({
+        "number": status.pr_number,
+        "labels": labels,
+    })))
 }
 
 /// Pin a session's branch to an explicit PR and fetch that PR immediately. The
@@ -1205,14 +1251,8 @@ pub(super) async fn set_github_session(
     if req.pr_number <= 0 {
         return Err(AppError::bad_request("PR number must be positive"));
     }
-    if !github::gh_available().await {
-        return Err(AppError::bad_request(
-            "the GitHub CLI (`gh`) is not available on the server",
-        ));
-    }
     let repo_root = PathBuf::from(&branch.repo_root);
-    let (token, _) = github::gh_environment(&st, Some(&repo_root)).await;
-    let snap = github::fetch_pr(&repo_root, &req.pr_number.to_string(), token.as_deref())
+    let snap = github::fetch_pr(&st, &repo_root, req.pr_number)
         .await
         .map_err(|e| github_request_error("find this pull request", e))?
         .ok_or_else(|| {
@@ -1242,10 +1282,8 @@ pub(super) async fn clear_github_session(
     let (session, branch) = require_session(&st.db, &key).await?;
     github::clear_mapping(&st.db, &branch.id).await?;
     github::clear_status(&st.db, &branch.id).await?;
-    if github::gh_available().await {
-        if let Err(e) = github::refresh(&st, &session, &branch, false).await {
-            tracing::debug!(branch = %branch.branch, error = %e, "automatic PR refresh after clearing mapping failed");
-        }
+    if let Err(e) = github::refresh(&st, &session, &branch, false).await {
+        tracing::debug!(branch = %branch.branch, error = %e, "automatic PR refresh after clearing mapping failed");
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
     Ok(Json(session_view(&st.db, &session, &branch).await?))

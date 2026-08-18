@@ -45,14 +45,26 @@ fn make_bare_remote(root: &std::path::Path) -> String {
     format!("file://{}", bare.display())
 }
 
+async fn allow_app_access(ts: &TestServer) {
+    let mut profile = loom::profile::get(&ts.state.db, loom::profile::DEFAULT_PROFILE)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.github_repositories = vec!["acme/widgets".to_string()];
+    loom::profile::upsert(&ts.state.db, &profile).await.unwrap();
+}
+
 /// Register a repo, then create a session against it by slug (no `cwd`): loom
 /// clones the registered remote into the managed store and forks the worktree
 /// from that managed checkout.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn register_then_launch_clones_into_managed_store() {
-    let ts = TestServer::start().await;
+    let ts = TestServer::start_with_app().await;
     let client = &ts.client;
+    allow_app_access(&ts).await;
 
     let remotes = tempfile::tempdir().unwrap();
     let remote_url = make_bare_remote(remotes.path());
@@ -129,8 +141,9 @@ async fn register_then_launch_clones_into_managed_store() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launching_into_an_unregistered_repo_registers_and_clones_it() {
-    let ts = TestServer::start().await;
+    let ts = TestServer::start_with_app().await;
     let client = &ts.client;
+    allow_app_access(&ts).await;
 
     let remotes = tempfile::tempdir().unwrap();
     let remote_url = make_bare_remote(remotes.path());

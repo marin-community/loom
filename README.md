@@ -447,6 +447,10 @@ loom mcp add /engineering/search/docs --label "Docs search" \
 Strict profiles reject one-launch overrides. Environment-cleared profiles start
 from a minimal baseline plus explicit ambient, profile, and repository values.
 Environment reads expose names and source metadata, never literal secret values.
+GitHub client credentials are selected by Loom: an ordinary interactive session
+prefers its launching user's optional Account PAT and otherwise uses the
+profile's allowlisted GitHub App access. The image's Git credential helper and
+`gh` wrapper consume that session selection.
 
 MCP selection is provider-neutral: `none`, `all`, or named groups. Saving a
 profile pins exact capability identities and revisions; registry edits cannot
