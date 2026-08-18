@@ -37,7 +37,6 @@ owner_github = "your-github-login"
 # use (either can also be an interactive `claude` / `codex login` instead).
 # anthropic_api_key = ""
 # openai_api_key = ""
-# gh_token = ""
 
 # Slack Socket Mode integration (the `/marinbot` / `@marinbot` trigger) —
 # optional; unset leaves it off. Both are secrets: an app-level token

@@ -108,10 +108,9 @@ Restricted profiles add a tighter trust boundary:
   context;
 - provider credentials remain in Loom and never enter the agent process.
 
-The stock `github_comment` profile carries policy, not credentials. Loom
-normally mints a short-lived repository-scoped GitHub App token while executing
-the fixed operation. An App-less deployment may configure an explicit
-least-privilege profile token as a write-only environment value.
+The stock `github_comment` profile carries policy, not credentials. Loom calls
+GitHub through its App client while executing the fixed operation, minting a
+short-lived repository-scoped installation token internally.
 
 See [Restricted sessions](restricted-sessions.md) for automation identity,
 idempotency, and deployment boundaries.

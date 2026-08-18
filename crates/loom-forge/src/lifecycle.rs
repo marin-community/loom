@@ -64,8 +64,9 @@ pub async fn delete_session_row(st: &AppState, session_id: &str) -> Result<()> {
 }
 
 /// Rebuild a session's launch environment and restore its Loom-owned GitHub
-/// credential mode. Profile/repo values win over baseline and allowlisted
-/// ambient values; Loom's own session token is rotated later.
+/// credential mode. User-configurable layers cannot supply GitHub credentials;
+/// Loom overlays the session creator's stored PAT before selecting direct or
+/// brokered App access. Loom's session token is rotated later.
 pub async fn resume_environment(
     st: &AppState,
     session: &Session,
@@ -86,14 +87,25 @@ pub async fn resume_environment(
             .unwrap_or_default();
         env = crate::profile::cleared_environment(env, &allowlist);
     }
-    apply_user_github_token(&st.db, &mut env, session.created_by.as_deref()).await;
+    let user_token_applied =
+        if crate::runtime::user_github_token_allowed(&session.class, session.policy_restricted) {
+            apply_user_github_token(&st.db, &mut env, session.created_by.as_deref()).await
+        } else {
+            false
+        };
     let github_repositories =
         serde_json::from_str::<Vec<String>>(&session.policy_github_repositories)
             .unwrap_or_default();
     let github_app = (!github_repositories.is_empty())
         .then(|| st.trigger.app())
         .flatten();
-    stamp_github_auth_mode(&mut env, github_app, session.policy_restricted).await;
+    stamp_github_auth_mode(
+        &mut env,
+        github_app,
+        session.policy_restricted,
+        user_token_applied,
+    )
+    .await;
     env
 }
 
@@ -534,7 +546,7 @@ pub async fn create_warm_session(
     let github_app = (!github_repositories.is_empty())
         .then(|| st.trigger.app())
         .flatten();
-    stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted).await;
+    stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted, false).await;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, protocol = %protocol, work_dir = %work_dir.display(), "launching warm session agent");

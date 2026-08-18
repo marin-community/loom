@@ -4,7 +4,7 @@ Subscribes to `pr.opened` — it wakes when a session's PR first appears, on tha
 one branch, instead of polling every session's labels on a timer.
 """
 
-from weaver_loom import Round, WeaverError, gh_json
+from weaver_loom import Round, WeaverError
 
 DEFAULT_LABEL = "weaver"
 
@@ -25,17 +25,7 @@ def main(rnd):
             rnd.would("label", **fields)
             continue
         try:
-            gh_json(
-                [
-                    "api",
-                    "-X",
-                    "POST",
-                    f"repos/{{owner}}/{{repo}}/issues/{pr}/labels",
-                    "-f",
-                    f"labels[]={label}",
-                ],
-                cwd=branch.get("repo_root"),
-            )
+            rnd.client.add_github_labels(session["id"], [label])
         except WeaverError as e:
             rnd.would("label", **fields, note=str(e))
             continue

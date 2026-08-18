@@ -4,9 +4,7 @@
 //! only into sessions launched with that profile, alongside loom's own
 //! `WEAVER_*` / `LOOM_TOKEN`. Other profiles have independent environment
 //! stores, and restricted profiles never inherit these values. The one-shot
-//! judgement agent runs env-stripped and gets none of them (see
-//! [`crate::agent`]); watch scripts are likewise stripped but do receive
-//! `GH_TOKEN` (via [`get`]) for legacy App-less GitHub reads.
+//! judgement agent and watch scripts run env-stripped and get none of them.
 //!
 //! This remains a flat name/value API for existing settings, setup, GitHub,
 //! watch, and shell callers, but storage lives in `profile_env` under the
@@ -33,11 +31,11 @@ pub struct EnvVar {
 
 /// Names loom owns and exports itself ([`crate::agent::launch`]). Operator vars
 /// are exported *after* these, so allowing one of these names through would let a
-/// stored value shadow `WEAVER_API`/`WEAVER_BRANCH`/`LOOM_TOKEN` and break the
-/// agent's own `loom session …` calls. We reserve the whole `WEAVER_`/`LOOM_`
-/// prefix space rather than just the current names so future loom-owned vars are
-/// covered without a matching validation change.
+/// stored value shadow Loom's control variables or GitHub credential policy.
+/// We reserve the whole `WEAVER_`/`LOOM_` prefix space plus the stock GitHub
+/// clients' token names.
 const RESERVED_PREFIXES: &[&str] = &["WEAVER_", "LOOM_"];
+const RESERVED_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
 
 /// Validate an environment-variable name. Accept the POSIX-portable identifier
 /// shape (`[A-Za-z_][A-Za-z0-9_]*`): a leading letter or underscore, then
@@ -68,6 +66,11 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
              environment and cannot be overridden"
         ));
     }
+    if RESERVED_NAMES.contains(&name) {
+        return Err(format!(
+            "name '{name}' is reserved: GitHub credentials are managed by Loom"
+        ));
+    }
     Ok(())
 }
 
@@ -87,22 +90,6 @@ pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
             updated_at: r.get::<String, _>("updated_at"),
         })
         .collect())
-}
-
-/// One variable's value, or `None` when unset (or on a DB error — callers use
-/// this for best-effort credential lookup, where a miss and an error are the same
-/// "no value" outcome). Used by loom's *own* GitHub operations — the PR poll loop
-/// and watch scripts — which run in the server process and so don't inherit the
-/// per-session agent environment.
-pub async fn get(db: &Db, name: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM profile_env WHERE profile_name = 'default' AND name = ?",
-    )
-    .bind(name)
-    .fetch_optional(db)
-    .await
-    .ok()
-    .flatten()
 }
 
 /// The variables as a plain `(name, value)` list — what [`crate::agent::launch`]
@@ -177,6 +164,8 @@ mod tests {
         assert!(validate_name("WEAVER_BRANCH").is_err());
         assert!(validate_name("LOOM_TOKEN").is_err());
         assert!(validate_name("WEAVER_ANYTHING").is_err());
+        assert!(validate_name("GH_TOKEN").is_err());
+        assert!(validate_name("GITHUB_TOKEN").is_err());
     }
 
     #[tokio::test]
@@ -204,17 +193,9 @@ mod tests {
             ]
         );
 
-        // `get` reads a single value; a missing key is `None`.
-        assert_eq!(
-            get(&db, "GH_HOST").await.as_deref(),
-            Some("github.internal")
-        );
-        assert_eq!(get(&db, "MISSING").await, None);
-
         assert!(remove(&db, "API_TOKEN").await.unwrap());
         // Removing again is a no-op.
         assert!(!remove(&db, "API_TOKEN").await.unwrap());
         assert_eq!(list(&db).await.unwrap().len(), 1);
-        assert_eq!(get(&db, "API_TOKEN").await, None, "gone after remove");
     }
 }

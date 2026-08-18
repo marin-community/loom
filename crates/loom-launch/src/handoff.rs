@@ -570,18 +570,17 @@ async fn handoff_session_inner(
             .map_err(|error| HandoffError::bad_request(error.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
-    runtime::apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref()).await;
     let github_app = (!session_github_repositories.is_empty())
         .then(|| st.trigger.app())
         .flatten();
-    if !runtime::github_token_available(
-        &st.db,
-        &extra_env,
-        session.created_by.as_deref(),
-        &target,
-        github_app,
-    )
-    .await?
+    if current_github_repo.is_some()
+        && !runtime::github_credential_available(
+            &st.db,
+            session.created_by.as_deref(),
+            github_app,
+            runtime::user_github_token_allowed(&plan.class, plan.restricted),
+        )
+        .await?
     {
         return Err(HandoffError::PreconditionRequired(
             runtime::MISSING_GITHUB_TOKEN_MESSAGE.to_string(),
@@ -640,7 +639,19 @@ async fn handoff_session_inner(
         &session.branch_id,
     )
     .await?;
-    runtime::stamp_github_auth_mode(&mut extra_env, github_app, plan.restricted).await;
+    let user_token_applied = if runtime::user_github_token_allowed(&plan.class, plan.restricted) {
+        runtime::apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref())
+            .await
+    } else {
+        false
+    };
+    runtime::stamp_github_auth_mode(
+        &mut extra_env,
+        github_app,
+        plan.restricted,
+        user_token_applied,
+    )
+    .await;
     runtime::set_env(&mut extra_env, "LOOM_TOKEN", staged_token.value.clone());
     runtime::set_env(&mut extra_env, "LOOM_SESSION_ID", session.id.clone());
     let mut launch = match agent::build_acp_launch(

@@ -1,11 +1,8 @@
-//! Optional GitHub integration via the `gh` CLI. All functions degrade
-//! gracefully — callers treat errors as "GitHub unavailable".
+//! GitHub integration through Loom's configured GitHub App.
 //!
 //! Two responsibilities live here:
 //!
-//! * **Issue seeding** ([`fetch_issue`], [`repo_slug`]) and PR opening
-//!   ([`create_pr`]) — one-shot shell-outs used when a session is created.
-//! * **PR status polling** ([`poll`], [`refresh`], [`fetch_pr`]) — the
+//! * **PR status polling** ([`poll`], [`refresh`]) — the
 //!   background loop that snapshots each live session's pull request (link,
 //!   review decision, check rollup) into the `branch_github` table, and
 //!   archives a session — closing the weaver issues it was working — once its PR
@@ -18,8 +15,6 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::process::Command;
-use tokio::sync::OnceCell;
 
 use crate::db::{now_iso, Db};
 use crate::session::{self as session_mod, Session};
@@ -37,77 +32,6 @@ pub struct Issue {
     pub body: String,
     #[serde(default)]
     pub url: String,
-}
-
-async fn gh(dir: &Path, args: &[&str]) -> Result<String> {
-    tracing::debug!(args = %args.join(" "), dir = %dir.display(), "running gh");
-    let out = Command::new("gh")
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "failed to spawn gh");
-            e
-        })
-        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        tracing::warn!(
-            args = %args.join(" "),
-            code = out.status.code().unwrap_or(-1),
-            stderr = %stderr.trim(),
-            "gh command failed"
-        );
-        bail!("gh {} failed: {}", args.join(" "), stderr.trim());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// `owner/name` slug for the repository at `repo_root`.
-pub async fn repo_slug(repo_root: &Path) -> Result<String> {
-    gh(
-        repo_root,
-        &[
-            "repo",
-            "view",
-            "--json",
-            "nameWithOwner",
-            "-q",
-            ".nameWithOwner",
-        ],
-    )
-    .await
-}
-
-/// Fetch an issue's title/body/url.
-pub async fn fetch_issue(repo_root: &Path, number: i64) -> Result<Issue> {
-    let json = gh(
-        repo_root,
-        &[
-            "issue",
-            "view",
-            &number.to_string(),
-            "--json",
-            "title,body,url",
-        ],
-    )
-    .await?;
-    serde_json::from_str(&json).context("parsing gh issue JSON")
-}
-
-/// Open a pull request from the workspace branch; returns the PR URL.
-pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> Result<String> {
-    tracing::debug!(base, title, body_len = body.len(), "creating pull request");
-    let url = gh(
-        work_dir,
-        &[
-            "pr", "create", "--base", base, "--title", title, "--body", body,
-        ],
-    )
-    .await?;
-    tracing::info!(url = %url, base, "pull request created");
-    Ok(url)
 }
 
 // ---------------------------------------------------------------------------
@@ -446,8 +370,6 @@ pub async fn record_status_comment(
 
 /// The fields requested from `gh pr view --json`. Kept in one place so the parse
 /// struct and the query can't drift.
-const PR_FIELDS: &str = "number,url,state,title,isDraft,reviewDecision,mergeable,mergedAt,statusCheckRollup,headRefOid,updatedAt";
-
 /// The shape of one `gh pr view --json` record. Internal — callers see
 /// [`GithubStatus`].
 #[derive(Debug, Deserialize)]
@@ -666,133 +588,35 @@ fn review_decision_changed(prev: Option<&GithubStatus>, next: &GithubStatus) -> 
         && prev.map(|p| &p.review_decision) != Some(&next.review_decision)
 }
 
-/// Whether the `gh` CLI is usable on this machine. Probed once and cached — a
-/// missing `gh` is the common "GitHub integration off" case and shouldn't cost a
-/// process spawn on every poll.
-pub async fn gh_available() -> bool {
-    static AVAILABLE: OnceCell<bool> = OnceCell::const_new();
-    *AVAILABLE
-        .get_or_init(|| async {
-            let ok = Command::new("gh")
-                .arg("--version")
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if ok {
-                tracing::info!("gh CLI detected — GitHub PR polling available");
-            } else {
-                tracing::info!("gh CLI not found — GitHub PR polling disabled");
-            }
-            ok
-        })
-        .await
-}
-
-/// Fetch one pull request by number (or another exact `gh pr view` selector).
-/// This is used for a user-selected mapping and to follow an already-open PR
-/// through its terminal transition.
-pub async fn fetch_pr(
+async fn app_and_slug<'a>(
+    state: &'a AppState,
     repo_root: &Path,
-    selector: &str,
-    token: Option<&str>,
-) -> Result<Option<GithubStatus>> {
-    let mut cmd = Command::new("gh");
-    cmd.args(["pr", "view", selector, "--json", PR_FIELDS])
-        .current_dir(repo_root);
-    // The poll loop runs in the loom process, which carries no ambient `gh` auth
-    // (the operator's `GH_TOKEN` is session-scoped, not the server's). Without a
-    // token `gh pr view` fails and every branch's PR status stays blank — starving
-    // the pr-label / review-wait / archive-merged watches, which key off it.
-    if let Some(token) = token {
-        cmd.env("GH_TOKEN", token);
-    }
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        // gh exits non-zero when the branch has no PR; that's not an error.
-        if stderr.to_lowercase().contains("no pull requests found")
-            || stderr.to_lowercase().contains("no open pull requests")
-        {
-            return Ok(None);
-        }
-        bail!("gh pr view {selector} failed: {}", stderr.trim());
-    }
-    let raw: PrJson = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
-        .context("parsing gh pr JSON")?;
-    Ok(Some(raw.into_status()))
+) -> Result<(&'a crate::github_app::GithubApp, String)> {
+    let slug = crate::repo::github_slug_for_root(&state.db, repo_root)
+        .await?
+        .context("repository has no registered GitHub identity")?;
+    let app = state.trigger.app().context("GitHub App is unavailable")?;
+    Ok((app, slug))
 }
 
-/// Discover the branch's current open PR. `gh pr view <branch>` may keep
-/// returning an old closed/merged PR forever; the list query makes "current"
-/// explicit and returns no result once the branch has no open PR.
+pub async fn fetch_pr(
+    state: &AppState,
+    repo_root: &Path,
+    number: i64,
+) -> Result<Option<GithubStatus>> {
+    let (app, slug) = app_and_slug(state, repo_root).await?;
+    let snapshots = fetch_pr_batch(app, &slug, &[], &[number]).await?;
+    Ok(snapshots.by_number.get(&number).cloned())
+}
+
 pub async fn fetch_open_pr(
+    state: &AppState,
     repo_root: &Path,
     branch: &str,
-    token: Option<&str>,
 ) -> Result<Option<GithubStatus>> {
-    let mut cmd = Command::new("gh");
-    cmd.args([
-        "pr", "list", "--head", branch, "--state", "open", "--limit", "1", "--json", PR_FIELDS,
-    ])
-    .current_dir(repo_root);
-    if let Some(token) = token {
-        cmd.env("GH_TOKEN", token);
-    }
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
-    if !out.status.success() {
-        bail!(
-            "gh pr list --head {branch} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let mut rows: Vec<PrJson> =
-        serde_json::from_slice(&out.stdout).context("parsing gh pr list JSON")?;
-    Ok(rows.pop().map(PrJson::into_status))
-}
-
-async fn operator_gh_environment(state: &AppState) -> (Option<String>, Option<String>) {
-    (
-        crate::agent_env::get(&state.db, "GH_TOKEN").await,
-        crate::agent_env::get(&state.db, "GH_HOST").await,
-    )
-}
-
-async fn gh_environment_for_slug(state: &AppState, slug: &str) -> (Option<String>, Option<String>) {
-    if let (Some(app), Ok(repo)) = (state.trigger.app(), crate::repo::parse_slug(slug)) {
-        if app.is_configured().await {
-            match app.token_for_repo(&repo.owner, &repo.name).await {
-                Ok(token) => return (Some(token), None),
-                Err(error) => tracing::debug!(repo = slug, %error, "GitHub App token unavailable"),
-            }
-        }
-    }
-    operator_gh_environment(state).await
-}
-
-/// The `gh` environment for one repository: its App installation token when
-/// available, otherwise the operator credential configured in Settings.
-pub async fn gh_environment(
-    state: &AppState,
-    repo_root: Option<&Path>,
-) -> (Option<String>, Option<String>) {
-    let Some(repo_root) = repo_root else {
-        return operator_gh_environment(state).await;
-    };
-    match crate::repo::github_slug_for_root(&state.db, repo_root).await {
-        Ok(Some(slug)) => gh_environment_for_slug(state, &slug).await,
-        Ok(None) => operator_gh_environment(state).await,
-        Err(error) => {
-            tracing::debug!(repo = %repo_root.display(), %error, "GitHub repository lookup failed");
-            operator_gh_environment(state).await
-        }
-    }
+    let (app, slug) = app_and_slug(state, repo_root).await?;
+    let snapshots = fetch_pr_batch(app, &slug, &[branch.to_string()], &[]).await?;
+    Ok(snapshots.by_head.get(branch).cloned())
 }
 
 /// Fetch every due branch's current open PR plus every previously-known PR in
@@ -801,35 +625,15 @@ pub async fn gh_environment(
 /// lookups keep terminal transitions visible after GitHub removes a merged or
 /// closed PR from the open-head result.
 async fn fetch_pr_batch(
-    repo_root: &Path,
+    app: &crate::github_app::GithubApp,
     slug: &str,
     heads: &[String],
     known_numbers: &[i64],
-    token: Option<&str>,
-    host: Option<&str>,
 ) -> Result<BatchSnapshots> {
     let query = build_batch_query(slug, heads, known_numbers)?;
-
-    let mut cmd = Command::new("gh");
-    cmd.args(["api", "graphql", "--raw-field", &format!("query={query}")])
-        .current_dir(repo_root);
-    if let Some(token) = token {
-        cmd.env("GH_TOKEN", token);
-    }
-    if let Some(host) = host {
-        cmd.env("GH_HOST", host);
-    }
-    let out = cmd
-        .output()
-        .await
-        .context("failed to spawn gh (is the GitHub CLI installed?)")?;
-    if !out.status.success() {
-        bail!(
-            "gh api graphql failed for {slug}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    parse_batch_response(&out.stdout, slug, heads, known_numbers)
+    let repo = crate::repo::parse_slug(slug).map_err(anyhow::Error::msg)?;
+    let response = app.graphql(&repo, &query).await?;
+    parse_batch_response(&response, slug, heads, known_numbers)
 }
 
 fn build_batch_query(slug: &str, heads: &[String], known_numbers: &[i64]) -> Result<String> {
@@ -1040,23 +844,22 @@ pub async fn refresh(
     archive_on_merge: bool,
 ) -> Result<Option<GithubStatus>> {
     let repo_root = PathBuf::from(&branch.repo_root);
-    let (token, _) = gh_environment(state, Some(&repo_root)).await;
     let previous = get_status(&state.db, &branch.id).await?;
     let mapping = get_mapping(&state.db, &branch.id).await?;
     let fetched = if let Some(number) = mapping {
-        fetch_pr(&repo_root, &number.to_string(), token.as_deref()).await?
+        fetch_pr(state, &repo_root, number).await?
     } else {
         // Automatic mode always asks GitHub which open PR is current instead of
         // treating yesterday's cached number as authoritative. Only when the
         // branch has no open PR do we revisit the previous number once, to
         // preserve its close/merge transition before the snapshot is cleared.
         let head = discovery_branch(session, branch).await;
-        let current = fetch_open_pr(&repo_root, &head, token.as_deref()).await?;
+        let current = fetch_open_pr(state, &repo_root, &head).await?;
         if current.is_some() {
             current
         } else if previous.as_ref().is_some_and(|pr| pr.pr_state == "OPEN") {
             let number = previous.as_ref().expect("checked above").pr_number;
-            fetch_pr(&repo_root, &number.to_string(), token.as_deref()).await?
+            fetch_pr(state, &repo_root, number).await?
         } else {
             None
         }
@@ -1342,8 +1145,8 @@ async fn close_claimed_issues(
 }
 
 /// Background loop: snapshot live sessions' PRs on an activity-aware cadence. A
-/// no-op while `github.poll` is off or `gh` is unavailable, so it is always safe
-/// to spawn. Sibling of the [`crate::monitor`] loop.
+/// no-op while `github.poll` is off or the GitHub App is unavailable, so it is
+/// always safe to spawn. Sibling of the [`crate::monitor`] loop.
 pub async fn poll(state: AppState) {
     tracing::info!(tick_s = POLL_TICK.as_secs(), "github poll loop started");
     let mut ticks = tokio::time::interval(POLL_TICK);
@@ -1359,7 +1162,10 @@ pub async fn poll(state: AppState) {
         if !config::get_bool(&state.db, "github.poll", config::DEFAULT_GITHUB_POLL).await {
             continue;
         }
-        if !gh_available().await {
+        let Some(app) = state.trigger.app() else {
+            continue;
+        };
+        if !app.is_configured().await {
             continue;
         }
         if let Err(e) = poll_once(&state, &mut last_polled).await {
@@ -1490,7 +1296,10 @@ async fn poll_once(
             }
             continue;
         };
-        let (token, host) = gh_environment_for_slug(state, &slug).await;
+        let Some(app) = state.trigger.app() else {
+            tracing::debug!(repo = %repo_root, "github batch skipped: GitHub App unavailable");
+            continue;
+        };
         let heads: Vec<String> = candidates
             .iter()
             .map(|candidate| candidate.head.clone())
@@ -1511,15 +1320,7 @@ async fn poll_once(
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let fetched = fetch_pr_batch(
-            &path,
-            &slug,
-            &heads,
-            &known_numbers,
-            token.as_deref(),
-            host.as_deref(),
-        )
-        .await;
+        let fetched = fetch_pr_batch(app, &slug, &heads, &known_numbers).await;
         for candidate in &candidates {
             last_polled.insert(candidate.branch.id.clone(), now);
         }

@@ -93,9 +93,8 @@ fn survey_program() -> String {
     .to_string()
 }
 
-/// Fixture that echoes the `GH_TOKEN` it was handed into its summary, so a test
-/// can assert loom injects the operator's token into the (otherwise env-stripped)
-/// watch subprocess — what github watches need for their own `gh` calls.
+/// Fixture that echoes `GH_TOKEN` so a test can assert credentials do not leak
+/// into an otherwise capability-scoped watch subprocess.
 fn echo_env_program() -> String {
     concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -927,14 +926,11 @@ async fn rest_watch_lifecycle_and_validation() {
 
 use loom::builtins::python3_available;
 
-/// A github watch shells out to `gh` (reading PR labels/state); loom must inject
-/// the operator's `GH_TOKEN` (Settings → Agents & profiles) into the otherwise
-/// env-stripped watch subprocess, or every github watch (pr-label, review-wait,
-/// archive-merged) is blind. The explicit inject wins over any ambient value, so
-/// the exact token reaches the process.
+/// GitHub watches consume Loom-owned PR snapshots over the API. They must not
+/// receive raw GitHub credentials in their subprocess environment.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn watch_subprocess_receives_operator_gh_token() {
+async fn watch_subprocess_does_not_receive_github_credentials() {
     if !python3_available() {
         eprintln!("skipping: python3 not on PATH");
         return;
@@ -955,10 +951,6 @@ async fn watch_subprocess_receives_operator_gh_token() {
     )
     .await;
 
-    // Set the operator token (Settings → Agents & profiles) and fire a manual round.
-    loom::agent_env::set(&state.db, "GH_TOKEN", "ghtok-marker-xyz")
-        .await
-        .unwrap();
     let run_id = watch::fire_now(&state, &o.name, false, "manual")
         .await
         .unwrap();
@@ -968,8 +960,8 @@ async fn watch_subprocess_receives_operator_gh_token() {
         .unwrap();
     let run = runs.iter().find(|r| r.id == run_id).unwrap();
     assert_eq!(
-        run.summary, "token[ghtok-marker-xyz]",
-        "the operator's GH_TOKEN reaches the env-stripped watch subprocess"
+        run.summary, "token[]",
+        "GitHub credentials stay out of the env-stripped watch subprocess"
     );
 }
 

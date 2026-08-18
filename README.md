@@ -447,6 +447,10 @@ loom mcp add /engineering/search/docs --label "Docs search" \
 Strict profiles reject one-launch overrides. Environment-cleared profiles start
 from a minimal baseline plus explicit ambient, profile, and repository values.
 Environment reads expose names and source metadata, never literal secret values.
+GitHub client credentials are a separate Loom-owned path: an ordinary
+interactive session uses its launching user's optional Account PAT, otherwise
+the profile's allowlisted GitHub App access. Profile, repository, committed, and
+daemon environments cannot define `GH_TOKEN` or `GITHUB_TOKEN`.
 
 MCP selection is provider-neutral: `none`, `all`, or named groups. Saving a
 profile pins exact capability identities and revisions; registry edits cannot

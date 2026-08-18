@@ -3067,8 +3067,9 @@ pub struct GithubConfigView {
     /// (`/api/auth/github/callback`).
     pub callback_path: String,
     /// Whether the App identity (id **and** private key) is configured — i.e.
-    /// the `@loom` trigger acts through the App rather than the ambient
-    /// `GH_TOKEN`. The same App normally backs sign-in above.
+    /// App-backed `@loom` operations and session GitHub access are available.
+    /// Interactive sessions may instead use their launching user's Account PAT.
+    /// The same App normally backs sign-in above.
     pub app_configured: bool,
     /// The App's numeric id (public). Empty when unset.
     pub app_id: String,

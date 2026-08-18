@@ -143,14 +143,14 @@ impl TestServer {
     /// answer `/api/health`. The caller must be `#[serial]`: setup writes
     /// process-global env.
     pub async fn start() -> Self {
-        Self::start_inner(None, true).await
+        Self::start_inner(None, true, false).await
     }
 
     /// Boot the REST server and database without initializing the fixture
     /// directory as a Git repository. API journeys that never provision a
     /// session should use this cheaper boundary.
     pub async fn start_api_only() -> Self {
-        Self::start_inner(None, false).await
+        Self::start_inner(None, false, false).await
     }
 
     /// Like [`start`](Self::start) but installs `gh` as the GitHub trigger's
@@ -159,12 +159,19 @@ impl TestServer {
     pub async fn start_with_github(
         gh: std::sync::Arc<dyn loom::github_trigger::GithubApi>,
     ) -> Self {
-        Self::start_inner(Some(gh), true).await
+        Self::start_inner(Some(gh), true, false).await
+    }
+
+    /// Boot with a configured App client pointed at Loom's mock GitHub REST
+    /// service. Used by journeys that exercise App-owned server operations.
+    pub async fn start_with_app() -> Self {
+        Self::start_inner(None, true, true).await
     }
 
     async fn start_inner(
         gh: Option<std::sync::Arc<dyn loom::github_trigger::GithubApi>>,
         initialize_repo: bool,
+        configured_app: bool,
     ) -> Self {
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
@@ -187,9 +194,14 @@ impl TestServer {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let pool = db::connect(&db::default_db_path()).await.unwrap();
-        let trigger = match gh {
-            Some(gh) => loom::github_trigger::GithubTrigger::with_gateway(gh),
-            None => loom::github_trigger::GithubTrigger::production(pool.clone()),
+        let trigger = match (gh, configured_app) {
+            (Some(gh), false) => loom::github_trigger::GithubTrigger::with_gateway(gh),
+            (None, true) => {
+                let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
+                loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app))
+            }
+            (None, false) => loom::github_trigger::GithubTrigger::production(pool.clone()),
+            (Some(_), true) => unreachable!("test server selects one GitHub gateway"),
         };
         let state = AppState {
             ctx: Ctx {

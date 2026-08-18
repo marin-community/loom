@@ -74,12 +74,12 @@ GitHub's ~10s delivery timeout, and a timed-out delivery would cancel an inline
 handler mid-clone. Each launch is tracked on **Settings → Diagnostics** (running / done
 / error, with the outcome), so you can follow it after the `200`.
 
-The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) when
-one is configured — with a short-lived, per-installation token — and otherwise
-through the `gh` CLI's ambient `GH_TOKEN`. The **session itself** acts as the
-requester: its `GH_TOKEN` is that user's personal token (**Settings → Account**),
-falling back to its selected profile when they have none — so its pushes and
-`gh` replies use the configured session identity. Separately, the poll loop
+The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) with
+a short-lived, per-installation token. The **session itself** receives access
+from the triggering user's Loom-stored Account PAT when present, otherwise
+through Loom's App broker for the repositories its selected profile allows.
+Profile, repository, and deployment PATs are never credential sources.
+Separately, the poll loop
 posts a one-time back-link comment (`Working on this in loom: {base}/s/{id}`) on
 a session's open PR when one isn't already linked, so a reader of the PR can
 jump to the session.
@@ -117,8 +117,8 @@ The mirroring works on any session, not just triggered ones: `weaver tag set
 github owner/name#123` wires a session by hand (the card appears on its next
 status report), and `weaver tag rm github` stops the mirroring, freezing the
 comment. The card requires a configured `auth.base_url` (the session link must
-resolve for a GitHub reader) and posts through the same App-token/`gh`
-credential ladder as the reply. Two loom-internal tags do the bookkeeping —
+resolve for a GitHub reader) and posts through the same App client as the reply.
+Two loom-internal tags do the bookkeeping —
 `github.status_comment` (the comment id the card lives in) and `github.linked`
 (the PR back-link dedupe); both are machine-owned, hidden from the dashboard's
 pill row, and refused by the tag-set routes (clearing one is harmless: loom
@@ -163,11 +163,10 @@ curl -X POST {base}/api/auth/users -H 'Authorization: Bearer $LOOM_TOKEN' \
 
 ## Configure the webhook
 
-This section is the classic, App-less path: a shared secret plus a manually
-added repo/org webhook. If you're setting up the [GitHub App](#the-github-app)
-(the recommended path — `loom setup github-app` does it in one step), skip
-straight there: the App's own webhook delivers events for any repo it's
-installed on, so there's no separate webhook to add.
+The normal path is the [GitHub App](#the-github-app): `loom setup github-app`
+configures its webhook in one step, and the App delivers events for every
+repository where it is installed. The manual steps below are useful only when
+managing the same App's webhook configuration yourself.
 
 Set a shared secret in loom's environment (it is held outside the settings
 registry and never returned by `GET /api/settings`, like the OAuth client
@@ -227,19 +226,19 @@ launches nothing.
 
 ## The GitHub App
 
-A **GitHub App** is the hardened identity loom acts through. Instead of a
-long-lived, broadly-scoped shared `GH_TOKEN`, loom mints a **short-lived,
-least-privilege installation token** scoped to a single repo's installation for
-the reply, and treats the repos the App is installed on as the set it can reach
+A **GitHub App** is Loom's deployment and server-side GitHub identity. Loom
+mints a **short-lived, least-privilege installation token** scoped to a single
+repo's installation for webhook replies, polling, clones, and fixed server-side
+tools, and treats the repos the App is installed on as the set it can reach
 (the [approved-user gate](#who-can-trigger) decides whether it acts). Tokens are
 signed from the App's private key (an RS256 JWT exchanged for an installation
 token via `POST /app/installations/{id}/access_tokens`) and cached until they
 near expiry.
 
-When the App is **not configured**, loom falls back to the ambient `GH_TOKEN`
-(the `gh` CLI), so the webhook works without it. The webhook receiver and its
-security controls (HMAC, idempotency, authorization) are identical either way —
-the App only changes which credential the outbound reply uses.
+When the App is not configured, App-backed clones, polling, trigger replies,
+restricted GitHub tools, and interactive sessions without a per-user Account
+PAT fail closed. Loom never consults an ambient, profile, repository, or
+deployment PAT.
 
 ### Create the App
 
@@ -312,11 +311,10 @@ LOOM_GITHUB_APP_ID=<the App ID>
 LOOM_GITHUB_APP_PRIVATE_KEY=<the private-key PEM>
 ```
 
-With both set, loom uses the App for the reply and reaches any repo the App is
-installed on (registered on an approved user's first trigger). With either unset
-it falls back to the ambient `GH_TOKEN`. (Cloning still uses the ambient git
-credentials; granting the App **Contents** access keeps a single least-privilege
-credential set as the deploy migrates off the shared PAT.)
+With both set, loom uses the App for cloning, replies, session Git/CLI access,
+polling, and fixed server-side tools, and reaches repositories where the App is
+installed (registered on an approved user's first trigger). With either value
+unset, those operations are unavailable.
 
 ## Debugging the trigger
 

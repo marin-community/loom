@@ -1,18 +1,17 @@
 //! A user's own GitHub token (a fine-grained PAT), stored in the
 //! `user_github_tokens` table.
 //!
-//! For an ordinary interactive session, loom injects the token as `GH_TOKEN`
-//! into the session env ([`crate::provision::create`]), overriding the
-//! selected profile credential. Restricted sessions use the GitHub App (or an
-//! explicit App-less profile credential) instead. Combined with the per-user
-//! commit author identity loom already sets
-//! ([`crate::auth::commit_identity`]), ordinary pushes are attributed to them.
+//! Loom may inject this token as `GH_TOKEN` into an ordinary interactive
+//! session launched by that user. It is the only direct-token source: profile,
+//! repository, committed, and daemon environments cannot provide GitHub
+//! credentials. If no per-user token is stored, the session uses its
+//! profile-approved GitHub App credential instead. Restricted sessions never
+//! receive the personal token.
 //!
 //! The value is **write-only** over the API: callers learn only *that* a token is
-//! set and when it changed, never the token itself — the same treatment
-//! [`crate::repo_env`] gives per-repo secrets. Export into ordinary shared
-//! sessions is blast-radius reduction rather than isolation; restricted sessions
-//! avoid that export entirely.
+//! set and when it changed, never the token itself. Export into ordinary shared
+//! sessions is blast-radius reduction rather than isolation; restricted
+//! sessions avoid that export entirely.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -28,8 +27,8 @@ pub struct TokenStatus {
     pub updated_at: Option<String>,
 }
 
-/// The stored token for `username`, if any. The *only* reader of the value; used
-/// at session launch and never exposed over the API.
+/// The stored token for `username`, if any. Used only while assembling the
+/// user's ordinary interactive session environment and never exposed by API.
 pub async fn get(db: &Db, username: &str) -> Result<Option<String>> {
     let row = sqlx::query("SELECT token FROM user_github_tokens WHERE username = ?")
         .bind(username)
@@ -69,7 +68,6 @@ pub async fn set(db: &Db, username: &str, token: &str) -> Result<()> {
     .bind(&now)
     .execute(db)
     .await?;
-    tracing::debug!(username, "user github token set");
     tracing::info!(username, "github token set");
     Ok(())
 }
@@ -102,7 +100,6 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
 
-        // Absent: status reports unset, get returns None.
         assert_eq!(
             status(&db, "alice").await.unwrap(),
             TokenStatus {
@@ -112,25 +109,20 @@ mod tests {
         );
         assert!(get(&db, "alice").await.unwrap().is_none());
 
-        // Set: get returns the value; status reports set with a timestamp, but
-        // the value is only ever readable through `get` (never `status`).
         set(&db, "alice", "github_pat_abc").await.unwrap();
         assert_eq!(
             get(&db, "alice").await.unwrap().as_deref(),
             Some("github_pat_abc")
         );
-        let st = status(&db, "alice").await.unwrap();
-        assert!(st.set);
-        assert!(st.updated_at.is_some());
+        let status = status(&db, "alice").await.unwrap();
+        assert!(status.set);
+        assert!(status.updated_at.is_some());
 
-        // Upsert replaces in place.
         set(&db, "alice", "github_pat_rotated").await.unwrap();
         assert_eq!(
             get(&db, "alice").await.unwrap().as_deref(),
             Some("github_pat_rotated")
         );
-
-        // Remove, then removing again is a no-op.
         assert!(remove(&db, "alice").await.unwrap());
         assert!(!remove(&db, "alice").await.unwrap());
         assert!(get(&db, "alice").await.unwrap().is_none());
@@ -141,7 +133,6 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
         seed_user(&db, "bob").await;
-
         set(&db, "alice", "alice-tok").await.unwrap();
         set(&db, "bob", "bob-tok").await.unwrap();
 
@@ -150,8 +141,6 @@ mod tests {
             Some("alice-tok")
         );
         assert_eq!(get(&db, "bob").await.unwrap().as_deref(), Some("bob-tok"));
-
-        // Removing one leaves the other untouched.
         remove(&db, "alice").await.unwrap();
         assert!(get(&db, "alice").await.unwrap().is_none());
         assert_eq!(get(&db, "bob").await.unwrap().as_deref(), Some("bob-tok"));

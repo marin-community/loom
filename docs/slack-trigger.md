@@ -241,8 +241,8 @@ result — post back to the wired thread through `POST
 /api/branches/{branch}/slack/reply` with `{"text": "…"}` and the session's
 `LOOM_TOKEN`. loom resolves the destination channel and thread from the
 branch's `slack` wiring tag server-side; the bot token itself never reaches
-the agent, the same separation the GitHub trigger keeps between an agent's
-`GH_TOKEN` and any App-level credential.
+the agent, the same separation used by Loom's App-backed server-side GitHub
+tools.
 
 Adding `"thread": {"channel": "C…", "thread_ts": "…"}` posts to one of the
 session's *routed* threads instead (see [Automation-delivered

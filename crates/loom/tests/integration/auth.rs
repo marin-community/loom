@@ -21,6 +21,51 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
+async fn personal_github_token_is_self_service_and_write_only() {
+    let ts = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let endpoint = url(&ts, "/api/auth/github-token");
+
+    let initial: Value = http
+        .get(&endpoint)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(initial, json!({ "set": false, "updated_at": null }));
+
+    let stored: Value = http
+        .put(&endpoint)
+        .json(&json!({ "token": "github_pat_write_only" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["set"], true);
+    assert!(stored["updated_at"].is_string());
+    assert!(!stored.to_string().contains("github_pat_write_only"));
+    assert_eq!(
+        loom::user_token::get(&ts.state.db, "rjpower")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("github_pat_write_only")
+    );
+
+    let deleted = http.delete(&endpoint).send().await.unwrap();
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert!(loom::user_token::get(&ts.state.db, "rjpower")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+#[serial]
 async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();

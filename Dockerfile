@@ -236,8 +236,10 @@ ENV CLOUDSDK_CONFIG=/opt/gcloud
 
 # Let agents `git push` over HTTPS with the credential selected by Loom — no
 # mounted SSH key. Loom stamps LOOM_GITHUB_AUTH_MODE on every managed session:
-# an explicit personal/profile GH_TOKEN is direct, an allowlisted GitHub App is
-# brokered through the session API, and restricted sessions are disabled. The
+# `direct` consumes only a per-user PAT that Loom injected, `broker` requests an
+# allowlisted GitHub App token through the session API, and restricted sessions
+# or sessions without either are disabled. These scripts are transport adapters;
+# Loom owns credential selection. The
 # bind-mounted host repos usually have `git@github.com:` SSH remotes, so also
 # rewrite GitHub SSH URLs to HTTPS. (Non-GitHub SSH remotes still need ~/.ssh
 # mounted; see compose.)
@@ -256,6 +258,7 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
     token="$(/usr/local/bin/weaver github-token)" || exit $?
     ;;
   direct)
+    # Loom sets direct only after injecting the launching user's Account token.
     token="$GH_TOKEN"
     if [ -z "$token" ]; then
       echo "Loom-managed direct GitHub auth is missing GH_TOKEN" >&2
@@ -291,6 +294,7 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
     unset GITHUB_TOKEN
     ;;
   direct)
+    # GH_TOKEN was injected by Loom from the launching user's Account settings.
     if [ -z "$GH_TOKEN" ]; then
       echo "Loom-managed direct GitHub auth is missing GH_TOKEN" >&2
       exit 1

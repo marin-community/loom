@@ -48,9 +48,8 @@ async function savePassword() {
 }
 
 // -- Your GitHub token ------------------------------------------------------
-// A personal fine-grained PAT, injected as GH_TOKEN into the sessions this user
-// launches, so their agents' `git push` / `gh` act as them (not the shared
-// ambient token). Write-only: we render only whether it's set, never the value.
+// This is Loom-owned user state, not an ambient process credential. Loom
+// injects it only into ordinary interactive sessions launched by this user.
 const PAT_CREATE_URL =
   'https://github.com/settings/personal-access-tokens/new' +
   '?name=Loom' +
@@ -73,7 +72,7 @@ async function saveMyGithubToken() {
   try {
     ghTokenStatus.value = await api.setMyGithubToken(ghToken.value.trim());
     ghToken.value = '';
-    ok('GitHub token saved — your new sessions will act as you.');
+    ok('GitHub token saved — your new interactive sessions will act as you.');
   } catch (e) {
     fail(e);
   } finally {
@@ -85,7 +84,7 @@ async function clearMyGithubToken() {
   await confirmAction({
     title: 'Remove your personal GitHub token?',
     description:
-      "New interactive sessions will use an explicit session credential or the selected profile's GitHub App access. Existing sessions are unchanged.",
+      "New interactive sessions will use the selected profile's GitHub App access. Existing sessions are unchanged.",
     confirmLabel: 'Remove token',
     danger: true,
     action: async () => {
@@ -164,17 +163,16 @@ onMounted(loadMyGithubToken);
       </div>
     </section>
 
-    <!-- Your GitHub token -->
     <section>
       <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
         Your GitHub token
       </h2>
       <div class="rounded-md border border-line bg-surface px-3 py-2.5">
         <p class="text-xs text-muted mb-2">
-          A personal fine-grained token your ordinary interactive sessions use for
-          <code class="font-mono">git push</code> and <code class="font-mono">gh</code>, so your
-          agents act as you. It takes precedence over explicit session and profile GitHub
-          credentials.
+          An optional personal fine-grained token Loom stores for you. Loom injects it into your
+          ordinary interactive sessions so <code class="font-mono">git push</code> and
+          <code class="font-mono">gh</code> act as you. When it is not set, new sessions use the
+          selected profile’s approved GitHub App access.
           <a class="text-accent underline" :href="PAT_CREATE_URL" target="_blank" rel="noopener">
             Create one</a
           >
@@ -184,11 +182,7 @@ onMounted(loadMyGithubToken);
           <span class="font-medium">Workflows</span> read/write only when sessions must edit
           <code class="font-mono">.github/workflows</code>.
           <span :class="ghTokenStatus?.set ? 'text-accent' : 'text-faint'">
-            {{
-              ghTokenStatus?.set
-                ? 'Set.'
-                : 'Not set — interactive sessions use an explicit session credential, then the selected profile’s GitHub App access.'
-            }}
+            {{ ghTokenStatus?.set ? 'Set.' : 'Not set — using GitHub App access.' }}
           </span>
         </p>
         <div class="flex flex-wrap items-center gap-2">

@@ -527,7 +527,7 @@ async fn happy_path_creates_session_and_replies() {
     assert_eq!(
         session["created_by"].as_str(),
         Some("rjpower"),
-        "the session is attributed to the commenting user, so its GH_TOKEN is theirs"
+        "attribution selects the commenter's Account PAT and records ownership/audit"
     );
 
     // loom replied on the triggering issue with the session URL.

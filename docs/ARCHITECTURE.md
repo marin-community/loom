@@ -692,8 +692,8 @@ access from `loom github access` or Session Details, without restarting it.
 Loom validates write access against the GitHub App installation before storing
 the audited override.
 
-When the `gh` CLI is installed and authenticated, loom keeps a per-branch
-pull-request snapshot alongside the session. A second background loop
+When the GitHub App is configured, loom keeps a per-branch pull-request
+snapshot alongside the session. A second background loop
 (`github::poll`, sibling of the monitor, spawned in `server::serve`) runs on
 startup and every minute. It polls sessions active in the previous ten minutes
 on every tick, the rest of the first quiet day every ten minutes, and older live
@@ -717,8 +717,8 @@ The dashboard renders it on the session list and session header; `POST
 /api/sessions/{id}/github` forces an immediate re-poll.
 
 The loop self-gates and degrades quietly: it is always spawned but does nothing
-while the `github.poll` setting is off, `gh` is missing (probed once, cached via
-`gh_available`), or the repo has no GitHub remote (the repository batch is
+while the `github.poll` setting is off, the GitHub App is unavailable, or the
+repo has no GitHub remote (the repository batch is
 logged at debug and skipped). So it is a no-op on non-GitHub repos rather
 than a failure.
 
@@ -742,12 +742,11 @@ settings pane).
 Both settings live in `weaver-core::config::registry()` under the **GitHub**
 group.
 
-`gh`-touching logic lives in `crate::github`: `fetch_pr` (the single-PR
-shell-out used by manual refresh), `fetch_pr_batch` (the repository-wide
-background GraphQL request), `apply_refresh_result` / `apply_snapshot` (store →
-announce → maybe archive), and `poll` (the
-loop). The merge-archive decision is split into `apply_snapshot` so it is
-testable without invoking `gh`.
+GitHub snapshot logic lives in `crate::github`: `fetch_pr` (the single-PR App
+request used by manual refresh), `fetch_pr_batch` (the repository-wide App
+GraphQL request), `apply_refresh_result` / `apply_snapshot` (store → announce →
+maybe archive), and `poll` (the loop). The merge-archive decision is split into
+`apply_snapshot` so it is testable without contacting GitHub.
 
 **The status card.** A branch carrying the quiet `github` tag
 (`owner/name#number` — stamped by the `@loom` trigger, or set by hand with
@@ -877,34 +876,33 @@ rules. Repository/profile data never supplies executable MCP configuration.
 Restricted launch and recovery omit repository environment/setup and Claude
 user/project/local settings. Repository reads are path-scoped, and GitHub
 mutations use a fixed MCP bridge backed by a session-scoped REST endpoint. Loom
-uses the configured GitHub App's short-lived repository installation token
-server-side, with an explicit profile token available only to App-less
-deployments, and invokes `gh` without a shell against the session's fixed
-repository and linked thread. Personal user tokens remain exclusive to ordinary
-interactive sessions, and no credential enters the restricted agent
-environment. Allowed rules execute directly;
+uses the configured GitHub App client to call GitHub's REST API against the
+session's fixed repository and linked thread. No GitHub credential enters the
+restricted agent environment. Allowed rules execute directly;
 any remaining ACP permission request is answered with the adapter's one-shot
 rejection (or a cancelled outcome), including after `session/load`. Runtime
 handoff and permission-mode changes are forbidden. The stock `github_comment`
 profile contains the policy only; its reviewed JSON manifest is seeded when
-absent and then remains operator-editable. App-less deployments must provide
-its write-only `GH_TOKEN`.
+absent and then remains operator-editable.
 
 **Git and GitHub CLI credentials.** The Docker image installs a Git credential
 helper and a `gh` wrapper because those clients do not speak Loom's session API.
 They are transport adapters, not policy owners: every fresh, resumed, warm, or
 handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
-`direct` uses the personal/profile `GH_TOKEN` in the resolved session
-environment, `broker` ignores inherited deployment credentials and requests the
-session's short-lived App token, and `disabled` rejects direct GitHub CLI
-access. Loom explicitly masks ambient `GH_TOKEN` and `GITHUB_TOKEN` values for
-brokered and disabled sessions, and the adapters fail closed when the reserved
-mode is absent. This prevents the daemon's clone/webhook identity from silently
-becoming an agent's push identity. Adapter registration stays in the image's
-system Git config: linked worktrees share repository-local config, agents may
-clone additional repositories, and the helper must be available before a target
-repository exists. Session selection and credentials remain Loom-owned policy;
-the image registration only teaches stock `git` and `gh` how to ask for them.
+`direct` uses the launching user's write-only PAT stored in Loom Account
+settings, `broker` requests the session's short-lived App installation token,
+and `disabled` rejects direct GitHub CLI access. Loom reserves `GH_TOKEN` and
+`GITHUB_TOKEN` from profile, repository, and committed environment
+configuration, overlays a per-user PAT only after those layers are resolved,
+and masks token variables in brokered and disabled sessions. The adapters fail
+closed when the reserved mode is absent. The `gh` wrapper exports `GH_TOKEN`
+only for the stock CLI; it is the compatibility boundary for a client that does
+not speak Loom's session API.
+Adapter registration stays in the image's system Git config: linked worktrees
+share repository-local config, agents may clone additional repositories, and
+the helper must be available before a target repository exists. Session
+selection and credentials remain Loom-owned policy; the image registration
+only teaches stock `git` and `gh` how to ask for them.
 
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
 or an explicit group list. Saving resolves the trusted builtin registry and

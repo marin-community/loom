@@ -49,7 +49,6 @@ from the weaver repo with ``uv pip install -e python/weaver-loom``.
 import json
 import os
 import random
-import subprocess
 import threading
 import time
 import urllib.error
@@ -260,39 +259,6 @@ class WorkloadCredentials:
         return token
 
 
-def gh_json(args, cwd=None, timeout=30):
-    """Run ``gh <args>`` and parse its stdout as JSON.
-
-    A watch that shells out to ``gh`` needs exactly one thing: a way to tell
-    "gh couldn't answer this one call" (worth logging and moving on) apart
-    from "our code is broken" (worth a traceback). This draws that line once:
-    every failure — gh missing, the call timing out, a non-zero exit, output
-    that isn't JSON — raises :class:`WeaverError` carrying gh's own message,
-    so a caller that wants to tolerate an unreadable PR can catch that one
-    type and *keep the reason* in its note instead of discarding it. Anything
-    that isn't a `WeaverError` (a bug in the caller's own code) is left to
-    propagate as-is.
-    """
-    try:
-        out = subprocess.run(
-            ["gh", *args], cwd=cwd, capture_output=True, text=True, timeout=timeout
-        )
-    except FileNotFoundError as e:
-        # cwd missing raises the same exception type as gh itself missing;
-        # e.filename names whichever path the OS actually failed to find.
-        what = "gh" if e.filename in (None, "gh") else e.filename
-        raise WeaverError(f"{what} not found: {e}") from e
-    except subprocess.TimeoutExpired as e:
-        raise WeaverError(f"gh {' '.join(args)} timed out after {timeout}s") from e
-    if out.returncode != 0:
-        detail = out.stderr.strip() or out.stdout.strip() or "no output"
-        raise WeaverError(f"gh {' '.join(args)}: exit {out.returncode}: {detail}")
-    try:
-        return json.loads(out.stdout)
-    except ValueError as e:
-        raise WeaverError(f"gh {' '.join(args)}: unparseable JSON: {e}") from e
-
-
 def _base_url(base=None):
     """Resolve a base URL: the argument, else ``$WEAVER_API``, else the loom
     default. A bare ``host:port`` is accepted."""
@@ -433,6 +399,11 @@ class Client:
         if by is not None:
             body["by"] = by
         return self._request("PUT", f"/sessions/{key}/tags/{tag_key}", body)
+
+    def add_github_labels(self, key, labels):
+        """Label the session's current pull request through Loom; needs ``mark``."""
+        self._gate("mark")
+        return self._request("POST", f"/sessions/{key}/github/labels", {"labels": labels})
 
     def set_tags(self, key, tags, by=None, clear=None):
         """Atomically replace this author's complete tag set on a session.

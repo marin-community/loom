@@ -61,14 +61,14 @@ fn git_helper_obeys_loom_owned_auth_mode() {
         &script,
         &[
             ("LOOM_GITHUB_AUTH_MODE", "direct"),
-            ("GH_TOKEN", "personal-token"),
+            ("GH_TOKEN", "loom-stored-user-token"),
         ],
         &["get"],
     );
     assert!(direct.status.success());
     assert_eq!(
         String::from_utf8(direct.stdout).unwrap(),
-        "username=x-access-token\npassword=personal-token\n"
+        "username=x-access-token\npassword=loom-stored-user-token\n"
     );
 
     let disabled = run_script(
@@ -135,7 +135,7 @@ fn gh_wrapper_obeys_loom_owned_auth_mode() {
         &script,
         &[
             ("LOOM_GITHUB_AUTH_MODE", "direct"),
-            ("GH_TOKEN", "personal-token"),
+            ("GH_TOKEN", "loom-stored-user-token"),
             ("GITHUB_TOKEN", "wrong-daemon-bot"),
         ],
         &["auth", "status"],
@@ -143,7 +143,7 @@ fn gh_wrapper_obeys_loom_owned_auth_mode() {
     assert!(direct.status.success());
     assert_eq!(
         String::from_utf8(direct.stdout).unwrap(),
-        "GH_TOKEN=personal-token\nGITHUB_TOKEN=unset\n"
+        "GH_TOKEN=loom-stored-user-token\nGITHUB_TOKEN=unset\n"
     );
 
     let unmarked = run_script(

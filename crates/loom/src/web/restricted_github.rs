@@ -1,11 +1,9 @@
 //! Server-side GitHub tools for restricted sessions.
 //!
 //! The agent-facing MCP bridge authenticates with the session token. This
-//! handler resolves the fixed repository and GitHub credential from durable
-//! session/profile state, validates the stamped tool grant, and invokes `gh`
-//! without a shell. Neither the repository nor the token is caller-controlled.
-
-use std::process::Stdio;
+//! handler resolves the fixed repository from durable session state, validates
+//! the stamped tool grant, and calls GitHub through Loom's App client. Neither
+//! the repository nor the credential is caller-controlled.
 
 use axum::{
     extract::{Path, State},
@@ -13,10 +11,10 @@ use axum::{
     Extension, Json,
 };
 use serde::Deserialize;
-use tokio::process::Command;
 use weaver_api::{GithubTokenView, RestrictedGithubToolReq, RestrictedGithubToolView};
 
 use crate::auth::{Grant, Principal};
+use crate::github_app::{GithubApp, GithubThreadKind};
 
 use super::{ApiResult, AppError, AppState};
 
@@ -82,42 +80,6 @@ pub(super) async fn github_token(
     Ok(Json(GithubTokenView { token }))
 }
 
-async fn restricted_github_token(
-    st: &AppState,
-    profile: &str,
-    repo: &crate::repo::RepoSlug,
-) -> ApiResult<String> {
-    if let Some(app) = st.trigger.app() {
-        if app.is_configured().await {
-            return app
-                .token_for_repo(&repo.owner, &repo.name)
-                .await
-                .map_err(|error| {
-                    AppError::new(
-                        StatusCode::BAD_GATEWAY,
-                        format!(
-                            "could not mint a GitHub App token for {}: {error}",
-                            repo.slug()
-                        ),
-                    )
-                });
-        }
-    }
-    if let Some(token) = crate::profile::env_pairs(&st.db, profile)
-        .await
-        .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?
-        .into_iter()
-        .find_map(|(name, value)| (name == "GH_TOKEN").then_some(value))
-        .filter(|value| !value.trim().is_empty())
-    {
-        return Ok(token);
-    }
-    Err(AppError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "restricted GitHub credential is unavailable",
-    ))
-}
-
 fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArguments> {
     let arguments: ToolArguments = serde_json::from_value(value)
         .map_err(|error| AppError::bad_request(format!("invalid {tool} arguments: {error}")))?;
@@ -158,70 +120,63 @@ fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArg
     Ok(arguments)
 }
 
-async fn invoke_gh(
-    repo: &str,
+async fn invoke_app(
+    app: &GithubApp,
+    repo: &crate::repo::RepoSlug,
     tool: &str,
     arguments: &ToolArguments,
-    token: &str,
-    config_dir: &std::path::Path,
 ) -> ApiResult<String> {
-    let number = arguments.number.to_string();
     let (kind, verb) = tool
         .split_once('_')
         .ok_or_else(|| AppError::bad_request("invalid restricted GitHub tool"))?;
-    let mut command = Command::new("gh");
-    command
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("GH_TOKEN", token)
-        .env("GH_CONFIG_DIR", config_dir)
-        .env("GH_PAGER", "cat")
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("NO_COLOR", "1")
-        .args([kind, verb, &number, "--repo", repo])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    match verb {
-        "view" => {
-            command.args(["--json", "number,title,body,url,state"]);
-        }
-        "comment" => {
-            command.args(["--body", arguments.body.as_deref().unwrap_or_default()]);
-        }
-        "edit" => {
-            command.args(["--body", arguments.body.as_deref().unwrap_or_default()]);
-            if let Some(title) = arguments.title.as_deref() {
-                command.args(["--title", title]);
+    let kind = match kind {
+        "issue" => GithubThreadKind::Issue,
+        "pr" => GithubThreadKind::PullRequest,
+        _ => return Err(AppError::bad_request("invalid restricted GitHub resource")),
+    };
+    let request = async {
+        match verb {
+            "view" => {
+                let value = app.thread_view(repo, kind, arguments.number).await?;
+                serde_json::to_string(&value).map_err(anyhow::Error::from)
             }
+            "comment" => {
+                app.thread_comment(
+                    repo,
+                    arguments.number,
+                    arguments.body.as_deref().unwrap_or_default(),
+                )
+                .await?;
+                Ok(format!(
+                    "GitHub {tool} completed for {}#{}",
+                    repo.slug(),
+                    arguments.number
+                ))
+            }
+            "edit" => {
+                app.thread_edit(
+                    repo,
+                    kind,
+                    arguments.number,
+                    arguments.title.as_deref(),
+                    arguments.body.as_deref().unwrap_or_default(),
+                )
+                .await?;
+                Ok(format!(
+                    "GitHub {tool} completed for {}#{}",
+                    repo.slug(),
+                    arguments.number
+                ))
+            }
+            _ => Err(anyhow::anyhow!("invalid restricted GitHub verb")),
         }
-        _ => return Err(AppError::bad_request("invalid restricted GitHub verb")),
     }
-    let output = tokio::time::timeout(std::time::Duration::from_secs(60), command.output())
-        .await
-        .map_err(|_| AppError::new(StatusCode::GATEWAY_TIMEOUT, "GitHub tool timed out"))?
-        .map_err(|error| {
-            AppError::new(
-                StatusCode::BAD_GATEWAY,
-                format!("failed to start GitHub CLI: {error}"),
-            )
-        })?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).replace(token, "[REDACTED]");
-        return Err(AppError::new(
+    .await;
+    request.map_err(|error| {
+        AppError::new(
             StatusCode::BAD_GATEWAY,
-            format!("GitHub {tool} failed: {}", detail.trim()),
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout)
-        .replace(token, "[REDACTED]")
-        .trim()
-        .to_string();
-    Ok(if stdout.is_empty() {
-        format!("GitHub {tool} completed for {repo}#{}", arguments.number)
-    } else {
-        stdout
+            format!("GitHub {tool} failed: {error}"),
+        )
     })
 }
 
@@ -270,40 +225,27 @@ pub(super) async fn restricted_github_tool(
             "GitHub tool target does not match the session's linked thread",
         ));
     }
-    let token = restricted_github_token(&st, &session.profile, &repo).await?;
-    let config_dir = crate::db::run_dir(&session.id).join("restricted-gh-config");
-    tokio::fs::create_dir_all(&config_dir)
-        .await
-        .map_err(|error| {
-            AppError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("creating restricted GitHub config directory: {error}"),
-            )
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700))
-            .await
-            .map_err(|error| {
-                AppError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("securing restricted GitHub config directory: {error}"),
-                )
-            })?;
+    let app = st.trigger.app().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        )
+    })?;
+    if !app.is_configured().await {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        ));
     }
-    let text = invoke_gh(&repo_slug, &tool, &arguments, &token, &config_dir).await?;
+    let text = invoke_app(app, &repo, &tool, &arguments).await?;
     Ok(Json(RestrictedGithubToolView { text }))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use axum::http::StatusCode;
     use serde_json::json;
 
-    use super::{principal_owns_session, restricted_github_token, validate_arguments};
+    use super::{principal_owns_session, validate_arguments};
     use crate::auth::{AuthVia, Grant, Principal};
 
     fn principal(grant: Grant) -> Principal {
@@ -355,42 +297,5 @@ mod tests {
         assert!(
             validate_arguments("issue_edit", json!({ "number": 7, "body": "clean body" })).is_ok()
         );
-    }
-
-    #[tokio::test]
-    async fn github_app_precedes_the_restricted_profile_credential() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        crate::profile::env_set(&db, "github_comment", "GH_TOKEN", "profile-token")
-            .await
-            .unwrap();
-        let app = Arc::new(crate::github_app::tests::configured_test_app(db.clone()).await);
-        let state = super::AppState {
-            ctx: crate::Ctx {
-                db,
-                bus: crate::events::EventBus::new(),
-                addr: "127.0.0.1:0".to_string(),
-            },
-            ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-            trigger: crate::github_trigger::GithubTrigger::with_app(app),
-            acp: crate::acp::AcpRegistry::new(),
-            launch_gate: crate::launch_gate::RepoLaunchGate::default(),
-        };
-        let repo = crate::repo::parse_slug("marin-community/loom").unwrap();
-
-        let resolved = restricted_github_token(&state, "github_comment", &repo)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resolved,
-            crate::github_app::tests::MOCK_INSTALLATION_TOKEN,
-            "the App credential must override the configured profile credential"
-        );
-
-        let uninstalled = crate::repo::parse_slug("uninstalled/loom").unwrap();
-        let error = restricted_github_token(&state, "github_comment", &uninstalled)
-            .await
-            .unwrap_err();
-        assert_eq!(error.status(), StatusCode::BAD_GATEWAY);
     }
 }

@@ -812,6 +812,10 @@ pub fn router(state: AppState) -> Router {
                 .put(set_github_session)
                 .delete(clear_github_session),
         )
+        .route(
+            "/sessions/{id}/github/labels",
+            post(add_github_session_labels),
+        )
         .route("/sessions/{id}/raw", get(raw_session))
         // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`
         // is the UI's availability probe; the `ide`/`ide/`/`ide/*` routes serve
@@ -1107,8 +1111,6 @@ pub fn router(state: AppState) -> Router {
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/{id}", get(get_run))
         .route("/auth/password", post(set_own_password))
-        // The caller's own GitHub token (a fine-grained PAT), injected as
-        // GH_TOKEN into the sessions they launch so their agents act as them.
         .route(
             "/auth/github-token",
             get(get_github_token)

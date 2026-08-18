@@ -2,14 +2,14 @@
 
 use crate::Db;
 
-pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured. Add your personal GitHub token in Settings > Access, allowlist this repository for the selected profile's GitHub App credential, or configure a write-only GH_TOKEN on the profile.";
+pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured for this repository. Add your personal GitHub token in Settings > Account or allowlist this repository for the selected profile's GitHub App credential.";
 pub const GITHUB_AUTH_MODE_ENV: &str = "LOOM_GITHUB_AUTH_MODE";
 
 /// How the image's Git/GitHub CLI adapters obtain a credential for one session.
 ///
 /// This is stamped by Loom after it resolves the session environment. The
-/// adapters must not infer policy from an inherited daemon-level `GH_TOKEN`:
-/// that token belongs to the deployment, not automatically to every session.
+/// adapters must not infer policy from process or profile environment. A
+/// direct token is always the launching user's Loom-stored Account token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GithubAuthMode {
     Direct,
@@ -70,6 +70,10 @@ pub async fn layer_launch_environment(
     strict: bool,
     restricted: bool,
 ) -> Vec<(String, String)> {
+    // Reject legacy snapshot values as well as newly configured values. This
+    // guarantees that the only non-empty GH_TOKEN reaching mode selection is
+    // the per-user credential overlaid later by `apply_user_github_token`.
+    env.retain(|(name, _)| !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
     let repo_root_str = repo_root.display().to_string();
     if restricted {
         tracing::debug!(repo = %repo_root_str, profile = profile_name, "restricted launch uses profile environment only");
@@ -77,12 +81,14 @@ pub async fn layer_launch_environment(
     }
     let repo_pairs = crate::repo_env::pairs(db, &repo_root_str)
         .await
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
     let config_pairs = config_env_pairs(cfg);
     if strict {
         // A strict profile's declared names are policy, not defaults. Repo
         // layers may add variables but cannot replace a profile-owned value.
-        for (name, value) in repo_pairs.into_iter().chain(config_pairs) {
+        for (name, value) in repo_pairs.chain(config_pairs) {
             if !env.iter().any(|(existing, _)| existing == &name) {
                 env.push((name, value));
             }
@@ -109,21 +115,31 @@ pub async fn launch_environment(
     layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
 }
 
+/// Overlay the launching user's Loom-stored PAT after all user-configurable
+/// environment layers have been validated. This is the only path that may put
+/// a non-empty `GH_TOKEN` into a managed session environment.
 pub async fn apply_user_github_token(
     db: &Db,
     env: &mut Vec<(String, String)>,
     created_by: Option<&str>,
-) {
-    let Some(username) = created_by else { return };
+) -> bool {
+    let Some(username) = created_by else {
+        return false;
+    };
     match crate::user_token::get(db, username).await {
         Ok(Some(token)) if !token.trim().is_empty() => {
             set_env(env, "GH_TOKEN", token);
-            tracing::info!(%username, "applied user github token as GH_TOKEN");
+            tracing::info!(%username, "applied Loom-stored user GitHub credential");
+            true
         }
         Ok(_) => {
-            tracing::debug!(%username, "no personal github token on file, retaining session GH_TOKEN")
+            tracing::debug!(%username, "no personal GitHub token on file");
+            false
         }
-        Err(error) => tracing::warn!(%username, "failed to load user github token: {error}"),
+        Err(error) => {
+            tracing::warn!(%username, "failed to load user GitHub token: {error}");
+            false
+        }
     }
 }
 
@@ -135,22 +151,27 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     }
 }
 
+/// Personal Account PATs are an ordinary interactive-session convenience, not
+/// an automation or restricted-session credential source.
+pub fn user_github_token_allowed(class: &str, restricted: bool) -> bool {
+    class == "interactive" && !restricted
+}
+
 /// Stamp the GitHub credential policy consumed by the Docker image's `git`
 /// credential helper and `gh` wrapper.
 ///
-/// A resolved session token (personal, profile, repository, or config-file)
-/// wins. Otherwise an allowed and configured GitHub App is brokered through the
-/// session-scoped Loom API. A session with neither is disabled; the daemon's
-/// ambient credential is never promoted into a managed session. Empty explicit
-/// values mask both GitHub token variables inherited by a non-cleared runtime.
+/// A Loom-injected per-user token selects `direct`; otherwise an allowed and
+/// configured GitHub App selects `broker`. Restricted sessions and sessions
+/// without either are disabled. Empty values mask ambient client variables.
 pub async fn stamp_github_auth_mode(
     env: &mut Vec<(String, String)>,
     github_app: Option<&crate::github_app::GithubApp>,
     restricted: bool,
+    user_token_applied: bool,
 ) -> GithubAuthMode {
     let mode = if restricted {
         GithubAuthMode::Disabled
-    } else if env_has_nonempty(env, "GH_TOKEN") {
+    } else if user_token_applied {
         GithubAuthMode::Direct
     } else if let Some(app) = github_app {
         if app.is_configured().await {
@@ -164,8 +185,6 @@ pub async fn stamp_github_auth_mode(
     if mode != GithubAuthMode::Direct {
         set_env(env, "GH_TOKEN", String::new());
     }
-    // GH_TOKEN is Loom's sole direct-token input. Always mask GitHub CLI's
-    // lower-precedence alias so a daemon credential cannot become a fallback.
     set_env(env, "GITHUB_TOKEN", String::new());
     set_env(env, GITHUB_AUTH_MODE_ENV, mode.as_str().to_string());
     mode
@@ -189,44 +208,30 @@ pub fn session_github_repositories(
         .unwrap_or_default()
 }
 
-fn env_has_nonempty(env: &[(String, String)], name: &str) -> bool {
-    env.iter()
-        .any(|(key, value)| key == name && !value.trim().is_empty())
-}
-
-pub async fn github_token_available(
+/// A GitHub repository may be launched only when Loom can provide either the
+/// launching user's stored PAT or the selected profile's approved App access.
+pub async fn github_credential_available(
     db: &Db,
-    env: &[(String, String)],
     created_by: Option<&str>,
-    runtime: &str,
     github_app: Option<&crate::github_app::GithubApp>,
+    allow_user_token: bool,
 ) -> anyhow::Result<bool> {
-    if crate::agent::builtin_agent_type(runtime).is_none() {
-        return Ok(true);
-    }
-    let Some(username) = created_by else {
-        return Ok(true);
-    };
-    if crate::auth::get_user(db, username).await?.is_none() {
-        return Ok(true);
-    }
-    if env_has_nonempty(env, "GH_TOKEN") {
-        return Ok(true);
-    }
-    if crate::user_token::get(db, username)
-        .await?
-        .as_deref()
-        .is_some_and(|token| !token.trim().is_empty())
-    {
-        return Ok(true);
-    }
-    if let Some(app) = github_app {
-        if app.is_configured().await {
-            return Ok(true);
+    if allow_user_token {
+        if let Some(username) = created_by {
+            if crate::user_token::get(db, username)
+                .await?
+                .as_deref()
+                .is_some_and(|token| !token.trim().is_empty())
+            {
+                return Ok(true);
+            }
         }
     }
-    tracing::warn!(created_by = ?created_by, runtime = %runtime, "launch blocked: no github token available");
-    Ok(false)
+    Ok(if let Some(app) = github_app {
+        app.is_configured().await
+    } else {
+        false
+    })
 }
 
 #[cfg(test)]
@@ -241,34 +246,12 @@ mod tests {
             .unwrap();
     }
 
-    struct EnvVarGuard {
-        name: &'static str,
-        value: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(name: &'static str, new_value: &str) -> Self {
-            let value = std::env::var_os(name);
-            std::env::set_var(name, new_value);
-            Self { name, value }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            match &self.value {
-                Some(value) => std::env::set_var(self.name, value),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-
     #[tokio::test]
     async fn launch_environment_respects_restricted_and_strict_profiles() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
-        crate::profile::env_set(&db, "github_comment", "GH_TOKEN", "profile-token")
+        crate::profile::env_set(&db, "github_comment", "ANTHROPIC_API_KEY", "profile-token")
             .await
             .unwrap();
         crate::repo_env::set(&db, &repo.display().to_string(), "REPO_SECRET", "leak")
@@ -280,7 +263,7 @@ mod tests {
             .insert("COMMITTED_SECRET".to_string(), "leak".to_string());
         assert_eq!(
             launch_environment(&db, repo, &restricted_cfg, "github_comment", true, true).await,
-            vec![("GH_TOKEN".to_string(), "profile-token".to_string())]
+            vec![("ANTHROPIC_API_KEY".to_string(), "profile-token".to_string())]
         );
 
         crate::profile::env_set(&db, "default", "SHARED_TOKEN", "profile")
@@ -307,10 +290,27 @@ mod tests {
             Some("profile")
         );
         assert!(!strict.iter().any(|(name, _)| name == "CARGO_TARGET_DIR"));
+
+        let legacy_snapshot = layer_launch_environment(
+            &db,
+            repo,
+            &weaver_core::repo_config::RepoConfig::default(),
+            "default",
+            vec![
+                ("GH_TOKEN".to_string(), "legacy-profile-token".to_string()),
+                ("GITHUB_TOKEN".to_string(), "legacy-alias".to_string()),
+            ],
+            false,
+            false,
+        )
+        .await;
+        assert!(legacy_snapshot
+            .iter()
+            .all(|(name, _)| { !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN") }));
     }
 
     #[tokio::test]
-    async fn user_github_token_overlay_preserves_precedence() {
+    async fn only_the_loom_stored_user_token_is_overlaid() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
         seed_user(&db, "bob").await;
@@ -318,27 +318,15 @@ mod tests {
             .await
             .unwrap();
 
-        let mut fresh = vec![("FOO".to_string(), "bar".to_string())];
-        apply_user_github_token(&db, &mut fresh, Some("alice")).await;
-        assert!(fresh
+        let mut alice = vec![("FOO".to_string(), "bar".to_string())];
+        assert!(apply_user_github_token(&db, &mut alice, Some("alice")).await);
+        assert!(alice
             .iter()
             .any(|(name, value)| name == "GH_TOKEN" && value == "ghp_alice"));
 
-        let mut layered = vec![("GH_TOKEN".to_string(), "shared".to_string())];
-        apply_user_github_token(&db, &mut layered, Some("alice")).await;
-        let github_tokens = layered
-            .iter()
-            .filter(|(name, _)| name == "GH_TOKEN")
-            .collect::<Vec<_>>();
-        assert_eq!(github_tokens.len(), 1);
-        assert_eq!(github_tokens[0].1, "ghp_alice");
-
-        let mut fallback = vec![("GH_TOKEN".to_string(), "shared".to_string())];
-        apply_user_github_token(&db, &mut fallback, Some("bob")).await;
-        assert_eq!(fallback[0].1, "shared");
-        let mut producer = Vec::new();
-        apply_user_github_token(&db, &mut producer, None).await;
-        assert!(producer.is_empty());
+        let mut bob = Vec::new();
+        assert!(!apply_user_github_token(&db, &mut bob, Some("bob")).await);
+        assert!(!bob.iter().any(|(name, _)| name == "GH_TOKEN"));
     }
 
     #[tokio::test]
@@ -347,34 +335,31 @@ mod tests {
         let app = crate::github_app::GithubApp::new(db.clone());
 
         let mut direct = vec![
-            ("GH_TOKEN".to_string(), "personal".to_string()),
-            ("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string()),
+            ("GH_TOKEN".to_string(), "loom-stored-user-token".to_string()),
+            ("GITHUB_TOKEN".to_string(), "also-wrong".to_string()),
         ];
         assert_eq!(
-            stamp_github_auth_mode(&mut direct, Some(&app), false).await,
+            stamp_github_auth_mode(&mut direct, Some(&app), false, true).await,
             GithubAuthMode::Direct
         );
         assert!(direct
             .iter()
-            .any(|(name, value)| name == GITHUB_AUTH_MODE_ENV
-                && value == GithubAuthMode::Direct.as_str()));
-        assert!(direct
-            .iter()
-            .any(|(name, value)| name == "GH_TOKEN" && value == "personal"));
+            .any(|(name, value)| { name == "GH_TOKEN" && value == "loom-stored-user-token" }));
         assert!(direct
             .iter()
             .any(|(name, value)| name == "GITHUB_TOKEN" && value.is_empty()));
 
-        let mut unmanaged = vec![("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string())];
+        let mut unavailable = vec![
+            ("GH_TOKEN".to_string(), "unmanaged-token".to_string()),
+            ("GITHUB_TOKEN".to_string(), "also-wrong".to_string()),
+        ];
         assert_eq!(
-            stamp_github_auth_mode(&mut unmanaged, Some(&app), false).await,
+            stamp_github_auth_mode(&mut unavailable, Some(&app), false, false).await,
             GithubAuthMode::Disabled
         );
-        for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
-            assert!(unmanaged
-                .iter()
-                .any(|(candidate, value)| candidate == name && value.is_empty()));
-        }
+        assert!(unavailable.iter().all(|(name, value)| {
+            !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN") || value.is_empty()
+        }));
 
         weaver_core::config::apply(
             &db,
@@ -393,7 +378,7 @@ mod tests {
         .unwrap();
         let mut brokered = vec![("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string())];
         assert_eq!(
-            stamp_github_auth_mode(&mut brokered, Some(&app), false).await,
+            stamp_github_auth_mode(&mut brokered, Some(&app), false, false).await,
             GithubAuthMode::Broker
         );
         for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
@@ -407,7 +392,7 @@ mod tests {
             ("GITHUB_TOKEN".to_string(), "also-must-not-win".to_string()),
         ];
         assert_eq!(
-            stamp_github_auth_mode(&mut restricted, Some(&app), true).await,
+            stamp_github_auth_mode(&mut restricted, Some(&app), true, true).await,
             GithubAuthMode::Disabled
         );
         assert!(restricted.iter().all(|(name, value)| {
@@ -435,49 +420,29 @@ mod tests {
             session_github_repositories("automation", &configured, None),
             configured
         );
+        assert!(user_github_token_allowed("interactive", false));
+        assert!(!user_github_token_allowed("automation", false));
+        assert!(!user_github_token_allowed("interactive", true));
     }
 
-    #[serial_test::serial]
     #[tokio::test]
-    async fn github_token_preflight_covers_builtin_custom_and_app_paths() {
-        let _ambient = EnvVarGuard::set("GH_TOKEN", "ghp_daemon_must_not_leak");
+    async fn github_preflight_accepts_user_token_or_configured_app() {
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
-
-        assert!(
-            !github_token_available(&db, &[], Some("alice"), "codex", None)
-                .await
-                .unwrap()
-        );
-        assert!(
-            github_token_available(&db, &[], Some("alice"), "my-custom-agent", None)
-                .await
-                .unwrap()
-        );
-        assert!(
-            github_token_available(&db, &[], Some("github-webhook (octo)"), "codex", None)
-                .await
-                .unwrap()
-        );
-
+        assert!(!github_credential_available(&db, Some("alice"), None, true)
+            .await
+            .unwrap());
         crate::user_token::set(&db, "alice", "ghp_alice")
             .await
             .unwrap();
+        assert!(github_credential_available(&db, Some("alice"), None, true)
+            .await
+            .unwrap());
         assert!(
-            github_token_available(&db, &[], Some("alice"), "claude", None)
+            !github_credential_available(&db, Some("alice"), None, false)
                 .await
                 .unwrap()
         );
-        crate::user_token::remove(&db, "alice").await.unwrap();
-        assert!(github_token_available(
-            &db,
-            &[("GH_TOKEN".to_string(), "ghp_shared".to_string())],
-            Some("alice"),
-            "codex",
-            None,
-        )
-        .await
-        .unwrap());
 
         weaver_core::config::apply(
             &db,
@@ -495,16 +460,8 @@ mod tests {
         .await
         .unwrap();
         let app = crate::github_app::GithubApp::new(db.clone());
-        assert!(
-            github_token_available(&db, &[], Some("alice"), "claude", Some(&app))
-                .await
-                .unwrap()
-        );
-
-        assert!(
-            !github_token_available(&db, &[], Some("alice"), "codex", None,)
-                .await
-                .unwrap()
-        );
+        assert!(github_credential_available(&db, None, Some(&app), false)
+            .await
+            .unwrap());
     }
 }

@@ -50,9 +50,9 @@ pub(super) struct PutRepoEnvBody {
 }
 
 /// `PUT /api/repos/env/{name}` — upsert one per-repo variable. The name (from the
-/// path) is validated as a shell identifier that isn't one of loom's reserved
-/// `WEAVER_`/`LOOM_` names, so it can't corrupt or shadow the launch env that
-/// exports it; the value is free-form and write-only. Returns the refreshed
+/// path) is validated as a shell identifier that isn't one of Loom's reserved
+/// control or GitHub credential names, so it can't corrupt or shadow the launch
+/// environment; the value is free-form and write-only. Returns the refreshed
 /// metadata list (no values).
 pub(super) async fn put_repo_env(
     State(st): State<AppState>,

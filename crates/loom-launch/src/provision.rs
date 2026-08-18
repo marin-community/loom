@@ -274,12 +274,18 @@ async fn fetch_launch_issue(
     managed_repo: Option<&crate::repo::RepoSlug>,
     number: i64,
 ) -> anyhow::Result<github::Issue> {
-    if let (Some(app), Some(repo)) = (st.trigger.app(), managed_repo) {
-        if app.is_configured().await {
-            return app.issue(&repo.owner, &repo.name, number).await;
-        }
-    }
-    github::fetch_issue(repo_root, number).await
+    let slug = match managed_repo {
+        Some(repo) => repo.clone(),
+        None => crate::repo::github_slug_for_root(&st.db, repo_root)
+            .await?
+            .and_then(|slug| crate::repo::parse_slug(&slug).ok())
+            .ok_or_else(|| anyhow::anyhow!("repository has no registered GitHub identity"))?,
+    };
+    let app = st
+        .trigger
+        .app()
+        .ok_or_else(|| anyhow::anyhow!("GitHub App is unavailable"))?;
+    app.issue(&slug.owner, &slug.name, number).await
 }
 
 /// The configured wall-clock budget for a repo setup run.
@@ -663,8 +669,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
     // The resolved launch environment: selected profile < per-repo repo_env <
     // the repo file's [env]. It is needed before provisioning so a real agent
-    // launch can stop cleanly when neither the user nor an environment layer
-    // provides GH_TOKEN.
+    // launch can stop cleanly when the selected profile has no App access.
     let mut extra_env = layer_launch_environment(
         &st.db,
         &repo_root,
@@ -681,14 +686,6 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
             .map_err(|e| ProvisionError::invalid(e.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
-    // Select the launching user's GitHub credential by overlaying it as
-    // GH_TOKEN (design §6.3, "Level B"). See `apply_user_github_token` for the
-    // precedence rules. This happens before preflight. Ordinary sessions export
-    // it; a restricted ACP launch removes it from the adapter environment and
-    // its server-side GitHub tool independently resolves an App or profile
-    // credential.
-    apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await;
-
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     let github_app = if (!session_github_repositories.is_empty())
         || (launch_profile.restricted && managed_slug.is_some())
@@ -697,20 +694,20 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     } else {
         None
     };
-    if !crate::runtime::github_token_available(
-        &st.db,
-        &extra_env,
-        created_by.as_deref(),
-        &runtime,
-        github_app,
-    )
-    .await?
+    if current_github_repo.is_some()
+        && !crate::runtime::github_credential_available(
+            &st.db,
+            created_by.as_deref(),
+            github_app,
+            crate::runtime::user_github_token_allowed(&class, launch_profile.restricted),
+        )
+        .await?
     {
         return Err(ProvisionError::CredentialRequired(
             crate::runtime::MISSING_GITHUB_TOKEN_MESSAGE.to_string(),
         ));
     }
-    tracing::debug!(runtime = %runtime, "github token availability check passed");
+    tracing::debug!(runtime = %runtime, "github app availability check passed");
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
     let mut goal = req.goal.unwrap_or_default().trim().to_string();
@@ -741,7 +738,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         github_issue = Some(number);
         github_repo = match managed_slug.as_ref() {
             Some(repo) => Some(repo.slug()),
-            None => github::repo_slug(&repo_root).await.ok(),
+            None => crate::repo::github_slug_for_root(&st.db, &repo_root).await?,
         };
         tracing::debug!(issue = number, github_repo = ?github_repo, "seeded session fields from github issue");
     } else if let Some(number) = req.github_issue {
@@ -1211,7 +1208,19 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     let session_token =
         crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
             .await?;
-    stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted).await;
+    let user_token_applied =
+        if crate::runtime::user_github_token_allowed(&class, launch_profile.restricted) {
+            apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await
+        } else {
+            false
+        };
+    stamp_github_auth_mode(
+        &mut extra_env,
+        github_app,
+        launch_profile.restricted,
+        user_token_applied,
+    )
+    .await;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     let session = if protocol == "acp" {
