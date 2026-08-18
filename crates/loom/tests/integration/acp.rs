@@ -1595,11 +1595,13 @@ async fn session_send_restarts_a_live_turn() {
     }));
 }
 
-/// User-console feedback uses a supported adapter's steering extension while
-/// the model is receptive, keeping the current work alive.
+/// User-console feedback remains preemptive when the adapter advertises its
+/// private steering extension. An `injected` response only proves the adapter
+/// queued the message; the model can still enter a long tool call before it
+/// observes that input, so immediate delivery must stop and replace the turn.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn prompt_send_now_steers_a_receptive_live_turn() {
+async fn prompt_send_now_restarts_a_steerable_live_turn() {
     let ts = TestServer::start().await;
     start_new_with_env(
         &ts,
@@ -1626,32 +1628,30 @@ async fn prompt_send_now_steers_a_receptive_live_turn() {
         .await
         .unwrap();
     assert_eq!(sent["queued"], false, "response: {sent}");
-    assert_eq!(sent["turn"], 0, "steering stays in the live turn");
+    assert_eq!(sent["turn"], 1, "the replacement opens the next turn");
 
     let chat = poll_chat(&ts, "acp-prompt-steer", Duration::from_secs(10), |blocks| {
-        blocks.iter().any(|block| {
-            block["kind"] == "agent_message"
-                && block["payload"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("injected"))
-        })
+        blocks
+            .iter()
+            .any(|block| block["kind"] == "agent_message" && block["payload"]["text"] == "injected")
     })
     .await;
     let blocks = chat["blocks"].as_array().unwrap();
     assert!(blocks.iter().any(|block| {
         block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 1
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:injected"
-            && block["payload"]["steered"] == true
-    }));
-    assert!(!blocks.iter().any(|block| {
-        block["kind"] == "turn_end" && block["payload"]["stop_reason"] == "cancelled"
+            && block["payload"].get("steered").is_none()
     }));
 }
 
-/// codex-acp acknowledges steering while the model is blocked in a tool, but a
-/// later cancellation can discard that unconsumed in-memory input. User-console
-/// feedback therefore falls back to one normal stop-and-send at that boundary.
+/// User-console feedback stops and replaces a tool-blocked turn without probing
+/// the adapter's private steering extension first.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prompt_send_now_restarts_a_tool_blocked_live_turn() {

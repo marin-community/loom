@@ -2030,8 +2030,8 @@ pub(super) struct PromptBody {
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
-    /// Deliver this user message immediately: steer a receptive live turn, or
-    /// cancel and replace one blocked behind a tool or permission.
+    /// Deliver this user message immediately by cancelling any live turn and
+    /// starting the message as a normal prompt.
     #[serde(default)]
     pub send_now: bool,
     /// Promote the server's durable next-turn queue instead of sending `text`.
@@ -2151,9 +2151,9 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 
 /// Send a user message to an ACP session. A normal request is dispatched when
 /// idle or appended to the durable queue while a turn is live; `send_now`
-/// instead steers a receptive live turn or cancels and replaces one blocked at
-/// a tool/permission boundary. Returns 202 `{ queued, turn }`. Every send records
-/// a `nudge` event (the audit rule).
+/// instead cancels any live turn and starts the message as a normal prompt.
+/// Returns 202 `{ queued, turn }`. Every send records a `nudge` event (the audit
+/// rule).
 pub(super) async fn prompt_session(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -2174,7 +2174,7 @@ pub(super) async fn prompt_session(
         let resources = prompt_resources(&session.work_dir, &req.files).await?;
         if req.send_now {
             handle
-                .steer_or_restart(req.text.clone(), Some(by.clone()), resources)
+                .stop_and_send(req.text.clone(), Some(by.clone()), resources)
                 .await
         } else {
             handle
