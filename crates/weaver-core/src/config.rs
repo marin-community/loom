@@ -38,7 +38,7 @@ pub const DEFAULT_GITHUB_PROFILE: &str = "default";
 /// Reasoning effort for Slack-origin sessions. Slack conversations usually
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
-pub const DEFAULT_SLACK_EFFORT: &str = "high";
+pub const DEFAULT_SLACK_EFFORT: &str = "medium";
 /// Named launch profile selected by Slack-triggered sessions.
 pub const DEFAULT_SLACK_PROFILE: &str = "default";
 /// Sentinel that leaves a Slack-origin session's profile effort unchanged.
@@ -257,7 +257,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         label: "Slack reasoning effort",
         description: "Reasoning effort for Slack-origin sessions. Slack \
             conversations generally favor a faster direct answer, so the \
-            default is `high` rather than an extra-high tier. Choose \
+            default is `medium` rather than a deeper tier. Choose \
             `agent-default` to inherit the selected agent profile unchanged. \
             Profiles that lock or do not support this setting also keep their \
             configured effort.",

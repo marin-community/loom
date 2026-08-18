@@ -54,9 +54,10 @@ frame it receives, in order:
    slash command — rather than launched again. If the recorded session is
    unreachable, loom archives it and relaunches on the kept branch so the
    request is not dropped. Otherwise loom clones/resolves the repo, pulls
-   conversation history to seed the session goal (up to 40 replies for a
-   mention inside a thread; for a top-level mention or slash command, up to 10
-   preceding channel messages explicitly labeled as potentially unrelated),
+   conversation history to seed the session goal (the last 15 replies for a
+   mention inside a thread, with the summoning message labeled in the
+   transcript; for a top-level mention or slash command, up to 10 preceding
+   channel messages explicitly labeled as potentially unrelated),
    and creates the session on a stable `slack-<hash>` branch derived
    from the thread identity, so a later trigger on the same thread finds the
    same branch.
@@ -200,7 +201,7 @@ discarding the tokens — use it to pause the integration without losing
 configuration. It, along with `slack.allowed_users`, `slack.default_repo`, and
 `slack.idle_archive_secs`, lives in **Settings → Slack**. Presentation and
 profile-selection settings live there as well. `slack.profile` defaults to
-`default`; `slack.effort` defaults Slack-origin sessions to `high` reasoning
+`default`; `slack.effort` defaults Slack-origin sessions to `medium` reasoning
 effort, while `agent-default` preserves the selected profile's effort. Locked
 or incompatible profiles fall back automatically.
 
