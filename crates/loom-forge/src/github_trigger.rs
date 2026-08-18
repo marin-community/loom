@@ -653,10 +653,10 @@ pub struct IssueState {
 /// so a test can install a fake.
 pub struct GithubTrigger {
     gh: Arc<dyn GithubApi>,
-    /// The GitHub **App** client, when production-built: the same object the
-    /// `gh` gateway points at, kept concretely so the webhook can query
-    /// installations (the implicit allowlist, §6.3). `None` when a test installs
-    /// a bare [`GithubApi`] fake via [`with_gateway`](Self::with_gateway).
+    /// The GitHub **App** client, when available: normally the same object the
+    /// gateway points at, kept concretely so the webhook can query installations
+    /// and server operations can mint credentials. Tests may pair a recording
+    /// [`GithubApi`] fake with a configured App client.
     app: Option<Arc<crate::github_app::GithubApp>>,
     /// Per-repo trigger timestamps, pruned to [`RATE_WINDOW`] on each check.
     limiter: Mutex<HashMap<String, Vec<Instant>>>,
@@ -694,14 +694,26 @@ impl GithubTrigger {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_gateway_and_app(
+        gh: Arc<dyn GithubApi>,
+        app: Arc<crate::github_app::GithubApp>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            gh,
+            app: Some(app),
+            limiter: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// The GitHub gateway, for the permission check and the reply.
     pub fn gh(&self) -> &dyn GithubApi {
         self.gh.as_ref()
     }
 
-    /// The concrete GitHub App client when this trigger was production-built.
-    /// Callers that require credentials also check `is_configured`; tests may
-    /// install only a fake gateway and expose no App client.
+    /// The concrete GitHub App client available to server operations. Callers
+    /// that require credentials also check `is_configured`; focused trigger
+    /// unit tests may install only a fake gateway and expose no App client.
     pub fn app(&self) -> Option<&crate::github_app::GithubApp> {
         self.app.as_deref()
     }

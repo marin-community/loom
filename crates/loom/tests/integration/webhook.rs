@@ -164,6 +164,23 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
         .post("/api/repos", json!({ "repo": url }))
         .await
         .unwrap();
+    // The webhook's ordinary interactive session has no Account PAT in this
+    // fixture, so explicitly approve its repository for the App broker through
+    // the selected profile, just as an operator would in production.
+    let profile_name = weaver_core::config::get_or(
+        &ts.state.db,
+        "github.profile",
+        weaver_core::config::DEFAULT_GITHUB_PROFILE,
+    )
+    .await;
+    let mut profile = loom::profile::get(&ts.state.db, &profile_name)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.github_repositories = vec!["acme/widgets".to_string()];
+    loom::profile::upsert(&ts.state.db, &profile).await.unwrap();
     // The webhook builds a CreateReq with no agent, so it uses `agent.default`;
     // pin it to `shell` so the test doesn't try to launch a real claude.
     ts.client

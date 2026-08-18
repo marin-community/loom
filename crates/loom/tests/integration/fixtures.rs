@@ -196,7 +196,13 @@ impl TestServer {
         let addr = listener.local_addr().unwrap();
         let pool = db::connect(&db::default_db_path()).await.unwrap();
         let trigger = match github {
-            GithubFixture::Gateway(gh) => loom::github_trigger::GithubTrigger::with_gateway(gh),
+            GithubFixture::Gateway(gh) => {
+                let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
+                loom::github_trigger::GithubTrigger::with_gateway_and_app(
+                    gh,
+                    std::sync::Arc::new(app),
+                )
+            }
             GithubFixture::ConfiguredApp => {
                 let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
                 loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app))
