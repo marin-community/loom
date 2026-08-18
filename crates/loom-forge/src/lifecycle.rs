@@ -44,7 +44,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::runtime::{
-    apply_user_github_token, layer_launch_environment, repo_cfg_or_default, set_env,
+    configure_session_github_auth, layer_launch_environment, repo_cfg_or_default, set_env,
     stamp_github_auth_mode,
 };
 use crate::session::{self as session_mod, NewSession, Session};
@@ -87,23 +87,19 @@ pub async fn resume_environment(
             .unwrap_or_default();
         env = crate::profile::cleared_environment(env, &allowlist);
     }
-    let user_token_applied =
-        if crate::runtime::user_github_token_allowed(&session.class, session.policy_restricted) {
-            apply_user_github_token(&st.db, &mut env, session.created_by.as_deref()).await
-        } else {
-            false
-        };
     let github_repositories =
         serde_json::from_str::<Vec<String>>(&session.policy_github_repositories)
             .unwrap_or_default();
     let github_app = (!github_repositories.is_empty())
         .then(|| st.trigger.app())
         .flatten();
-    stamp_github_auth_mode(
+    configure_session_github_auth(
+        &st.db,
         &mut env,
-        github_app,
+        session.created_by.as_deref(),
+        &session.class,
         session.policy_restricted,
-        user_token_applied,
+        github_app,
     )
     .await;
     env

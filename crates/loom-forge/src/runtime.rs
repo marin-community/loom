@@ -73,7 +73,7 @@ pub async fn layer_launch_environment(
     // Reject legacy snapshot values as well as newly configured values. This
     // guarantees that the only non-empty GH_TOKEN reaching mode selection is
     // the per-user credential overlaid later by `apply_user_github_token`.
-    env.retain(|(name, _)| !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
+    env.retain(|(name, _)| !crate::agent_env::is_github_token_name(name));
     let repo_root_str = repo_root.display().to_string();
     if restricted {
         tracing::debug!(repo = %repo_root_str, profile = profile_name, "restricted launch uses profile environment only");
@@ -83,7 +83,7 @@ pub async fn layer_launch_environment(
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN"));
+        .filter(|(name, _)| !crate::agent_env::is_github_token_name(name));
     let config_pairs = config_env_pairs(cfg);
     if strict {
         // A strict profile's declared names are policy, not defaults. Repo
@@ -188,6 +188,25 @@ pub async fn stamp_github_auth_mode(
     set_env(env, "GITHUB_TOKEN", String::new());
     set_env(env, GITHUB_AUTH_MODE_ENV, mode.as_str().to_string());
     mode
+}
+
+/// Apply the only permitted direct credential, then stamp the adapter mode for
+/// one session. Lifecycle paths use this single entrypoint so fresh launches,
+/// resumptions, and handoffs cannot disagree about Account-token eligibility.
+pub async fn configure_session_github_auth(
+    db: &Db,
+    env: &mut Vec<(String, String)>,
+    created_by: Option<&str>,
+    class: &str,
+    restricted: bool,
+    github_app: Option<&crate::github_app::GithubApp>,
+) -> GithubAuthMode {
+    let user_token_applied = if user_github_token_allowed(class, restricted) {
+        apply_user_github_token(db, env, created_by).await
+    } else {
+        false
+    };
+    stamp_github_auth_mode(env, github_app, restricted, user_token_applied).await
 }
 
 /// Resolve a profile's App-token allowlist into the repositories stamped on

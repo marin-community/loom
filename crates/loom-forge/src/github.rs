@@ -1,12 +1,10 @@
 //! GitHub integration through Loom's configured GitHub App.
 //!
-//! Two responsibilities live here:
-//!
-//! * **PR status polling** ([`poll`], [`refresh`]) — the
-//!   background loop that snapshots each live session's pull request (link,
-//!   review decision, check rollup) into the `branch_github` table, and
-//!   archives a session — closing the weaver issues it was working — once its PR
-//!   merges. The snapshot rides along on `BranchView`; the dashboard renders it.
+//! It owns PR status polling ([`poll`], [`refresh`]): the background loop
+//! snapshots each live session's pull request (link, review decision, check
+//! rollup) into the `branch_github` table, and archives a session — closing the
+//! weaver issues it was working — once its PR merges. The snapshot rides along
+//! on `BranchView`; the dashboard renders it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -40,8 +38,8 @@ pub struct Issue {
 // The latest pull-request snapshot loom found for a branch, persisted in the
 // `branch_github` table (one row per branch) and served inside `BranchView`.
 // The background `poll` loop keeps it fresh; `refresh` does one branch on
-// demand. Everything degrades to "no snapshot" when `gh` is missing or the repo
-// has no GitHub remote.
+// demand. Everything degrades to "no snapshot" when the App is unavailable or
+// the repo has no GitHub remote.
 // ---------------------------------------------------------------------------
 
 const POLL_TICK: Duration = Duration::from_secs(60);
@@ -368,10 +366,7 @@ pub async fn record_status_comment(
     .ok();
 }
 
-/// The fields requested from `gh pr view --json`. Kept in one place so the parse
-/// struct and the query can't drift.
-/// The shape of one `gh pr view --json` record. Internal — callers see
-/// [`GithubStatus`].
+/// The GraphQL pull-request shape. Internal — callers see [`GithubStatus`].
 #[derive(Debug, Deserialize)]
 struct PrJson {
     number: i64,

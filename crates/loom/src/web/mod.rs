@@ -153,6 +153,24 @@ use weaver_api::{
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::Branch;
+
+pub(super) async fn configured_github_app(
+    st: &AppState,
+) -> ApiResult<&crate::github_app::GithubApp> {
+    let app = st.trigger.app().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        )
+    })?;
+    if !app.is_configured().await {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        ));
+    }
+    Ok(app)
+}
 use weaver_core::tags;
 
 // ---------------------------------------------------------------------------

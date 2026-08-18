@@ -1229,12 +1229,7 @@ pub(super) async fn add_github_session_labels(
         .ok_or_else(|| AppError::bad_request("session repository has no GitHub identity"))?;
     let repo = crate::repo::parse_slug(&slug)
         .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
-    let app = st.trigger.app().ok_or_else(|| {
-        AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub App credential is unavailable",
-        )
-    })?;
+    let app = super::configured_github_app(&st).await?;
     app.add_thread_labels(&repo, status.pr_number, &labels)
         .await
         .map_err(|e| github_request_error("label this pull request", e))?;

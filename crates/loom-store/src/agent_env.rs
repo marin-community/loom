@@ -37,6 +37,11 @@ pub struct EnvVar {
 const RESERVED_PREFIXES: &[&str] = &["WEAVER_", "LOOM_"];
 const RESERVED_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
 
+/// Whether `name` is one of the stock GitHub clients' credential variables.
+pub fn is_github_token_name(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
 /// Validate an environment-variable name. Accept the POSIX-portable identifier
 /// shape (`[A-Za-z_][A-Za-z0-9_]*`): a leading letter or underscore, then
 /// letters, digits, or underscores. This is exactly what the `export NAME=…` in
@@ -66,7 +71,7 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
              environment and cannot be overridden"
         ));
     }
-    if RESERVED_NAMES.contains(&name) {
+    if is_github_token_name(name) {
         return Err(format!(
             "name '{name}' is reserved: GitHub credentials are managed by Loom"
         ));

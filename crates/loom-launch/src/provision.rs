@@ -11,9 +11,7 @@ use weaver_core::tags;
 use weaver_core::BoxFut;
 
 use crate::auth::{Grant, Principal};
-use crate::runtime::{
-    apply_user_github_token, layer_launch_environment, set_env, stamp_github_auth_mode,
-};
+use crate::runtime::{configure_session_github_auth, layer_launch_environment, set_env};
 use crate::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
@@ -1208,17 +1206,13 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     let session_token =
         crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
             .await?;
-    let user_token_applied =
-        if crate::runtime::user_github_token_allowed(&class, launch_profile.restricted) {
-            apply_user_github_token(&st.db, &mut extra_env, created_by.as_deref()).await
-        } else {
-            false
-        };
-    stamp_github_auth_mode(
+    configure_session_github_auth(
+        &st.db,
         &mut extra_env,
-        github_app,
+        created_by.as_deref(),
+        &class,
         launch_profile.restricted,
-        user_token_applied,
+        github_app,
     )
     .await;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);

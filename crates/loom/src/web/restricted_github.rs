@@ -61,18 +61,7 @@ pub(super) async fn github_token(
             "session profile has no GitHub repository credential",
         ));
     }
-    let app = st.trigger.app().ok_or_else(|| {
-        AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub App credential is unavailable",
-        )
-    })?;
-    if !app.is_configured().await {
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub App credential is unavailable",
-        ));
-    }
+    let app = super::configured_github_app(&st).await?;
     let token = app
         .token_for_repositories(&repositories)
         .await
@@ -225,18 +214,7 @@ pub(super) async fn restricted_github_tool(
             "GitHub tool target does not match the session's linked thread",
         ));
     }
-    let app = st.trigger.app().ok_or_else(|| {
-        AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub App credential is unavailable",
-        )
-    })?;
-    if !app.is_configured().await {
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "GitHub App credential is unavailable",
-        ));
-    }
+    let app = super::configured_github_app(&st).await?;
     let text = invoke_app(app, &repo, &tool, &arguments).await?;
     Ok(Json(RestrictedGithubToolView { text }))
 }

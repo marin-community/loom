@@ -310,18 +310,25 @@ impl GithubApp {
         }))
     }
 
-    /// Add a comment to an issue or pull request. GitHub exposes comments for
-    /// both through the issue-comment endpoint.
-    pub async fn thread_comment(&self, repo: &RepoSlug, number: i64, body: &str) -> Result<()> {
-        self.repo_request(
-            repo,
-            reqwest::Method::POST,
-            &format!("issues/{number}/comments"),
-            Some(&serde_json::json!({ "body": body })),
-            "commenting on the GitHub thread",
-        )
-        .await?;
-        Ok(())
+    /// Add a comment to an issue or pull request and return its id. GitHub
+    /// exposes comments for both through the issue-comment endpoint.
+    pub async fn thread_comment(&self, repo: &RepoSlug, number: i64, body: &str) -> Result<i64> {
+        let response = self
+            .repo_request(
+                repo,
+                reqwest::Method::POST,
+                &format!("issues/{number}/comments"),
+                Some(&serde_json::json!({ "body": body })),
+                "commenting on the GitHub thread",
+            )
+            .await?;
+        let created: serde_json::Value = response
+            .json()
+            .await
+            .context("parsing created-comment json")?;
+        created["id"]
+            .as_i64()
+            .ok_or_else(|| anyhow!("created-comment json carries no id"))
     }
 
     /// Edit the body and optional title of an issue or pull request.
@@ -638,27 +645,7 @@ impl GithubApp {
 impl GithubApi for GithubApp {
     async fn post_issue_comment(&self, repo: &str, issue: i64, body: &str) -> Result<i64> {
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
-        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
-        let url = format!(
-            "{}/repos/{}/{}/issues/{issue}/comments",
-            self.api_base, slug.owner, slug.name
-        );
-        let resp = self
-            .http
-            .post(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await
-            .context("posting the issue comment")?;
-        let resp = check_status(resp, "posting the issue comment").await?;
-        let created: serde_json::Value =
-            resp.json().await.context("parsing created-comment json")?;
-        let id = created["id"]
-            .as_i64()
-            .ok_or_else(|| anyhow!("created-comment json carries no id"))?;
+        let id = self.thread_comment(&slug, issue, body).await?;
         tracing::info!(repo, issue, comment = id, "posted issue comment");
         Ok(id)
     }

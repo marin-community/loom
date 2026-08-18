@@ -639,17 +639,13 @@ async fn handoff_session_inner(
         &session.branch_id,
     )
     .await?;
-    let user_token_applied = if runtime::user_github_token_allowed(&plan.class, plan.restricted) {
-        runtime::apply_user_github_token(&st.db, &mut extra_env, session.created_by.as_deref())
-            .await
-    } else {
-        false
-    };
-    runtime::stamp_github_auth_mode(
+    runtime::configure_session_github_auth(
+        &st.db,
         &mut extra_env,
-        github_app,
+        session.created_by.as_deref(),
+        &plan.class,
         plan.restricted,
-        user_token_applied,
+        github_app,
     )
     .await;
     runtime::set_env(&mut extra_env, "LOOM_TOKEN", staged_token.value.clone());
