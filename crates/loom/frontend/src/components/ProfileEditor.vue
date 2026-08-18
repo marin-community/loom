@@ -300,7 +300,7 @@ watch(
         :disabled="disabled"
         class="min-w-0 rounded bg-input px-2 py-1.5"
       >
-        <option value="weaver">Weaver</option>
+        <option value="weaver">Loom</option>
         <option value="none">None (caller prompt only)</option>
       </select>
     </div>

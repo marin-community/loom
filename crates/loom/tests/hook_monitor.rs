@@ -1,5 +1,5 @@
 //! Writing a `hook` event row drives the monitor to flip session status on
-//! its next tick. This mirrors what `weaver hook --event …` does in practice
+//! its next tick. This mirrors what `loom hook --event …` does in practice
 //! (writes an event row, no HTTP); see the `weaver` crate's `agent_cli`
 //! integration test for the binary-driven side.
 
@@ -146,7 +146,7 @@ async fn hook_event_drives_session_status() {
         session.branch_id
     };
 
-    // What `weaver hook --event working` would do: write a `hook` event row.
+    // What `loom hook --event working` would do: write a `hook` event row.
     // Any hook means the agent process is alive → lifecycle `running`.
     weaver_core::events::record_local(&pool, &branch_id, "hook", json!({ "event": "working" }))
         .await

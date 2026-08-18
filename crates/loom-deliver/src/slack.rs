@@ -7,7 +7,7 @@
 //! token, receives `slash_commands` / `app_mention` envelopes, and — for an
 //! authorized trigger — continues the session already wired to that thread or
 //! pulls the conversation and launches one, replying in-thread with a live "On
-//! it" card only for a launch. As the session reports `weaver status`,
+//! it" card only for a launch. As the session reports `loom status`,
 //! [`sync_status_message`] edits that Slack message in place, exactly as
 //! [`crate::github::sync_status_comment`] edits the GitHub comment.
 //!
@@ -804,7 +804,7 @@ fn retain_current_session_events(
 }
 
 /// Render the configured Slack status card: its header, optional artifact
-/// links, then the optional `weaver status` trail (oldest-first, capped).
+/// links, then the optional `loom status` trail (oldest-first, capped).
 /// Pure, so the mrkdwn format is unit-testable. Slack link syntax is
 /// `<url|label>`, not Markdown's `[label](url)`.
 pub fn render_status(
@@ -1432,7 +1432,7 @@ async fn launch_inner(
         .map_err(|e| anyhow!("{e:?}"))?;
 
     // Wire the branch to the thread — what `sync_status_message` reads to mirror
-    // every `weaver status` write. Left untouched if already wired to this thread.
+    // every `loom status` write. Left untouched if already wired to this thread.
     let already = matches!(
         tags::get(&state.db, &created.branch.id, WIRED_TAG).await,
         Ok(Some(ref t)) if t.value == wiring
@@ -1658,7 +1658,7 @@ fn slack_goal(
          ## {history_heading}\n{history_note}\n\n{history}\n\n\
          ## How to respond\n\
          - Finish by sending a `result` to your own Loom channel; its origin binding delivers the same durable item to this Slack thread. Prefer the built-in `loom_channel.send` tool with `channel: \"self\"` and `kind: \"result\"`. The existing `slack_reply` tool and `$WEAVER_API/api/branches/$WEAVER_BRANCH/slack/reply` route remain compatibility facades over that channel path.\n\
-         - Your `weaver status` messages and the built-in `status_update` MCP tool are mirrored onto the Slack thread. When you create a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
+         - Your `loom status` messages and the built-in `status_set` MCP tool are mirrored onto the Slack thread. When you create a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
          - Do not leave the thread with only a progress card: the final Slack reply must be self-contained.",
         channel = trigger.channel_id,
         user = trigger.user_id,

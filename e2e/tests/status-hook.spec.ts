@@ -45,7 +45,7 @@ test.describe("status reflects hook and attention events", () => {
     await expect(conv).toContainText("Idle");
   });
 
-  test("detail view: weaver status sets level + message via SSE", async ({
+  test("detail view: loom status sets level + message via SSE", async ({
     page,
     weaver,
   }) => {

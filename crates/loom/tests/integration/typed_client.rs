@@ -10,7 +10,10 @@ use serial_test::serial;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
-use weaver_api::{CreateChannelMessageReq, CreateReq, SettingKind, SettingSource};
+use weaver_api::{
+    CreateChannelMessageReq, CreatePermissionRequestReq, CreateReq, DecidePermissionRequestReq,
+    SettingKind, SettingSource,
+};
 
 use crate::fixtures::TestServer;
 
@@ -161,6 +164,92 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(status[0].body, "review the boundary");
 
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn operation_discovery_and_permission_request_round_trip() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .create_session(&CreateReq {
+            cwd: ts.cwd(),
+            goal: Some("request repository access".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &created.id,
+        &created.branch.id,
+    )
+    .await
+    .unwrap();
+    let session = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
+
+    let meta = session.api_meta().await.unwrap();
+    assert_eq!(meta.product, "loom");
+    let operations = session.operations().await.unwrap();
+    let request_operation = operations
+        .iter()
+        .find(|operation| operation.id == "permissions.requests.create")
+        .expect("bound permission request operation is discoverable");
+    assert_eq!(request_operation.method, "POST");
+    assert_eq!(request_operation.path, "/api/permissions/requests/create");
+
+    let request = session
+        .create_permission_request(
+            &created.id,
+            &CreatePermissionRequestReq {
+                kind: "github_repository".to_string(),
+                repository: "acme/widgets".to_string(),
+                mode: "write".to_string(),
+                reason: "update the shared client".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(request.state, "pending");
+    assert_eq!(
+        session
+            .effective_permissions(&created.id)
+            .await
+            .unwrap()
+            .pending_requests[0]
+            .id,
+        request.id
+    );
+    let branch = session.get_session(&created.id).await.unwrap().branch;
+    assert_eq!(tag_value(&branch, "attention"), Some("attention"));
+
+    let error = session
+        .decide_permission_request(
+            &request.id,
+            &DecidePermissionRequestReq {
+                decision: "deny".to_string(),
+                reason: String::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("human operator"));
+
+    let denied = ts
+        .client
+        .decide_permission_request(
+            &request.id,
+            &DecidePermissionRequestReq {
+                decision: "deny".to_string(),
+                reason: "not needed".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.state, "denied");
+    assert_eq!(denied.decided_by.as_deref(), Some("rjpower"));
 }
 
 #[serial]

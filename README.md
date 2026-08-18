@@ -1,27 +1,22 @@
-# weaver
+# Loom
 
 A lightweight session orchestrator and communication surface for coding agents.
 
-weaver ships two binaries:
+Loom has one public command surface:
 
-- **`weaver`** — the **agent-facing CLI**. It is a thin HTTP client of loom's
-  REST API (via the `weaver-api` crate) — every command needs a reachable
-  `loom server run`. The agent inside a worktree uses it to read and update
-  the branch's **goal** and **description**, the session's durable
-  **channel**, and intentional repo **backlog items**.
-  Without a running loom, `weaver` fails fast with a plain-text error.
 - **`loom`** — the **orchestrator**. It runs the REST + SSE server, hosts a
   Vue dashboard, creates worktrees, launches agents under managed runtime
-  supervisors, and monitors their lifecycle. It is the only process that opens
-  the sqlite database directly.
+  supervisors, monitors their lifecycle, and exposes the same registered
+  operations through its CLI and MCP adapters. It is the only process that
+  opens the sqlite database directly.
 
-`loom` owns the sqlite database at `~/.weaver/weaver.db`; `weaver` never opens
-it — every read and write goes over HTTP to `loom`.
+`loom` owns the sqlite database at `~/.weaver/weaver.db`; every CLI, MCP, and
+browser operation goes through its REST API. There is no separate agent CLI.
 
 ## Getting Started
 
-The fastest way in is to **have your coding agent set weaver up for you**: open
-this repo in Claude Code (or your agent of choice) and tell it to *"set weaver up
+The fastest way in is to **have your coding agent set Loom up for you**: open
+this repo in Claude Code (or your agent of choice) and tell it to *"set Loom up
 for me — follow the Getting Started steps in the README."* The steps below are
 written for it to run; do them yourself if you'd rather.
 
@@ -31,14 +26,13 @@ written for it to run; do them yourself if you'd rather.
    cargo build
    ```
 
-   This produces `target/debug/weaver` and `target/debug/loom`.
+   This produces `target/debug/loom`.
 
-2. **Put both binaries on the PATH.** Symlink them into a directory already on
+2. **Put `loom` on the PATH.** Symlink it into a directory already on
    `$PATH` (e.g. `~/.local/bin`), so they stay current as you rebuild:
 
    ```sh
    mkdir -p ~/.local/bin
-   ln -sf "$PWD/target/debug/weaver" ~/.local/bin/weaver
    ln -sf "$PWD/target/debug/loom"   ~/.local/bin/loom
    ```
 
@@ -49,19 +43,24 @@ Then start the orchestrator and open the dashboard:
 
 ```sh
 loom server run     # REST + SSE server, runtime manager, background monitor
-loom open      # open the web UI (http://127.0.0.1:7878)
+loom open           # open the web UI (http://127.0.0.1:7878)
 ```
 
-`weaver` requires `loom server run` to be reachable — it resolves the server
-from `$WEAVER_API` (falling back to the address loom recorded while serving)
-and fails with a friendly error if it can't connect. See [Usage](#usage) for the
-full command surface, and [AGENTS.md](AGENTS.md) for the build/test loop and how
-to work on weaver itself.
+Run `loom help` for registered resource groups, `loom <group> --help` for
+syntax, `loom help --json` for machine-readable discovery, and inspect the
+running server's `/api/operations` or `/api/openapi.json` for its live surface.
+Each routine operation is one executable registration: descriptor, typed
+input/output, authority boundary, and implementation. Registration mounts the
+canonical `POST /api/<group>/<operation>` route; discovery, typed clients, and
+MCP enumerate that same entry. Argument constraints generate MCP tool
+descriptions and JSON Schema. Custom adapters remain available for streaming,
+PTY, file/stdin, interactive, and genuinely specialized bulk behavior.
+See [AGENTS.md](AGENTS.md) for the contributor build/test loop.
 
 ## Architecture
 
-`weaver` and the Vue SPA are REST clients of `loom`; only `loom` owns sqlite,
-worktrees, supervisors, agents, and background services. See
+The `loom` CLI, MCP adapters, and Vue SPA are REST clients; only the server owns
+sqlite, worktrees, supervisors, agents, and background services. See
 [Architecture](docs/ARCHITECTURE.md) for the module map, flows, storage model,
 and route catalogue.
 
@@ -70,20 +69,20 @@ and route catalogue.
 The common operator loop is launch, supervise, review, and archive:
 
 ```sh
-loom session launch "Add a /health endpoint"
-loom session poll <session>
-loom session wait <session>
-loom session send <session> "try the curl again"
-loom session interrupt <session>
-loom session url [<session>]
-loom session archive <session>
+loom sessions launch "Add a /health endpoint"
+loom sessions poll <session>
+loom sessions wait <session>
+loom sessions send <session> "try the curl again"
+loom sessions interrupt <session>
+loom sessions url [<session>]
+loom sessions archive <session>
 ```
 
 The task becomes the branch goal and opening prompt; Loom derives the
 `weaver/<slug>` branch name and forks from a freshly fetched default branch.
 Use `--repo` for another checkout or managed GitHub repository, `--base` to pin
 a parent branch, and `--claim` or `--issue` to seed the task from existing work.
-Run `loom session launch --help` for the complete launch surface.
+Run `loom sessions launch --help` for the complete launch surface.
 
 Profiles are reusable templates, not live session configuration. Omitted
 selectors inherit from the selected template and agent defaults. The resolver
@@ -98,7 +97,7 @@ A profile may also carry organization-owned opening instructions. Loom appends
 them for every origin that selects the profile: user and delegated launches,
 Slack and GitHub triggers, watches, and authenticated automation. This keeps
 workflow and response conventions in deployment configuration while Loom's
-own prompt supplies only Weaver mechanics and transport context.
+own prompt supplies only compact session and transport context.
 
 Loom seeds lightweight instructions for an untouched `default` profile and
 editable `slack` and `github` starters from the same runtime posture. Their
@@ -144,7 +143,7 @@ title assistance run with a cleared environment, no tools, and no MCP. Restricte
 session content is excluded unless the operator explicitly enables it, and
 source fingerprints prevent stale generated text from overwriting newer state.
 
-`loom session url` prints a session's dashboard URL — the link to hand a person,
+`loom sessions url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
 running inside, which is how an agent links a PR back to the work behind it.
@@ -154,38 +153,39 @@ same-id channel whose opening goal records its charter. Messages are append-only
 read markers are per participant, and delivery is recorded per server-owned
 binding. A Slack-origin session binds its own channel to that thread, so one
 idempotent `result` append is both the canonical outcome and the external reply.
-The dashboard's Channels pane is a dense split mailbox; `weaver channel
+The dashboard's Channels pane is a dense split mailbox; `loom channels
 list|get|read|send|wait|ack` exposes the same REST model to agents (`ls` remains
 an alias for `list`).
 
 Issues remain intentional repository backlog or external mappings.
 `source_branch` records provenance;
-`claimed_branch` records the branch currently working the issue. The agent CLI
-defaults to this branch's claims plus the unclaimed backlog, while the Loom board
+`claimed_branch` records the branch currently working the issue. Loom's
+worktree-facing commands default to this branch's claims plus the unclaimed backlog, while the Loom board
 shows the repository. Batch commands use the same atomic API as the Issues pane:
-`loom issue close 7 9`, `loom issue reopen 7 9`,
-`loom issue tag --key area --value ui 7 9`,
-`loom issue untag --key area 7 9`, and `loom issue delete 7 9`.
+`loom issues close 7 9`, `loom issues reopen 7 9`,
+`loom issues tag set 7 9 area ui`,
+`loom issues tag delete 7 9 area`, and `loom issues delete 7 9`.
 If any ID or precondition is invalid, none of the requested issues changes.
 
-An ordinary launch does not manufacture an issue. `loom session launch` prints
-the new session/channel id; a parent follows it with `weaver channel read
---channel <id>` or blocks with `weaver channel wait --channel <id>`. Explicit
+An ordinary launch does not manufacture an issue. `loom sessions launch` prints
+the new session/channel id; a parent follows it with `loom channels read
+--channel <id>` or blocks with `loom channels wait --channel <id>`. Explicit
 `--claim` and GitHub-triggered launches retain a compatibility issue association
 because that work item already exists outside the session.
 
 Inside a worktree, the compact agent loop is:
 
 ```sh
-weaver summary
-weaver status set --tag ok --message "implementing the API"
-weaver channel read
-weaver artifact write design design.md
-weaver channel send "ready for review"
+loom summary
+loom status set --tag ok --message "implementing the API"
+loom channels read
+loom artifacts write design design.md
+loom channels send "ready for review"
 ```
 
-`weaver readme` prints the complete in-workspace workflow. Each command requires
-the current `WEAVER_BRANCH` and a reachable Loom server.
+`loom permissions show` reports the session's effective operations and external
+repository scope. `loom permissions request --help` exposes the durable human
+approval flow when another repository is needed.
 
 ## Status & attention
 
@@ -201,9 +201,9 @@ The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),
 `attention` (a question, a decision, "ready for review"), or `blocked` (stuck,
 needs help). Agents set it with
-`weaver status set --tag <level> --message "<message>"`, which records both the
+`loom status set --tag <level> --message "<message>"`, which records both the
 level and a one-line current-state message; omitting `--message` changes the
-level and keeps the last message. `weaver status get` reads the current value. The
+level and keeps the last message. `loom status get` reads the current value. The
 dashboard shows both and lets you filter for sessions that need a human. It
 replaces the old guessed working/waiting/idle indicator, which was often wrong —
 e.g. it read "idle" while the agent was actually waiting on a background
@@ -221,7 +221,7 @@ An orphaned session can be adopted: Loom recreates the stamped runtime and
 resumes it through that runtime's recovery contract.
 
 ```sh
-loom session adopt <branch>                   # or the "Adopt" button in the web UI
+loom sessions adopt <branch>                  # or the "Adopt" button in the web UI
 ```
 
 Set `server.auto_adopt` to have loom adopt every recoverable session
@@ -242,7 +242,7 @@ worktree, branch, durable journal, and session URL stay in place.
 The same action is available outside the browser:
 
 ```sh
-loom session recover <branch>
+loom sessions recover <branch>
 ```
 
 For an archived session, this command retains its existing meaning: rebuild the
@@ -269,15 +269,15 @@ stays visible and can be pulled back into the composer with its **Edit** action
 or ArrowUp from an empty composer, or sent immediately with **Stop & send**. The
 live status names visible thinking, writing, or tool activity and reports how
 long it has been since the agent produced an observable update; quiet time is
-not guessed to mean stuck. Cross-session `loom session send` uses the same
+not guessed to mean stuck. Cross-session `loom sessions send` uses the same
 stop-and-send behavior.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript
 (Claude Code or Codex), normalizes it, and writes a machine-readable `chat.json`
 plus a readable `chat.md` under `session.log_dir`
-(default `~/.iris/logs/sessions/<branch>/`). `weaver chatlog` renders the same
-log for a live session on the command line.
+(default `~/.iris/logs/sessions/<branch>/`). `loom sessions transcript`
+renders the same local log without contacting the server.
 
 Agents can page or literally search that same normalized history through
 session-scoped REST. ACP reads its durable journal; terminal agents normalize
@@ -291,15 +291,15 @@ Ordinary sessions are archived after ten days without activity by default. The
 GitHub poller checks sessions active within the last ten minutes every minute,
 the rest of the first quiet day every ten minutes, and older live sessions every
 hour. A merged PR is archived on the next poll for its activity tier. Both paths
-tear down the terminal and worktree while keeping the branch and its weaver
+tear down the terminal and worktree while keeping the branch and its Loom
 history, the same as the Archive button.
 Profiles can override the idle interval (an explicit `0` disables that TTL). To
 keep one session until you archive it yourself, choose **Disable auto-archive**
 from that session's **Details** popover, or set its quiet opt-out label:
 
 ```sh
-weaver tag set auto-archive disabled
-weaver tag rm auto-archive                    # allow automatic archive again
+loom sessions tags set auto-archive disabled
+loom sessions tags delete auto-archive        # allow automatic archive again
 ```
 
 The opt-out also applies to automation cleanup and the other background
@@ -391,7 +391,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
 
   ```sh
   loom login production --url https://loom.example.com
-  loom session launch "Investigate the failing test in #123"
+  loom sessions launch "Investigate the failing test in #123"
   ```
 
   For an ephemeral environment, the environment-variable form remains
@@ -432,7 +432,7 @@ instructions. Edit both in
 Settings or use the operator CLI:
 
 ```sh
-weaver config ls
+loom settings list
 loom profile ls
 loom profile show default
 loom profile show ops --effective
@@ -464,13 +464,13 @@ and keep provider credentials server-side. See
 [Restricted sessions](docs/restricted-sessions.md).
 
 The complete setting registry is self-documenting in Settings and
-`weaver config ls`. Environment variables and runtime defaults are catalogued in
+`loom settings list`. Environment variables and runtime defaults are catalogued in
 [Architecture](docs/ARCHITECTURE.md#environment); standalone deployment values
 live in [deploy/README.md](deploy/README.md). Registered settings share one
 [configuration precedence policy](docs/configuration.md): runtime override →
 deployment default → built-in default.
 
-## Developing weaver
+## Developing Loom
 
 See [AGENTS.md](AGENTS.md) for the proportional test loop, pre-commit gate,
 repository conventions, and PR workflow.

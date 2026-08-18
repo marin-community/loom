@@ -6,23 +6,57 @@ use serde_json::{json, Value};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_session";
-const TOOL_NAMES: [&str; 4] = ["get", "status", "history", "search"];
-const READ_TOOLS: &[&str] = &["get", "history", "search"];
-const WRITE_TOOLS: &[&str] = &["status"];
+const TOOL_NAMES: [&str; 7] = [
+    "get",
+    "summary",
+    "status_get",
+    "status_set",
+    "status",
+    "history",
+    "search",
+];
+const CANONICAL_TOOL_NAMES: [&str; 6] = [
+    "get",
+    "summary",
+    "status_get",
+    "status_set",
+    "history",
+    "search",
+];
+const READ_TOOLS: &[&str] = &["get", "summary", "status_get", "history", "search"];
+const WRITE_TOOLS: &[&str] = &["status_set"];
+const LEGACY_READ_TOOLS: &[&str] = &["get", "history", "search"];
+const LEGACY_WRITE_TOOLS: &[&str] = &["status"];
 const CAPABILITY_SETS: &[CapabilitySet] = &[
+    CapabilitySet {
+        name: "loom/sessions/read@v1",
+        group: "session",
+        version: "v1",
+        description: "Inspect visible sessions, catch-up state, status, and normalized history.",
+        tools: READ_TOOLS,
+    },
+    CapabilitySet {
+        name: "loom/sessions/write@v1",
+        group: "session",
+        version: "v1",
+        description: "Update this session's durable status projection and status stream.",
+        tools: WRITE_TOOLS,
+    },
+    // Existing pinned sessions keep their exact identities during the CLI/MCP
+    // migration. New profile resolution receives the canonical Loom bundles.
     CapabilitySet {
         name: "mcp/session/read@v1",
         group: "session",
         version: "v1",
         description: "Inspect visible sessions and normalized session history.",
-        tools: READ_TOOLS,
+        tools: LEGACY_READ_TOOLS,
     },
     CapabilitySet {
         name: "mcp/session/status@v1",
         group: "session",
         version: "v1",
         description: "Update this session's durable status projection and status stream.",
-        tools: WRITE_TOOLS,
+        tools: LEGACY_WRITE_TOOLS,
     },
 ];
 
@@ -50,66 +84,19 @@ fn server_config() -> Value {
     super::builtin_server_config("session")
 }
 
-fn session_property() -> Value {
-    json!({
-        "type": "string", "minLength": 1,
-        "description": "A visible session id. Omit or pass 'self' for this session."
-    })
-}
-
-fn history_properties() -> Value {
-    json!({
-        "before": { "type": "string", "minLength": 1 },
-        "limit": { "type": "integer", "minimum": 1, "maximum": crate::history::MAX_LIMIT },
-        "kinds": { "type": "array", "uniqueItems": true, "items": {
-            "type": "string", "enum": crate::history::KINDS
-        }}
-    })
-}
-
 fn tools() -> Value {
-    let history = history_properties();
-    json!([
-        {
-            "name": "get",
-            "description": "Get one visible session and its branch/lifecycle metadata.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "session": session_property()
-            }}
-        },
-        {
-            "name": "status",
-            "description": "Update this session's status projection and append a typed status item to its channel.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "level": { "type": "string", "enum": ["ok", "attention", "blocked"] },
-                "message": { "type": "string", "maxLength": 4096 }
-            }, "required": ["level", "message"] }
-        },
-        {
-            "name": "history",
-            "description": "Page normalized records for one visible session, newest tail first.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "session": session_property(),
-                "before": history["before"], "limit": history["limit"], "kinds": history["kinds"]
-            }}
-        },
-        {
-            "name": "search",
-            "description": "Case-insensitive literal search over one visible session's normalized history.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "session": session_property(),
-                "q": { "type": "string", "minLength": 1, "maxLength": crate::history::MAX_QUERY_BYTES },
-                "before": history["before"], "limit": history["limit"], "kinds": history["kinds"]
-            }, "required": ["q"] }
-        }
-    ])
-}
-
-async fn resolve_session(client: &weaver_api::Client, arguments: &Value) -> Result<String> {
-    match super::string_argument(arguments, "session")? {
-        Some(session) if session != "self" => Ok(session.to_string()),
-        _ => Ok(client.self_context().await?.session_id),
-    }
+    let mut tools = weaver_api::mcp_tools_ordered(SERVER_NAME, &CANONICAL_TOOL_NAMES)
+        .as_array()
+        .expect("generated session MCP catalogue is an array")
+        .clone();
+    let mut legacy_status = tools
+        .iter()
+        .find(|tool| tool["name"] == "status_set")
+        .expect("status_set is a registered session operation")
+        .clone();
+    legacy_status["name"] = json!("status");
+    tools.insert(4, legacy_status);
+    Value::Array(tools)
 }
 
 fn history_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
@@ -161,11 +148,33 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     let client = super::runtime_client("session")?;
     match name {
         "get" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let session = client.get_session(&id).await?;
             super::structured_result(&format!("session {id}"), &session)
         }
-        "status" => {
+        "summary" => {
+            let id = super::resolve_session_argument(&client, &arguments).await?;
+            let summary = client.session_summary(&id).await?;
+            super::structured_result(&format!("session {id} summary"), &summary)
+        }
+        "status_get" => {
+            let id = super::resolve_session_argument(&client, &arguments).await?;
+            let session = client.get_session(&id).await?;
+            let attention = session
+                .branch
+                .tags
+                .iter()
+                .find(|tag| tag.key == weaver_core::tags::ATTENTION_KEY)
+                .map(|tag| tag.value.as_str())
+                .unwrap_or("ok");
+            let value = json!({
+                "session_id": session.id,
+                "attention": attention,
+                "message": session.branch.description,
+            });
+            super::structured_result(&format!("session {id} status"), &value)
+        }
+        "status_set" | "status" => {
             let level =
                 super::string_argument(&arguments, "level")?.context("status requires level")?;
             if !matches!(level, "ok" | "attention" | "blocked") {
@@ -187,7 +196,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             super::structured_result(&format!("status updated to {level}"), &value)
         }
         "history" | "search" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let (before, limit, kinds) = history_args(&arguments)?;
             let page = if name == "history" {
                 client
@@ -227,6 +236,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(names, TOOL_NAMES);
+        assert_eq!(expand_tool_set("loom/sessions/read@v1").unwrap().len(), 5);
         assert_eq!(expand_tool_set("mcp/session/read@v1").unwrap().len(), 3);
     }
 }

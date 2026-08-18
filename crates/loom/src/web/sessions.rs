@@ -2299,9 +2299,16 @@ pub(super) struct PermissionBody {
 /// request id, 409 when it was already resolved.
 pub(super) async fn answer_permission(
     State(st): State<AppState>,
+    Extension(principal): Extension<crate::auth::Principal>,
     Path((key, request_id)): Path<(String, String)>,
     Json(req): Json<PermissionBody>,
 ) -> ApiResult<Json<Value>> {
+    if !principal.is_human() {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "agent permission prompts require a human operator decision",
+        ));
+    }
     let (session, branch) = require_session(&st.db, &key).await?;
     require_acp(&session)?;
     let handle = require_acp_task(&st, &session)?;

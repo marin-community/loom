@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { getSessionGithubAccess, setSessionGithubAccess } from '../api';
-import type { Session, SessionGithubAccess } from '../types';
+import {
+  decidePermissionRequest,
+  getSessionGithubAccess,
+  listPermissionRequests,
+  setSessionGithubAccess,
+} from '../api';
+import type { PermissionRequest, Session, SessionGithubAccess } from '../types';
 
 // The Details popover for the page header. Holds everything low-frequency so it
 // stays out of the always-visible header run, yet reachable from any scroll
@@ -16,16 +21,32 @@ const props = defineProps<{ ws: Session; open: boolean }>();
 const emit = defineEmits<{ close: [reason: 'escape' | 'outside'] }>();
 const panel = ref<HTMLElement | null>(null);
 const githubAccess = ref<SessionGithubAccess[]>([]);
+const permissionRequests = ref<PermissionRequest[]>([]);
 const githubRepository = ref('');
 const githubAccessError = ref('');
 const githubAccessBusy = ref(false);
 
 async function loadGithubAccess() {
   try {
-    githubAccess.value = await getSessionGithubAccess(props.ws.id);
+    [githubAccess.value, permissionRequests.value] = await Promise.all([
+      getSessionGithubAccess(props.ws.id),
+      listPermissionRequests(props.ws.id, 'pending'),
+    ]);
     githubAccessError.value = '';
   } catch (error) {
     githubAccessError.value = (error as Error).message;
+  }
+}
+
+async function decideAccessRequest(request: PermissionRequest, decision: 'approve' | 'deny') {
+  githubAccessBusy.value = true;
+  try {
+    await decidePermissionRequest(request.id, decision);
+    await loadGithubAccess();
+  } catch (error) {
+    githubAccessError.value = (error as Error).message;
+  } finally {
+    githubAccessBusy.value = false;
   }
 }
 
@@ -112,6 +133,34 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onOutsidePoint
           <h3 class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">
             GitHub access
           </h3>
+          <div v-if="permissionRequests.length" class="mb-3 space-y-2">
+            <div
+              v-for="request in permissionRequests"
+              :key="request.id"
+              class="rounded border border-attention/40 bg-attention/5 p-2 text-xs"
+            >
+              <div class="break-all font-mono text-default">{{ request.repository }}</div>
+              <p class="mt-1 text-muted">{{ request.reason }}</p>
+              <div class="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  class="rounded border border-line px-2 py-1 text-xs text-muted hover:text-default"
+                  :disabled="githubAccessBusy"
+                  @click="decideAccessRequest(request, 'approve')"
+                >
+                  Approve
+                </button>
+                <button
+                  type="button"
+                  class="rounded border border-line px-2 py-1 text-xs text-muted hover:text-default"
+                  :disabled="githubAccessBusy"
+                  @click="decideAccessRequest(request, 'deny')"
+                >
+                  Deny
+                </button>
+              </div>
+            </div>
+          </div>
           <ul v-if="githubAccess.length" class="mb-2 space-y-1 text-xs text-muted">
             <li v-for="grant in githubAccess" :key="grant.repository" class="flex gap-2">
               <code class="min-w-0 flex-1 break-all">{{ grant.repository }}</code>

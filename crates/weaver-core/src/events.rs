@@ -84,7 +84,7 @@ pub async fn record(
     Ok(event)
 }
 
-/// Persist an event without going through a bus (the `weaver hook` path that
+/// Persist an event without going through a bus (the `loom hook` path that
 /// runs without a daemon).
 pub async fn record_local(db: &Db, branch_id: &str, kind: &str, data: Value) -> Result<i64> {
     let row =
@@ -160,7 +160,7 @@ pub async fn history(db: &Db, branch_id: &str, limit: i64) -> Result<Vec<Event>>
 }
 
 /// Fetch every event with id strictly greater than `since`, oldest first.
-/// Used by the monitor to consume hook events written by the `weaver hook`
+/// Used by the monitor to consume hook events written by the `loom hook`
 /// command.
 pub async fn since(db: &Db, since: i64) -> Result<Vec<Event>> {
     let rows = sqlx::query(

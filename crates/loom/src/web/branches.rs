@@ -142,14 +142,14 @@ pub(super) async fn patch_branch(
 }
 
 /// The attention value that means "calm" — never stored (absence is calm);
-/// both the input that clears the tag and the value `weaver status` reads
+/// both the input that clears the tag and the value `loom status` reads
 /// back as the default.
 const CALM_STATUS: &str = "ok";
 
 /// Set the agent's attention level and current-state message in one call:
 /// validate the level, write the description when a message is given,
 /// set-or-clear the `attention` tag, and record exactly one `tag` event —
-/// what `weaver status set --tag <level> [--message <message>]` does against the local
+/// what `loom status set --tag <level> [--message <message>]` does against the local
 /// database in one process, reproduced server-side so a networked CLI gets
 /// the same one-event, effectively-atomic semantics.
 pub(super) async fn set_branch_status(
@@ -397,7 +397,7 @@ pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<s
 }
 
 /// Append a raw event row to a branch's log — the escape hatch for an event
-/// kind with no dedicated mutating route of its own (namely `weaver hook`,
+/// kind with no dedicated mutating route of its own (namely `loom hook`,
 /// which has no other server-side action to piggyback on). Publishes to the
 /// bus like every other mutation, unlike the local `record_local` this
 /// replaces, so SSE subscribers see it too.
@@ -417,7 +417,7 @@ pub(super) async fn create_branch_event(
 }
 
 /// Set (upsert) a tag on a branch — the branch-scoped twin of
-/// [`set_session_tag`], for a `weaver tag` target with no live session (a
+/// [`set_session_tag`], for a `loom sessions tags` target with no live session (a
 /// finished session, or `--session` pointing at another branch entirely).
 pub(super) async fn set_branch_tag(
     State(st): State<AppState>,

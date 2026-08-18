@@ -145,6 +145,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "loom-owned-github-auth",
         include_str!("../migrations/0027_loom_owned_github_auth.sql"),
     ),
+    (
+        28,
+        "permission-requests",
+        include_str!("../migrations/0028_permission_requests.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

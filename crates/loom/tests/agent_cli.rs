@@ -20,8 +20,8 @@ use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
 
 /// Path to the freshly-built `weaver` binary the test will drive.
-fn weaver_bin() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_BIN_EXE_weaver"))
+fn loom_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_loom"))
 }
 
 /// A running loom server, isolated in its own temp `WEAVER_HOME`/sqlite db,
@@ -93,7 +93,7 @@ impl Env {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(weaver_bin());
+        let mut cmd = Command::new(loom_bin());
         cmd.args(args)
             .env("WEAVER_API", format!("http://{}", self.addr))
             .env("WEAVER_BRANCH", &self.branch_id)
@@ -101,7 +101,7 @@ impl Env {
         cmd
     }
 
-    /// Run the weaver binary with the given args, returning captured stdout.
+    /// Run the Loom binary with the given args, returning captured stdout.
     /// Asserts success.
     fn run(&self, args: &[&str]) -> String {
         let out = self.command(args).output().expect("failed to spawn weaver");
@@ -114,7 +114,7 @@ impl Env {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// Run the weaver binary with `stdin` piped in, returning captured stdout.
+    /// Run the Loom binary with `stdin` piped in, returning captured stdout.
     /// Used to drive the SessionStart hook, which reads its `source` from a
     /// JSON payload on stdin.
     fn run_with_stdin(&self, args: &[&str], stdin: &str) -> String {
@@ -141,7 +141,7 @@ impl Env {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// Run the weaver binary and return the raw output (not asserting on
+    /// Run the Loom binary and return the raw output (not asserting on
     /// success) — for tests exercising a failure path.
     fn run_raw(&self, args: &[&str]) -> std::process::Output {
         self.command(args).output().expect("failed to spawn weaver")
@@ -149,13 +149,13 @@ impl Env {
 }
 
 /// The goal lives as the `goal` artifact; writing it keeps the branch's
-/// denormalized goal (what `weaver status` reads back) in sync.
+/// denormalized goal (what `loom status` reads back) in sync.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn goal_artifact_write_syncs_the_branch_goal() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "goal"], "ship the thing\n");
-    let out = env.run(&["artifact", "show", "goal"]);
+    env.run_with_stdin(&["artifacts", "write", "goal"], "ship the thing\n");
+    let out = env.run(&["artifacts", "show", "goal"]);
     assert_eq!(out.trim(), "ship the thing");
     let out = env.run(&["status", "get"]);
     assert!(out.contains("goal:        ship the thing"), "status: {out}");
@@ -165,7 +165,7 @@ async fn goal_artifact_write_syncs_the_branch_goal() {
 #[serial]
 async fn where_reports_resolved_branch() {
     let env = Env::start().await;
-    let out = env.run(&["where"]);
+    let out = env.run(&["self"]);
     assert!(
         out.contains("branch:    feature-test"),
         "where output: {out}"
@@ -176,8 +176,8 @@ async fn where_reports_resolved_branch() {
 #[serial]
 async fn missing_weaver_branch_gives_a_friendly_error() {
     let env = Env::start().await;
-    let out = std::process::Command::new(weaver_bin())
-        .args(["where"])
+    let out = std::process::Command::new(loom_bin())
+        .args(["self"])
         .env("WEAVER_API", format!("http://{}", env.addr))
         .env_remove("WEAVER_BRANCH")
         .env_remove("LOOM_TOKEN")
@@ -194,8 +194,8 @@ async fn missing_weaver_branch_gives_a_friendly_error() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn unreachable_loom_gives_a_friendly_error() {
-    let out = std::process::Command::new(weaver_bin())
-        .args(["where"])
+    let out = std::process::Command::new(loom_bin())
+        .args(["self"])
         // Port 1 is (almost) never listening — a fast, reliable connection
         // refusal without a real unreachable-network dependency.
         .env("WEAVER_API", "http://127.0.0.1:1")
@@ -219,35 +219,35 @@ async fn unreachable_loom_gives_a_friendly_error() {
 #[serial]
 async fn issue_lifecycle() {
     let env = Env::start().await;
-    env.run(&["issue", "add", "fix", "the", "thing"]);
-    env.run(&["issue", "add", "another", "task"]);
+    env.run(&["issues", "add", "fix", "the", "thing"]);
+    env.run(&["issues", "add", "another", "task"]);
 
-    let out = env.run(&["issue", "ls"]);
+    let out = env.run(&["issues", "ls"]);
     assert!(out.contains("fix the thing"), "ls output: {out}");
     assert!(out.contains("another task"), "ls output: {out}");
     assert_eq!(out.matches("[ ]").count(), 2, "two open issues");
 
     // Close #1, then list defaults to open only (should drop it).
-    env.run(&["issue", "close", "1"]);
-    let out = env.run(&["issue", "ls"]);
+    env.run(&["issues", "close", "1"]);
+    let out = env.run(&["issues", "ls"]);
     assert!(
         !out.contains("fix the thing"),
         "closed issue should be hidden"
     );
 
-    let out = env.run(&["issue", "ls", "--all"]);
+    let out = env.run(&["issues", "ls", "--all"]);
     assert!(
         out.contains("[x]"),
         "closed marker should appear with --all"
     );
 
     // Reopen, then rm.
-    env.run(&["issue", "reopen", "1"]);
-    let out = env.run(&["issue", "ls"]);
+    env.run(&["issues", "reopen", "1"]);
+    let out = env.run(&["issues", "ls"]);
     assert_eq!(out.matches("[ ]").count(), 2);
 
-    env.run(&["issue", "rm", "1"]);
-    let out = env.run(&["issue", "ls", "--all"]);
+    env.run(&["issues", "rm", "1"]);
+    let out = env.run(&["issues", "ls", "--all"]);
     assert!(!out.contains("fix the thing"));
 }
 
@@ -290,11 +290,11 @@ async fn channel_cli_reads_and_appends_typed_history() {
     .await
     .unwrap();
 
-    let listed = env.run(&["channel", "ls"]);
+    let listed = env.run(&["channels", "ls"]);
     assert!(listed.contains("cli-session"), "channel list: {listed}");
     assert!(listed.contains("CLI channel"), "channel list: {listed}");
 
-    let opening = env.run(&["channel", "read", "--channel", "cli-session"]);
+    let opening = env.run(&["channels", "read", "--channel", "cli-session"]);
     assert!(opening.contains("goal"), "channel history: {opening}");
     assert!(
         opening.contains("coordinate durably"),
@@ -302,7 +302,7 @@ async fn channel_cli_reads_and_appends_typed_history() {
     );
 
     let sent = env.run(&[
-        "channel",
+        "channels",
         "send",
         "--channel",
         "cli-session",
@@ -315,7 +315,7 @@ async fn channel_cli_reads_and_appends_typed_history() {
     assert!(sent.contains("result"), "channel send: {sent}");
     assert!(sent.contains("ready for review"), "channel send: {sent}");
 
-    let history = env.run(&["channel", "read", "--channel", "cli-session"]);
+    let history = env.run(&["channels", "read", "--channel", "cli-session"]);
     assert!(
         history.contains("ready for review"),
         "channel history: {history}"
@@ -328,20 +328,20 @@ async fn channel_cli_reads_and_appends_typed_history() {
 #[serial]
 async fn issue_tag_set_show_clear() {
     let env = Env::start().await;
-    env.run(&["issue", "add", "label", "me"]);
+    env.run(&["issues", "add", "label", "me"]);
 
-    env.run(&["issue", "tag", "set", "1", "priority", "high"]);
-    let out = env.run(&["issue", "show", "1"]);
+    env.run(&["issues", "tag", "set", "1", "priority", "high"]);
+    let out = env.run(&["issues", "show", "1"]);
     assert!(out.contains("priority=high"), "show output: {out}");
 
     // A second set overwrites the value in place (single-valued per key).
-    env.run(&["issue", "tag", "set", "1", "priority", "low"]);
-    let out = env.run(&["issue", "show", "1"]);
+    env.run(&["issues", "tag", "set", "1", "priority", "low"]);
+    let out = env.run(&["issues", "show", "1"]);
     assert!(out.contains("priority=low"), "show output: {out}");
     assert!(!out.contains("priority=high"));
 
-    env.run(&["issue", "tag", "rm", "1", "priority"]);
-    let out = env.run(&["issue", "show", "1"]);
+    env.run(&["issues", "tag", "rm", "1", "priority"]);
+    let out = env.run(&["issues", "show", "1"]);
     assert!(!out.contains("priority="), "tag should be cleared: {out}");
 }
 
@@ -350,18 +350,18 @@ async fn issue_tag_set_show_clear() {
 async fn issue_ls_separates_branch_work_from_repo_backlog() {
     let env = Env::start().await;
     // Default add → claimed by this branch. `--repo` → unclaimed backlog.
-    env.run(&["issue", "add", "my", "task"]);
-    env.run(&["issue", "add", "--repo", "backlog", "task"]);
+    env.run(&["issues", "add", "my", "task"]);
+    env.run(&["issues", "add", "--repo", "backlog", "task"]);
 
     // Default ls shows both, under separate sections.
-    let out = env.run(&["issue", "ls"]);
+    let out = env.run(&["issues", "ls"]);
     assert!(out.contains("On this branch"), "ls: {out}");
     assert!(out.contains("my task"), "ls: {out}");
     assert!(out.contains("Repo backlog"), "ls: {out}");
     assert!(out.contains("backlog task"), "ls: {out}");
 
     // `--mine` drops the backlog section.
-    let out = env.run(&["issue", "ls", "--mine"]);
+    let out = env.run(&["issues", "ls", "--mine"]);
     assert!(out.contains("my task"), "mine: {out}");
     assert!(
         !out.contains("backlog task"),
@@ -379,7 +379,7 @@ async fn issue_ls_separates_branch_work_from_repo_backlog() {
 #[serial]
 async fn issue_show_includes_the_working_branch_status() {
     let env = Env::start().await;
-    env.run(&["issue", "add", "the", "sub-task"]);
+    env.run(&["issues", "add", "the", "sub-task"]);
     // The current branch claims it; give the branch a live status.
     env.run(&[
         "status",
@@ -389,7 +389,7 @@ async fn issue_show_includes_the_working_branch_status() {
         "--message",
         "build is broken",
     ]);
-    let out = env.run(&["issue", "show", "1"]);
+    let out = env.run(&["issues", "show", "1"]);
     assert!(
         out.contains("working:"),
         "show should report progress: {out}"
@@ -406,9 +406,9 @@ async fn issue_show_includes_the_working_branch_status() {
 #[serial]
 async fn issue_wait_returns_when_already_closed() {
     let env = Env::start().await;
-    env.run(&["issue", "add", "done", "already"]);
-    env.run(&["issue", "close", "1"]);
-    let out = env.run(&["issue", "wait", "1", "--timeout", "1"]);
+    env.run(&["issues", "add", "done", "already"]);
+    env.run(&["issues", "close", "1"]);
+    let out = env.run(&["issues", "wait", "1", "--timeout", "1"]);
     assert!(
         out.contains("nothing to wait for"),
         "wait on a closed issue should return at once: {out}"
@@ -421,8 +421,8 @@ async fn issue_wait_returns_when_already_closed() {
 #[serial]
 async fn issue_wait_times_out_on_an_open_issue() {
     let env = Env::start().await;
-    env.run(&["issue", "add", "still", "going"]);
-    let out = env.run_raw(&["issue", "wait", "1", "--timeout", "1", "--interval", "1"]);
+    env.run(&["issues", "add", "still", "going"]);
+    let out = env.run_raw(&["issues", "wait", "1", "--timeout", "1", "--interval", "1"]);
     assert!(
         !out.status.success(),
         "an unmet wait should exit non-zero so callers can branch on it"
@@ -439,7 +439,7 @@ async fn issue_ls_shows_delegated_sub_trees() {
     let env = Env::start().await;
     seed_delegated_issue(&env, "weaver/child", "attention", "ready").await;
 
-    let out = env.run(&["issue", "ls"]);
+    let out = env.run(&["issues", "ls"]);
     assert!(
         out.contains("Delegated by this branch"),
         "ls should list delegated sub-trees: {out}"
@@ -500,9 +500,9 @@ async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, descripti
 #[serial]
 async fn summary_orients_an_agent_on_the_branch() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "goal"], "ship the feature\n");
-    env.run(&["issue", "add", "wire", "up", "routes"]);
-    env.run(&["issue", "add", "add", "tests"]);
+    env.run_with_stdin(&["artifacts", "write", "goal"], "ship the feature\n");
+    env.run(&["issues", "add", "wire", "up", "routes"]);
+    env.run(&["issues", "add", "add", "tests"]);
     env.run(&["status", "set", "--tag", "ok", "--message", "routes wired"]);
 
     let out = env.run(&["summary"]);
@@ -517,11 +517,11 @@ async fn summary_orients_an_agent_on_the_branch() {
     assert!(out.contains("pick up #1"), "summary: {out}");
     // Every section advertises the command that drills into it.
     for hint in [
-        "(weaver artifact get goal)",
-        "(weaver status get)",
-        "(weaver issue ls)",
-        "weaver artifact",
-        "weaver log",
+        "(loom artifacts get goal)",
+        "(loom status get)",
+        "(loom issues list)",
+        "loom artifacts",
+        "loom sessions events",
     ] {
         assert!(out.contains(hint), "summary should surface `{hint}`: {out}");
     }
@@ -536,7 +536,7 @@ async fn summary_caps_a_long_outstanding_list() {
     let env = Env::start().await;
     for n in 0..13 {
         let title = format!("task{n}");
-        env.run(&["issue", "add", title.as_str()]);
+        env.run(&["issues", "add", title.as_str()]);
     }
     let out = env.run(&["summary"]);
     assert!(out.contains("Backlog (13):"), "summary: {out}");
@@ -556,7 +556,7 @@ async fn summary_caps_a_long_outstanding_list() {
 #[serial]
 async fn summary_with_no_open_tasks_suggests_wrapping_up() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "goal"], "tidy up\n");
+    env.run_with_stdin(&["artifacts", "write", "goal"], "tidy up\n");
     let out = env.run(&["summary"]);
     assert!(out.contains("Backlog: none"), "summary: {out}");
     assert!(out.contains("no explicit backlog items"), "summary: {out}");
@@ -570,7 +570,7 @@ async fn artifact_write_show_ls_and_revisions() {
     // Write from stdin (no file arg). The CLI prints a dashboard URL (now
     // always known — the write only succeeds because loom is reachable) and
     // the new revision.
-    let out = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan\n\nDesign here.\n");
+    let out = env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n\nDesign here.\n");
     assert!(
         out.contains("/artifacts/plan"),
         "write should print the URL: {out}"
@@ -578,17 +578,17 @@ async fn artifact_write_show_ls_and_revisions() {
     assert!(out.contains("rev 1"), "first write is rev 1: {out}");
 
     // show prints the content verbatim.
-    let shown = env.run(&["artifact", "show", "plan"]);
+    let shown = env.run(&["artifacts", "show", "plan"]);
     assert!(shown.contains("Design here."), "show: {shown}");
 
     // A second write appends rev 2, and --rev 1 still fetches the original.
-    let out2 = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan v2\n");
+    let out2 = env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan v2\n");
     assert!(out2.contains("rev 2"), "second write is rev 2: {out2}");
-    let v1 = env.run(&["artifact", "show", "plan", "--rev", "1"]);
+    let v1 = env.run(&["artifacts", "show", "plan", "--rev", "1"]);
     assert!(v1.contains("Design here."), "rev 1 is the original: {v1}");
 
     // --meta prints the envelope, not the content.
-    let meta = env.run(&["artifact", "show", "plan", "--meta"]);
+    let meta = env.run(&["artifacts", "show", "plan", "--meta"]);
     assert!(meta.contains("name:    plan"), "meta: {meta}");
     assert!(meta.contains("rev:     2"), "meta latest rev: {meta}");
     assert!(
@@ -597,22 +597,22 @@ async fn artifact_write_show_ls_and_revisions() {
     );
 
     // ls lists the branch-scoped artifact.
-    let ls = env.run(&["artifact", "ls"]);
+    let ls = env.run(&["artifacts", "ls"]);
     assert!(ls.contains("plan"), "ls: {ls}");
     assert!(ls.contains("rev 2"), "ls shows latest rev: {ls}");
 
     // A --repo write is repo-shared; --repo ls shows it.
-    env.run_with_stdin(&["artifact", "write", "shared", "--repo"], "shared body\n");
-    let repo_ls = env.run(&["artifact", "ls", "--repo"]);
+    env.run_with_stdin(&["artifacts", "write", "shared", "--repo"], "shared body\n");
+    let repo_ls = env.run(&["artifacts", "ls", "--repo"]);
     assert!(
         repo_ls.contains("repo:shared"),
         "repo ls shows shared scope: {repo_ls}"
     );
 
     // rm reports the scope and revision it removed, then the artifact is gone.
-    let rm = env.run(&["artifact", "rm", "plan"]);
+    let rm = env.run(&["artifacts", "rm", "plan"]);
     assert!(rm.contains("was rev 2"), "rm: {rm}");
-    let ls = env.run(&["artifact", "ls"]);
+    let ls = env.run(&["artifacts", "ls"]);
     assert!(!ls.contains("plan"), "rm should remove it: {ls}");
 }
 
@@ -626,7 +626,7 @@ async fn artifact_write_url_honours_the_public_base() {
 
     // With no `auth.base_url`, the origin is derived from the request's Host —
     // here the loopback address the CLI dialed, right for a single-machine loom.
-    let derived = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan\n");
+    let derived = env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n");
     assert!(
         derived.contains(&format!(
             "http://{}/s/{}/artifacts/plan",
@@ -647,7 +647,7 @@ async fn artifact_write_url_honours_the_public_base() {
     )
     .await
     .unwrap();
-    let public = env.run_with_stdin(&["artifact", "write", "plan"], "# Plan v2\n");
+    let public = env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan v2\n");
     assert!(
         public.contains(&format!(
             "https://loom.example.com/s/{}/artifacts/plan  (rev 2, this branch)",
@@ -665,17 +665,17 @@ async fn artifact_write_url_honours_the_public_base() {
 #[serial]
 async fn artifact_comment_thread_and_resolve_roundtrip() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "plan"], "# Plan\n\nDesign here.\n");
+    env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n\nDesign here.\n");
 
     // No thread yet.
-    let threads = env.run(&["artifact", "threads", "plan"]);
+    let threads = env.run(&["artifacts", "threads", "plan"]);
     assert!(
         threads.contains("no open threads"),
         "no threads yet: {threads}"
     );
 
     // Opening a thread requires --quote.
-    let missing_quote = env.run_raw(&["artifact", "comment", "plan", "looks off"]);
+    let missing_quote = env.run_raw(&["artifacts", "comment", "plan", "looks off"]);
     assert!(
         !missing_quote.status.success(),
         "comment without --quote or --thread should fail"
@@ -683,7 +683,7 @@ async fn artifact_comment_thread_and_resolve_roundtrip() {
 
     // Open a new thread anchored to a quote, seeded with its first comment.
     let opened = env.run(&[
-        "artifact",
+        "artifacts",
         "comment",
         "plan",
         "--quote",
@@ -692,7 +692,7 @@ async fn artifact_comment_thread_and_resolve_roundtrip() {
     ]);
     assert!(opened.contains("opened thread"), "opened: {opened}");
 
-    let threads = env.run(&["artifact", "threads", "plan"]);
+    let threads = env.run(&["artifacts", "threads", "plan"]);
     assert!(threads.contains("this needs more detail"), "{threads}");
     assert!(threads.contains("agent:"), "author is agent: {threads}");
 
@@ -705,7 +705,7 @@ async fn artifact_comment_thread_and_resolve_roundtrip() {
         .expect("thread id is numeric");
 
     let replied = env.run(&[
-        "artifact",
+        "artifacts",
         "comment",
         "plan",
         "--thread",
@@ -714,16 +714,16 @@ async fn artifact_comment_thread_and_resolve_roundtrip() {
     ]);
     assert!(replied.contains("added comment"), "replied: {replied}");
 
-    let threads = env.run(&["artifact", "threads", "plan"]);
+    let threads = env.run(&["artifacts", "threads", "plan"]);
     assert!(threads.contains("fixed, take a look"), "{threads}");
 
-    env.run(&["artifact", "resolve", "plan", &tid.to_string()]);
-    let threads = env.run(&["artifact", "threads", "plan"]);
+    env.run(&["artifacts", "resolve", "plan", &tid.to_string()]);
+    let threads = env.run(&["artifacts", "threads", "plan"]);
     assert!(
         threads.contains("no open threads"),
         "resolved thread should no longer be open: {threads}"
     );
-    let all = env.run(&["artifact", "threads", "plan", "--all"]);
+    let all = env.run(&["artifacts", "threads", "plan", "--all"]);
     assert!(
         all.contains("this needs more detail"),
         "--all still shows the resolved thread: {all}"
@@ -735,7 +735,7 @@ async fn artifact_comment_thread_and_resolve_roundtrip() {
 async fn hook_writes_an_event_row() {
     let env = Env::start().await;
     env.run(&["hook", "--event", "working"]);
-    let log = env.run(&["log"]);
+    let log = env.run(&["sessions", "events"]);
     assert!(
         log.contains("hook"),
         "log should mention the hook event: {log}"
@@ -749,14 +749,14 @@ async fn hook_writes_an_event_row() {
 /// A nested, isolated agent (a headless `claude -p` review/lint/one-shot) still
 /// fires the worktree's weaver lifecycle hooks, but the spawner strips
 /// `$WEAVER_BRANCH` so the child cannot impersonate the parent. With no branch to
-/// key on, `weaver hook` must be a silent no-op: exit 0, print nothing, and — the
+/// key on, `loom hook` must be a silent no-op: exit 0, print nothing, and — the
 /// load-bearing part — write no event that would stamp the parent branch's
 /// lifecycle mid-turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn hook_without_weaver_branch_is_a_silent_no_op() {
     let env = Env::start().await;
-    let out = std::process::Command::new(weaver_bin())
+    let out = std::process::Command::new(loom_bin())
         .args(["hook", "--event", "idle"])
         .env("WEAVER_API", format!("http://{}", env.addr))
         .env_remove("WEAVER_BRANCH")
@@ -771,27 +771,27 @@ async fn hook_without_weaver_branch_is_a_silent_no_op() {
         String::from_utf8_lossy(&out.stderr),
     );
     // And it recorded nothing against the seeded branch — the whole point.
-    let log = env.run(&["log"]);
+    let log = env.run(&["sessions", "events"]);
     assert!(
         !log.contains("idle") && !log.contains("hook"),
         "a branchless hook must not write an event: {log}"
     );
 }
 
-/// `weaver readme` prints the full weaver workflow guide so an agent can pull
-/// the rules back on demand (e.g. after a compaction replayed only the catch-up).
+/// `loom help` renders the code-registered operation catalogue without a
+/// separate Markdown command manual.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn readme_prints_the_full_weaver_guide() {
+async fn help_prints_the_registered_loom_guide() {
     let env = Env::start().await;
-    let out = env.run(&["readme"]);
+    let out = env.run(&["help"]);
     assert!(
-        out.contains("weaver session"),
-        "readme should print the WEAVER.md guide: {out}"
+        out.contains("Loom's registered operation groups"),
+        "help should print the registered Loom catalogue: {out}"
     );
     assert!(
-        out.contains("weaver status"),
-        "readme should describe the weaver CLI: {out}"
+        out.contains("permissions"),
+        "help should list registered Loom groups: {out}"
     );
 }
 
@@ -809,8 +809,8 @@ async fn session_start_hook_injects_the_full_primer() {
     );
     // The full guide — not the compact catch-up.
     assert!(
-        out.contains("review progress asynchronously"),
-        "startup should replay the full WEAVER.md: {out}"
+        out.contains("detached Loom session"),
+        "startup should replay the registered primer: {out}"
     );
     assert!(
         !out.contains("Context was just compacted"),
@@ -819,14 +819,14 @@ async fn session_start_hook_injects_the_full_primer() {
 }
 
 /// After a context compaction (`source: "compact"`), the hook replays a concise
-/// re-orientation — the `weaver summary` catch-up plus the load-bearing rules and
-/// a pointer to `weaver readme` — instead of the whole WEAVER.md.
+/// re-orientation — the summary catch-up plus the load-bearing rules and a
+/// pointer to registered Loom help — instead of the full primer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn session_start_hook_after_compaction_replays_the_concise_summary() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "goal"], "ship the feature\n");
-    env.run(&["issue", "add", "wire", "up", "routes"]);
+    env.run_with_stdin(&["artifacts", "write", "goal"], "ship the feature\n");
+    env.run(&["issues", "add", "wire", "up", "routes"]);
     env.run(&["status", "set", "--tag", "ok", "--message", "routes wired"]);
 
     let payload = r#"{"hook_event_name":"SessionStart","source":"compact"}"#;
@@ -855,17 +855,17 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
         "replay omits the outstanding work: {out}"
     );
     assert!(
-        out.contains("weaver readme"),
-        "replay should point at the full guide: {out}"
+        out.contains("loom help"),
+        "replay should point at registered help: {out}"
     );
     // It must stay concise — not re-feed the whole WEAVER.md.
     assert!(
-        !out.contains("review progress asynchronously"),
-        "compact replay must not dump the full WEAVER.md: {out}"
+        !out.contains("detached Loom session"),
+        "compact replay must not dump the full primer: {out}"
     );
 
     // The hook still records the lifecycle event (with its source) for the monitor.
-    let log = env.run(&["log"]);
+    let log = env.run(&["sessions", "events"]);
     assert!(
         log.contains("session-start"),
         "the hook should record a session-start event: {log}"
@@ -876,8 +876,8 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
 #[serial]
 async fn get_status_reports_current_branch() {
     let env = Env::start().await;
-    env.run_with_stdin(&["artifact", "write", "goal"], "do the thing\n");
-    env.run(&["issue", "add", "step", "one"]);
+    env.run_with_stdin(&["artifacts", "write", "goal"], "do the thing\n");
+    env.run(&["issues", "add", "step", "one"]);
     let out = env.run(&["status", "get"]);
     assert!(out.contains("branch:      feature-test"), "status: {out}");
     assert!(out.contains("goal:        do the thing"), "status: {out}");
@@ -928,7 +928,7 @@ async fn set_status_sets_level_and_message() {
     );
 
     // The set also writes a `tag` event to the branch log (the attention tag).
-    let log = env.run(&["log"]);
+    let log = env.run(&["sessions", "events"]);
     assert!(log.contains("tag"), "log should record tag events: {log}");
     assert!(
         log.contains("attention"),
@@ -936,7 +936,7 @@ async fn set_status_sets_level_and_message() {
     );
 }
 
-/// `weaver tag set triage` stamps the watch's mark on a *named* session —
+/// `loom sessions tags set triage` stamps the watch's mark on a *named* session —
 /// a status axis distinct from the agent's own `attention` — and records a `tag`
 /// event for the audit trail. The agent's attention tag is never touched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -954,7 +954,7 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
     ]);
 
     // No triage tag until a watch looks.
-    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
+    let out = env.run(&["sessions", "tags", "ls", "--session", "feature-test"]);
     assert!(
         !out.contains("triage"),
         "fresh session has no triage tag: {out}"
@@ -963,7 +963,8 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
     // A watch stamps a *different* opinion on the same session via the
     // triage tag.
     let out = env.run(&[
-        "tag",
+        "sessions",
+        "tags",
         "set",
         "triage",
         "attention",
@@ -977,7 +978,7 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
     assert!(out.contains("triage = attention"), "triage tag set: {out}");
 
     // Read it back with its note and attribution.
-    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
+    let out = env.run(&["sessions", "tags", "ls", "--session", "feature-test"]);
     assert!(out.contains("triage = attention"), "read level: {out}");
     assert!(out.contains("looks stuck on tests"), "read note: {out}");
     assert!(out.contains("status-check"), "read attribution: {out}");
@@ -995,12 +996,19 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
     );
 
     // The mark is logged as a `tag` event.
-    let log = env.run(&["log"]);
+    let log = env.run(&["sessions", "events"]);
     assert!(log.contains("tag"), "log should record tag events: {log}");
 
     // Clearing the triage tag leaves the agent's attention untouched.
-    env.run(&["tag", "rm", "triage", "--session", "feature-test"]);
-    let out = env.run(&["tag", "ls", "--session", "feature-test"]);
+    env.run(&[
+        "sessions",
+        "tags",
+        "rm",
+        "triage",
+        "--session",
+        "feature-test",
+    ]);
+    let out = env.run(&["sessions", "tags", "ls", "--session", "feature-test"]);
     assert!(
         !out.contains("triage"),
         "triage tag should be cleared: {out}"
@@ -1017,7 +1025,15 @@ async fn triage_tag_marks_a_session_without_touching_attention() {
 #[serial]
 async fn tag_set_rejects_invalid_loud_value() {
     let env = Env::start().await;
-    let out = env.run_raw(&["tag", "set", "triage", "bogus", "--session", "feature-test"]);
+    let out = env.run_raw(&[
+        "sessions",
+        "tags",
+        "set",
+        "triage",
+        "bogus",
+        "--session",
+        "feature-test",
+    ]);
     assert!(!out.status.success(), "an invalid loud value should fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -1026,7 +1042,7 @@ async fn tag_set_rejects_invalid_loud_value() {
     );
 }
 
-/// `weaver tag set/ls/rm` round-trips a free-form (quiet) tag on the current
+/// `loom sessions tags set/list/delete` round-trips a free-form (quiet) tag on the current
 /// branch with its note and author, and `tag rm` clears it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -1034,12 +1050,13 @@ async fn tag_set_ls_rm_roundtrip() {
     let env = Env::start().await;
 
     // No tags to begin with.
-    let out = env.run(&["tag", "ls"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(out.contains("(no tags)"), "fresh branch has no tags: {out}");
 
     // Set a free-form tag with a note and author.
     let out = env.run(&[
-        "tag",
+        "sessions",
+        "tags",
         "set",
         "priority",
         "high",
@@ -1051,20 +1068,20 @@ async fn tag_set_ls_rm_roundtrip() {
     assert!(out.contains("priority = high"), "tag set: {out}");
 
     // List it back with its note and attribution.
-    let out = env.run(&["tag", "ls"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(out.contains("priority = high"), "tag ls value: {out}");
     assert!(out.contains("by russell"), "tag ls author: {out}");
     assert!(out.contains("ship by friday"), "tag ls note: {out}");
 
     // Setting the same key again overwrites it (single-valued).
-    env.run(&["tag", "set", "priority", "low"]);
-    let out = env.run(&["tag", "ls"]);
+    env.run(&["sessions", "tags", "set", "priority", "low"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(out.contains("priority = low"), "tag overwrite: {out}");
     assert_eq!(out.matches("priority").count(), 1, "single-valued: {out}");
 
     // Remove it.
-    env.run(&["tag", "rm", "priority"]);
-    let out = env.run(&["tag", "ls"]);
+    env.run(&["sessions", "tags", "rm", "priority"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(out.contains("(no tags)"), "tag rm cleared it: {out}");
 }
 
@@ -1083,7 +1100,7 @@ async fn set_status_ok_clears_attention_tag_but_keeps_description() {
         "--message",
         "ready for review",
     ]);
-    let out = env.run(&["tag", "ls"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(
         out.contains("attention = attention"),
         "status should write the attention tag: {out}"
@@ -1091,7 +1108,7 @@ async fn set_status_ok_clears_attention_tag_but_keeps_description() {
 
     // Return to calm — the attention tag is cleared, the description survives.
     env.run(&["status", "set", "--tag", "ok"]);
-    let out = env.run(&["tag", "ls"]);
+    let out = env.run(&["sessions", "tags", "ls"]);
     assert!(
         !out.contains("attention ="),
         "calm status should clear the attention tag: {out}"
@@ -1120,15 +1137,21 @@ async fn set_status_rejects_unknown_level() {
 #[serial]
 async fn status_requires_an_explicit_get_or_set_verb() {
     let env = Env::start().await;
-    for args in [&["status"][..], &["status", "attention"][..]] {
-        let out = env.run_raw(args);
-        assert!(!out.status.success(), "legacy status syntax should fail");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("Usage: weaver status <COMMAND>"),
-            "stderr: {stderr}"
-        );
-    }
+    let missing = env.run_raw(&["status"]);
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("a subcommand is required"),
+        "stderr: {stderr}"
+    );
+
+    let legacy = env.run_raw(&["status", "attention"]);
+    assert!(!legacy.status.success(), "legacy status syntax should fail");
+    let stderr = String::from_utf8_lossy(&legacy.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand 'attention'"),
+        "stderr: {stderr}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1136,7 +1159,7 @@ async fn status_requires_an_explicit_get_or_set_verb() {
 async fn config_get_ls_reads_settings() {
     let env = Env::start().await;
     // A known setting has a default value before anything is set.
-    let out = env.run(&["config", "ls"]);
+    let out = env.run(&["settings", "ls"]);
     assert!(out.contains("(default)"), "ls should mark defaults: {out}");
 
     // Settings are written by operators (`loom config set` / the settings
@@ -1147,9 +1170,9 @@ async fn config_get_ls_reads_settings() {
     )
     .await
     .unwrap();
-    let out = env.run(&["config", "get", "server.auto_adopt"]);
+    let out = env.run(&["settings", "get", "server.auto_adopt"]);
     assert_eq!(out.trim(), "true");
-    let out = env.run(&["config", "ls"]);
+    let out = env.run(&["settings", "ls"]);
     assert!(
         out.contains("server.auto_adopt") && out.contains("true"),
         "ls shows the stored value: {out}"

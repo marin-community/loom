@@ -450,7 +450,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
         .unwrap();
     assert_eq!(
         session["mcp_policy"]["capability_sets"][0]["name"],
-        "mcp/github/comment@v1"
+        "loom/github/comment@v1"
     );
     assert!(session["mcp_policy"]["capability_sets"][0]["digest"]
         .as_str()
@@ -530,7 +530,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
             .fetch_one(&ts.state.db)
             .await
             .unwrap();
-    assert!(mcp_policy.contains("mcp/github/comment@v1"));
+    assert!(mcp_policy.contains("loom/github/comment@v1"));
     assert!(mcp_policy.contains("sha256:"));
     let tracking = weaver_core::issue::add(
         &ts.state.db,

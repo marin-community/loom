@@ -1,15 +1,16 @@
-//! loom — the optional orchestrator binary that sits on top of `weaver-core`.
+//! Loom's server, public CLI, and transport adapters.
 //!
 //! Loom owns sessions (one terminal supervisor + one running agent per branch),
 //! the REST API, the Vue web UI, the monitor loop, and recently-used repository
-//! bookkeeping. The agent-facing `weaver` CLI does not depend on loom; running
-//! loom is purely additive.
+//! bookkeeping. `loom` is the single public command surface; its host-facing and
+//! worktree-facing commands are clients of the same REST API.
 //!
 //! This crate is the HTTP/SSE/WebSocket adapter and the CLI. The engine beneath
 //! it is split by persistent store, agent mechanism, policy, editor, forge,
 //! launch, background-watch, and delivery subjects. Each layer is re-exported
 //! here, so `loom::session`, `loom::AppState` and friends keep stable paths.
 
+pub mod agent_cli;
 pub mod client;
 pub mod endpoint;
 pub mod server;
@@ -31,8 +32,8 @@ pub use loom_forge::{
 pub use loom_launch::{handoff, metadata_assist, provision, setup};
 pub use loom_policy::{auth, automation, custom_mcp, db, profile};
 pub use loom_store::{
-    agent_env, channels, chat, chatlog, github_access, history, profile_data, repo_env,
-    review_inbox, runs, session, session_layout, slack_routes, status,
+    agent_env, channels, chat, chatlog, github_access, history, permission_requests, profile_data,
+    repo_env, review_inbox, runs, session, session_layout, slack_routes, status,
 };
 pub use loom_watch::{builtins, monitor, tasks, watch};
 

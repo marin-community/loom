@@ -88,7 +88,6 @@ async fn issue_belongs_to_session(st: &AppState, branch_id: &str, issue_id: &str
         "SELECT EXISTS(
            SELECT 1 FROM issues i JOIN branches b ON b.id = ?
            WHERE i.id = ? AND i.repo_root = b.repo_root
-             AND (i.claimed_branch = b.branch OR i.source_branch = b.branch)
          )",
     )
     .bind(branch_id)
@@ -150,6 +149,14 @@ pub(super) async fn grant_allows(
     if principal.is_admin() {
         return true;
     }
+    if let Some(registration) = super::operations::bound_operation_for_request(method, raw_path) {
+        return operation_grant_allows(principal, registration.operation);
+    }
+    if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
+        if !operation_grant_allows(principal, operation) {
+            return false;
+        }
+    }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     // The multiplexed stream carries no authority of its own: it is a container
@@ -175,7 +182,16 @@ pub(super) async fn grant_allows(
         Grant::Session {
             session_id,
             branch_id,
+            ..
         } => {
+            if *method == axum::http::Method::GET
+                && matches!(path, "/meta" | "/operations" | "/openapi.json")
+            {
+                return true;
+            }
+            if *method == axum::http::Method::GET && path.starts_with("/operations/") {
+                return true;
+            }
             if *method == axum::http::Method::GET && path == "/self" {
                 return true;
             }
@@ -202,6 +218,9 @@ pub(super) async fn grant_allows(
                 return branch_belongs_to_session_tree(st, session_id, segments[1]).await;
             }
             if segments.first() == Some(&"issues") && segments.len() >= 2 {
+                if segments[1] == "actions" && *method == axum::http::Method::POST {
+                    return true;
+                }
                 return issue_belongs_to_session(st, branch_id, segments[1]).await;
             }
             *method == axum::http::Method::GET
@@ -214,10 +233,36 @@ pub(super) async fn grant_allows(
                         | "/repos"
                         | "/repos/recent"
                         | "/repos/branches"
-                        | "/repos/issues"
                         | "/settings"
                         | "/profiles"
                 )
+                || (path == "/repos/issues"
+                    && matches!(*method, axum::http::Method::GET | axum::http::Method::POST))
+        }
+    }
+}
+
+/// Enforce the operation registry at the API boundary. CLI and MCP adapters
+/// therefore cannot widen authority by choosing a different transport.
+pub(super) fn operation_grant_allows(
+    principal: &Principal,
+    operation: &weaver_api::OperationSpec,
+) -> bool {
+    match &principal.grant {
+        Grant::Admin => true,
+        Grant::User => matches!(
+            operation.actor,
+            weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
+        ),
+        Grant::Automation { .. } => operation.actor == weaver_api::ActorPolicy::Internal,
+        Grant::Session { capabilities, .. } => {
+            operation.actor == weaver_api::ActorPolicy::SessionSelf
+                && capabilities.as_ref().is_none_or(|granted| {
+                    operation
+                        .capabilities
+                        .iter()
+                        .all(|required| granted.iter().any(|value| value == required))
+                })
         }
     }
 }
@@ -313,8 +358,18 @@ pub(super) async fn require_auth(
     match resolve_principal(&st, &headers, peer.ip()).await {
         Some(principal) => {
             if !grant_allows(&st, &principal, req.method(), req.uri().path()).await {
-                return AppError::new(StatusCode::FORBIDDEN, "credential grant forbids this route")
-                    .into_response();
+                let message =
+                    weaver_api::operation_for_request(req.method().as_str(), req.uri().path())
+                        .map(|operation| match operation.actor {
+                            weaver_api::ActorPolicy::User | weaver_api::ActorPolicy::Admin
+                                if matches!(&principal.grant, Grant::Session { .. }) =>
+                            {
+                                "this operation requires a human operator"
+                            }
+                            _ => "credential lacks this operation's registered capability or scope",
+                        })
+                        .unwrap_or("credential grant forbids this route");
+                return AppError::new(StatusCode::FORBIDDEN, message).into_response();
             }
             req.extensions_mut().insert(principal);
             next.run(req).await
@@ -840,7 +895,8 @@ pub(super) async fn put_github_config(
 
 #[cfg(test)]
 mod tests {
-    use super::dialable_host;
+    use super::{dialable_host, operation_grant_allows};
+    use crate::auth::{AuthVia, Grant, Principal};
 
     #[test]
     fn wildcard_hosts_map_to_loopback() {
@@ -870,5 +926,32 @@ mod tests {
             dialable_host("https://host/p/0.0.0.0"),
             "https://host/p/0.0.0.0"
         );
+    }
+
+    #[test]
+    fn registered_capabilities_are_enforced_before_adapter_routing() {
+        let principal = Principal {
+            username: "agent".to_string(),
+            github_login: None,
+            via: AuthVia::Token,
+            grant: Grant::Session {
+                session_id: "s".to_string(),
+                branch_id: "b".to_string(),
+                capabilities: Some(vec!["loom/artifacts/read@v1".to_string()]),
+            },
+            automation_context: None,
+        };
+        assert!(operation_grant_allows(
+            &principal,
+            weaver_api::operation("artifacts.get").unwrap()
+        ));
+        assert!(!operation_grant_allows(
+            &principal,
+            weaver_api::operation("artifacts.write").unwrap()
+        ));
+        assert!(!operation_grant_allows(
+            &principal,
+            weaver_api::operation("permissions.requests.approve").unwrap()
+        ));
     }
 }

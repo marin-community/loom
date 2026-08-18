@@ -1,26 +1,19 @@
 # Architecture
 
-Deep reference for weaver's internals. [AGENTS.md](../AGENTS.md) is the short
+Deep reference for Loom's internals. [AGENTS.md](../AGENTS.md) is the short
 how-to-work guide and links here; this file is for when you need the full map.
 
 ## Mental model
 
-weaver ships **two binaries** over **loom's REST API**:
+Loom exposes one registered operation model through several adapters:
 
-- **`weaver`** — the **agent-facing CLI**: a thin HTTP client (`weaver-api::Client`)
-  of `loom`, resolving "the current branch" solely from `$WEAVER_BRANCH` (set by
-  loom for every session it launches — there is no git-cwd fallback). It carries
-  no sqlite driver; `reqwest` (via `weaver-api`) is its only network dependency.
-  Agents call it to read and update the `goal` artifact, report status, add
-  issues, set tags, and emit hook events. It **requires a reachable `loom server run`** —
-  every command fails with a friendly error if the server can't be reached.
 - **`loom`** — the **orchestrator**: the REST + SSE server, the Vue web UI, the
   per-session detached Tapestry runtime supervisor + agent process (via the
   `sessions` table), the background monitor, and the `git worktree` shell-outs.
-  It is the only process that opens the sqlite database directly.
-
+  It is the only process that opens the sqlite database directly. Its CLI, MCP
+  servers, and browser are thin clients of the same registered REST operations.
 ```
-weaver CLI ──HTTP (REST)──▶ loom server run
+loom CLI / MCP ──HTTP (REST)──▶ loom server run
                                 │
                                 ├─ sqlite ─▶ ~/.weaver/weaver.db
                                 ├─ axum REST + SSE
@@ -28,14 +21,13 @@ weaver CLI ──HTTP (REST)──▶ loom server run
                                 ├─ agent launcher
                                 ├─ monitor (consumes
                                 │   `events` rows that
-                                │   `weaver hook` posted)
+                                │   `loom hook` posted)
                                 └─ Vue SPA ──REST + SSE──▶ (browser)
 ```
 
-Only `loom` opens the sqlite file directly; `weaver` reaches the same state
-over HTTP. The monitor watches the `events` table for new `hook` rows —
-`weaver hook` posts them via `POST /api/branches/{key}/events`, same as every
-other `weaver` subcommand.
+Only the server opens the sqlite file directly. The monitor watches the
+`events` table for new `hook` rows; `loom hook` posts them through the same REST
+boundary as other commands.
 
 ## Module layout
 
@@ -45,10 +37,10 @@ and the rule for placing a new module.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `review` (durable staged feedback + delivery outbox), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
-| `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
+| `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. It is not a command or product surface. |
+| `crates/weaver-api/` | legacy-named typed Loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver); it is the cross-process API seam. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | the slim agent-facing CLI (`summary`, `readme`, `status` [read or set level + message], `channel …`, `tag` [`set`/`rm`/`ls` a branch tag], explicit-backlog `issue …`, `where`, `log`, `chatlog` [render the agent's conversation transcript], `hook`, `config` [read-only: `get`/`ls`; writes go through `loom config set` or the settings pane]) — every command drives `weaver-api::Client` over HTTP; none touch sqlite |
+| `crates/loom/src/agent_cli.rs` | HTTP-only implementations behind Loom's session, channel, artifact, issue, status, and settings commands |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom-ctx/` | leaf utilities and `Ctx` (the storage handle, event bus and server address every layer above threads through). No loom dependency of its own; knows nothing about sessions |
 | `crates/loom-store/` | durable records and storage operations: sessions, chat, channels, layout, runs, history, and the profile record |
@@ -92,7 +84,7 @@ and the rule for placing a new module.
 | `crates/loom-store/src/chat.rs` | the ACP **chat journal**: the durable, block-structured (`chat_blocks`, one row per `(session_id, turn, seq)`) conversation record `loom::acp` writes idempotently and the `/chat` routes read |
 | `crates/loom-forge/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
 | `crates/loom/src/client.rs` | HTTP client used by the `loom` CLI to talk to its own daemon |
-| `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`server`, `session`, `ps`, `attach`, …) |
+| `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`server`, `sessions`, `ps`, `attach`, …) |
 | `crates/loom/frontend/` | Vue 3 SPA, rspack, Tailwind. `api.ts` + views in `views/`; the visual rules live in [loom-ui.md](loom-ui.md) |
 | `crates/loom/static/dist/` | Build output (placeholder; real build overwrites) |
 | `crates/loom/tests/` | integration tests: `integration/` (server suites) + `hook_monitor.rs`; need `git` (they spawn `tapestry` supervisors, built by the same `cargo test`) |
@@ -159,7 +151,7 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
 ## Storage & state
 
 - **SQLite** at `$WEAVER_HOME/weaver.db` (default `~/.weaver/weaver.db`),
-  opened only by `loom` — `weaver` reaches it over HTTP. WAL mode handles
+  opened only by `loom`; every external adapter reaches it over HTTP. WAL mode handles
   concurrency among loom's own connections.
   - Core tables: `branches`, `issues`, `events`, `settings`.
   - Loom tables (`crates/loom-store/src/db.rs`): `sessions` (`origin` — the channel
@@ -287,25 +279,27 @@ local SQLite.
 
 ## REST API
 
-Routes live under `/api`; the Vue SPA and CLIs are clients of the same surface.
-This map groups that surface by architectural responsibility. The router in
-[`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs) is the exhaustive
-route truth, including internal proxy and compatibility paths.
+Routes live under `/api`; the Vue SPA, CLI, and MCP adapters are clients of the
+same surface. A routine operation is a `RegisteredOperation` containing its
+descriptor and a type-erased wrapper around one compile-checked async function.
+`register_operation::<O>(handler)` binds the marker's concrete input/output types,
+authority metadata, argument spec, and implementation in one entry. The
+registry mounts that entry at `POST /api/<operation/id>` (for example,
+`issues.tags.set` becomes `/api/issues/tags/set`), publishes it through
+`GET /api/operations`, and invokes it through `weaver_api::Client::invoke<O>`.
+JSON erasure exists only at that HTTP boundary.
 
-| Area | Route families and responsibility |
-|---|---|
-| Operations | `/api/{health,ready,diagnostics,events,logs}` and `/metrics` expose bounded health, observability, diagnostics, and authorized event streams. |
-| Identity and access | `/api/self` and `/api/auth/*` cover session bootstrap, human authentication, OAuth, API tokens, federation, and admin user/access configuration. |
-| Sessions and launch policy | `/api/sessions*`, `/api/session-launches/*`, and `/api/agents` cover fleet views and search, launch resolution, admission, creation, and session metadata. |
-| Channels and delivery | `/api/channels/*` owns durable communication contexts, typed messages, delivery bindings and receipts, subscriptions, and read markers. |
-| Session layout | `/api/session-layout/*` owns the revisioned Spaces → Groups → Sessions model, placement defaults, ordering, moves, restores, and per-user presentation preferences. |
-| Profiles and capabilities | `/api/profiles/*`, `/api/mcps/*`, `/api/deployment/*`, `/api/settings`, and `/api/preferences` cover launch templates, effective capabilities, write-only environment, deployment reconciliation, and operator/user configuration. |
-| Automation | `/api/runs/*` and `/api/watches/*` provide idempotent automation runs, watch definitions, program discovery, execution, and audit history. |
-| Session lifecycle and integrations | `/api/sessions/{id}/*` covers metadata, tags, title generation, resumption cues, archive/adopt/recover, runtime handoff, and GitHub association and credentials. Lifecycle changes preserve the branch and durable conversation unless the operation explicitly removes the session. |
-| Session workspace | `/api/scratch/*`, `/api/sessions/{id}/{scratch,files,changes,artifacts,ide,shells}*`, and `/api/shell/*` expose bounded file exchange, diffs, artifacts, IDE proxying, and isolated debug terminals. |
-| Reviews | `/api/sessions/{id}/reviews` and `/api/reviews/*` own optimistic review drafts, anchored comments, immutable submission, resolution, and durable delivery/retry. |
-| Session runtime | `/api/sessions/{id}/{events,conversation,history,terminal,send,interrupt,preview,chat,prompt,permissions,mode}*` exposes the live terminal or ACP interaction model, durable journal/history, streaming updates, queued input, and permission/mode controls. |
-| Work planning | `/api/branches/*`, `/api/issues/*`, and `/api/repos/*` cover tracked branches, branch events, claimed and backlog work, bulk issue actions, tags, and repository discovery. |
+MCP tool listing resolves names, descriptions, and JSON Schema from the same
+operation descriptors. Tool calls resolve that descriptor and post projected
+arguments to the registered API route; there is no MCP callback table to
+reconcile. Small projections may inject session-relative context or preserve a
+useful text presentation. The CLI's operation help also reads the descriptor
+catalogue, while richer interactive and multi-item presentations remain
+ordinary API clients. Custom adapters are the explicit escape hatch for
+streaming, PTY, file/stdin, interactive, and specialized bulk behavior. The
+remaining routes in [`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs)
+are internal proxy, streaming, UI, and administration transports that are
+intentionally not routine agent operations.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -367,7 +361,7 @@ Status is two orthogonal axes. The session's `status` is the **lifecycle**
 `error` / `archived`. The branch's **`attention` tag** (value
 `attention` | `blocked`, absent ⇒ calm) plus its `description` (a one-line
 current-state message) are the **agent-declared** "does this need me?" signal,
-both set via `weaver status`. The dashboard resolves and filters on the
+both set via `loom status`. The dashboard resolves and filters on the
 attention signal.
 
 There is **no** `/api/hook` endpoint — see [Status & tags](#status--tags).
@@ -407,7 +401,7 @@ primitives over the supervisor's control socket (see `backend::send_literal`,
 let an agent or script type into, interrupt, or read back a child session
 uniformly. For a `terminal` session each requires a live terminal (else 409). An
 `acp` session has no PTY, so the same verbs map onto the protocol — keeping the
-CLI (`loom session {send,interrupt,preview}`) and its `nudge` audit uniform across
+CLI (`loom sessions {send,interrupt,preview}`) and its `nudge` audit uniform across
 backends: `send` cancels a live turn and starts the message as a normal prompt,
 `interrupt` is a `session/cancel`,
 and `preview` renders the last journal blocks as compact plain text instead of
@@ -425,18 +419,21 @@ Details → Advanced, not as the primary file or work surface.
 
 ## Runtime conventions
 
-- **API-first.** New features land as a REST endpoint in `web.rs` first; the
-  SPA and the `loom` CLI both consume it. Don't put business logic in
-  `bin/loom.rs` or in the Vue layer.
+- **API-first.** New agent features land as executable operation registrations
+  first. Routine operations declare arguments and authority beside their typed
+  implementation; the registry derives Axum routes and discovery, while CLI and
+  MCP call those routes through the REST client. Custom adapters remain for the
+  minority of transport-specific shapes. Don't put business logic in
+  `bin/loom.rs`, MCP dispatch, or the Vue layer.
 - **Errors:** the server returns `AppError` (status + message + optional
   `details` map of per-field reasons); the `loom` CLI uses `anyhow` and prints
   `error: {e:#}`.
 - **Async:** tokio everywhere on the server side. External processes (Tapestry
   runtime supervisors, git, gh, and agent adapters) go through
-  `tokio::process::Command`. The `weaver` CLI remains synchronous-feeling while
-  delegating its reads and writes to `weaver-api` over HTTP.
+  `tokio::process::Command`. The `loom` CLI remains synchronous-feeling while
+  delegating its reads and writes to the internal typed API client over HTTP.
 - **Events:** state changes flow through `EventBus`; the SSE handlers in
-  `web.rs` fan them out. `weaver hook` posts to the branch events route; Loom
+  `web.rs` fan them out. `loom hook` posts to the branch events route; Loom
   writes the row, and the monitor tick promotes it into session status and a
   fresh `EventBus` notification. Browsers cap HTTP/1.1 at 6 connections per
   origin and an EventSource holds one for its whole life, so the SPA subscribes
@@ -445,7 +442,7 @@ Details → Advanced, not as the primary file or work surface.
 - **No tracking-branch state in the server:** loom can be killed and restarted
   at any time. Terminal *and* relay supervisors and worktrees survive (the
   supervisor is a detached process, independent of `loom server run`); "orphaned"
-  is a first-class status, recovered via `loom session adopt` (or the Adopt button
+  is a first-class status, recovered via `loom sessions adopt` (or the Adopt button
   in the UI). On startup and periodically afterward, the active loom generation
   re-attaches every live-relay ACP session missing its in-process driver so its
   journal keeps flowing; a `loom.json` ownership fence prevents an older draining
@@ -482,7 +479,7 @@ branch.
 
 **Tags** are single-valued `(key, value)` annotations on a branch, each with a
 `note`, `set_by`, and `set_at`, stored in the shared `tags` table (one row per
-`(branch_id, key)`, registry in [`weaver_core::tags`](../crates/weaver-core/WEAVER.md)).
+`(branch_id, key)`, registry in `weaver_core::tags`).
 **Loudness lives in the value, not the key:** a tag whose value is on the
 `attention` | `blocked` ladder is *loud* (raises a badge) regardless of key, so
 agents and watches both add loud tags without a privileged key registry. A tag's
@@ -504,7 +501,7 @@ is no stored `ok`; returning to calm *clears* the tag. A tag is **stale** when i
 was set). The dashboard resolves the loudest non-stale loud tag into one
 attention signal, with attribution (the agent's own, or an outside mark). The
 agent's own `attention` self-report stays the *server-side* signal — what
-`weaver status`, `resolve_attention`, and `weaver issue wait` read — so a watch's
+`loom status`, `resolve_attention`, and `loom issues wait` read — so a watch's
 outside marks surface on the dashboard without spuriously waking sub-agent
 tracking.
 
@@ -534,13 +531,13 @@ custom agent whose `reports_status` is off — start `running` immediately:
 
 | Claude hook event | shells out to |
 |---|---|
-| `SessionStart` | `weaver hook --event session-start` (also injects `additionalContext`: the repo's `WEAVER.md`, or the builtin [crates/weaver-core/WEAVER.md](../crates/weaver-core/WEAVER.md), on a genuine start/resume/clear; after a **compaction** — `source: "compact"` on the hook's stdin — a concise `weaver summary` re-orientation instead, so the agent isn't re-fed the whole guide. `weaver readme` pulls the full guide back on demand) |
-| `UserPromptSubmit` | `weaver hook --event working` |
-| `Notification` | `weaver hook --event waiting` |
-| `Stop` | `weaver hook --event idle` |
+| `SessionStart` | `loom hook --event session-start` (also injects `additionalContext`: a repository `WEAVER.md` override, or Loom's compact code-registered primer, on a genuine start/resume/clear; after a **compaction** it injects a `loom summary` re-orientation) |
+| `UserPromptSubmit` | `loom hook --event working` |
+| `Notification` | `loom hook --event waiting` |
+| `Stop` | `loom hook --event idle` |
 
-`weaver hook` writes an `events` row keyed on the branch resolved from
-`$WEAVER_BRANCH` (set by the launcher) — no HTTP. Loom's monitor (`apply_hook`)
+`loom hook` posts an `events` row keyed on the branch resolved from
+`$WEAVER_BRANCH` (set by the launcher). Loom's monitor (`apply_hook`)
 consumes new `hook` rows on its next tick. A `working` / `waiting` / `idle` hook
 means the agent process is alive, so each sets `status = running` (this also
 promotes a freshly `launching` session); `session-start` is recorded for the
@@ -551,7 +548,7 @@ orchestrator tracks — it does not infer working/waiting/idle from stillness.
 An **`acp` session drives the same lifecycle from the protocol's turn boundaries**
 rather than hooks: the acp task calls `monitor::record_acp_lifecycle` at turn
 start (`working`) and turn end (`idle`), which records the very `hook` event row
-`weaver hook` would and then runs the shared `promote_lifecycle` path — so the
+`loom hook` would and then runs the shared `promote_lifecycle` path — so the
 status lift and tag mutations live in exactly one place across both backends. The
 monitor's `apply_hook` therefore *ignores* an acp session (a stray work-cycle hook
 a user's own settings might still fire must not move it), and the acp task is the
@@ -570,17 +567,17 @@ loud self-report still wins the badge. We don't try to mechanically separate
 "truly idle" from "waiting on a sub-agent or shell" — the finished-turn hook is a
 good-enough idle signal, and the status watch upgrades it when warranted (below).
 
-The **`attention` tag** is otherwise the agent's own call, set via `weaver
+The **`attention` tag** is otherwise the agent's own call, set via `loom
 status set --tag <level> [--message "<message>"]`. That calls `POST /api/branches/{key}/status`,
 which writes the tag (and, when a message is given, the `description`) and
 records a `tag` event the monitor re-broadcasts over SSE, atomically in one
 request — `ok` clears the tag, the two loud levels upsert it. The message rides
 the event as its `note`, so the event log carries the full **status trail** —
-the progress log the dashboard's activity feed renders, `weaver log` prints,
+the progress log the dashboard's activity feed renders, `loom sessions events` prints,
 and a GitHub-wired session mirrors publicly (see [GitHub
 integration](#github-integration)). Omitting `--message` changes only the level
 and keeps the last message. Last write wins, so an explicit declaration
-overrides the hook-inferred default. The general `weaver tag set|rm|ls` group
+overrides the hook-inferred default. The general `loom sessions tags` group
 writes any key the same way, over the
 branch-scoped `PUT`/`DELETE /api/branches/{key}/tags/{key}` routes; the
 session-scoped `PUT`/`DELETE /api/sessions/{id}/tags/{key}` routes serve the
@@ -614,7 +611,7 @@ same pipeline output (raw → **iris format** → a rendered markdown log) and w
 `<session.log_dir>/<branch>/` (`session.log_dir` defaults to
 `~/.iris/logs/sessions`). It is best-effort: a missing or unreadable transcript
 is a logged warning, never a failed archive. The same conversion/render pipeline
-backs `weaver chatlog`, which renders the current worktree's (or a named file's)
+backs `loom sessions transcript`, which renders the current worktree's (or a named file's)
 transcript on demand.
 
 The dashboard surfaces this as a **Conversation tab** on the session detail,
@@ -750,7 +747,7 @@ maybe archive), and `poll` (the loop). The merge-archive decision is split into
 
 **The status card.** A branch carrying the quiet `github` tag
 (`owner/name#number` — stamped by the `@loom` trigger, or set by hand with
-`weaver tag set github …`, format-validated at set time) mirrors its status
+`loom sessions tags set github …`, format-validated at set time) mirrors its status
 trail onto that GitHub thread: `github::sync_status_comment`, spawned detached
 by the status endpoint and by artifact writes, renders one comment — the
 session link, links to the branch's artifacts, and the trail of the agent's
@@ -767,7 +764,7 @@ from the dashboard's pill row. See
 
 ## Authentication
 
-Authentication is a **loom-only** concern — `weaver` authenticates like any
+Authentication is a **server-only** concern — the CLI authenticates like any
 other REST client, sending `$LOOM_TOKEN` as a bearer token when set (falling
 back to loom's machine-local token). It lets loom be exposed off the loopback
 interface (so the dashboard and the API are reachable without an SSH tunnel)
@@ -907,11 +904,19 @@ revision. Launch validates availability, copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
 descriptors whose subprocess tool surfaces are filtered to the stamped rules.
-Built-in adapters are grouped by resource: `loom_context`, `loom_channel`,
-`loom_artifact`, and `loom_session`, alongside the compatibility history,
-messaging, and fixed-repository GitHub adapters. Resource tools return concise
-text plus machine-readable MCP `structuredContent`; their DTOs are the same
-ones used by the REST client and CLI.
+Built-in adapters include `loom_context`, `loom_channel`, `loom_artifact`, and
+`loom_session`, alongside the specialized history, messaging, and
+fixed-repository GitHub adapters. Resource tools return concise text plus
+machine-readable MCP `structuredContent`; their DTOs are the same ones used by
+the REST client and CLI. The ordinary first-party adapters obtain their names,
+descriptions, input schemas, and invocation target from `OperationSpec`;
+genuinely nested or special behavior remains an explicit custom adapter. Builtin
+capability digest goldens ensure this declaration migration cannot invalidate a
+pinned profile accidentally.
+Small remote projections map session defaults when needed and add the
+established text presentation. The shared descriptor-driven dispatcher retains
+runtime allow-list gating and object-argument checks; authorization and domain
+validation remain authoritative at the REST boundary.
 Neither an unchanged profile nor recovery re-resolves the current registry.
 Custom definitions live under
 absolute identities such as `/engineering/search/docs`; their first segment is
@@ -1004,8 +1009,8 @@ builtins are stdlib-only and need neither).
 | `WEAVER_DB` | sqlite path, read only by `loom` | `$WEAVER_HOME/weaver.db` |
 | `WEAVER_API` | explicit loom URL (server bind input and CLI override) | `http://127.0.0.1:7878` |
 | `LOOM_CONTEXT` | named context for the `loom` CLI when `WEAVER_API` is unset | user default |
-| `WEAVER_BRANCH` | the current branch key, set by `loom session launch` in the worktree — the only source `weaver` uses; unset, every `weaver` command fails with a friendly error | — |
-| `LOOM_TOKEN` | explicit bearer token for the `weaver`/`loom` CLIs and automation; `loom` otherwise uses its selected context credential or a loopback-only machine token | — |
+| `WEAVER_BRANCH` | compatibility branch key set by `loom sessions launch` in the worktree for branch-relative commands | — |
+| `LOOM_TOKEN` | explicit bearer token for Loom CLI/MCP and automation; `loom` otherwise uses its selected context credential or a loopback-only machine token | — |
 | `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database; unset seeds no owner at all | — |
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |

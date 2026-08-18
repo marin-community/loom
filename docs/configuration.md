@@ -151,9 +151,8 @@ idempotent, so the normal deployment loop can apply it on every rollout.
 
 Runtime edits take effect without rebuilding a deployment:
 
-```sh
-loom config set slack.status_updates false
-```
+Use Administration → Settings or `PATCH /api/settings` to set
+`slack.status_updates` to `false`.
 
 The Administration pages and `PATCH /api/settings` use the same validation and storage
 path. Send `null` to clear an override and inherit again:
@@ -162,7 +161,7 @@ path. Send `null` to clear an override and inherit again:
 {"slack.status_updates": null}
 ```
 
-`weaver config ls` prints the effective value and source for diagnostics.
+`loom settings list` prints the effective value and source for diagnostics.
 
 ## Adding configurable behavior
 

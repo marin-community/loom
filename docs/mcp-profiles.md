@@ -40,14 +40,11 @@ self-history adapters. They call Loom's typed REST client and return
 machine-readable `structuredContent`; service credentials and provider routing
 remain in the server.
 
-The resource families use consistent verbs:
-
-```text
-loom_context.get
-loom_channel.list|get|read|send|wait|ack|open|subscribe
-loom_artifact.list|get|write|delete|history|threads|comment|resolve
-loom_session.get|status|history|search
-```
+The exact resource families, tools, versioned bundles, digests, and canonical
+successors are code-registered. Inspect them with `loom mcp registry`, and join
+tools back to the transport-neutral contract with `loom help --json` or
+`GET /api/operations`. Compatibility `mcp/*` identities remain resolvable for
+pinned snapshots; new profile resolutions select their `loom/*` successors.
 
 `channel: "self"` and `session: "self"` resolve through `GET /api/self`.
 Artifact writes are create-or-append operations and may supply `base_rev` for
@@ -99,7 +96,7 @@ explicit profile selection.
 Restricted profiles add a tighter trust boundary:
 
 - they are strict, environment-cleared ACP automation profiles;
-- they suppress repository-controlled agent configuration and the normal Weaver
+- they suppress repository-controlled agent configuration and the normal Loom
   prelude;
 - they admit only reviewed builtin capabilities and reject custom MCPs;
 - exact expanded permissions are stamped on the session;

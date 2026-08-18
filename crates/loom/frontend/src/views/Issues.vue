@@ -24,7 +24,7 @@ defineOptions({ name: 'Issues' });
 const router = useRouter();
 const route = useRoute();
 
-// The Issues pane — the cross-repo weaver issue board, sibling to the session
+// The Issues pane — the cross-repo Loom issue board, sibling to the session
 // list and the watch panel. API-first: every row is an `IssueView` from
 // `GET /api/issues`, every control a REST call. Issues are repo-scoped data, so
 // the whole fleet's issues land here and a repo chip / filter disambiguates when
@@ -128,7 +128,7 @@ const repos = computed(() => [...new Set(issues.value.map((i) => i.repo_root))].
 const multiRepo = computed(() => repos.value.length > 1);
 
 // --- Create issue ----------------------------------------------------------
-// The "New issue" form files an unclaimed backlog item via `POST /repos/issues`.
+// The "New issue" form invokes the registered backlog-create operation.
 // Initial tags travel in that create command and persist atomically with it.
 const showCreate = ref(false);
 const createRepo = ref('');

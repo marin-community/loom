@@ -18,8 +18,8 @@ use super::{ApiResult, AppError, AppState};
 // of an artifact. See `weaver_core::discussion` and docs/artifacts.md. Name
 // resolution mirrors the artifact endpoints (branch-scoped, then
 // repo-shared); API-originated threads/comments are authored `"user"`. The
-// branch-scoped twins below serve `weaver artifact comment/resolve/threads`,
-// which — like every other `weaver` command — needs no live session.
+// branch-scoped twins below serve `loom artifacts comment/resolve/threads`,
+// which — like the other worktree-facing Loom commands — need no live session.
 // ---------------------------------------------------------------------------
 
 /// Map a domain [`discussion::Thread`] to its wire [`ThreadDto`].
@@ -170,7 +170,7 @@ pub(super) async fn resolve_thread(
 
 // ---------------------------------------------------------------------------
 // Branch-scoped discussion — the twin of the session-scoped routes above, for
-// a `weaver artifact comment/resolve/threads` target with no live session
+// a `loom artifacts comment/resolve/threads` target with no live session
 // required, matching the branch-scoped artifact routes in `artifacts.rs`.
 // ---------------------------------------------------------------------------
 

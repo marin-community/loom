@@ -10,29 +10,38 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::operations::{
+    issues as issue_operations, permissions as permission_operations, ApiMetaView, ApiOperation,
+    OperationView,
+};
+
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
     AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelBindingView,
     ChannelMessageView, ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto,
-    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq, CreateRepoIssueReq,
-    CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq,
-    CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq,
-    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
-    EnsureResumptionCueReq, ExpectedReviewRevisionReq, FederationReq, FederationView,
-    GithubTokenView, HandoffReq, HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView,
-    McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq,
-    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq,
+    CreatePermissionRequestReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
+    CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
+    CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeleteSessionGroupReq,
+    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView,
+    EffectivePermissionsView, EffectiveProfileView, EnsureResumptionCueReq,
+    ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
+    HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
+    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
+    PermissionRequestView, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
     ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
     ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
     RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
-    SendReq, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
-    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
-    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    SendReq, SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
+    SetChannelSubscriptionReq, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq,
+    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
+    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
+#[derive(Clone)]
 pub struct Client {
     base: String,
     http: reqwest::Client,
@@ -72,7 +81,7 @@ impl Client {
     /// an absolute path full of `/`, which would otherwise split into extra
     /// path segments the router never matches.
     fn seg(s: &str) -> String {
-        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+        crate::operations::encode_path_segment(s)
     }
 
     // -- Untyped JSON transport -------------------------------------------
@@ -165,10 +174,56 @@ impl Client {
         serde_json::from_value(value).map_err(|e| anyhow!("decoding response from {path}: {e}"))
     }
 
+    /// Invoke one code-registered operation through Loom's canonical JSON boundary
+    /// and deserialize the associated output type.
+    pub async fn invoke<O: ApiOperation>(&self, input: &O::Input) -> Result<O::Output> {
+        let value = serde_json::to_value(input)?;
+        let path = format!(
+            "/api/{}",
+            O::SPEC
+                .id
+                .split('.')
+                .map(Self::seg)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let value = self.invoke_value(O::SPEC.id, value).await?;
+        serde_json::from_value(value)
+            .map_err(|error| anyhow!("decoding response from {path}: {error}"))
+    }
+
+    /// Untyped counterpart used by generic adapters such as MCP.  The server
+    /// resolves `id` in its executable registry; adapters do not keep a second
+    /// callback table.
+    pub async fn invoke_value(&self, id: &str, input: Value) -> Result<Value> {
+        let path = format!(
+            "/api/{}",
+            id.split('.').map(Self::seg).collect::<Vec<_>>().join("/")
+        );
+        self.send(Method::POST, &path, Some(input)).await
+    }
+
     // -- Sessions ---------------------------------------------------------
 
     pub async fn self_context(&self) -> Result<SelfContextView> {
         self.get_typed("/api/self").await
+    }
+
+    /// Discover the connected Loom server and its operation registry version.
+    pub async fn api_meta(&self) -> Result<ApiMetaView> {
+        self.get_typed("/api/meta").await
+    }
+
+    /// List the transport-neutral operation catalogue advertised by the server.
+    pub async fn operations(&self) -> Result<Vec<OperationView>> {
+        self.get_typed("/api/operations").await
+    }
+
+    pub async fn operation(&self, id: &str) -> Result<OperationView> {
+        self.invoke::<permission_operations::Explain>(&permission_operations::ExplainInput {
+            operation: id.to_string(),
+        })
+        .await
     }
 
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
@@ -199,6 +254,60 @@ impl Client {
         self.send_typed(
             Method::PUT,
             &format!("/api/sessions/{}/github/access", Self::seg(session_id)),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn effective_permissions(
+        &self,
+        session_id: &str,
+    ) -> Result<EffectivePermissionsView> {
+        self.invoke::<permission_operations::EffectiveGet>(&permission_operations::SessionInput {
+            session: session_id.to_string(),
+        })
+        .await
+    }
+
+    pub async fn permission_requests(
+        &self,
+        session_id: &str,
+        state: Option<&str>,
+    ) -> Result<Vec<PermissionRequestView>> {
+        self.invoke::<permission_operations::RequestsList>(
+            &permission_operations::ListRequestsInput {
+                session: session_id.to_string(),
+                state: state.map(str::to_string),
+            },
+        )
+        .await
+    }
+
+    pub async fn create_permission_request(
+        &self,
+        session_id: &str,
+        request: &CreatePermissionRequestReq,
+    ) -> Result<PermissionRequestView> {
+        self.invoke::<permission_operations::RequestsCreate>(
+            &permission_operations::CreateRequestInput {
+                session: session_id.to_string(),
+                request: request.clone(),
+            },
+        )
+        .await
+    }
+
+    pub async fn decide_permission_request(
+        &self,
+        request_id: &str,
+        request: &DecidePermissionRequestReq,
+    ) -> Result<PermissionRequestView> {
+        self.send_typed(
+            Method::POST,
+            &format!(
+                "/api/permission-requests/{}/decision",
+                Self::seg(request_id)
+            ),
             Some(request),
         )
         .await
@@ -370,6 +479,11 @@ impl Client {
     /// (`GET /api/sessions/{key}`).
     pub async fn get_session(&self, key: &str) -> Result<SessionView> {
         self.get_typed(&format!("/api/sessions/{}", Self::seg(key)))
+            .await
+    }
+
+    pub async fn session_summary(&self, key: &str) -> Result<SessionCatchupView> {
+        self.get_typed(&format!("/api/sessions/{}/summary", Self::seg(key)))
             .await
     }
 
@@ -844,7 +958,7 @@ impl Client {
     //
     // Unlike the session-scoped `/api/sessions/{key}/artifacts*` routes (which
     // 404 without a live session — the dashboard's normal case), these work
-    // against the branch row directly: what the `weaver artifact` CLI needs,
+    // against the branch row directly: what the `loom artifacts` CLI needs,
     // since it may target a branch with no active session.
 
     /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
@@ -935,7 +1049,7 @@ impl Client {
 
     // -- Branch-scoped discussion ---------------------------------------------
     //
-    // The twin of loom's session-scoped thread routes, for `weaver artifact
+    // The twin of Loom's session-scoped thread routes, for `loom artifacts
     // comment/resolve/threads`, which — like every other `weaver` command —
     // needs no live session.
 
@@ -1171,43 +1285,42 @@ impl Client {
 
     // -- Issues ---------------------------------------------------------------
 
-    /// Create an issue claimed by a branch (`POST /api/branches/{key}/issues`).
+    /// Create an issue claimed by a branch (`POST /api/issues/create`).
     pub async fn create_branch_issue(&self, key: &str, req: &CreateIssueReq) -> Result<IssueView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/branches/{}/issues", Self::seg(key)),
-            Some(req),
-        )
+        self.invoke::<issue_operations::Create>(&issue_operations::CreateInput {
+            branch: key.to_string(),
+            request: req.clone(),
+        })
         .await
     }
 
     /// Create an unclaimed repo-level backlog item
-    /// (`POST /api/repos/issues`).
+    /// (`POST /api/issues/backlog/create`).
     pub async fn create_repo_issue(&self, req: &CreateRepoIssueReq) -> Result<IssueView> {
-        self.send_typed(Method::POST, "/api/repos/issues", Some(req))
-            .await
+        self.invoke::<issue_operations::CreateBacklog>(req).await
     }
 
     /// Every issue in a repo (`scope: "repo"`), or just the unclaimed backlog
-    /// (`scope: "backlog"`) — the one fetch every `weaver issue ls` view
-    /// partitions client-side (`GET /api/repos/issues`).
+    /// (`scope: "backlog"`) — the one fetch every `loom issues list` view
+    /// partitions client-side (`POST /api/issues/list`).
     pub async fn list_repo_issues(
         &self,
         repo_root: &str,
         scope: &str,
         all: bool,
     ) -> Result<Vec<IssueView>> {
-        let repo_root =
-            percent_encoding::utf8_percent_encode(repo_root, percent_encoding::NON_ALPHANUMERIC);
-        self.get_typed(&format!(
-            "/api/repos/issues?repo_root={repo_root}&scope={scope}&all={all}"
-        ))
+        self.invoke::<issue_operations::List>(&issue_operations::ListInput {
+            repo_root: repo_root.to_string(),
+            scope: scope.parse().map_err(anyhow::Error::msg)?,
+            all,
+        })
         .await
     }
 
-    /// Get one issue by id (`GET /api/issues/{id}`).
+    /// Get one issue by id (`POST /api/issues/get`).
     pub async fn get_issue(&self, id: i64) -> Result<IssueView> {
-        self.get_typed(&format!("/api/issues/{id}")).await
+        self.invoke::<issue_operations::Get>(&issue_operations::IdInput { id })
+            .await
     }
 
     /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
@@ -1221,17 +1334,31 @@ impl Client {
     /// The server validates every id and precondition before applying the
     /// command atomically. Validation failure changes nothing.
     pub async fn issue_actions(&self, req: &IssueActionsReq) -> Result<IssueActionsResult> {
-        self.send_typed(Method::POST, "/api/issues/actions", Some(req))
+        self.invoke::<issue_operations::Actions>(req).await
+    }
+
+    /// Close one issue through its semantic operation.
+    pub async fn close_issue(&self, id: i64) -> Result<IssueView> {
+        self.invoke::<issue_operations::Close>(&issue_operations::IdInput { id })
             .await
     }
 
-    /// Delete an issue (`DELETE /api/issues/{id}`).
+    /// Reopen one issue through its semantic operation.
+    pub async fn reopen_issue(&self, id: i64) -> Result<IssueView> {
+        self.invoke::<issue_operations::Reopen>(&issue_operations::IdInput { id })
+            .await
+    }
+
+    /// Delete an issue (`POST /api/issues/delete`).
     pub async fn delete_issue(&self, id: i64) -> Result<Value> {
-        self.delete(&format!("/api/issues/{id}")).await
+        let deleted = self
+            .invoke::<issue_operations::Delete>(&issue_operations::IdInput { id })
+            .await?;
+        Ok(serde_json::to_value(deleted)?)
     }
 
     /// Set (upsert) a free-form label on an issue
-    /// (`PUT /api/issues/{id}/tags/{key}`). Issue tags carry no
+    /// (`POST /api/issues/tags/set`). Issue tags carry no
     /// `attention`/`triage` ladder — every key is a quiet annotation.
     pub async fn set_issue_tag(
         &self,
@@ -1241,27 +1368,25 @@ impl Client {
         note: &str,
         by: &str,
     ) -> Result<IssueView> {
-        let req = TagReq {
-            value: value.to_string(),
-            note: note.to_string(),
-            by: Some(by.to_string()),
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/issues/{id}/tags/{}", Self::seg(key)),
-            Some(&req),
-        )
+        self.invoke::<issue_operations::SetTag>(&issue_operations::SetTagInput {
+            id,
+            key: key.to_string(),
+            request: TagReq {
+                value: value.to_string(),
+                note: note.to_string(),
+                by: Some(by.to_string()),
+            },
+        })
         .await
     }
 
-    /// Clear a label on an issue (`DELETE /api/issues/{id}/tags/{key}`).
+    /// Clear a label on an issue (`POST /api/issues/tags/delete`).
     pub async fn clear_issue_tag(&self, id: i64, key: &str) -> Result<IssueView> {
-        self.delete(&format!("/api/issues/{id}/tags/{}", Self::seg(key)))
-            .await
-            .and_then(|v| {
-                serde_json::from_value(v)
-                    .map_err(|e| anyhow!("decoding response from /api/issues/{id}/tags/{key}: {e}"))
-            })
+        self.invoke::<issue_operations::DeleteTag>(&issue_operations::DeleteTagInput {
+            id,
+            key: key.to_string(),
+        })
+        .await
     }
 
     // -- Settings -------------------------------------------------------------

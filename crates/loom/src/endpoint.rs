@@ -1,5 +1,5 @@
-//! Resolving the weaver server's address — the single source of truth shared by
-//! `weaver server run` (which binds it) and every other subcommand (which
+//! Resolving the Loom server's address — the single source of truth shared by
+//! `loom server run` (which binds it) and every other subcommand (which
 //! connects to it).
 //!
 //! `$WEAVER_API` configures both sides at once: set it and the server binds

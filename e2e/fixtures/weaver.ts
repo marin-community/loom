@@ -11,7 +11,6 @@ const CARGO_TARGET_DIR = resolve(
   process.env.CARGO_TARGET_DIR ?? "target",
 );
 const LOOM_BINARY = join(CARGO_TARGET_DIR, "debug", "loom");
-const WEAVER_BINARY = join(CARGO_TARGET_DIR, "debug", "weaver");
 const FRONTEND_DIR = join(WEAVER_ROOT, "crates", "loom", "frontend");
 const DIST_INDEX = join(
   WEAVER_ROOT,
@@ -40,7 +39,7 @@ export interface Branch {
   title: string;
   title_provenance: string;
   goal: string;
-  /** Current-state message, set with the `attention` tag via `weaver status`. */
+  /** Current-state message, set with the `attention` tag via `loom status`. */
   description: string;
   /** Every tag on the branch (the agent's `attention`, a watch's
    *  `triage`, any free-form key). Empty when calm — absence is the default. */
@@ -141,7 +140,7 @@ export interface WeaverFixture {
   /** Create an issue claimed by a seeded session's branch (so it shares the
    *  session's canonical repo_root and resolves back to it in the Issues pane). */
   seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
-  /** Create an *unclaimed* backlog issue in a repo via `POST /api/repos/issues`
+  /** Create an *unclaimed* backlog issue via `POST /api/issues/backlog/create`
    *  — the kind the Issues pane offers a Launch button for. */
   seedBacklogIssue(
     repoRoot: string,
@@ -153,7 +152,7 @@ export interface WeaverFixture {
    *  writes the log where the endpoint's capture fallback reads it
    *  (`<log_dir>/<branch-slug>/chat.json`). `log` is an iris `Log` shape. */
   seedConversation(session: Session, log: unknown): Promise<void>;
-  /** Write an artifact via `weaver artifact write` — creates it on first call,
+  /** Write an artifact via `loom artifacts write` — creates it on first call,
    *  appends an immutable revision after. Content is piped on stdin; `--repo`
    *  publishes it repo-shared instead of scoping it to the branch. A `Buffer`
    *  exercises the binary path — an image is sniffed from its magic bytes and
@@ -164,7 +163,7 @@ export interface WeaverFixture {
     content: string | Buffer,
     opts?: { title?: string; repo?: boolean; kind?: string },
   ): Promise<void>;
-  /** Remove an artifact via `weaver artifact rm` — drops it and its whole
+  /** Remove an artifact via `loom artifacts delete` — drops it and its whole
    *  history. `--repo` targets the repo-shared row when a branch copy shadows it. */
   removeArtifact(
     session: Session,
@@ -188,9 +187,9 @@ export interface WeaverFixture {
   /** Change creator attribution in the worker-private database so team-view
    *  filters can be exercised without a second browser login flow. */
   setCreator(id: string, username: string): Promise<void>;
-  /** Flip a session's status by writing a hook event row via `weaver hook`. */
+  /** Flip a session's status by writing a hook event row via `loom hook`. */
   hook(session: Session, event: "working" | "waiting" | "idle"): Promise<void>;
-  /** Declare the agent's status (level + message) via `weaver status`. It
+  /** Declare the agent's status (level + message) via `loom status`. It
    *  writes the branch's `attention` tag (clearing it on `ok`) and the
    *  current-state message, appends a typed channel item, and records a `tag`
    *  event the monitor re-broadcasts. */
@@ -217,12 +216,12 @@ export interface WeaverFixture {
 }
 
 /**
- * Ensure the loom/weaver binaries and the Vue SPA bundle all exist. Called once
+ * Ensure the Loom binary and the Vue SPA bundle both exist. Called once
  * from `globalSetup` (see playwright.config.ts) — before any worker spawns — so
  * parallel workers never race on a concurrent `cargo build` / rspack write.
  */
 export function ensureBuilt() {
-  // Always run an incremental `cargo build` (it builds both binaries and the SPA
+  // Always run an incremental `cargo build` (it builds Loom and the SPA
   // into static/dist via build.rs). `rerun-if-changed` makes it a fast no-op when
   // nothing changed, but it rebuilds a stale bundle after a backend *or* frontend
   // edit — so the suite never tests an out-of-date or placeholder UI.
@@ -233,9 +232,6 @@ export function ensureBuilt() {
   });
   if (!existsSync(LOOM_BINARY)) {
     throw new Error(`loom binary missing after build: ${LOOM_BINARY}`);
-  }
-  if (!existsSync(WEAVER_BINARY)) {
-    throw new Error(`weaver binary missing after build: ${WEAVER_BINARY}`);
   }
   if (!existsSync(DIST_INDEX)) {
     // build.rs writes a placeholder when Node is unavailable; build the SPA
@@ -254,7 +250,7 @@ function makeRepo(dir: string) {
   const git = (args: string[]) =>
     execFileSync("git", args, { cwd: dir, stdio: "pipe" });
   git(["init", "-b", "main"]);
-  git(["config", "user.name", "Weaver E2E"]);
+  git(["config", "user.name", "Loom E2E"]);
   git(["config", "user.email", "e2e@weaver.test"]);
   writeFileSync(join(dir, "README.md"), "# weaver e2e fixture repo\n");
   git(["add", "-A"]);
@@ -343,7 +339,10 @@ async function deleteAllIssues(baseUrl: string) {
     }[];
     for (const i of all) {
       try {
-        await fetch(`${baseUrl}/api/issues/${i.id}`, { method: "DELETE" });
+        await fetchJson(`${baseUrl}/api/issues/delete`, {
+          method: "POST",
+          body: JSON.stringify({ id: i.id }),
+        });
       } catch {
         /* best effort */
       }
@@ -381,7 +380,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       mkdirSync(weaverHome, { recursive: true });
       makeRepo(repoPath);
 
-      // Per-worker env: every spawned process (loom + weaver hooks) sees the same
+      // Per-worker env: every spawned Loom process sees the same
       // WEAVER_HOME / WEAVER_DB so they share one database. The private WEAVER_HOME
       // also scopes the Tapestry control sockets, so a worker's terminals never
       // collide with another worker's or the user's real sessions. Set both the
@@ -471,10 +470,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       if (!healthy)
         throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
 
-      // Pin the `weaver`/`loom` CLI subprocesses (setStatus, seedConversation, the
+      // Pin the Loom CLI subprocesses (setStatus, seedConversation, the
       // artifact helpers) at THIS server. `childEnv` spreads `process.env`, so
       // without this override they inherit any ambient `WEAVER_API` — e.g. when the
-      // suite runs from inside a weaver session — and hit the wrong loom, 404ing on
+      // suite runs from inside a Loom session — and hit the wrong server, 404ing on
       // this server's branches.
       childEnv.WEAVER_API = baseUrl;
 
@@ -565,17 +564,17 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async seedIssue(session, title, body) {
-        return (await fetchJson(
-          `${baseUrl}/api/branches/${session.branch.id}/issues`,
-          {
-            method: "POST",
-            body: JSON.stringify({ title, body: body ?? "" }),
-          },
-        )) as Issue;
+        return (await fetchJson(`${baseUrl}/api/issues/create`, {
+          method: "POST",
+          body: JSON.stringify({
+            branch: session.branch.id,
+            request: { title, body: body ?? "" },
+          }),
+        })) as Issue;
       },
 
       async seedBacklogIssue(repoRoot, title, body) {
-        return (await fetchJson(`${baseUrl}/api/repos/issues`, {
+        return (await fetchJson(`${baseUrl}/api/issues/backlog/create`, {
           method: "POST",
           body: JSON.stringify({
             repo_root: repoRoot,
@@ -603,14 +602,14 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async writeArtifact(session, name, content, opts) {
-        // `weaver artifact write <name> -` reads content from stdin and appends
+        // `loom artifacts write <name> -` reads content from stdin and appends
         // a revision to the branch resolved from $WEAVER_BRANCH (`--repo` makes
         // it repo-shared). The first write creates the envelope.
-        const args = ["artifact", "write", name, "-"];
+        const args = ["artifacts", "write", name, "-"];
         if (opts?.title) args.push("--title", opts.title);
         if (opts?.kind) args.push("--kind", opts.kind);
         if (opts?.repo) args.push("--repo");
-        execFileSync(WEAVER_BINARY, args, {
+        execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           input: content,
           stdio: ["pipe", "pipe", "pipe"],
@@ -618,22 +617,19 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async removeArtifact(session, name, opts) {
-        const args = ["artifact", "rm", name];
+        const args = ["artifacts", "delete", name];
         if (opts?.repo) args.push("--repo");
-        execFileSync(WEAVER_BINARY, args, {
+        execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: ["pipe", "pipe", "pipe"],
         });
       },
 
       async tagIssue(id, key, value) {
-        return (await fetchJson(
-          `${baseUrl}/api/issues/${id}/tags/${encodeURIComponent(key)}`,
-          {
-            method: "PUT",
-            body: JSON.stringify({ value }),
-          },
-        )) as Issue;
+        return (await fetchJson(`${baseUrl}/api/issues/tags/set`, {
+          method: "POST",
+          body: JSON.stringify({ id, key, request: { value } }),
+        })) as Issue;
       },
 
       async listIssues(all = false) {
@@ -671,16 +667,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async hook(session, event) {
-        // `weaver hook` writes an `events` row keyed on the branch resolved
+        // `loom hook` writes an `events` row keyed on the branch resolved
         // from $WEAVER_BRANCH; the loom monitor consumes it on its next tick.
-        execFileSync(WEAVER_BINARY, ["hook", "--event", event], {
+        execFileSync(LOOM_BINARY, ["hook", "--event", event], {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: "pipe",
         });
       },
 
       async setStatus(session, level, message) {
-        // `weaver status set` writes the branch's `attention` tag (clearing it
+        // `loom status set` writes the branch's `attention` tag (clearing it
         // on `ok`) and current-state message, appending a typed channel item and
         // recording a `tag` event.
         const args = [
@@ -690,7 +686,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           level,
           ...(message ? ["--message", message] : []),
         ];
-        execFileSync(WEAVER_BINARY, args, {
+        execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           stdio: "pipe",
         });

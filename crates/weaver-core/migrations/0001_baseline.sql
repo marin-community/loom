@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS branches (
 -- created from (`source_branch`) and the branch currently working them
 -- (`claimed_branch`) are annotations: `claimed_branch IS NULL` is the unclaimed
 -- repo backlog. Repo-owned means an issue outlives the branch/worktree that
--- spawned it — see docs/repo-scoped-issues.md.
+-- spawned it.
 CREATE TABLE IF NOT EXISTS issues (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_root      TEXT NOT NULL,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS issues (
     status         TEXT NOT NULL DEFAULT 'open',
     github_issue   INTEGER,
     -- Link to a plan task, `"<slug>#T3"`, when this issue was materialized from
-    -- a plan (docs/structured-projects.md). NULL for ordinary issues.
+    -- a plan. NULL for ordinary issues.
     plan_task      TEXT,
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

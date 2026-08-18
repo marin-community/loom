@@ -42,6 +42,43 @@ pub(super) async fn effective_repositories(
     Ok(repositories)
 }
 
+/// Validate that a prospective repository expansion can be represented by one
+/// GitHub App installation token. Nothing is stored until this succeeds.
+pub(super) async fn validate_github_write(
+    st: &AppState,
+    session: &crate::session::Session,
+    repository: &str,
+) -> ApiResult<()> {
+    let mut repositories = effective_repositories(&st.db, session)
+        .await
+        .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
+    repositories.retain(|candidate| candidate != repository);
+    repositories.push(repository.to_string());
+    let app = st.trigger.app().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        )
+    })?;
+    if !app.is_configured().await {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App credential is unavailable",
+        ));
+    }
+    app.token_for_repositories(&repositories)
+        .await
+        .map_err(|error| {
+            AppError::new(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "could not grant access to {repository}; ensure the Loom GitHub App is installed on that repository: {error}"
+                ),
+            )
+        })?;
+    Ok(())
+}
+
 pub(super) async fn list_github_access(
     State(st): State<AppState>,
     Path(key): Path<String>,
@@ -81,31 +118,7 @@ pub(super) async fn set_github_access(
     // access. This catches an uninstalled repo and cross-installation mixes at
     // grant time instead of surprising the agent on its next push.
     if mode == crate::github_access::Mode::Write {
-        let mut repositories = effective_repositories(&st.db, &session)
-            .await
-            .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-        repositories.retain(|candidate| candidate != &repository);
-        repositories.push(repository.clone());
-        let app = st.trigger.app().ok_or_else(|| {
-            AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "GitHub App credential is unavailable",
-            )
-        })?;
-        if !app.is_configured().await {
-            return Err(AppError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "GitHub App credential is unavailable",
-            ));
-        }
-        app.token_for_repositories(&repositories).await.map_err(|error| {
-            AppError::new(
-                StatusCode::BAD_GATEWAY,
-                format!(
-                    "could not grant access to {repository}; ensure the Loom GitHub App is installed on that repository: {error}"
-                ),
-            )
-        })?;
+        validate_github_write(&st, &session, &repository).await?;
     }
 
     crate::github_access::set(&st.db, &session.id, &repository, mode, &principal.username).await?;
@@ -171,6 +184,7 @@ mod tests {
         assert!(require_human(&principal(Grant::Session {
             session_id: "session".to_string(),
             branch_id: "branch".to_string(),
+            capabilities: None,
         }))
         .is_err());
     }

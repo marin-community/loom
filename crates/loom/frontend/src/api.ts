@@ -74,6 +74,11 @@ export const del = (path: string) => request(path, { method: 'DELETE' });
 export const destroy = (path: string, body: unknown) =>
   request(path, { method: 'DELETE', body: JSON.stringify(body) });
 
+/** Invoke a routine code-registered operation. Its dotted identity maps to a
+ * resource-grouped API path (`issues.tags.set` → `/api/issues/tags/set`). */
+const invokeOperation = (operation: string, input: unknown) =>
+  post(`/${operation.split('.').map(encodeURIComponent).join('/')}`, input);
+
 /** Upload one prompt/reference attachment into the session-owned scratch dir. */
 export const uploadSessionScratch = (id: string, file: File) =>
   upload(`/sessions/${id}/scratch?name=${encodeURIComponent(file.name)}`, file) as Promise<
@@ -125,6 +130,31 @@ export const setSessionGithubAccess = (
     repository,
     mode,
   }) as Promise<SessionGithubAccess>;
+export const listPermissionRequests = (id: string, state?: PermissionRequest['state']) => {
+  return invokeOperation('permissions.requests.list', {
+    session: id,
+    state: state ?? null,
+  }) as Promise<PermissionRequest[]>;
+};
+export const createPermissionRequest = (id: string, repository: string, reason: string) =>
+  invokeOperation('permissions.requests.create', {
+    session: id,
+    request: {
+      kind: 'github_repository',
+      repository,
+      mode: 'write',
+      reason,
+    },
+  }) as Promise<PermissionRequest>;
+export const decidePermissionRequest = (
+  requestId: string,
+  decision: 'approve' | 'deny',
+  reason = '',
+) =>
+  post(`/permission-requests/${encodeURIComponent(requestId)}/decision`, {
+    decision,
+    reason,
+  }) as Promise<PermissionRequest>;
 
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
@@ -218,6 +248,7 @@ import type {
   IssueActionsResult,
   IssueTagInput,
   Session,
+  PermissionRequest,
   SessionGithubAccess,
   SessionSummary,
   AutomationRun,
@@ -394,7 +425,7 @@ export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) =
   return get(`/issues${qs ? `?${qs}` : ''}`) as Promise<Issue[]>;
 };
 
-/** Launch a new loom session that picks up (claims) an existing weaver issue:
+/** Launch a new Loom session that picks up (claims) an existing Loom issue:
  *  the issue's repo is the new session's cwd, and the backend seeds the branch's
  *  title/goal from the issue and stamps it as the tracking (claimed) issue.
  *  Returns the created session view, whose `id` deep-links to its detail page. */
@@ -407,7 +438,13 @@ export const createRepoIssue = (
   title: string,
   body = '',
   tags: IssueTagInput[] = [],
-) => post('/repos/issues', { repo_root: repoRoot, title, body, tags }) as Promise<Issue>;
+) =>
+  invokeOperation('issues.backlog.create', {
+    repo_root: repoRoot,
+    title,
+    body,
+    tags,
+  }) as Promise<Issue>;
 
 /** Patch an issue's editable fields. Blank `github` unlinks it;
  *  `claimed_branch: null` returns it to the unclaimed backlog. */
@@ -427,7 +464,7 @@ export const setSessionGithub = (id: string, prNumber: number) =>
 export const clearSessionGithub = (id: string) => del(`/sessions/${id}/github`) as Promise<Session>;
 
 /** Delete an issue outright. */
-export const deleteIssue = (id: number) => del(`/issues/${id}`);
+export const deleteIssue = (id: number) => invokeOperation('issues.delete', { id });
 
 /** Apply one action atomically to every issue id. */
 export const issueActions = (ids: number[], action: IssueAction) =>
@@ -435,11 +472,15 @@ export const issueActions = (ids: number[], action: IssueAction) =>
 
 /** Set (upsert) a free-form label on an issue. */
 export const setIssueTag = (id: number, key: string, value: string, note = '') =>
-  put(`/issues/${id}/tags/${encodeURIComponent(key)}`, { value, note }) as Promise<Issue>;
+  invokeOperation('issues.tags.set', {
+    id,
+    key,
+    request: { value, note, by: 'manual' },
+  }) as Promise<Issue>;
 
 /** Clear a label on an issue. */
 export const clearIssueTag = (id: number, key: string) =>
-  del(`/issues/${id}/tags/${encodeURIComponent(key)}`) as Promise<Issue>;
+  invokeOperation('issues.tags.delete', { id, key }) as Promise<Issue>;
 
 // --- Artifacts -------------------------------------------------------------
 

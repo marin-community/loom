@@ -2,13 +2,15 @@ use std::path::PathBuf;
 
 use axum::{
     extract::{Path, Query, State},
-    Json,
+    Extension, Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use weaver_api::operations::issues as issue_operations;
 use weaver_api::{
-    CreateIssueReq, CreateRepoIssueReq, IssueAction, IssueActionProblem as IssueActionProblemView,
-    IssueActionsReq, IssueActionsResult, IssueTagInput, IssueView, PatchIssueReq, TagReq,
+    CreateRepoIssueReq, DeleteIssueResult, IssueAction,
+    IssueActionProblem as IssueActionProblemView, IssueActionsReq, IssueActionsResult,
+    IssueTagInput, IssueView, PatchIssueReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
@@ -16,13 +18,30 @@ use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
 use crate::db::Db;
 use crate::events;
 use crate::git;
+use crate::{auth::Grant, auth::Principal};
 
 use super::{author_or_manual, require_branch};
-use super::{ApiResult, AppError, AppState};
+use super::{
+    register_operation, ApiResult, AppError, AppState, OperationContext, RegisteredOperation,
+};
 
 // ---------------------------------------------------------------------------
 // Issues
 // ---------------------------------------------------------------------------
+
+pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
+    vec![
+        register_operation::<issue_operations::List, _, _>(list_repo_issues_operation),
+        register_operation::<issue_operations::Get, _, _>(get_issue_operation),
+        register_operation::<issue_operations::Create, _, _>(create_branch_issue_operation),
+        register_operation::<issue_operations::CreateBacklog, _, _>(create_repo_issue_operation),
+        register_operation::<issue_operations::Close, _, _>(close_issue_operation),
+        register_operation::<issue_operations::Reopen, _, _>(reopen_issue_operation),
+        register_operation::<issue_operations::Delete, _, _>(delete_issue_operation),
+        register_operation::<issue_operations::SetTag, _, _>(set_issue_tag_operation),
+        register_operation::<issue_operations::DeleteTag, _, _>(clear_issue_tag_operation),
+    ]
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueListQuery {
@@ -50,7 +69,7 @@ async fn issue_view(db: &Db, issue: Issue) -> ApiResult<IssueView> {
 }
 
 /// Build views for a batch of issues, each with its tags joined.
-async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
+pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
     let mut out = Vec::with_capacity(issues.len());
     for i in issues {
         out.push(issue_view(db, i).await?);
@@ -137,11 +156,13 @@ pub(super) async fn list_branch_issues(
 }
 
 /// Create an issue claimed by this branch.
-pub(super) async fn create_branch_issue(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<CreateIssueReq>,
-) -> ApiResult<Json<IssueView>> {
+pub(super) async fn create_branch_issue_operation(
+    context: OperationContext,
+    input: issue_operations::CreateInput,
+) -> ApiResult<IssueView> {
+    let st = context.state;
+    let key = input.branch;
+    let req = input.request;
     if req.title.trim().is_empty() {
         return Err(AppError::bad_request("issue title is required"));
     }
@@ -170,7 +191,7 @@ pub(super) async fn create_branch_issue(
     )
     .await
     .ok();
-    Ok(Json(issue_view(&st.db, issue).await?))
+    issue_view(&st.db, issue).await
 }
 
 /// Resolve the branch row an issue event should be attributed to: the branch
@@ -217,47 +238,18 @@ async fn change_issue_status(st: &AppState, issue: &Issue, status: &str) -> ApiR
     Ok(())
 }
 
-async fn set_issue_tag_value(
-    st: &AppState,
-    issue: &Issue,
-    key: &str,
-    value: &str,
-    note: &str,
-    by: &str,
-) -> ApiResult<()> {
-    weaver_core::issue::set_tag(&st.db, issue.id, key, value, note, by).await?;
-    record_issue_event(
-        st,
-        issue,
-        "issue_tagged",
-        json!({ "id": issue.id, "key": key, "value": value }),
-    )
-    .await;
-    Ok(())
-}
-
-async fn clear_issue_tag_value(st: &AppState, issue: &Issue, key: &str) -> ApiResult<()> {
-    weaver_core::issue::clear_tag(&st.db, issue.id, key).await?;
-    record_issue_event(
-        st,
-        issue,
-        "issue_tagged",
-        json!({ "id": issue.id, "key": key, "value": "" }),
-    )
-    .await;
-    Ok(())
-}
-
-pub(super) async fn get_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<IssueView>> {
+pub(super) async fn get_issue_operation(
+    context: OperationContext,
+    input: issue_operations::IdInput,
+) -> ApiResult<IssueView> {
+    let st = context.state;
+    let id = input.id;
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     let mut view = issue_view(&st.db, issue).await?;
-    // Best-effort live snapshot of the linked GitHub thread, so `weaver issue
-    // show` surfaces "closed / re-titled while you worked". Single-issue reads
+    // Best-effort live snapshot of the linked GitHub thread, so `loom issues
+    // get` surfaces "closed / re-titled while you worked". Single-issue reads
     // only (lists would fan out), bounded so a slow GitHub can't hang the CLI,
     // and a failure just leaves the field absent — the ledger still stands.
     if let (Some(repo), Some(number)) = (view.github_repo.clone(), view.github_issue) {
@@ -277,7 +269,7 @@ pub(super) async fn get_issue(
             updated_at: s.updated_at,
         });
     }
-    Ok(Json(view))
+    Ok(view)
 }
 
 pub(super) async fn patch_issue(
@@ -352,59 +344,70 @@ pub(super) async fn patch_issue(
 /// rule is a non-empty value (clear the tag with `DELETE` to remove a label). A
 /// `tag` event is recorded on the branch working the issue, when there is one,
 /// so its session feed refreshes.
-pub(super) async fn set_issue_tag(
-    State(st): State<AppState>,
-    Path((id, tag_key)): Path<(i64, String)>,
-    Json(req): Json<TagReq>,
-) -> ApiResult<Json<IssueView>> {
-    let issue = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    let key = tag_key.trim();
-    let value = req.value.trim();
-    if key.is_empty() {
-        return Err(AppError::bad_request("tag key is required"));
-    }
-    if value.is_empty() {
-        return Err(AppError::bad_request(format!(
-            "invalid value for '{key}' — must be non-empty (clear the tag to remove it)"
-        )));
-    }
-    let by = author_or_manual(req.by.as_deref());
-    let note = req.note.trim();
-    set_issue_tag_value(&st, &issue, key, value, note, &by).await?;
-    let issue = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(issue_view(&st.db, issue).await?))
+pub(super) async fn set_issue_tag_operation(
+    context: OperationContext,
+    input: issue_operations::SetTagInput,
+) -> ApiResult<IssueView> {
+    let id = input.id;
+    let tag_key = input.key.trim().to_string();
+    let req = input.request;
+    let result = issue_actions_operation(
+        context,
+        IssueActionsReq {
+            ids: vec![id],
+            action: IssueAction::Tag {
+                key: tag_key,
+                value: req.value,
+                note: req.note,
+                by: req.by,
+            },
+        },
+    )
+    .await?;
+    result
+        .issues
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::not_found("issue"))
 }
 
-/// Clear a label on an issue — delete the `(issue_id, key)` row. A no-op when
-/// the tag is already absent.
-pub(super) async fn clear_issue_tag(
-    State(st): State<AppState>,
-    Path((id, tag_key)): Path<(i64, String)>,
-) -> ApiResult<Json<IssueView>> {
-    let issue = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    clear_issue_tag_value(&st, &issue, tag_key.trim()).await?;
-    let issue = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(issue_view(&st.db, issue).await?))
+/// Clear a label on an issue through the same validated semantic operation as
+/// MCP and bulk CLI calls. A missing tag is reported as a conflict.
+pub(super) async fn clear_issue_tag_operation(
+    context: OperationContext,
+    input: issue_operations::DeleteTagInput,
+) -> ApiResult<IssueView> {
+    let id = input.id;
+    let result = issue_actions_operation(
+        context,
+        IssueActionsReq {
+            ids: vec![id],
+            action: IssueAction::Untag {
+                key: input.key.trim().to_string(),
+            },
+        },
+    )
+    .await?;
+    result
+        .issues
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::not_found("issue"))
 }
 
-pub(super) async fn delete_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<Value>> {
-    let _ = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    weaver_core::issue::delete(&st.db, id).await?;
-    tracing::info!(issue = id, "issue deleted");
-    Ok(Json(json!({ "deleted": true })))
+pub(super) async fn delete_issue_operation(
+    context: OperationContext,
+    input: issue_operations::IdInput,
+) -> ApiResult<DeleteIssueResult> {
+    issue_actions_operation(
+        context,
+        IssueActionsReq {
+            ids: vec![input.id],
+            action: IssueAction::Delete,
+        },
+    )
+    .await?;
+    Ok(DeleteIssueResult { deleted: true })
 }
 
 fn validate_issue_action(action: &IssueAction) -> ApiResult<()> {
@@ -447,10 +450,12 @@ fn domain_issue_action(action: &IssueAction) -> BulkIssueAction {
 /// Validate an issue command and every target before applying the whole batch
 /// in one transaction. Invalid IDs and preconditions are returned together in
 /// structured error details; no requested issue changes.
-pub(super) async fn issue_actions(
-    State(st): State<AppState>,
-    Json(req): Json<IssueActionsReq>,
-) -> ApiResult<Json<IssueActionsResult>> {
+pub(super) async fn issue_actions_operation(
+    context: OperationContext,
+    req: IssueActionsReq,
+) -> ApiResult<IssueActionsResult> {
+    let st = context.state;
+    let principal = context.principal;
     if req.ids.is_empty() {
         return Err(AppError::bad_request("at least one issue id is required"));
     }
@@ -459,6 +464,13 @@ pub(super) async fn issue_actions(
         return Err(AppError::bad_request("issue ids must be unique"));
     }
     validate_issue_action(&req.action)?;
+    if matches!(principal.grant, Grant::Session { .. }) {
+        for id in &req.ids {
+            if let Some(issue) = weaver_core::issue::get(&st.db, *id).await? {
+                require_repo_access(&st, &principal, &issue.repo_root).await?;
+            }
+        }
+    }
 
     let action = domain_issue_action(&req.action);
     let result = match weaver_core::issue::apply_bulk_action(&st.db, &req.ids, &action).await {
@@ -509,30 +521,63 @@ pub(super) async fn issue_actions(
             record_issue_event(&st, issue, kind, payload).await;
         }
     }
-    Ok(Json(IssueActionsResult {
+    Ok(IssueActionsResult {
         issues: issue_views(&st.db, result.issues).await?,
         deleted_ids: result.deleted_ids,
-    }))
+    })
+}
+
+pub(super) async fn issue_actions(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<IssueActionsReq>,
+) -> ApiResult<Json<IssueActionsResult>> {
+    issue_actions_operation(OperationContext::new(st, principal), req)
+        .await
+        .map(Json)
+}
+
+pub(super) async fn close_issue_operation(
+    context: OperationContext,
+    input: issue_operations::IdInput,
+) -> ApiResult<IssueView> {
+    let result = issue_actions_operation(
+        context,
+        IssueActionsReq {
+            ids: vec![input.id],
+            action: IssueAction::Close,
+        },
+    )
+    .await?;
+    result
+        .issues
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::not_found("issue"))
+}
+
+pub(super) async fn reopen_issue_operation(
+    context: OperationContext,
+    input: issue_operations::IdInput,
+) -> ApiResult<IssueView> {
+    let result = issue_actions_operation(
+        context,
+        IssueActionsReq {
+            ids: vec![input.id],
+            action: IssueAction::Reopen,
+        },
+    )
+    .await?;
+    result
+        .issues
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::not_found("issue"))
 }
 
 // ---------------------------------------------------------------------------
 // Repo-scoped issues (the backlog / board surface)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub(super) struct RepoIssuesQuery {
-    /// Repo to scope to (canonical primary-worktree path). The frontend has
-    /// this from any `BranchView`.
-    repo_root: Option<String>,
-    /// Alternative for callers that only know a directory (e.g. the `loom`
-    /// CLI): the repo root is resolved from it server-side.
-    cwd: Option<String>,
-    #[serde(default)]
-    all: bool,
-    /// `repo` (default) = every issue; `backlog` = unclaimed only.
-    #[serde(default)]
-    scope: Option<String>,
-}
 
 /// Resolve a repo identity from an explicit `repo_root` or, failing that, a
 /// `cwd` — canonicalized to match how issues are keyed.
@@ -553,36 +598,64 @@ pub(crate) async fn resolve_repo_root(
     Ok(root.canonicalize().unwrap_or(root).display().to_string())
 }
 
+async fn require_repo_access(
+    st: &AppState,
+    principal: &Principal,
+    repo_root: &str,
+) -> ApiResult<()> {
+    let Grant::Session { branch_id, .. } = &principal.grant else {
+        return Ok(());
+    };
+    let own_repo: Option<String> =
+        sqlx::query_scalar("SELECT repo_root FROM branches WHERE id = ?")
+            .bind(branch_id)
+            .fetch_optional(&st.db)
+            .await?;
+    if own_repo.as_deref() == Some(repo_root) {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "session credentials are limited to their repository",
+        ))
+    }
+}
+
 /// The repo-wide issue board: every issue in a repo, or just the unclaimed
 /// backlog with `?scope=backlog`.
-pub(super) async fn list_repo_issues(
-    State(st): State<AppState>,
-    Query(q): Query<RepoIssuesQuery>,
-) -> ApiResult<Json<Vec<IssueView>>> {
-    let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
-    let issues = match q.scope.as_deref() {
-        Some("backlog") => weaver_core::issue::list_backlog(&st.db, &repo_root, q.all).await?,
-        Some("repo") | None => weaver_core::issue::list_for_repo(&st.db, &repo_root, q.all).await?,
-        Some(other) => {
-            return Err(AppError::bad_request(format!(
-                "invalid scope '{other}' (expected 'repo' or 'backlog')"
-            )))
+pub(super) async fn list_repo_issues_operation(
+    context: OperationContext,
+    input: issue_operations::ListInput,
+) -> ApiResult<Vec<IssueView>> {
+    let st = context.state;
+    let principal = context.principal;
+    let repo_root = resolve_repo_root(Some(&input.repo_root), None).await?;
+    require_repo_access(&st, &principal, &repo_root).await?;
+    let issues = match input.scope {
+        issue_operations::ListScope::Backlog => {
+            weaver_core::issue::list_backlog(&st.db, &repo_root, input.all).await?
+        }
+        issue_operations::ListScope::Repo => {
+            weaver_core::issue::list_for_repo(&st.db, &repo_root, input.all).await?
         }
     };
-    Ok(Json(issue_views(&st.db, issues).await?))
+    issue_views(&st.db, issues).await
 }
 
 /// Create an unclaimed repo-level backlog item.
-pub(super) async fn create_repo_issue(
-    State(st): State<AppState>,
-    Json(req): Json<CreateRepoIssueReq>,
-) -> ApiResult<Json<IssueView>> {
+pub(super) async fn create_repo_issue_operation(
+    context: OperationContext,
+    req: CreateRepoIssueReq,
+) -> ApiResult<IssueView> {
+    let st = context.state;
+    let principal = context.principal;
     if req.title.trim().is_empty() {
         return Err(AppError::bad_request("issue title is required"));
     }
     if req.repo_root.trim().is_empty() {
         return Err(AppError::bad_request("repo_root is required"));
     }
+    require_repo_access(&st, &principal, req.repo_root.trim()).await?;
     let tags = initial_issue_tags(req.tags)?;
     let issue = weaver_core::issue::add_with_tags(
         &st.db,
@@ -617,7 +690,7 @@ pub(super) async fn create_repo_issue(
             .ok();
         }
     }
-    Ok(Json(issue_view(&st.db, issue).await?))
+    issue_view(&st.db, issue).await
 }
 
 #[cfg(test)]
@@ -639,6 +712,16 @@ mod tests {
         }
     }
 
+    fn admin_principal() -> Principal {
+        Principal {
+            username: "test".to_string(),
+            github_login: None,
+            via: crate::auth::AuthVia::Loopback,
+            grant: Grant::Admin,
+            automation_context: None,
+        }
+    }
+
     #[tokio::test]
     async fn create_repo_issue_attributes_source_branch_and_records_an_event() {
         let db = crate::db::connect_in_memory().await.unwrap();
@@ -647,20 +730,19 @@ mod tests {
             .await
             .unwrap();
 
-        let issue = create_repo_issue(
-            State(st),
-            Json(CreateRepoIssueReq {
+        let issue = create_repo_issue_operation(
+            OperationContext::new(st, admin_principal()),
+            CreateRepoIssueReq {
                 repo_root: "/r".to_string(),
                 title: "backlog item".to_string(),
                 body: String::new(),
                 github_issue: None,
                 source_branch: Some("weaver/a".to_string()),
                 tags: Vec::new(),
-            }),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(issue.claimed_branch, None, "still unclaimed");
         assert_eq!(issue.source_branch.as_deref(), Some("weaver/a"));
 
@@ -782,6 +864,7 @@ mod tests {
 
         let result = issue_actions(
             State(st),
+            Extension(admin_principal()),
             Json(IssueActionsReq {
                 ids: vec![first.id, second.id],
                 action: IssueAction::Close,
@@ -793,6 +876,46 @@ mod tests {
         assert_eq!(result.issues.len(), 2);
         assert!(result.issues.iter().all(|issue| issue.status == "closed"));
         assert!(result.deleted_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scalar_status_operations_share_atomic_validation() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let st = test_state(db.clone());
+        let issue = weaver_core::issue::add(
+            &db,
+            &weaver_core::issue::NewIssue {
+                repo_root: "/r".to_string(),
+                title: "one item".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let closed = close_issue_operation(
+            OperationContext::new(st.clone(), admin_principal()),
+            issue_operations::IdInput { id: issue.id },
+        )
+        .await
+        .unwrap();
+        assert_eq!(closed.status, "closed");
+
+        let duplicate = close_issue_operation(
+            OperationContext::new(st.clone(), admin_principal()),
+            issue_operations::IdInput { id: issue.id },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(duplicate.status(), axum::http::StatusCode::CONFLICT);
+
+        let reopened = reopen_issue_operation(
+            OperationContext::new(st, admin_principal()),
+            issue_operations::IdInput { id: issue.id },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reopened.status, "open");
     }
 
     #[tokio::test]
@@ -812,6 +935,7 @@ mod tests {
 
         let error = issue_actions(
             State(st),
+            Extension(admin_principal()),
             Json(IssueActionsReq {
                 ids: vec![issue.id, 999_999],
                 action: IssueAction::Close,

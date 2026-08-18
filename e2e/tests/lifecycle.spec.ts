@@ -62,10 +62,11 @@ test.describe('session lifecycle actions', () => {
       name: 'archive-task',
     });
     await page.goto(`${weaver.baseUrl}/s/${archived.id}`);
-    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.getByRole('button', { name: 'Details & actions' }).click();
     await page.getByTestId('action-archive').scrollIntoViewIfNeeded();
     await page.getByTestId('action-archive').click();
-    await expect(dialog).toContainText('branch, conversation, placement, and Weaver history');
+    await expect(dialog).toContainText('branch, conversation, placement, and Loom history');
     const archivedResponse = page.waitForResponse(
       (response) =>
         response.ok() &&
@@ -82,18 +83,22 @@ test.describe('session lifecycle actions', () => {
       name: 'remove-task',
     });
     await page.goto(`${weaver.baseUrl}/s/${removed.id}`);
-    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByRole('button', { name: 'More' }).click();
+    await page.getByRole('button', { name: 'Details & actions' }).click();
     const scroller = page.getByTestId('details-scroll');
     await expect(scroller).toHaveCSS('overflow-y', 'auto');
     const remove = page.getByTestId('action-remove');
     await remove.scrollIntoViewIfNeeded();
     await remove.click();
-    await expect(dialog).toContainText('Git branch, conversation, and Weaver history');
+    await expect(dialog).toContainText('Git branch, conversation, and Loom history');
     await page.goBack();
     await expect(dialog).toHaveCount(0);
     expect((await weaver.getSession(removed.id)).id).toBe(removed.id);
     await page.goForward();
-    if (!(await remove.isVisible())) await page.getByRole('button', { name: /Details/ }).click();
+    if (!(await remove.isVisible())) {
+      await page.getByRole('button', { name: 'More' }).click();
+      await page.getByRole('button', { name: 'Details & actions' }).click();
+    }
     await remove.scrollIntoViewIfNeeded();
     await remove.click();
     await page.keyboard.press('Escape');

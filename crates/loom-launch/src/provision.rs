@@ -163,6 +163,7 @@ impl Actor {
             Grant::Session {
                 session_id,
                 branch_id,
+                ..
             } => Self(ActorKind::Session {
                 username: principal.username.clone(),
                 session_id: session_id.clone(),
@@ -746,11 +747,11 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         github_repo = managed_slug.as_ref().map(|repo| repo.slug());
     }
 
-    // Claiming an existing weaver issue seeds the same three fields from it.
+    // Claiming an existing Loom issue seeds the same three fields from it.
     let repo_root_str = repo_root.display().to_string();
     let mut claimed_issue_id: Option<i64> = None;
     if let Some(issue_id) = req.claim_issue {
-        tracing::debug!(issue_id, "claiming existing weaver issue for new session");
+        tracing::debug!(issue_id, "claiming existing Loom issue for new session");
         let issue = weaver_core::issue::get(&st.db, issue_id)
             .await?
             .ok_or_else(|| ProvisionError::not_found("issue"))?;
@@ -1203,9 +1204,15 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         tracking_issue_id: tracking_issue,
     };
     crate::auth::revoke_session_tokens(&st.db, &session_id).await?;
-    let session_token =
-        crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
-            .await?;
+    let session_token = crate::auth::create_session_token_with_policy(
+        &st.db,
+        created_by.as_deref(),
+        &session_id,
+        &branch.id,
+        launch_profile.restricted,
+        &launch_policy.mcp_access,
+    )
+    .await?;
     configure_session_github_auth(
         &st.db,
         &mut extra_env,
@@ -1390,20 +1397,21 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
 /// Session-specific operating context appended after the goal. Keep this
 /// compact: the goal is the outcome, the primer owns durable workflow rules,
 /// and this note only supplies the tracking contract that neither can know
-/// ahead of time. `weaver summary` is a recovery path, not a mandatory first
+/// ahead of time. `loom summary` is a recovery path, not a mandatory first
 /// tool call that would inject the goal a second time.
 fn entrance_note(tracking_issue: Option<i64>) -> String {
-    let mut note = "You are working in a Weaver session. Use `weaver summary` \
-                    to recover context if needed and `weaver readme` for the \
-                    complete workflow guide. This session has a durable channel \
-                    for user/agent messages and status history; append a typed \
+    let mut note = "You are working in a Loom session. Use `loom summary` \
+                    to recover context, `loom help` to explore the registered \
+                    command surface, and `loom permissions show` to inspect \
+                    effective access. This session has a durable channel for \
+                    user/agent messages and status history; append a typed \
                     `result` there when delegated work is complete."
         .to_string();
     if let Some(id) = tracking_issue {
         note.push_str(&format!(
-            " This session is tracked as weaver issue #{id}: keep `weaver \
-             status set --tag <level> --message \"<message>\"` honest as you work, and run `weaver \
-             issue close {id}` once the task is complete (e.g. the PR is open) \
+            " This session is tracked as Loom issue #{id}: keep `loom \
+             status set --tag <level> --message \"<message>\"` honest as you work, and run `loom \
+             issues close {id}` once the task is complete (e.g. the PR is open) \
              so whoever launched you knows you are done."
         ));
     }
@@ -1412,7 +1420,7 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
 
 /// Construct the positional first prompt from the stamped prelude policy.
 /// The user's goal is always the opening user message: making an agent fetch it
-/// through `weaver summary` on turn one adds latency and duplicates the goal in
+/// through `loom summary` on turn one adds latency and duplicates the goal in
 /// context. `none` deliberately omits all Weaver orientation.
 fn build_launch_prompt(
     goal: &str,
@@ -1463,7 +1471,7 @@ async fn resolve_explicit_work_item(
     let source = parent_branch.unwrap_or(&branch.branch).to_string();
     tracing::debug!(branch = %branch.id, source = %source, "resolving explicit work item for session");
 
-    // Claiming an existing weaver issue: that issue *is* the tracker, so the
+    // Claiming an existing Loom issue: that issue *is* the tracker, so the
     // claim must actually land — otherwise we'd hand back a tracking id for an
     // issue this branch never claimed. Propagate failures rather than swallow.
     if let Some(id) = claim_issue {
@@ -1640,17 +1648,17 @@ mod tests {
     #[test]
     fn entrance_note_keeps_catch_up_out_of_the_first_turn() {
         let note = entrance_note(Some(42));
-        assert!(note.contains("weaver summary"));
+        assert!(note.contains("loom summary"));
         assert!(note.contains("recover context"));
         assert!(!note.contains("summary` first"));
         assert!(!note.contains("prints the full goal"));
         // It tells the agent exactly how to signal "done".
-        assert!(note.contains("weaver issue #42"));
-        assert!(note.contains("weaver issue close 42"));
-        assert!(note.contains("weaver status"));
+        assert!(note.contains("Loom issue #42"));
+        assert!(note.contains("loom issues close 42"));
+        assert!(note.contains("loom status"));
         // Untracked sessions get the orientation with no issue contract.
         let untracked = entrance_note(None);
-        assert!(untracked.contains("weaver summary"));
+        assert!(untracked.contains("loom summary"));
         assert!(!untracked.contains("issue"));
     }
 

@@ -21,6 +21,20 @@ const READ_TOOLS: &[&str] = &["list", "get", "read", "wait"];
 const WRITE_TOOLS: &[&str] = &["send", "ack", "open", "subscribe"];
 const CAPABILITY_SETS: &[CapabilitySet] = &[
     CapabilitySet {
+        name: "loom/channels/read@v1",
+        group: "channel",
+        version: "v1",
+        description: "List, inspect, read, and wait on visible durable channels.",
+        tools: READ_TOOLS,
+    },
+    CapabilitySet {
+        name: "loom/channels/write@v1",
+        group: "channel",
+        version: "v1",
+        description: "Send, acknowledge, open, and subscribe to durable channels.",
+        tools: WRITE_TOOLS,
+    },
+    CapabilitySet {
         name: "mcp/channel/read@v1",
         group: "channel",
         version: "v1",
@@ -60,114 +74,8 @@ fn server_config() -> Value {
     super::builtin_server_config("channel")
 }
 
-fn channel_property() -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "description": "A visible channel id. Omit or pass 'self' for this session's channel."
-    })
-}
-
 fn tools() -> Value {
-    json!([
-        {
-            "name": "list",
-            "description": "List channels visible to this session, including unread state and binding summaries.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "archived": { "type": "boolean", "default": false } }
-            }
-        },
-        {
-            "name": "get",
-            "description": "Get channel metadata and its server-owned delivery bindings.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "channel": channel_property() }
-            }
-        },
-        {
-            "name": "read",
-            "description": "Read an ordered channel stream without changing its read marker.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "channel": channel_property(),
-                    "after": { "type": "integer", "minimum": 0, "default": 0 },
-                    "limit": { "type": "integer", "minimum": 1, "maximum": weaver_api::CHANNEL_MESSAGE_LIMIT_MAX, "default": 100 },
-                    "kinds": { "type": "array", "uniqueItems": true, "items": {
-                        "type": "string", "enum": ["goal", "message", "status", "result", "system"]
-                    }}
-                }
-            }
-        },
-        {
-            "name": "send",
-            "description": "Append one durable message and return its per-binding delivery receipts. Retrying with the same idempotency_key reuses the item and does not repeat a successful delivery.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "channel": channel_property(),
-                    "body": { "type": "string", "minLength": 1, "maxLength": 262144 },
-                    "kind": { "type": "string", "enum": ["message", "status", "result"], "default": "message" },
-                    "urgency": { "type": "string", "enum": ["normal", "attention", "blocked"], "default": "normal" },
-                    "payload": {},
-                    "reply_to": { "type": "string", "minLength": 1 },
-                    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN }
-                },
-                "required": ["body"]
-            }
-        },
-        {
-            "name": "wait",
-            "description": "Wait for the first matching channel item and return it with the new cursor.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "channel": channel_property(),
-                    "after": { "type": "integer", "minimum": 0 },
-                    "kind": { "type": "string", "enum": ["goal", "message", "status", "result", "system"] },
-                    "urgent": { "type": "boolean", "default": false },
-                    "timeout": { "type": "integer", "minimum": 1, "maximum": 3600, "default": 1800 }
-                }
-            }
-        },
-        {
-            "name": "ack",
-            "description": "Advance this session's read marker through a sequence, or through the latest item when seq is omitted.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "channel": channel_property(),
-                    "seq": { "type": "integer", "minimum": 0 }
-                }
-            }
-        },
-        {
-            "name": "open",
-            "description": "Open a durable custom channel in this repository.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
-                    "topic": { "type": "string", "maxLength": 4096, "default": "" }
-                },
-                "required": ["name"]
-            }
-        },
-        {
-            "name": "subscribe",
-            "description": "Set observe or runtime-deliver mode for this session or a visible descendant session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": {
-                    "channel": channel_property(),
-                    "mode": { "type": "string", "enum": ["observe", "deliver"], "default": "observe" },
-                    "session": { "type": "string", "minLength": 1 }
-                }
-            }
-        }
-    ])
+    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
 fn object(arguments: &Value) -> Result<&Map<String, Value>> {

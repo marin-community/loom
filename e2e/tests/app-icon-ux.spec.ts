@@ -1,7 +1,7 @@
 import { test, expect } from '../fixtures/weaver';
 
 // Covers the app-icon + UI-cleanup work: a served favicon, consistent
-// "Weaver - <Section>" tab titles, and session rows that are real links
+// "Loom - <Section>" tab titles, and session rows that are real links
 // (right-click / middle-click / ⌘-click open in a new tab).
 
 test.describe('app icon (favicon)', () => {
@@ -29,29 +29,29 @@ test.describe('app icon (favicon)', () => {
 });
 
 test.describe('consistent page titles', () => {
-  test('each route sets a "Weaver - <Section>" tab title', async ({ page, weaver }) => {
+  test('each route sets a "Loom - <Section>" tab title', async ({ page, weaver }) => {
     await page.goto(weaver.baseUrl);
-    await expect(page).toHaveTitle('Weaver - Sessions');
+    await expect(page).toHaveTitle('Loom - Sessions');
 
     // The focused New Session route carries its own URL and title.
     await page.getByRole('button', { name: 'New session' }).click();
-    await expect(page).toHaveTitle('Weaver - New Session');
+    await expect(page).toHaveTitle('Loom - New Session');
     await expect(page).toHaveURL(/\/sessions\/new$/);
 
     await page.goto(`${weaver.baseUrl}/settings`);
-    await expect(page).toHaveTitle('Weaver - Settings');
+    await expect(page).toHaveTitle('Loom - Settings');
 
     await page.goto(`${weaver.baseUrl}/issues`);
-    await expect(page).toHaveTitle('Weaver - Backlog');
+    await expect(page).toHaveTitle('Loom - Backlog');
 
     await page.goto(`${weaver.baseUrl}/watches`);
-    await expect(page).toHaveTitle('Weaver - Watches');
+    await expect(page).toHaveTitle('Loom - Watches');
   });
 
   test('a session page titles the tab with the session name', async ({ page, weaver }) => {
     const s = await weaver.seedSession({ goal: 'Title me', name: 'title-task' });
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await expect(page).toHaveTitle('Weaver - title-task');
+    await expect(page).toHaveTitle('Loom - title-task');
   });
 });
 

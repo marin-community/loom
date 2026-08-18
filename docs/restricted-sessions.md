@@ -1,11 +1,11 @@
 # Restricted GitHub sessions
 
 Restricted sessions let a trusted GitHub Actions workflow supply a complete,
-one-shot prompt without giving the agent Weaver's normal issue-solving prelude
+one-shot prompt without giving the agent Loom's normal issue-solving prelude
 or an unrestricted developer environment. Loom supplies the security envelope;
 the workflow owns task semantics, stale-write checks, and prose policy.
 
-The stock `github_comment` profile uses Claude over ACP with no Weaver prelude,
+The stock `github_comment` profile uses Claude over ACP with no Loom prelude,
 no repository environment or setup script, no Claude user/project/local
 settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP surface.
 The profile selects that reviewed surface as `mcp/github/comment@v1`; Loom expands

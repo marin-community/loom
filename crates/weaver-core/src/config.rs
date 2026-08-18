@@ -164,7 +164,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         label: "Archive on PR merge",
         description: "When enabled, loom archives a session automatically once \
             its pull request is merged — tearing down the terminal session, \
-            removing the worktree, and closing the weaver issues that session \
+            removing the worktree, and closing the Loom issues that session \
             was working, while keeping the branch and its history. Requires \
             GitHub polling.",
         kind: SettingKind::Bool,
@@ -276,7 +276,7 @@ pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec {
         key: "slack.status_updates",
         label: "Show Slack progress updates",
-        description: "Include this session's `weaver status` reports in the \
+        description: "Include this session's `loom status` reports in the \
             editable Slack status card. Reports from an earlier session on the \
             same conversation are never repeated.",
         kind: SettingKind::Bool,

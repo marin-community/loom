@@ -225,7 +225,7 @@ async function remove(agent: CustomAgent) {
           @update:model-value="draft.reports_status = $event"
         />
         <span class="text-xs text-muted">
-          Reports status via weaver hooks
+          Reports status via Loom hooks
           <span class="text-faint">
             — off: the session is <code>running</code> immediately, with no live working/idle state.
           </span>

@@ -4,7 +4,6 @@ members = [
     "crates/smartdoc",
     "crates/weaver-core",
     "crates/weaver-api",
-    "crates/weaver",
     "crates/loom-ctx",
     "crates/loom-store",
     "crates/loom-agent",

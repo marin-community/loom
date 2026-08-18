@@ -1,6 +1,6 @@
 //! Background task: detects when a session's terminal has ended and consumes the
 //! event rows the `weaver` CLI writes — `hook` events (Claude lifecycle) and
-//! `tag` events (`weaver status` writing the `attention` tag) — reflecting
+//! `tag` events (`loom status` writing the `attention` tag) — reflecting
 //! them onto the session and the dashboard.
 //!
 //! The browser terminal (xterm.js over a PTY) is the live-screen surface; this
@@ -59,9 +59,9 @@ async fn run_inner(state: AppState) {
                 for ev in new_events {
                     last_event = last_event.max(ev.id);
                     match ev.kind.as_str() {
-                        // A `tag` write — `weaver status` (the agent's
+                        // A `tag` write — `loom status` (the agent's
                         // `attention`), a watch's `triage`, or any free-form
-                        // key — or an `artifact_written` from `weaver artifact
+                        // key — or an `artifact_written` from `loom artifact
                         // write`: recorded daemon-less by the CLI, so it never
                         // touched the bus. Re-broadcast so live dashboards refresh
                         // the badge, pill, or artifact list; nothing else to do.
@@ -179,7 +179,7 @@ async fn run_inner(state: AppState) {
             }
             // Hash the pane to detect activity and bump `last_activity_at`.
             // Inferred working→idle demotion is gone: liveness is all we can
-            // know, and the agent reports the rest via `weaver status`.
+            // know, and the agent reports the rest via `loom status`.
             let screen = backend::capture(&session.term_session, 0)
                 .await
                 .unwrap_or_default();
@@ -418,7 +418,7 @@ fn runtime_starting(session: &Session, now: DateTime<Utc>) -> bool {
 /// alive → `running` (this also lifts a recovered `orphaned` session back to
 /// `running`).
 /// `session-start` is returned early below — it is recorded for the primer
-/// injection (in the `weaver hook` CLI) but the launch path owns the initial
+/// injection (in the `loom hook` CLI) but the launch path owns the initial
 /// status, so it carries no liveness or tag signal here. Beyond liveness:
 ///
 /// * `working` (a prompt was submitted — the user is engaged) clears the calm

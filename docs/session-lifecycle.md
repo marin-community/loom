@@ -100,8 +100,8 @@ attempts:
 POST   /api/sessions/{session-or-reserved-id}/archive
 DELETE /api/sessions/{session-or-reserved-id}
 
-loom session archive <session-or-reserved-id>
-loom session rm <session-or-reserved-id>
+loom sessions archive <session-or-reserved-id>
+loom sessions rm <session-or-reserved-id>
 ```
 
 ## Ownership reconciliation

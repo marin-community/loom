@@ -242,6 +242,7 @@ mod tests {
             &principal(Grant::Session {
                 session_id: "session-1".to_string(),
                 branch_id: "branch-1".to_string(),
+                capabilities: None,
             }),
             "session-1"
         ));
@@ -249,6 +250,7 @@ mod tests {
             &principal(Grant::Session {
                 session_id: "parent".to_string(),
                 branch_id: "branch-1".to_string(),
+                capabilities: None,
             }),
             "child"
         ));

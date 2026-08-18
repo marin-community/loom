@@ -85,6 +85,30 @@ export interface SessionGithubAccess {
   granted_at: string;
 }
 
+/** A session's durable request for a human-approved external access expansion. */
+export interface PermissionRequest {
+  id: string;
+  session_id: string;
+  kind: 'github_repository';
+  repository: string;
+  mode: 'write';
+  reason: string;
+  state: 'pending' | 'approved' | 'denied';
+  requested_by: string;
+  requested_at: string;
+  decided_by: string | null;
+  decided_at: string | null;
+  decision_reason: string | null;
+}
+
+export interface EffectivePermissions {
+  session_id: string;
+  actor: string;
+  operations: string[];
+  github_repositories: string[];
+  pending_requests: PermissionRequest[];
+}
+
 /** A branch is the engine's view of "what the agent is working on": one
  *  `(repo_root, branch)` pair with a goal, a title, and a free-form
  *  description. Branches are owned by `weaver-core` and exist whether or not
@@ -97,7 +121,7 @@ export interface Branch {
   title_provenance: 'derived' | 'generated' | 'user' | 'issue';
   goal: string;
   /** The agent's current-state message, set together with the `attention` tag
-   *  via `weaver status` (e.g. "Wired up routes; tests pass"). Shown even
+   *  via `loom status` (e.g. "Wired up routes; tests pass"). Shown even
    *  when the branch is calm. */
   description: string;
   /** Every tag on the branch: the agent's own loud `attention`, a watch's typed
@@ -1461,6 +1485,7 @@ export interface McpCapabilitySet {
   description: string;
   adapter: string;
   tools: string[];
+  deprecated_by?: string;
 }
 
 export interface McpAccess {

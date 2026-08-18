@@ -1,6 +1,6 @@
 //! Promoting a session's status and tags from a lifecycle signal.
 //!
-//! A session announces where it is in its work cycle — a `weaver hook` from a
+//! A session announces where it is in its work cycle — a `loom hook` from a
 //! terminal agent, an ACP turn boundary from [`crate::acp`] — and that signal
 //! has to become durable state: the `sessions.status` row, the attention and
 //! idle tags the dashboard reads, and an event on the bus. That translation is
@@ -220,7 +220,7 @@ async fn promote_lifecycle_inner(
 
 /// Drive an ACP session's status/idle from a turn boundary — the acp task calls
 /// this at turn start (`kind = "working"`) and turn end (`kind = "idle"`). It
-/// records the same `hook` event row `weaver hook --event <kind>` would (the
+/// records the same `hook` event row `loom hook --event <kind>` would (the
 /// durable audit trail), then promotes the status/tags directly through the
 /// shared [`promote_lifecycle`] path — bypassing [`apply_hook`]'s ACP filter,
 /// which exists only to ignore stray user-authored work-cycle hooks. Best-effort:

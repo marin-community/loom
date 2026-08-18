@@ -129,7 +129,7 @@ export function useSessionActions(
     confirmAction({
       title: 'Archive this session?',
       description:
-        'Its terminal and worktree will be removed. The branch, conversation, placement, and Weaver history remain recoverable in History.',
+        'Its terminal and worktree will be removed. The branch, conversation, placement, and Loom history remain recoverable in History.',
       confirmLabel: 'Archive session',
       danger: true,
       action: async () => {
@@ -152,7 +152,7 @@ export function useSessionActions(
     confirmAction({
       title: 'Permanently remove this session?',
       description:
-        'Its terminal, worktree, Git branch, conversation, and Weaver history will be deleted. Claimed issues return to the backlog.',
+        'Its terminal, worktree, Git branch, conversation, and Loom history will be deleted. Claimed issues return to the backlog.',
       confirmLabel: 'Remove session',
       danger: true,
       action: async () => {

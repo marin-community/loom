@@ -45,12 +45,15 @@ async fn branch_issues_and_repo_board() {
     let tracking = tracking.as_array().unwrap();
     assert!(tracking.is_empty(), "ordinary launch opens no issue");
 
-    // Branch issues are claimed by the branch; the repo-wide board lives at
-    // /api/repos/issues.
+    // Branch issues are claimed by the branch; routine issue operations use
+    // generated resource-grouped endpoints.
     let created = client
         .post(
-            &format!("/api/branches/{branch_id}/issues"),
-            json!({ "title": "fix it", "body": "details" }),
+            "/api/issues/create",
+            json!({
+                "branch": branch_id,
+                "request": { "title": "fix it", "body": "details" }
+            }),
         )
         .await
         .unwrap();
@@ -76,14 +79,18 @@ async fn branch_issues_and_repo_board() {
     assert_eq!(branch_view["open_issue_count"], 1);
     // The repo board sees the claimed issue; the unclaimed backlog does not.
     let board = client
-        .get(&format!("/api/repos/issues?repo_root={repo_root}"))
+        .post(
+            "/api/issues/list",
+            json!({ "repo_root": repo_root, "scope": "repo", "all": false }),
+        )
         .await
         .unwrap();
     assert_eq!(board.as_array().unwrap().len(), 1);
     let backlog = client
-        .get(&format!(
-            "/api/repos/issues?repo_root={repo_root}&scope=backlog"
-        ))
+        .post(
+            "/api/issues/list",
+            json!({ "repo_root": repo_root, "scope": "backlog", "all": false }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -96,7 +103,10 @@ async fn branch_issues_and_repo_board() {
     // the unclaimed backlog rather than deleting it.
     client.delete(&format!("/api/sessions/{id}")).await.unwrap();
     let board = client
-        .get(&format!("/api/repos/issues?repo_root={repo_root}&all=true"))
+        .post(
+            "/api/issues/list",
+            json!({ "repo_root": repo_root, "scope": "repo", "all": true }),
+        )
         .await
         .unwrap();
     let board = board.as_array().unwrap();
@@ -134,8 +144,8 @@ async fn cross_repo_board_and_issue_tags() {
 
     let created = client
         .post(
-            &format!("/api/branches/{branch_id}/issues"),
-            json!({ "title": "label me" }),
+            "/api/issues/create",
+            json!({ "branch": branch_id, "request": { "title": "label me" } }),
         )
         .await
         .unwrap();
@@ -177,14 +187,20 @@ async fn cross_repo_board_and_issue_tags() {
     let cleared = client.clear_issue_tag(issue_id, tag_key).await.unwrap();
     assert!(cleared.tags.is_empty(), "clearing removes the label");
 
-    // Close the issue: it leaves the default board but returns with ?all=true.
-    client
-        .patch(
-            &format!("/api/issues/{issue_id}"),
-            json!({ "status": "closed" }),
-        )
-        .await
-        .unwrap();
+    // Scalar lifecycle operations are the canonical typed API surface. They
+    // retain the bulk endpoint's state validation while mapping directly to
+    // the corresponding MCP operations.
+    let closed = client.close_issue(issue_id).await.unwrap();
+    assert_eq!(closed.status, "closed");
+    assert!(
+        client.close_issue(issue_id).await.is_err(),
+        "closing an already-closed issue retains atomic action validation"
+    );
+    let reopened = client.reopen_issue(issue_id).await.unwrap();
+    assert_eq!(reopened.status, "open");
+    client.close_issue(issue_id).await.unwrap();
+
+    // A closed issue leaves the default board but returns with ?all=true.
     let open_board = client.get("/api/issues").await.unwrap();
     assert!(
         !open_board

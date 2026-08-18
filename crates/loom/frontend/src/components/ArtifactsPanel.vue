@@ -481,7 +481,7 @@ onUnmounted(() => {
             <span v-if="a.title" class="truncate text-xs text-faint">{{ a.title }}</span>
           </button>
           <p v-if="!list.length && !listError" class="px-3 py-2 text-xs text-faint">
-            No artifacts yet. Agents write them with <code>weaver artifact write</code>.
+            No artifacts yet. Agents write them with <code>loom artifacts write</code>.
           </p>
         </div>
       </div>

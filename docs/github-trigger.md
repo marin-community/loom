@@ -7,7 +7,7 @@ loom launches a session against that repo — attached to
 the PR's own branch (so the agent's commits land on the PR) or, for an issue, a
 stable `weaver/issue-<n>` branch — seeded with the thread's context, and replies
 with a link to the live session (`On it — {base}/s/{id}`). That reply is the
-session's **status card**: as the agent reports progress with `weaver status`,
+session's **status card**: as the agent reports progress with `loom status`,
 loom edits the comment in place into a live trail (see [The status
 card](#the-status-card)). A follow-up `@loom` on a thread that already has a
 running session is handed to that session instead of starting a second one.
@@ -88,7 +88,7 @@ jump to the session.
 The "On it" reply doubles as the thread's live view of the session. At launch
 the trigger **wires** the branch to the thread — a quiet `github` tag whose
 value is `owner/name#number` — and records the reply's comment id. From then
-on, every `weaver status set --tag <level> --message "<message>"` the agent writes re-renders that
+on, every `loom status set --tag <level> --message "<message>"` the agent writes re-renders that
 comment:
 
 > On it — {base}/s/{id}
@@ -112,9 +112,9 @@ An editable stock `github` profile is available as a starter, but is not
 selected automatically so upgrades preserve the existing `default` profile's
 environment and runtime behavior.
 
-The mirroring works on any session, not just triggered ones: `weaver tag set
+The mirroring works on any session, not just triggered ones: `loom sessions tags set
 github owner/name#123` wires a session by hand (the card appears on its next
-status report), and `weaver tag rm github` stops the mirroring, freezing the
+status report), and `loom sessions tags delete github` stops the mirroring, freezing the
 comment. The card requires a configured `auth.base_url` (the session link must
 resolve for a GitHub reader) and posts through the same App client as the reply.
 Two loom-internal tags do the bookkeeping —

@@ -178,7 +178,7 @@ fn select_sessions(suffix: &str) -> String {
 /// guessed at the agent's state from hooks and screen stillness and were
 /// frequently wrong (e.g. an agent waiting on a background workflow looked
 /// "idle"). Liveness is all the orchestrator can know for sure; the agent
-/// reports the rest via `weaver status`.
+/// reports the rest via `loom status`.
 pub const STATUSES: &[&str] = &[
     "created", "running", "orphaned", "done", "error", "archived",
 ];

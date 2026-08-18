@@ -3,7 +3,7 @@
 //! It owns PR status polling ([`poll`], [`refresh`]): the background loop
 //! snapshots each live session's pull request (link, review decision, check
 //! rollup) into the `branch_github` table, and archives a session — closing the
-//! weaver issues it was working — once its PR merges. The snapshot rides along
+//! Loom issues it was working — once its PR merges. The snapshot rides along
 //! on `BranchView`; the dashboard renders it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -57,7 +57,7 @@ pub const LINKED_TAG: &str = tags::GITHUB_LINKED_KEY;
 // ---------------------------------------------------------------------------
 // The status card
 //
-// A branch wired to a GitHub thread mirrors its `weaver status` trail onto one
+// A branch wired to a GitHub thread mirrors its `loom status` trail onto one
 // comment there — the trigger's "On it" reply, edited in place — so the people
 // watching the issue or PR see the agent's progress without opening the
 // dashboard. Edits notify no one: the card is the quiet channel; the agent
@@ -100,7 +100,7 @@ pub fn parse_wiring(value: &str) -> Option<(String, i64)> {
 
 /// One rendered bullet of the status trail: the level's dot, the time, the
 /// level name when loud, and the message. Events with nothing to say (a bare
-/// `weaver status set --tag ok`) render `None`.
+/// `loom status set --tag ok`) render `None`.
 fn status_bullet(event: &weaver_core::events::Event) -> Option<String> {
     let value = event.data["value"].as_str().unwrap_or_default();
     let note = event.data["note"].as_str().unwrap_or_default().trim();
@@ -130,7 +130,7 @@ fn status_bullet(event: &weaver_core::events::Event) -> Option<String> {
 }
 
 /// Render the status card: the "On it" header linking the session, any
-/// published-document links, then the trail of `weaver status` reports (oldest first, capped at
+/// published-document links, then the trail of `loom status` reports (oldest first, capped at
 /// [`STATUS_CARD_CAP`]). Pure, so the format is unit-testable; `events` is the
 /// branch's history oldest-first, filtered here to the agent's own attention
 /// reports.
@@ -928,7 +928,7 @@ pub async fn upsert_status(db: &Db, branch_id: &str, s: &GithubStatus) -> Result
 
 /// Fetch a branch's PR, store the snapshot, announce a meaningful change on the
 /// activity feed, and — when `archive_on_merge` is set and the PR has merged —
-/// archive the still-live session and close the weaver issues it was working.
+/// archive the still-live session and close the Loom issues it was working.
 /// Returns the fresh snapshot, or `None` when the branch has no PR. The single
 /// code path behind both the poller and the on-demand refresh endpoint.
 pub async fn refresh(
@@ -996,7 +996,7 @@ async fn apply_refresh_result(
 
 /// Persist a freshly-fetched snapshot, announce a meaningful change on the
 /// activity feed, and — when `archive_on_merge` is set — archive a still-live
-/// session whose PR has merged and close the weaver issues that session claimed.
+/// session whose PR has merged and close the Loom issues that session claimed.
 /// Split from [`refresh`] so the storage and merge-archive behaviour is testable
 /// without invoking `gh`.
 pub async fn apply_snapshot(
@@ -2305,7 +2305,7 @@ mod tests {
             "the archived session no longer owns the closed issue"
         );
         // …and the closure lands on the activity feed as an `issue_closed` event,
-        // just as `weaver issue close` would have recorded it.
+        // just as `loom issues close` would have recorded it.
         let logged = events::history(&f.state.db, &f.branch.id, 50)
             .await
             .unwrap()

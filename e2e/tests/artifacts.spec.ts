@@ -165,7 +165,10 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('.markdown-body h1')).toContainText('Session goal');
   });
 
-  test('a CLI `artifact rm` removes it and the list updates over SSE', async ({ page, weaver }) => {
+  test('a CLI `artifacts delete` removes it and the list updates over SSE', async ({
+    page,
+    weaver,
+  }) => {
     const session = await weaver.seedSession({
       goal: 'cli rm',
       name: 'artifacts-cli-rm',
