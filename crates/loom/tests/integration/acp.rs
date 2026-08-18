@@ -1897,11 +1897,16 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
     ts.client
         .post(
             &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "say:reconnected|wait:1000" }),
+            json!({
+                "text": "say:before-disconnect|usage:1:10|wait:1000|say:after-disconnect"
+            }),
         )
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "usage")
+    })
+    .await;
 
     // Tapestry permits one live relay subscriber. A replacement subscriber
     // evicts Loom's driver while leaving the relay and ACP child alive, which is
@@ -1957,7 +1962,8 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
     );
     poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
         blocks.iter().any(|block| {
-            block["kind"] == "agent_message" && block["payload"]["text"] == "reconnected"
+            block["kind"] == "agent_message"
+                && block["payload"]["text"] == "before-disconnectafter-disconnect"
         }) && blocks.iter().any(|block| block["kind"] == "turn_end")
     })
     .await;

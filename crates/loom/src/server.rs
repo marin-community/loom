@@ -336,7 +336,7 @@ pub async fn repair_acp_sessions(state: &AppState) {
                                 &session.branch_id,
                             )
                             .await;
-                            let _ = crate::events::record(
+                            if let Err(error) = crate::events::record(
                                 &state.db,
                                 &state.bus,
                                 &session.branch_id,
@@ -346,7 +346,14 @@ pub async fn repair_acp_sessions(state: &AppState) {
                                     "reason": "ACP runtime reattached",
                                 }),
                             )
-                            .await;
+                            .await
+                            {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    %error,
+                                    "acp repair could not record restored session status"
+                                );
+                            }
                         }
                         Err(error) => tracing::warn!(
                             session = %session.id,
