@@ -234,31 +234,80 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
 RUN mkdir -p /opt/gcloud && chown -R "${HOST_UID}:${HOST_GID}" /opt/gcloud
 ENV CLOUDSDK_CONFIG=/opt/gcloud
 
-# Let agents `git push` over HTTPS with the injected GH_TOKEN — no mounted SSH
-# key. The bind-mounted host repos usually have `git@github.com:` SSH remotes, so
-# also rewrite GitHub SSH URLs to HTTPS: with no key in the container an SSH push
-# fails with "Permission denied (publickey)", but rewritten it rides the token
-# helper below. (Non-GitHub SSH remotes still need ~/.ssh mounted; see compose.)
+# Let agents `git push` over HTTPS with the credential selected by Loom — no
+# mounted SSH key. Loom stamps LOOM_GITHUB_AUTH_MODE on every managed session:
+# an explicit personal/profile GH_TOKEN is direct, an allowlisted GitHub App is
+# brokered through the session API, and restricted sessions are disabled. The
+# bind-mounted host repos usually have `git@github.com:` SSH remotes, so also
+# rewrite GitHub SSH URLs to HTTPS. (Non-GitHub SSH remotes still need ~/.ssh
+# mounted; see compose.)
 RUN <<'EOF'
 cat > /usr/local/bin/git-credential-ghtoken <<'SH'
 #!/bin/sh
 # git invokes the helper for get/store/erase; only `get` returns a credential,
 # and store/erase must exit 0 or git warns about a failing helper.
 [ "$1" = get ] || exit 0
-token="$GH_TOKEN"
-if [ -z "$token" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
-  token="$(/usr/local/bin/weaver github-token)" || exit $?
-fi
+case "${LOOM_GITHUB_AUTH_MODE:-}" in
+  broker)
+    if [ -z "$LOOM_SESSION_ID" ] || [ -z "$LOOM_TOKEN" ]; then
+      echo "Loom-managed GitHub auth is missing its session credential" >&2
+      exit 1
+    fi
+    token="$(/usr/local/bin/weaver github-token)" || exit $?
+    ;;
+  direct)
+    token="$GH_TOKEN"
+    ;;
+  disabled)
+    exit 0
+    ;;
+  "")
+    # Compatibility for sessions created by an older Loom server.
+    token="$GH_TOKEN"
+    if [ -z "$token" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
+      token="$(/usr/local/bin/weaver github-token)" || exit $?
+    fi
+    ;;
+  *)
+    echo "invalid LOOM_GITHUB_AUTH_MODE: $LOOM_GITHUB_AUTH_MODE" >&2
+    exit 1
+    ;;
+esac
 [ -n "$token" ] || exit 0
 printf 'username=x-access-token\npassword=%s\n' "$token"
 SH
 chmod +x /usr/local/bin/git-credential-ghtoken
 cat > /usr/local/bin/gh <<'SH'
 #!/bin/sh
-if [ -z "$GH_TOKEN" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
-  GH_TOKEN="$(/usr/local/bin/weaver github-token)" || exit $?
-  export GH_TOKEN
-fi
+case "${LOOM_GITHUB_AUTH_MODE:-}" in
+  broker)
+    if [ -z "$LOOM_SESSION_ID" ] || [ -z "$LOOM_TOKEN" ]; then
+      echo "Loom-managed GitHub auth is missing its session credential" >&2
+      exit 1
+    fi
+    GH_TOKEN="$(/usr/local/bin/weaver github-token)" || exit $?
+    export GH_TOKEN
+    unset GITHUB_TOKEN
+    ;;
+  direct)
+    unset GITHUB_TOKEN
+    ;;
+  disabled)
+    echo "GitHub CLI access is disabled for this Loom session" >&2
+    exit 1
+    ;;
+  "")
+    # Compatibility for sessions created by an older Loom server.
+    if [ -z "$GH_TOKEN" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
+      GH_TOKEN="$(/usr/local/bin/weaver github-token)" || exit $?
+      export GH_TOKEN
+    fi
+    ;;
+  *)
+    echo "invalid LOOM_GITHUB_AUTH_MODE: $LOOM_GITHUB_AUTH_MODE" >&2
+    exit 1
+    ;;
+esac
 exec /usr/bin/gh "$@"
 SH
 chmod +x /usr/local/bin/gh

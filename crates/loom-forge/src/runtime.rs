@@ -3,6 +3,29 @@
 use crate::Db;
 
 pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured. Add your personal GitHub token in Settings > Access, allowlist this repository for the selected profile's GitHub App credential, or configure a write-only GH_TOKEN on the profile.";
+pub const GITHUB_AUTH_MODE_ENV: &str = "LOOM_GITHUB_AUTH_MODE";
+
+/// How the image's Git/GitHub CLI adapters obtain a credential for one session.
+///
+/// This is stamped by Loom after it resolves the session environment. The
+/// adapters must not infer policy from an inherited daemon-level `GH_TOKEN`:
+/// that token belongs to the deployment, not automatically to every session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubAuthMode {
+    Direct,
+    Broker,
+    Disabled,
+}
+
+impl GithubAuthMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Broker => "broker",
+            Self::Disabled => "disabled",
+        }
+    }
+}
 
 /// External lifecycle work (terminal supervisors + git worktrees) cannot share
 /// a SQLite transaction. Serialize those operations process-wide, then use
@@ -110,6 +133,35 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     } else {
         env.push((name.to_string(), value));
     }
+}
+
+/// Stamp the GitHub credential policy consumed by the Docker image's `git`
+/// credential helper and `gh` wrapper.
+///
+/// A resolved session token (personal, profile, repository, or config-file)
+/// wins. Otherwise an allowed and configured GitHub App is brokered through the
+/// session-scoped Loom API. App-less deployments retain their ambient-token
+/// compatibility path, but Loom still explicitly labels that decision.
+pub async fn stamp_github_auth_mode(
+    env: &mut Vec<(String, String)>,
+    github_app: Option<&crate::github_app::GithubApp>,
+    restricted: bool,
+) -> GithubAuthMode {
+    let mode = if restricted {
+        GithubAuthMode::Disabled
+    } else if env_has_nonempty(env, "GH_TOKEN") {
+        GithubAuthMode::Direct
+    } else if let Some(app) = github_app {
+        if app.is_configured().await {
+            GithubAuthMode::Broker
+        } else {
+            GithubAuthMode::Direct
+        }
+    } else {
+        GithubAuthMode::Direct
+    };
+    set_env(env, GITHUB_AUTH_MODE_ENV, mode.as_str().to_string());
+    mode
 }
 
 /// Resolve a profile's App-token allowlist into the repositories stamped on
@@ -298,6 +350,49 @@ mod tests {
         let mut producer = Vec::new();
         apply_user_github_token(&db, &mut producer, None).await;
         assert!(producer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_auth_mode_is_owned_by_the_resolved_session_policy() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let app = crate::github_app::GithubApp::new(db.clone());
+
+        let mut direct = vec![("GH_TOKEN".to_string(), "personal".to_string())];
+        assert_eq!(
+            stamp_github_auth_mode(&mut direct, Some(&app), false).await,
+            GithubAuthMode::Direct
+        );
+        assert!(direct
+            .iter()
+            .any(|(name, value)| name == GITHUB_AUTH_MODE_ENV
+                && value == GithubAuthMode::Direct.as_str()));
+
+        weaver_core::config::apply(
+            &db,
+            &[
+                (
+                    crate::github_app::APP_ID_KEY.to_string(),
+                    Some("123456".to_string()),
+                ),
+                (
+                    crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                    Some("configured-for-mode-selection".to_string()),
+                ),
+            ],
+        )
+        .await
+        .unwrap();
+        let mut brokered = Vec::new();
+        assert_eq!(
+            stamp_github_auth_mode(&mut brokered, Some(&app), false).await,
+            GithubAuthMode::Broker
+        );
+
+        let mut restricted = vec![("GH_TOKEN".to_string(), "must-not-win".to_string())];
+        assert_eq!(
+            stamp_github_auth_mode(&mut restricted, Some(&app), true).await,
+            GithubAuthMode::Disabled
+        );
     }
 
     #[test]

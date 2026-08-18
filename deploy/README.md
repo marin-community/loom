@@ -123,14 +123,17 @@ invocation without touching `loom.toml`, by exporting the same-named env var:
 environment, with the environment winning (see `loom_config`'s module docs).
 
 `GH_TOKEN` and `ANTHROPIC_API_KEY` here cover the daemon's own ambient use
-(cloning private repos; the Claude launch-gate). Every *session* loom launches
-also needs them — `loom setup secrets --config /home/app/loom.toml` (run via
-`docker compose exec loom` against the running deploy, or as part of the
-[Quick start](#quick-start) sequence before first start) prompts for the agent
-keys (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex) and `GH_TOKEN`,
-and stores them as operator environment variables, live for every session from
-then on, no restart. Leave a key blank to skip it. Run it in addition to (not
-instead of) rendering them into `.env` above.
+(cloning private repos; the Claude launch-gate). The daemon's `GH_TOKEN` is not
+automatically a session's push identity: Loom explicitly selects a personal or
+profile token, or brokers an allowlisted GitHub App token, for each session.
+Session runtimes still need their provider keys. Run
+`loom setup secrets --config /home/app/loom.toml` via `docker compose exec loom`
+against the running deploy, or as part of the [Quick start](#quick-start)
+sequence before first start. It prompts for `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, and `GH_TOKEN`, and stores them as operator environment
+variables, live for every session from then on, no restart. Leave a key blank to
+skip it. Run it in addition to (not instead of) rendering them into `.env`
+above.
 
 ## Security posture
 

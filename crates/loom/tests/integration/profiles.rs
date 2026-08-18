@@ -487,6 +487,26 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_token()
         .unwrap()
         .starts_with("sha256:"));
     let id = session["id"].as_str().unwrap();
+    let stored_session = loom::session::get(&ts.state.db, id).await.unwrap().unwrap();
+    let session_token = loom::auth::create_session_token(
+        &ts.state.db,
+        stored_session.created_by.as_deref(),
+        id,
+        &stored_session.branch_id,
+    )
+    .await
+    .unwrap();
+    let token_response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/{id}/github/token", ts.addr))
+        .bearer_auth(session_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        token_response.status(),
+        StatusCode::FORBIDDEN,
+        "restricted agents must not retrieve the server-side credential"
+    );
     assert!(ts
         .client
         .put(

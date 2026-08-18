@@ -11,7 +11,9 @@ use weaver_core::tags;
 use weaver_core::BoxFut;
 
 use crate::auth::{Grant, Principal};
-use crate::runtime::{apply_user_github_token, layer_launch_environment, set_env};
+use crate::runtime::{
+    apply_user_github_token, layer_launch_environment, set_env, stamp_github_auth_mode,
+};
 use crate::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
@@ -1209,6 +1211,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     let session_token =
         crate::auth::create_session_token(&st.db, created_by.as_deref(), &session_id, &branch.id)
             .await?;
+    stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted).await;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     let session = if protocol == "acp" {

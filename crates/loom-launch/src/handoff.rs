@@ -640,6 +640,7 @@ async fn handoff_session_inner(
         &session.branch_id,
     )
     .await?;
+    runtime::stamp_github_auth_mode(&mut extra_env, github_app, plan.restricted).await;
     runtime::set_env(&mut extra_env, "LOOM_TOKEN", staged_token.value.clone());
     runtime::set_env(&mut extra_env, "LOOM_SESSION_ID", session.id.clone());
     let mut launch = match agent::build_acp_launch(

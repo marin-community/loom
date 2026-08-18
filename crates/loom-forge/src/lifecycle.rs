@@ -43,7 +43,10 @@ impl std::error::Error for Refusal {}
 use serde_json::{json, Value};
 
 use crate::db::Db;
-use crate::runtime::{layer_launch_environment, repo_cfg_or_default, set_env};
+use crate::runtime::{
+    apply_user_github_token, layer_launch_environment, repo_cfg_or_default, set_env,
+    stamp_github_auth_mode,
+};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::AppState;
 use crate::{agent, backend, custom_agents, db, events, git, repo};
@@ -60,17 +63,17 @@ pub async fn delete_session_row(st: &AppState, session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build the explicit ambient baseline used when Tapestry clears inheritance.
-/// Profile/repo values win over baseline and allowlisted ambient values; loom's
-/// own session variables are injected later by `agent::session_env`.
+/// Rebuild a session's launch environment and restore its Loom-owned GitHub
+/// credential mode. Profile/repo values win over baseline and allowlisted
+/// ambient values; Loom's own session token is rotated later.
 pub async fn resume_environment(
-    db: &Db,
+    st: &AppState,
     session: &Session,
     repo_root: &std::path::Path,
     cfg: &weaver_core::repo_config::RepoConfig,
 ) -> Vec<(String, String)> {
-    let env = crate::runtime::launch_environment(
-        db,
+    let mut env = crate::runtime::launch_environment(
+        &st.db,
         repo_root,
         cfg,
         &session.profile,
@@ -78,12 +81,20 @@ pub async fn resume_environment(
         session.policy_restricted,
     )
     .await;
-    if !session.policy_env_clear {
-        return env;
+    if session.policy_env_clear {
+        let allowlist = serde_json::from_str::<Vec<String>>(&session.policy_ambient_allowlist)
+            .unwrap_or_default();
+        env = crate::profile::cleared_environment(env, &allowlist);
     }
-    let allowlist =
-        serde_json::from_str::<Vec<String>>(&session.policy_ambient_allowlist).unwrap_or_default();
-    crate::profile::cleared_environment(env, &allowlist)
+    apply_user_github_token(&st.db, &mut env, session.created_by.as_deref()).await;
+    let github_repositories =
+        serde_json::from_str::<Vec<String>>(&session.policy_github_repositories)
+            .unwrap_or_default();
+    let github_app = (!github_repositories.is_empty())
+        .then(|| st.trigger.app())
+        .flatten();
+    stamp_github_auth_mode(&mut env, github_app, session.policy_restricted).await;
+    env
 }
 
 pub async fn rotate_session_token(
@@ -391,6 +402,9 @@ pub async fn create_warm_session(
         .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
     let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
         .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
+    let github_repositories = launch_profile
+        .github_repositories()
+        .map_err(|error| anyhow!(Refusal::Invalid(error.to_string())))?;
 
     let launch_permit = st.launch_gate.acquire(&repo_root).await;
     let repo_root_str = repo_root.display().to_string();
@@ -517,6 +531,10 @@ pub async fn create_warm_session(
     .await?;
     let session_token =
         crate::auth::create_session_token(&st.db, None, &session_id, &branch.id).await?;
+    let github_app = (!github_repositories.is_empty())
+        .then(|| st.trigger.app())
+        .flatten();
+    stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted).await;
     set_env(&mut extra_env, "LOOM_TOKEN", session_token);
     set_env(&mut extra_env, "LOOM_SESSION_ID", session_id.clone());
     tracing::info!(watch = %watch.id, session = %session_id, agent = %agent, protocol = %protocol, work_dir = %work_dir.display(), "launching warm session agent");
@@ -817,7 +835,7 @@ pub async fn adopt_terminal_into_acp(
     let work_dir = PathBuf::from(&session.work_dir);
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
     rotate_session_token(&st.db, session, &mut extra_env).await?;
     let run_dir = db::run_dir(&session.id);
     let primer_file = stamped_primer_file(&run_dir, &session.policy_prelude);
@@ -922,7 +940,7 @@ pub async fn adopt_acp(
         // The relay is gone — respawn the adapter and reopen the conversation.
         let repo_root = PathBuf::from(&branch.repo_root);
         let repo_cfg = repo_cfg_or_default(&repo_root);
-        let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+        let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
         rotate_session_token(&st.db, session, &mut extra_env).await?;
         let runtime = session.agent_kind.clone();
         let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
@@ -1200,7 +1218,7 @@ pub async fn resume_agent(
     // provisioned; this only resumes the agent.
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = resume_environment(&st.db, session, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
     rotate_session_token(&st.db, session, &mut extra_env).await?;
     let runtime = session.agent_kind.clone();
     tracing::info!(session = %session.id, branch = %branch.id, runtime = %runtime, work_dir = %work_dir.display(), "relaunching agent terminal for resume");

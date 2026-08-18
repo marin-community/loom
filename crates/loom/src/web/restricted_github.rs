@@ -48,6 +48,12 @@ pub(super) async fn github_token(
     let session = crate::session::get(&st.db, &id)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
+    if session.policy_restricted {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted sessions may use only Loom's server-side GitHub tools",
+        ));
+    }
     let repositories = super::github_access::effective_repositories(&st.db, &session)
         .await
         .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;

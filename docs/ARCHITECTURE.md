@@ -890,6 +890,17 @@ profile contains the policy only; its reviewed JSON manifest is seeded when
 absent and then remains operator-editable. App-less deployments must provide
 its write-only `GH_TOKEN`.
 
+**Git and GitHub CLI credentials.** The Docker image installs a Git credential
+helper and a `gh` wrapper because those clients do not speak Loom's session API.
+They are transport adapters, not policy owners: every fresh, resumed, warm, or
+handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
+`direct` uses the personal/profile `GH_TOKEN` in the resolved session
+environment, `broker` ignores inherited deployment credentials and requests the
+session's short-lived App token, and `disabled` rejects direct GitHub CLI
+access. An absent mode retains compatibility for sessions launched by an older
+server. This prevents the daemon's ambient clone/webhook identity from silently
+becoming an agent's push identity.
+
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
 or an explicit group list. Saving resolves the trusted builtin registry and
 enabled, validated custom definitions and pins the exact result to that profile
