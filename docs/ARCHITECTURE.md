@@ -695,16 +695,18 @@ the audited override.
 When the `gh` CLI is installed and authenticated, loom keeps a per-branch
 pull-request snapshot alongside the session. A second background loop
 (`github::poll`, sibling of the monitor, spawned in `server::serve`) runs on
-startup and every minute. It considers only sessions active in the previous ten
-minutes (using creation time until first activity), groups those sessions by
-repository, and sends one aliased GraphQL query per repository: one open-head
-lookup for each live branch, plus exact lookups for explicitly mapped or
-previously open PR numbers. The exact lookups preserve merge/close detection
-after a PR leaves the open set, without returning to one GitHub request per
-session. Quiet sessions remain on their last snapshot and can still use the
-manual refresh endpoint. `<branch>` is the worktree's live HEAD (falling back to
-loom's stored branch identity when the worktree cannot be read), so an agent
-that switches or renames its branch before opening a PR is still discovered.
+startup and every minute. It polls sessions active in the previous ten minutes
+on every tick, the rest of the first quiet day every ten minutes, and older live
+sessions hourly (using creation time until first activity). Poll attempts are
+remembered in memory so empty results and failures follow the same cadence. For
+each due tier it groups sessions by repository and sends one aliased GraphQL
+query per repository: one open-head lookup for each live branch, plus exact
+lookups for explicitly mapped or previously open PR numbers. The exact lookups
+preserve merge/close detection after a PR leaves the open set, without returning
+to one GitHub request per session. `<branch>` is the worktree's live HEAD
+(falling back to loom's stored branch identity when the worktree cannot be
+read), so an agent that switches or renames its branch before opening a PR is
+still discovered.
 The result — PR
 number, URL, state (`OPEN`/`CLOSED`/`MERGED`), draft
 flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
