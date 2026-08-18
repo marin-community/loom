@@ -75,12 +75,12 @@ Artifacts stays one tap away; Agent, Changes, and ACP Shells remain available
 from More without occupying primary navigation.
 
 Conversation is the durable operator/agent exchange. Mid-turn composer feedback
-steers a receptive adapter. When a tool or permission blocks the model from
-consuming a steer, Loom stops the current turn and starts the feedback as the
-next turn. Unseen queued text can still be retracted into the composer for
-editing without rewriting already-dispatched history, or promoted with **Stop &
-send**. Permission requests and runtime controls stay in the conversation that
-produced them; elapsed quiet time is evidence, not an automatic “stuck” verdict.
+stops the current turn and starts as the next turn, so it cannot sit behind work
+the model selected concurrently. Unseen queued text can still be retracted into
+the composer for editing without rewriting already-dispatched history, or
+promoted with **Stop & send**. Permission requests and runtime controls stay in
+the conversation that produced them; elapsed quiet time is evidence, not an
+automatic “stuck” verdict.
 
 Review contains **Changes** and **Artifacts**. Both use the same staged review
 workflow:
