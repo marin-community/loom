@@ -81,7 +81,7 @@ impl Client {
     /// an absolute path full of `/`, which would otherwise split into extra
     /// path segments the router never matches.
     fn seg(s: &str) -> String {
-        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+        crate::operations::encode_path_segment(s)
     }
 
     // -- Untyped JSON transport -------------------------------------------

@@ -26,8 +26,6 @@ use super::{
     OperationContext,
 };
 
-const MAX_REASON_LEN: usize = 4_096;
-
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct PermissionRequestQuery {
     state: Option<String>,
@@ -187,9 +185,10 @@ pub(super) async fn create_permission_request_operation(
     if reason.is_empty() {
         return Err(AppError::bad_request("reason is required"));
     }
-    if reason.len() > MAX_REASON_LEN {
+    if reason.len() > permission_operations::MAX_REASON_LEN {
         return Err(AppError::bad_request(format!(
-            "reason exceeds {MAX_REASON_LEN} bytes"
+            "reason exceeds {} bytes",
+            permission_operations::MAX_REASON_LEN
         )));
     }
     if effective_repositories(&st.db, &session)

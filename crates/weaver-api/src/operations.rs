@@ -253,6 +253,10 @@ impl OperationRequest {
     }
 }
 
+pub(crate) fn encode_path_segment(value: &str) -> String {
+    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 /// A compile-time API request/response contract bound to one registered
 /// operation identity.
 ///

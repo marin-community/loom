@@ -272,17 +272,13 @@ pub struct DeleteTagInput {
     pub key: String,
 }
 
-fn segment(value: &str) -> String {
-    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
-}
-
 typed_api_operation!(
     List,
     LIST_SPEC,
     ListInput,
     Vec<IssueView>,
     |input: &ListInput| {
-        let repo_root = segment(&input.repo_root);
+        let repo_root = encode_path_segment(&input.repo_root);
         Ok(OperationRequest::without_body(
             &LIST_SPEC,
             format!(
@@ -309,7 +305,10 @@ typed_api_operation!(
     |input: &CreateInput| {
         OperationRequest::json(
             &CREATE_SPEC,
-            format!("/api/branches/{}/issues", segment(&input.branch)),
+            format!(
+                "/api/branches/{}/issues",
+                encode_path_segment(&input.branch)
+            ),
             &input.request,
         )
     }
@@ -366,7 +365,11 @@ typed_api_operation!(
     |input: &SetTagInput| {
         OperationRequest::json(
             &TAG_SET_SPEC,
-            format!("/api/issues/{}/tags/{}", input.id, segment(&input.key)),
+            format!(
+                "/api/issues/{}/tags/{}",
+                input.id,
+                encode_path_segment(&input.key)
+            ),
             &input.request,
         )
     }
@@ -380,7 +383,11 @@ typed_api_operation!(
     |input: &DeleteTagInput| {
         Ok(OperationRequest::without_body(
             &TAG_DELETE_SPEC,
-            format!("/api/issues/{}/tags/{}", input.id, segment(&input.key)),
+            format!(
+                "/api/issues/{}/tags/{}",
+                input.id,
+                encode_path_segment(&input.key)
+            ),
         ))
     }
 );

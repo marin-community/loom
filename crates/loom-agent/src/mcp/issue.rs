@@ -233,12 +233,12 @@ macro_rules! status_projection {
     };
 }
 
-status_projection!(CloseProjection, issue_operations::Close, "close", "close");
+status_projection!(CloseProjection, issue_operations::Close, "close", "closed");
 status_projection!(
     ReopenProjection,
     issue_operations::Reopen,
     "reopen",
-    "reopen"
+    "reopened"
 );
 
 struct DeleteProjection;

@@ -14,6 +14,7 @@ const DECIDE: &[&str] = &["loom/permissions/decide@v1"];
 const GITHUB_USE: &[&str] = &["loom/github/use@v1"];
 const STATES: &[&str] = &["pending", "approved", "denied"];
 const GITHUB_WRITE_MODE: &[&str] = &["write"];
+pub const MAX_REASON_LEN: usize = 4_096;
 
 const fn session_arg() -> ArgumentSpec {
     ArgumentSpec::string("session")
@@ -34,7 +35,7 @@ static REQUEST_ARGS: &[ArgumentSpec] = &[
         .default_string("write"),
     ArgumentSpec::string("reason")
         .minimum(1)
-        .maximum(4096)
+        .maximum(MAX_REASON_LEN as i64)
         .required(),
     session_arg(),
 ];
@@ -196,10 +197,6 @@ pub struct CreateRequestInput {
     pub request: CreatePermissionRequestReq,
 }
 
-fn segment(value: &str) -> String {
-    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
-}
-
 typed_api_operation!(
     EffectiveGet,
     EFFECTIVE_GET_SPEC,
@@ -208,7 +205,10 @@ typed_api_operation!(
     |input: &SessionInput| {
         Ok(OperationRequest::without_body(
             &EFFECTIVE_GET_SPEC,
-            format!("/api/sessions/{}/permissions", segment(&input.session)),
+            format!(
+                "/api/sessions/{}/permissions",
+                encode_path_segment(&input.session)
+            ),
         ))
     }
 );
@@ -221,7 +221,7 @@ typed_api_operation!(
     |input: &ExplainInput| {
         Ok(OperationRequest::without_body(
             &EXPLAIN_SPEC,
-            format!("/api/operations/{}", segment(&input.operation)),
+            format!("/api/operations/{}", encode_path_segment(&input.operation)),
         ))
     }
 );
@@ -234,11 +234,11 @@ typed_api_operation!(
     |input: &ListRequestsInput| {
         let mut path = format!(
             "/api/sessions/{}/permission-requests",
-            segment(&input.session)
+            encode_path_segment(&input.session)
         );
         if let Some(state) = input.state.as_deref() {
             path.push_str("?state=");
-            path.push_str(&segment(state));
+            path.push_str(&encode_path_segment(state));
         }
         Ok(OperationRequest::without_body(&REQUESTS_LIST_SPEC, path))
     }
@@ -254,7 +254,7 @@ typed_api_operation!(
             &REQUESTS_CREATE_SPEC,
             format!(
                 "/api/sessions/{}/permission-requests",
-                segment(&input.session)
+                encode_path_segment(&input.session)
             ),
             &input.request,
         )

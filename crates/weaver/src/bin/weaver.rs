@@ -2279,11 +2279,11 @@ fn read_hook_source() -> Option<String> {
     v.get("source")?.as_str().map(str::to_owned)
 }
 
-/// The concise weaver re-orientation replayed after a context compaction: a
-/// short reminder that this is still a weaver session, the `weaver summary`
-/// catch-up, and the load-bearing rules an agent must not lose (status, no
-/// blocking TUI prompts, PR-not-merge, close the tracking issue). The full guide
-/// is one `weaver readme` away.
+/// The concise Loom re-orientation replayed after a context compaction: a short
+/// reminder that this is still a Loom session, the supplied catch-up summary,
+/// and the load-bearing rules an agent must not lose (status, no blocking TUI
+/// prompts, PR-not-merge, and typed result delivery). The command surface is
+/// discoverable through `loom help`.
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
