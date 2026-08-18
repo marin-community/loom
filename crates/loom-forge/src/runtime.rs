@@ -190,9 +190,8 @@ pub async fn stamp_github_auth_mode(
     mode
 }
 
-/// Apply the only permitted direct credential, then stamp the adapter mode for
-/// one session. Lifecycle paths use this single entrypoint so fresh launches,
-/// resumptions, and handoffs cannot disagree about Account-token eligibility.
+/// Apply the launching user's Account PAT when the session class permits it,
+/// then stamp the adapter mode from that result and the approved App access.
 pub async fn configure_session_github_auth(
     db: &Db,
     env: &mut Vec<(String, String)>,
