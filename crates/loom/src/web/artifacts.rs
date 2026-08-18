@@ -83,7 +83,7 @@ fn decode_artifact_image(content: &str) -> Option<(&'static str, Vec<u8>)> {
 }
 
 /// The wire metadata for an artifact envelope.
-fn artifact_meta(a: &Artifact) -> ArtifactMeta {
+pub(super) fn artifact_meta(a: &Artifact) -> ArtifactMeta {
     ArtifactMeta {
         id: a.id,
         name: a.name.clone(),

@@ -5,7 +5,7 @@ loom turns a Slack slash command or mention into a session. Type **`/marinbot
 loom pulls the surrounding conversation, launches a session against a repo,
 and replies in-thread with a link to the live session (`On it — {base}/s/{id}`).
 That reply is the session's **status card**: as the agent reports progress
-with `weaver status`, loom edits the message in place into a live trail — the
+with `loom status`, Loom edits the message in place into a live trail — the
 Slack analog of the [GitHub `@loom` trigger](github-trigger.md)'s status
 comment (see [The status card](#the-status-card)).
 
@@ -70,7 +70,7 @@ frame it receives, in order:
 The "On it" reply doubles as the thread's live view of the session, exactly
 as the GitHub comment does. At launch the trigger wires the branch to the
 thread — a `slack` tag whose value is `team_id/channel_id/thread_ts` — and
-records the card message's `ts`. From then on, every `weaver status set --tag
+records the card message's `ts`. From then on, every `loom status set --tag
 <level> --message "<message>"` the agent writes re-renders that message via
 `chat.update`:
 

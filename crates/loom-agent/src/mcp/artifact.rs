@@ -14,6 +14,20 @@ const READ_TOOLS: &[&str] = &["list", "get", "history", "threads"];
 const WRITE_TOOLS: &[&str] = &["write", "delete", "comment", "resolve"];
 const CAPABILITY_SETS: &[CapabilitySet] = &[
     CapabilitySet {
+        name: "loom/artifacts/read@v1",
+        group: "artifact",
+        version: "v1",
+        description: "List and read versioned artifacts and their discussions.",
+        tools: READ_TOOLS,
+    },
+    CapabilitySet {
+        name: "loom/artifacts/write@v1",
+        group: "artifact",
+        version: "v1",
+        description: "Write, delete, comment on, and resolve versioned artifacts.",
+        tools: WRITE_TOOLS,
+    },
+    CapabilitySet {
         name: "mcp/artifact/read@v1",
         group: "artifact",
         version: "v1",
@@ -53,84 +67,8 @@ fn server_config() -> Value {
     super::builtin_server_config("artifact")
 }
 
-fn name_property() -> Value {
-    json!({ "type": "string", "minLength": 1, "maxLength": 255 })
-}
-
-fn scope_property() -> Value {
-    json!({ "type": "string", "enum": ["branch", "repo"], "default": "branch" })
-}
-
 fn tools() -> Value {
-    json!([
-        {
-            "name": "list",
-            "description": "List artifacts visible from this branch, or the repository's shared artifacts.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "scope": scope_property()
-            }}
-        },
-        {
-            "name": "get",
-            "description": "Get an artifact envelope, content, revisions, references, and stable dashboard URL.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(), "rev": { "type": "integer", "minimum": 1 }, "scope": scope_property()
-            }, "required": ["name"] }
-        },
-        {
-            "name": "write",
-            "description": "Create an artifact or append a revision. base_rev=0 guards creation; a later base_rev rejects stale edits.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(),
-                "content": { "type": "string" },
-                "title": { "type": "string", "maxLength": 4096 },
-                "kind": { "type": "string", "minLength": 1, "default": "markdown" },
-                "scope": scope_property(),
-                "base_rev": { "type": "integer", "minimum": 0 }
-            }, "required": ["name", "content"] }
-        },
-        {
-            "name": "delete",
-            "description": "Delete an artifact and its complete revision and discussion history.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(), "scope": scope_property()
-            }, "required": ["name"] }
-        },
-        {
-            "name": "history",
-            "description": "List immutable revision metadata for one artifact, newest first.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(), "scope": scope_property()
-            }, "required": ["name"] }
-        },
-        {
-            "name": "threads",
-            "description": "List review threads and comments on one artifact; open threads only unless all=true.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(), "all": { "type": "boolean", "default": false }
-            }, "required": ["name"] }
-        },
-        {
-            "name": "comment",
-            "description": "Start an anchored review thread, or reply to an existing thread_id.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(),
-                "thread_id": { "type": "integer", "minimum": 1 },
-                "base_rev": { "type": "integer", "minimum": 1 },
-                "quote": { "type": "string", "minLength": 1 },
-                "prefix": { "type": "string", "default": "" },
-                "suffix": { "type": "string", "default": "" },
-                "body": { "type": "string", "minLength": 1 }
-            }, "required": ["name", "body"] }
-        },
-        {
-            "name": "resolve",
-            "description": "Resolve one artifact review thread.",
-            "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
-                "name": name_property(), "thread_id": { "type": "integer", "minimum": 1 }
-            }, "required": ["name", "thread_id"] }
-        }
-    ])
+    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
 fn repo_scope(arguments: &Value) -> Result<bool> {

@@ -23,7 +23,9 @@ pub(crate) mod channel;
 pub(crate) mod context;
 pub mod github;
 pub(crate) mod history;
+pub(crate) mod issue;
 pub(crate) mod messaging;
+pub(crate) mod permission;
 pub(crate) mod session;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
@@ -39,6 +41,16 @@ pub(crate) struct Adapter {
     server_config: fn() -> Value,
     tools: fn() -> Value,
     serve: fn() -> ServeFuture,
+}
+
+/// Compile-time factory registration for one trusted builtin adapter.
+///
+/// `operation_bundle` joins this transport implementation to the neutral API
+/// bundle without making `weaver-api` depend on MCP runtime types.
+#[derive(Clone, Copy)]
+struct AdapterFactory {
+    operation_bundle: &'static str,
+    build: fn() -> &'static Adapter,
 }
 
 /// A stable, provider-neutral set of MCP operations.  A set's digest is part
@@ -108,15 +120,96 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
     }
 }
 
-const ADAPTERS: &[Adapter] = &[
-    github::ADAPTER,
-    context::ADAPTER,
-    channel::ADAPTER,
-    artifact::ADAPTER,
-    session::ADAPTER,
-    history::ADAPTER,
-    messaging::ADAPTER,
-];
+macro_rules! adapter_factories {
+    ($(($name:ident, $module:ident, $bundle:literal)),+ $(,)?) => {
+        $(
+            fn $name() -> &'static Adapter {
+                &$module::ADAPTER
+            }
+        )+
+
+        const ADAPTER_FACTORIES: &[AdapterFactory] = &[
+            $(
+                AdapterFactory {
+                    operation_bundle: $bundle,
+                    build: $name,
+                },
+            )+
+        ];
+    };
+}
+
+adapter_factories!(
+    (github_adapter, github, "permissions"),
+    (context_adapter, context, "sessions"),
+    (channel_adapter, channel, "channels"),
+    (artifact_adapter, artifact, "artifacts"),
+    (issue_adapter, issue, "issues"),
+    (session_adapter, session, "sessions"),
+    (history_adapter, history, "sessions"),
+    (messaging_adapter, messaging, "sessions"),
+    (permission_adapter, permission, "permissions"),
+);
+
+fn adapters() -> impl Iterator<Item = &'static Adapter> {
+    ADAPTER_FACTORIES.iter().map(|factory| (factory.build)())
+}
+
+fn validate_adapter_factories() {
+    weaver_api::validate_operation_bundle_coverage(
+        "MCP",
+        ADAPTER_FACTORIES
+            .iter()
+            .map(|factory| factory.operation_bundle),
+    )
+    .expect("invalid MCP bundle factory registry");
+    let mut names = std::collections::BTreeSet::new();
+    let mut servers = std::collections::BTreeSet::new();
+    for registration in ADAPTER_FACTORIES {
+        let adapter = (registration.build)();
+        assert!(
+            names.insert(adapter.name),
+            "duplicate MCP adapter {}",
+            adapter.name
+        );
+        assert!(
+            servers.insert(adapter.server_name),
+            "duplicate MCP server {}",
+            adapter.server_name
+        );
+    }
+    for operation in weaver_api::operations() {
+        let Some(projection) = operation.mcp else {
+            continue;
+        };
+        let registration = ADAPTER_FACTORIES
+            .iter()
+            .find(|registration| (registration.build)().server_name == projection.server)
+            .unwrap_or_else(|| {
+                panic!(
+                    "operation {} projects unknown MCP server {}",
+                    operation.id, projection.server
+                )
+            });
+        assert_eq!(
+            registration.operation_bundle, operation.bundle,
+            "operation {} projects through an MCP factory owned by another bundle",
+            operation.id
+        );
+        let tools = ((registration.build)().tools)();
+        assert!(
+            tools
+                .as_array()
+                .expect("builtin MCP tools must be an array")
+                .iter()
+                .any(|tool| tool["name"] == projection.tool),
+            "operation {} projects unknown MCP tool {}::{}",
+            operation.id,
+            projection.server,
+            projection.tool
+        );
+    }
+}
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
 const BUILTIN_RUNTIME_ENV: [&str; 4] = [
     "WEAVER_API",
@@ -214,13 +307,11 @@ pub fn custom_permission_rule(server_name: &str, tool: &str) -> String {
 }
 
 pub fn is_tool_set(name: &str) -> bool {
-    ADAPTERS
-        .iter()
-        .any(|adapter| (adapter.expand_tool_set)(name).is_some())
+    adapters().any(|adapter| (adapter.expand_tool_set)(name).is_some())
 }
 
 pub fn is_builtin_group(group: &str) -> bool {
-    ADAPTERS.iter().any(|adapter| {
+    adapters().any(|adapter| {
         (adapter.capability_sets)()
             .iter()
             .any(|set| set.group == group)
@@ -228,9 +319,11 @@ pub fn is_builtin_group(group: &str) -> bool {
 }
 
 pub fn registry() -> McpRegistryView {
-    let mut adapters = Vec::new();
+    validate_adapter_factories();
+    let mut adapter_views = Vec::new();
     let mut capability_sets = Vec::new();
-    for adapter in ADAPTERS {
+    for registration in ADAPTER_FACTORIES {
+        let adapter = (registration.build)();
         let advertised = (adapter.tools)();
         let advertised_names = advertised
             .as_array()
@@ -249,7 +342,7 @@ pub fn registry() -> McpRegistryView {
                 set.name
             );
         }
-        adapters.push(McpAdapterView {
+        adapter_views.push(McpAdapterView {
             name: adapter.name.to_string(),
             description: adapter.description.to_string(),
             server_name: adapter.server_name.to_string(),
@@ -264,14 +357,38 @@ pub fn registry() -> McpRegistryView {
                 description: set.description.to_string(),
                 adapter: adapter.name.to_string(),
                 tools,
+                deprecated_by: canonical_capability_successor(set.name).map(str::to_string),
             });
         }
     }
     McpRegistryView {
-        adapters,
+        adapters: adapter_views,
         capability_sets,
         custom_servers: Vec::new(),
     }
+}
+
+fn canonical_capability_successor(name: &str) -> Option<&'static str> {
+    match name {
+        "mcp/github/comment@v1" => Some("loom/github/comment@v1"),
+        "mcp/context/read@v1" => Some("loom/context/read@v1"),
+        "mcp/channel/read@v1" => Some("loom/channels/read@v1"),
+        "mcp/channel/write@v1" => Some("loom/channels/write@v1"),
+        "mcp/artifact/read@v1" => Some("loom/artifacts/read@v1"),
+        "mcp/artifact/write@v1" => Some("loom/artifacts/write@v1"),
+        "mcp/session/read@v1" | "mcp/history/self@v1" => Some("loom/sessions/read@v1"),
+        "mcp/session/status@v1" | "mcp/messaging/status@v1" => Some("loom/sessions/write@v1"),
+        _ => None,
+    }
+}
+
+fn selected_for_groups(set: &McpCapabilitySetView, groups: &[String]) -> bool {
+    if set.deprecated_by.is_some() {
+        return false;
+    }
+    groups.iter().any(|group| group == &set.group)
+        || (set.name == "loom/sessions/read@v1" && groups.iter().any(|group| group == "history"))
+        || (set.name == "loom/sessions/write@v1" && groups.iter().any(|group| group == "messaging"))
 }
 
 /// Report whether an exact profile snapshot is still launchable. Profiles
@@ -329,7 +446,11 @@ pub async fn resolve_access(
     let ready_custom = ready_custom_snapshots(&custom);
     let capability_sets = match access.mode.as_str() {
         "none" => Vec::new(),
-        "all" => registry.capability_sets,
+        "all" => registry
+            .capability_sets
+            .into_iter()
+            .filter(|set| set.deprecated_by.is_none())
+            .collect(),
         "groups" => {
             for group in &access.groups {
                 if !registry
@@ -344,7 +465,7 @@ pub async fn resolve_access(
             registry
                 .capability_sets
                 .into_iter()
-                .filter(|set| access.groups.contains(&set.group))
+                .filter(|set| selected_for_groups(set, &access.groups))
                 .collect()
         }
         other => bail!("MCP access mode must be 'none', 'all', or 'groups', got '{other}'"),
@@ -433,14 +554,12 @@ fn capability_set_digest(adapter: &Adapter, set: &CapabilitySet, advertised: &Va
 pub fn expand_tool_sets(rules: &[String]) -> Result<Vec<String>> {
     let mut expanded = Vec::new();
     for rule in rules {
-        let tool_rules = ADAPTERS
-            .iter()
-            .find_map(|adapter| (adapter.expand_tool_set)(rule));
+        let tool_rules = adapters().find_map(|adapter| (adapter.expand_tool_set)(rule));
         if let Some(tool_rules) = tool_rules {
             for tool_rule in tool_rules {
                 push_unique(&mut expanded, tool_rule);
             }
-        } else if rule.starts_with("mcp/") {
+        } else if rule.starts_with("mcp/") || rule.starts_with("loom/") {
             bail!("unknown built-in MCP tool set '{rule}'");
         } else {
             push_unique(&mut expanded, rule.clone());
@@ -454,7 +573,7 @@ pub fn expand_tool_sets(rules: &[String]) -> Result<Vec<String>> {
 /// from repository-controlled profile data.
 pub(crate) fn server_configs(allowed_rules: &[String]) -> Map<String, Value> {
     let mut servers = Map::new();
-    for adapter in ADAPTERS {
+    for adapter in adapters() {
         let surface = (adapter.tools)();
         let allowed_tools = surface
             .as_array()
@@ -680,7 +799,7 @@ pub fn acp_server_configs(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if ADAPTERS.iter().any(|adapter| adapter.server_name == name) {
+            if adapters().any(|adapter| adapter.server_name == name) {
                 for required in BUILTIN_RUNTIME_ENV {
                     if let Some((_, value)) =
                         runtime_env.iter().rev().find(|(key, _)| key == required)
@@ -700,8 +819,7 @@ pub fn acp_server_configs(
 }
 
 pub async fn serve(adapter: &str) -> Result<()> {
-    let adapter = ADAPTERS
-        .iter()
+    let adapter = adapters()
         .find(|candidate| candidate.name == adapter)
         .ok_or_else(|| anyhow::anyhow!("unknown built-in MCP adapter '{adapter}'"))?;
     (adapter.serve)().await
@@ -752,9 +870,129 @@ mod tests {
     fn registry_exposes_versioned_provider_neutral_sets() {
         let registry = super::registry();
         let set = &registry.capability_sets[0];
-        assert_eq!(set.name, "mcp/github/comment@v1");
+        assert_eq!(set.name, "loom/github/comment@v1");
         assert!(set.digest.starts_with("sha256:"));
         assert_eq!(set.tools.len(), 6);
+        let legacy = registry
+            .capability_sets
+            .iter()
+            .find(|set| set.name == "mcp/github/comment@v1")
+            .unwrap();
+        assert_eq!(legacy.deprecated_by.as_deref(), Some(set.name.as_str()));
+    }
+
+    #[test]
+    fn builtin_capability_digests_are_stable() {
+        let expected = [
+            (
+                "loom/github/comment@v1",
+                "sha256:acfda8c46064c15a88906ab939379235510067d389173db04b92fff8c63c7775",
+            ),
+            (
+                "mcp/github/comment@v1",
+                "sha256:d18ed893185adb2817f65ee452a570d20342eafbd91a3e8f98450a0814755e78",
+            ),
+            (
+                "loom/context/read@v1",
+                "sha256:33214f2c5f8893bfd265f9ed95543de8e11bab2011b0a017891a1d19db573f33",
+            ),
+            (
+                "mcp/context/read@v1",
+                "sha256:6679d0abe8870e5b5c5e47467497335deaefe9e2770f1e90cb76ea126914a21a",
+            ),
+            (
+                "loom/channels/read@v1",
+                "sha256:c934b7ca47ad7f722d21c51cb0151c399794d591e367090fdc2e66514a7c0f87",
+            ),
+            (
+                "loom/channels/write@v1",
+                "sha256:08137846e0c8432ab6d1559216a27392497b932b64164742b0958ae782dbef59",
+            ),
+            (
+                "mcp/channel/read@v1",
+                "sha256:7c3a3677b592f456f4e5d452d630db436e59eeeca495cdc7e92dfdd99be16a5c",
+            ),
+            (
+                "mcp/channel/write@v1",
+                "sha256:6bd1bbafa1e2faa027f0c91f7422c57ea2d522b3953eec92b15996a294789a2f",
+            ),
+            (
+                "loom/artifacts/read@v1",
+                "sha256:172f77e14a2b524a74929e17de05366970e1898a57959d7e2db9b4c7f77fd5f3",
+            ),
+            (
+                "loom/artifacts/write@v1",
+                "sha256:0ee20dc115eb64e24521bc09415b47caa6e650498b0a3fb2bf438a16a2fc68f9",
+            ),
+            (
+                "mcp/artifact/read@v1",
+                "sha256:9c40da46bf5e05e9e9c5c95a47c35aff74c23e730ddba869a05aea3e51b1e6de",
+            ),
+            (
+                "mcp/artifact/write@v1",
+                "sha256:62dc5764fb10efcc4012695a5da78db2c2c85849d9341378aea770a2f7df0925",
+            ),
+            (
+                "loom/issues/read@v1",
+                "sha256:8c5dc52c5f8de69572d0875c833e7b61da79e066e934538d45933a1dfe24c45a",
+            ),
+            (
+                "loom/issues/write@v1",
+                "sha256:f9985ad6e2102a394b0ab5c9f25dd9b77de4278b6f9eaa207672ba27033a5898",
+            ),
+            (
+                "loom/sessions/read@v1",
+                "sha256:42ddd7ec1bef2eb902673af4874c0915fcbc1f05aa8ad6b3d12297df929bdb7f",
+            ),
+            (
+                "loom/sessions/write@v1",
+                "sha256:95e5c8dd47258cca69044c02d68d112ead60ae79f1af1e5ea5d9c70ea85eb63f",
+            ),
+            (
+                "mcp/session/read@v1",
+                "sha256:c9afb64abcc069a94410f0a402163b754e99917bb521d319169f97f0bdea09b7",
+            ),
+            (
+                "mcp/session/status@v1",
+                "sha256:a9a46f1877397102cc8fbaddb51cfd327d2a4d202a59a2872ce624ed2bb850ac",
+            ),
+            (
+                "mcp/history/self@v1",
+                "sha256:74c0cfd56c67e911f8278d214d4be2e7e146bf7f21929ced385c83a7c59db761",
+            ),
+            (
+                "mcp/messaging/status@v1",
+                "sha256:972a36c8e9b973352faf4c8d636b418a28c83f6ce42bc654a44546b24c03368d",
+            ),
+            (
+                "mcp/slack/message@v1",
+                "sha256:e138ce624d742cb814a5239cc0711bc58618bb6cffeeeb8eeb15abebb63b3e83",
+            ),
+            (
+                "loom/permissions/read@v1",
+                "sha256:1e90e579bc0778b5d309eb1bb3a4731b49159a4837ed059722613c180e842968",
+            ),
+            (
+                "loom/permissions/request@v1",
+                "sha256:bb5d2bf3efa472d30668c5cce2001ea5e7f222c39e0f6199754182e296e6ef20",
+            ),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+        let mut actual = std::collections::BTreeMap::new();
+        for adapter in super::adapters() {
+            let advertised = (adapter.tools)();
+            for set in (adapter.capability_sets)() {
+                actual.insert(
+                    set.name,
+                    super::capability_set_digest(adapter, set, &advertised),
+                );
+            }
+        }
+        assert_eq!(actual.len(), expected.len());
+        for (name, digest) in expected {
+            assert_eq!(actual.get(name).map(String::as_str), Some(digest), "{name}");
+        }
     }
 
     #[tokio::test]
@@ -780,6 +1018,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(github.capability_sets.len(), 1);
+        assert_eq!(github.capability_sets[0].name, "loom/github/comment@v1");
         assert!(super::resolve_access(
             &db,
             &weaver_api::McpAccess {
@@ -811,7 +1050,9 @@ mod tests {
 
     #[test]
     fn every_adapter_satisfies_the_registry_contract() {
-        for adapter in super::ADAPTERS {
+        super::validate_adapter_factories();
+        for registration in super::ADAPTER_FACTORIES {
+            let adapter = (registration.build)();
             let listed = (adapter.tools)();
             let names = listed
                 .as_array()

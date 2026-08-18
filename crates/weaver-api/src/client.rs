@@ -10,29 +10,35 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::operations::{ApiMetaView, OperationView};
+
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
     AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelBindingView,
     ChannelMessageView, ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto,
-    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq, CreateRepoIssueReq,
-    CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq,
-    CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView, DeleteSessionGroupReq,
-    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView,
-    EnsureResumptionCueReq, ExpectedReviewRevisionReq, FederationReq, FederationView,
-    GithubTokenView, HandoffReq, HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView,
-    McpRegistryView, MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq,
-    PatchSessionReq, PatchWatchReq, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq,
+    CreatePermissionRequestReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
+    CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
+    CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeleteSessionGroupReq,
+    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView,
+    EffectivePermissionsView, EffectiveProfileView, EnsureResumptionCueReq,
+    ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
+    HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
+    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
+    PermissionRequestView, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
     ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
     ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
     RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
-    SendReq, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
-    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
-    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    SendReq, SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
+    SetChannelSubscriptionReq, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq,
+    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
+    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
+    UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
+#[derive(Clone)]
 pub struct Client {
     base: String,
     http: reqwest::Client,
@@ -171,6 +177,21 @@ impl Client {
         self.get_typed("/api/self").await
     }
 
+    /// Discover the connected Loom server and its operation registry version.
+    pub async fn api_meta(&self) -> Result<ApiMetaView> {
+        self.get_typed("/api/meta").await
+    }
+
+    /// List the transport-neutral operation catalogue advertised by the server.
+    pub async fn operations(&self) -> Result<Vec<OperationView>> {
+        self.get_typed("/api/operations").await
+    }
+
+    pub async fn operation(&self, id: &str) -> Result<OperationView> {
+        self.get_typed(&format!("/api/operations/{}", Self::seg(id)))
+            .await
+    }
+
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
         self.send_typed::<Value, GithubTokenView>(
             Method::POST,
@@ -199,6 +220,65 @@ impl Client {
         self.send_typed(
             Method::PUT,
             &format!("/api/sessions/{}/github/access", Self::seg(session_id)),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn effective_permissions(
+        &self,
+        session_id: &str,
+    ) -> Result<EffectivePermissionsView> {
+        self.get_typed(&format!(
+            "/api/sessions/{}/permissions",
+            Self::seg(session_id)
+        ))
+        .await
+    }
+
+    pub async fn permission_requests(
+        &self,
+        session_id: &str,
+        state: Option<&str>,
+    ) -> Result<Vec<PermissionRequestView>> {
+        let mut path = format!(
+            "/api/sessions/{}/permission-requests",
+            Self::seg(session_id)
+        );
+        if let Some(state) = state {
+            path.push_str("?state=");
+            path.push_str(&Self::seg(state));
+        }
+        self.get_typed(&path).await
+    }
+
+    pub async fn create_permission_request(
+        &self,
+        session_id: &str,
+        request: &CreatePermissionRequestReq,
+    ) -> Result<PermissionRequestView> {
+        self.send_typed(
+            Method::POST,
+            &format!(
+                "/api/sessions/{}/permission-requests",
+                Self::seg(session_id)
+            ),
+            Some(request),
+        )
+        .await
+    }
+
+    pub async fn decide_permission_request(
+        &self,
+        request_id: &str,
+        request: &DecidePermissionRequestReq,
+    ) -> Result<PermissionRequestView> {
+        self.send_typed(
+            Method::POST,
+            &format!(
+                "/api/permission-requests/{}/decision",
+                Self::seg(request_id)
+            ),
             Some(request),
         )
         .await
@@ -370,6 +450,11 @@ impl Client {
     /// (`GET /api/sessions/{key}`).
     pub async fn get_session(&self, key: &str) -> Result<SessionView> {
         self.get_typed(&format!("/api/sessions/{}", Self::seg(key)))
+            .await
+    }
+
+    pub async fn session_summary(&self, key: &str) -> Result<SessionCatchupView> {
+        self.get_typed(&format!("/api/sessions/{}/summary", Self::seg(key)))
             .await
     }
 

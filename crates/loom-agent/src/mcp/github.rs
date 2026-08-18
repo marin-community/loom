@@ -14,6 +14,7 @@ use super::{Adapter, CapabilitySet, ServeFuture};
 const SERVER_NAME: &str = "loom_github";
 const COMMENT_TOOL_SET: &str = "mcp/github/comment";
 const COMMENT_TOOL_SET_V1: &str = "mcp/github/comment@v1";
+const LOOM_COMMENT_TOOL_SET_V1: &str = "loom/github/comment@v1";
 pub const BODY_MAX_BYTES: usize = 65_536;
 pub const TITLE_MAX_BYTES: usize = 256;
 const GITHUB_TOOL_NAMES: [&str; 6] = [
@@ -37,13 +38,22 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-const CAPABILITY_SETS: &[CapabilitySet] = &[CapabilitySet {
-    name: COMMENT_TOOL_SET_V1,
-    group: "github",
-    version: "v1",
-    description: "Read, comment on, and edit the issue or pull request bound to the session.",
-    tools: &GITHUB_TOOL_NAMES,
-}];
+const CAPABILITY_SETS: &[CapabilitySet] = &[
+    CapabilitySet {
+        name: LOOM_COMMENT_TOOL_SET_V1,
+        group: "github",
+        version: "v1",
+        description: "Read, comment on, and edit the issue or pull request bound to the session.",
+        tools: &GITHUB_TOOL_NAMES,
+    },
+    CapabilitySet {
+        name: COMMENT_TOOL_SET_V1,
+        group: "github",
+        version: "v1",
+        description: "Read, comment on, and edit the issue or pull request bound to the session.",
+        tools: &GITHUB_TOOL_NAMES,
+    },
+];
 
 fn capability_sets() -> &'static [CapabilitySet] {
     CAPABILITY_SETS
@@ -62,7 +72,11 @@ fn is_permission_rule(rule: &str) -> bool {
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    (matches!(name, COMMENT_TOOL_SET | COMMENT_TOOL_SET_V1)).then(|| {
+    (matches!(
+        name,
+        COMMENT_TOOL_SET | COMMENT_TOOL_SET_V1 | LOOM_COMMENT_TOOL_SET_V1
+    ))
+    .then(|| {
         GITHUB_TOOL_NAMES
             .iter()
             .map(|tool| permission_rule(tool).expect("registered GitHub tool"))

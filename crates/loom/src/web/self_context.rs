@@ -20,6 +20,7 @@ pub(super) async fn get_self_context(
     let Grant::Session {
         session_id,
         branch_id,
+        ..
     } = &principal.grant
     else {
         return Err(AppError::bad_request(

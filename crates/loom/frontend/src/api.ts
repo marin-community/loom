@@ -125,6 +125,30 @@ export const setSessionGithubAccess = (
     repository,
     mode,
   }) as Promise<SessionGithubAccess>;
+export const listPermissionRequests = (id: string, state?: PermissionRequest['state']) => {
+  const params = new URLSearchParams();
+  if (state) params.set('state', state);
+  const query = params.toString();
+  return get(
+    `/sessions/${encodeURIComponent(id)}/permission-requests${query ? `?${query}` : ''}`,
+  ) as Promise<PermissionRequest[]>;
+};
+export const createPermissionRequest = (id: string, repository: string, reason: string) =>
+  post(`/sessions/${encodeURIComponent(id)}/permission-requests`, {
+    kind: 'github_repository',
+    repository,
+    mode: 'write',
+    reason,
+  }) as Promise<PermissionRequest>;
+export const decidePermissionRequest = (
+  requestId: string,
+  decision: 'approve' | 'deny',
+  reason = '',
+) =>
+  post(`/permission-requests/${encodeURIComponent(requestId)}/decision`, {
+    decision,
+    reason,
+  }) as Promise<PermissionRequest>;
 
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session (`GET /api/runs`). */
@@ -218,6 +242,7 @@ import type {
   IssueActionsResult,
   IssueTagInput,
   Session,
+  PermissionRequest,
   SessionGithubAccess,
   SessionSummary,
   AutomationRun,

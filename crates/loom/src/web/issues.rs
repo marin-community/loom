@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use axum::{
     extract::{Path, Query, State},
-    Json,
+    Extension, Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -16,6 +16,7 @@ use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
 use crate::db::Db;
 use crate::events;
 use crate::git;
+use crate::{auth::Grant, auth::Principal};
 
 use super::{author_or_manual, require_branch};
 use super::{ApiResult, AppError, AppState};
@@ -50,7 +51,7 @@ async fn issue_view(db: &Db, issue: Issue) -> ApiResult<IssueView> {
 }
 
 /// Build views for a batch of issues, each with its tags joined.
-async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
+pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<IssueView>> {
     let mut out = Vec::with_capacity(issues.len());
     for i in issues {
         out.push(issue_view(db, i).await?);
@@ -449,6 +450,7 @@ fn domain_issue_action(action: &IssueAction) -> BulkIssueAction {
 /// structured error details; no requested issue changes.
 pub(super) async fn issue_actions(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<IssueActionsReq>,
 ) -> ApiResult<Json<IssueActionsResult>> {
     if req.ids.is_empty() {
@@ -459,6 +461,13 @@ pub(super) async fn issue_actions(
         return Err(AppError::bad_request("issue ids must be unique"));
     }
     validate_issue_action(&req.action)?;
+    if matches!(principal.grant, Grant::Session { .. }) {
+        for id in &req.ids {
+            if let Some(issue) = weaver_core::issue::get(&st.db, *id).await? {
+                require_repo_access(&st, &principal, &issue.repo_root).await?;
+            }
+        }
+    }
 
     let action = domain_issue_action(&req.action);
     let result = match weaver_core::issue::apply_bulk_action(&st.db, &req.ids, &action).await {
@@ -553,13 +562,38 @@ pub(crate) async fn resolve_repo_root(
     Ok(root.canonicalize().unwrap_or(root).display().to_string())
 }
 
+async fn require_repo_access(
+    st: &AppState,
+    principal: &Principal,
+    repo_root: &str,
+) -> ApiResult<()> {
+    let Grant::Session { branch_id, .. } = &principal.grant else {
+        return Ok(());
+    };
+    let own_repo: Option<String> =
+        sqlx::query_scalar("SELECT repo_root FROM branches WHERE id = ?")
+            .bind(branch_id)
+            .fetch_optional(&st.db)
+            .await?;
+    if own_repo.as_deref() == Some(repo_root) {
+        Ok(())
+    } else {
+        Err(AppError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "session credentials are limited to their repository",
+        ))
+    }
+}
+
 /// The repo-wide issue board: every issue in a repo, or just the unclaimed
 /// backlog with `?scope=backlog`.
 pub(super) async fn list_repo_issues(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Query(q): Query<RepoIssuesQuery>,
 ) -> ApiResult<Json<Vec<IssueView>>> {
     let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
+    require_repo_access(&st, &principal, &repo_root).await?;
     let issues = match q.scope.as_deref() {
         Some("backlog") => weaver_core::issue::list_backlog(&st.db, &repo_root, q.all).await?,
         Some("repo") | None => weaver_core::issue::list_for_repo(&st.db, &repo_root, q.all).await?,
@@ -575,6 +609,7 @@ pub(super) async fn list_repo_issues(
 /// Create an unclaimed repo-level backlog item.
 pub(super) async fn create_repo_issue(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<CreateRepoIssueReq>,
 ) -> ApiResult<Json<IssueView>> {
     if req.title.trim().is_empty() {
@@ -583,6 +618,7 @@ pub(super) async fn create_repo_issue(
     if req.repo_root.trim().is_empty() {
         return Err(AppError::bad_request("repo_root is required"));
     }
+    require_repo_access(&st, &principal, req.repo_root.trim()).await?;
     let tags = initial_issue_tags(req.tags)?;
     let issue = weaver_core::issue::add_with_tags(
         &st.db,
@@ -639,6 +675,16 @@ mod tests {
         }
     }
 
+    fn admin_principal() -> Principal {
+        Principal {
+            username: "test".to_string(),
+            github_login: None,
+            via: crate::auth::AuthVia::Loopback,
+            grant: Grant::Admin,
+            automation_context: None,
+        }
+    }
+
     #[tokio::test]
     async fn create_repo_issue_attributes_source_branch_and_records_an_event() {
         let db = crate::db::connect_in_memory().await.unwrap();
@@ -649,6 +695,7 @@ mod tests {
 
         let issue = create_repo_issue(
             State(st),
+            Extension(admin_principal()),
             Json(CreateRepoIssueReq {
                 repo_root: "/r".to_string(),
                 title: "backlog item".to_string(),
@@ -782,6 +829,7 @@ mod tests {
 
         let result = issue_actions(
             State(st),
+            Extension(admin_principal()),
             Json(IssueActionsReq {
                 ids: vec![first.id, second.id],
                 action: IssueAction::Close,
@@ -812,6 +860,7 @@ mod tests {
 
         let error = issue_actions(
             State(st),
+            Extension(admin_principal()),
             Json(IssueActionsReq {
                 ids: vec![issue.id, 999_999],
                 action: IssueAction::Close,

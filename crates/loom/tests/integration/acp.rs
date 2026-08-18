@@ -1029,6 +1029,28 @@ async fn permission_answered_over_rest() {
         .to_string();
     assert_eq!(chat["live_turn"], 0, "the turn is blocked, still in flight");
 
+    // The session's own bearer token cannot approve the ACP prompt it caused.
+    // Only a human principal may cross this boundary, regardless of whether
+    // the call arrives through a CLI, MCP adapter, or raw REST.
+    let session = ts.client.get_session("acp-rest").await.unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &session.id,
+        &session.branch.id,
+    )
+    .await
+    .unwrap();
+    let scoped = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
+    let error = scoped
+        .post(
+            &format!("/api/sessions/acp-rest/permissions/{request_id}"),
+            json!({ "option_id": "allow-once" }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("human operator"));
+
     // Answering an unknown id is a 404.
     assert!(
         ts.client
@@ -3874,11 +3896,11 @@ async fn builtin_codex_launches_over_codex_acp() {
         "the opening prompt contains the goal exactly once: {prompt}"
     );
     assert!(
-        prompt.contains("Use `weaver summary` to recover context if needed"),
+        prompt.contains("Use `loom summary` to recover context"),
         "summary is offered as recovery: {prompt}"
     );
     assert!(
-        !prompt.contains("Run `weaver summary` first"),
+        !prompt.contains("Run `loom summary` first"),
         "the opening prompt must not request a tool call that reinjects the goal: {prompt}"
     );
     let reply = blocks

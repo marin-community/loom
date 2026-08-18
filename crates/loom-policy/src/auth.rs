@@ -93,6 +93,11 @@ pub enum Grant {
     Session {
         session_id: String,
         branch_id: String,
+        /// `None` is the compatibility form minted before operation-bound
+        /// authorization. Newly minted credentials always carry an explicit
+        /// capability set derived from the immutable launch policy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        capabilities: Option<Vec<String>>,
     },
 }
 
@@ -757,14 +762,45 @@ pub struct StagedSessionToken {
     pub value: String,
 }
 
-/// Mint a session credential without revoking any predecessor. Provider
-/// handoff uses this staged form so a rejected preflight or teardown rollback
-/// leaves the live source token fully usable.
-pub async fn stage_session_token(
+pub fn session_capabilities_for_policy(
+    restricted: bool,
+    policy_mcp_access: &str,
+) -> Result<Vec<String>> {
+    let snapshot: weaver_api::McpPolicySnapshot =
+        serde_json::from_str(policy_mcp_access).context("invalid session MCP policy snapshot")?;
+    Ok(weaver_api::session_capabilities_from_mcp(
+        restricted,
+        snapshot
+            .capability_sets
+            .iter()
+            .map(|capability| capability.name.as_str()),
+    ))
+}
+
+async fn stored_session_capabilities(db: &Db, session_id: &str) -> Result<Vec<String>> {
+    let row = sqlx::query("SELECT policy_restricted, policy_mcp_access FROM sessions WHERE id = ?")
+        .bind(session_id)
+        .fetch_optional(db)
+        .await?;
+    match row {
+        Some(row) => session_capabilities_for_policy(
+            row.get::<bool, _>("policy_restricted"),
+            row.get::<String, _>("policy_mcp_access").as_str(),
+        ),
+        // Fresh provisioning mints before inserting the session so an agent's
+        // first callback cannot race the token row. That path calls the
+        // explicit-policy helper; retain unrestricted behavior as a safe
+        // compatibility fallback for direct test fixtures.
+        None => Ok(weaver_api::all_session_capabilities()),
+    }
+}
+
+async fn mint_staged_session_token(
     db: &Db,
     owner: Option<&str>,
     session_id: &str,
     branch_id: &str,
+    capabilities: Vec<String>,
 ) -> Result<StagedSessionToken> {
     let username = match owner {
         Some(username) if get_user(db, username).await?.is_some() => username.to_string(),
@@ -777,6 +813,7 @@ pub async fn stage_session_token(
     let grant = serde_json::to_string(&Grant::Session {
         session_id: session_id.to_string(),
         branch_id: branch_id.to_string(),
+        capabilities: Some(capabilities),
     })?;
     sqlx::query(
         "INSERT INTO api_tokens
@@ -796,6 +833,31 @@ pub async fn stage_session_token(
     Ok(StagedSessionToken { id, value: plain })
 }
 
+/// Mint a session credential without revoking any predecessor. Provider
+/// handoff uses this staged form so a rejected preflight or teardown rollback
+/// leaves the live source token fully usable.
+pub async fn stage_session_token(
+    db: &Db,
+    owner: Option<&str>,
+    session_id: &str,
+    branch_id: &str,
+) -> Result<StagedSessionToken> {
+    let capabilities = stored_session_capabilities(db, session_id).await?;
+    mint_staged_session_token(db, owner, session_id, branch_id, capabilities).await
+}
+
+pub async fn stage_session_token_with_policy(
+    db: &Db,
+    owner: Option<&str>,
+    session_id: &str,
+    branch_id: &str,
+    restricted: bool,
+    policy_mcp_access: &str,
+) -> Result<StagedSessionToken> {
+    let capabilities = session_capabilities_for_policy(restricted, policy_mcp_access)?;
+    mint_staged_session_token(db, owner, session_id, branch_id, capabilities).await
+}
+
 pub async fn create_session_token(
     db: &Db,
     owner: Option<&str>,
@@ -805,6 +867,26 @@ pub async fn create_session_token(
     Ok(stage_session_token(db, owner, session_id, branch_id)
         .await?
         .value)
+}
+
+pub async fn create_session_token_with_policy(
+    db: &Db,
+    owner: Option<&str>,
+    session_id: &str,
+    branch_id: &str,
+    restricted: bool,
+    policy_mcp_access: &str,
+) -> Result<String> {
+    Ok(stage_session_token_with_policy(
+        db,
+        owner,
+        session_id,
+        branch_id,
+        restricted,
+        policy_mcp_access,
+    )
+    .await?
+    .value)
 }
 
 /// Roll back one uncommitted replacement credential without touching the live
@@ -1349,13 +1431,17 @@ mod tests {
             .await
             .unwrap();
         let principal = lookup_token(&db, &plain).await.unwrap().unwrap();
-        assert_eq!(
-            principal.grant,
-            Grant::Session {
-                session_id: "s1".to_string(),
-                branch_id: branch.id,
-            }
-        );
+        let Grant::Session {
+            session_id,
+            branch_id,
+            capabilities,
+        } = principal.grant
+        else {
+            panic!("expected a session grant");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(branch_id, branch.id);
+        assert_eq!(capabilities, Some(weaver_api::all_session_capabilities()));
         assert_eq!(list_tokens(&db, "rjpower").await.unwrap().len(), 0);
         crate::session::set_status(&db, "s1", "archived")
             .await

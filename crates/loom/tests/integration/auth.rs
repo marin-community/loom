@@ -506,7 +506,46 @@ async fn health_is_public_but_protected_routes_are_not() {
 
 #[tokio::test]
 #[serial]
-async fn session_token_is_limited_to_its_tree_and_work_items() {
+async fn every_registered_operation_is_mounted_by_an_api_bundle_factory() {
+    let ts = TestServer::start().await;
+    ts.client
+        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+
+    for operation in weaver_api::operations() {
+        let path = operation
+            .path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') && segment.ends_with('}') {
+                    "factory-probe"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let response = http
+            .request(operation.method.parse().unwrap(), url(&ts, &path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{} {} for operation {} was not mounted behind auth",
+            operation.method,
+            operation.path,
+            operation.id
+        );
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let ts = TestServer::start().await;
     let explicit = weaver_core::issue::add(
         &ts.state.db,
@@ -553,6 +592,16 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         &weaver_core::issue::NewIssue {
             repo_root: ts.cwd(),
             title: "unrelated backlog".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let foreign = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: format!("{}-foreign", ts.cwd()),
+            title: "foreign repository backlog".to_string(),
             ..Default::default()
         },
     )
@@ -688,7 +737,14 @@ async fn session_token_is_limited_to_its_tree_and_work_items() {
         .send()
         .await
         .unwrap();
-    assert_eq!(unrelated.status(), StatusCode::FORBIDDEN);
+    assert_eq!(unrelated.status(), StatusCode::OK);
+    let foreign = http
+        .get(url(&ts, &format!("/api/issues/{}", foreign.id)))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
     for path in [
         format!("/api/sessions/{sibling_id}/history"),
         format!("/api/sessions/{sibling_id}/history/search?q=secret"),

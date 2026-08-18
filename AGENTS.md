@@ -1,23 +1,22 @@
 # AGENTS.md
 
-How to hack on weaver itself. **Read this whole file before you start** — it's
+How to hack on Loom itself. **Read this whole file before you start** — it's
 short on purpose. Depth lives elsewhere, pull it in when you need it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (internals: module map, REST API,
-storage, status model, GitHub integration), [README.md](README.md) (user docs),
-and [crates/weaver-core/WEAVER.md](crates/weaver-core/WEAVER.md) (the prompt the
-in-workspace agent sees). Run `weaver readme` for the agent workflow commands.
+storage, status model, GitHub integration), and [README.md](README.md) (user docs).
+The in-workspace primer is registered in code; run `loom help`, `loom summary`,
+and `loom permissions show` to discover the executable workflow surface.
 
-## What weaver is
+## What Loom is
 
-Two binaries over loom's REST API:
+One public command surface over Loom's REST API:
 
-- **`weaver`** — the agent CLI: status, issues, artifacts, hook events. A thin HTTP
-  client of `loom` (`weaver-api::Client`) — every command needs a reachable
-  `loom server run`.
 - **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-session
   detached Tapestry runtime supervisor + agent process, the monitor, and
   `git worktree` shell-outs. The only process that opens the sqlite db
-  (`~/.weaver/weaver.db`) directly.
+  (`~/.weaver/weaver.db`) directly. Its CLI and MCP adapters are thin REST
+  clients of code-registered operations. `weaver` is a deprecated compatibility
+  shim, not a second product model.
 
 Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -61,7 +60,7 @@ normally running the user's agents — including the one running *you*. The
 supervisors are detached, so they outlive `loom server run` and a broad kill is what
 wipes them. So unless the user explicitly asks:
 
-- **Don't** start your own `loom server run` or `loom session launch` against the default
+- **Don't** start your own `loom server run` or `loom sessions launch` against the default
   `~/.weaver`, kill the user's runtime supervisors, or run broad process cleanup
   (`pkill -f tapestry`, `pkill -f weaver`). Each wipes the user's agents at a
   stroke.
@@ -93,7 +92,7 @@ when you're ready to land. The rules it enforces:
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
   build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, fix
   failures until green, and address any comments already present. Only **then**
-  raise `weaver status set --tag attention --message "ready for review"` and hand off to the
+  raise `loom status set --tag attention --message "ready for review"` and hand off to the
   coordinator/human final reviewer; while CI runs you are `ok`, not done.
 
 ## Conventions

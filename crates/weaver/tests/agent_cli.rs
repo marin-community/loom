@@ -517,11 +517,11 @@ async fn summary_orients_an_agent_on_the_branch() {
     assert!(out.contains("pick up #1"), "summary: {out}");
     // Every section advertises the command that drills into it.
     for hint in [
-        "(weaver artifact get goal)",
-        "(weaver status get)",
-        "(weaver issue ls)",
-        "weaver artifact",
-        "weaver log",
+        "(loom artifacts get goal)",
+        "(loom status get)",
+        "(loom issues list)",
+        "loom artifacts",
+        "loom sessions events",
     ] {
         assert!(out.contains(hint), "summary should surface `{hint}`: {out}");
     }
@@ -778,20 +778,20 @@ async fn hook_without_weaver_branch_is_a_silent_no_op() {
     );
 }
 
-/// `weaver readme` prints the full weaver workflow guide so an agent can pull
-/// the rules back on demand (e.g. after a compaction replayed only the catch-up).
+/// The deprecated `weaver readme` compatibility route renders the compact,
+/// code-registered Loom primer rather than a separate Markdown catalogue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn readme_prints_the_full_weaver_guide() {
     let env = Env::start().await;
     let out = env.run(&["readme"]);
     assert!(
-        out.contains("weaver session"),
-        "readme should print the WEAVER.md guide: {out}"
+        out.contains("Loom session"),
+        "readme should print the registered Loom primer: {out}"
     );
     assert!(
-        out.contains("weaver status"),
-        "readme should describe the weaver CLI: {out}"
+        out.contains("loom status"),
+        "readme should describe the Loom CLI: {out}"
     );
 }
 
@@ -809,8 +809,8 @@ async fn session_start_hook_injects_the_full_primer() {
     );
     // The full guide — not the compact catch-up.
     assert!(
-        out.contains("review progress asynchronously"),
-        "startup should replay the full WEAVER.md: {out}"
+        out.contains("detached Loom session"),
+        "startup should replay the registered primer: {out}"
     );
     assert!(
         !out.contains("Context was just compacted"),
@@ -819,8 +819,8 @@ async fn session_start_hook_injects_the_full_primer() {
 }
 
 /// After a context compaction (`source: "compact"`), the hook replays a concise
-/// re-orientation — the `weaver summary` catch-up plus the load-bearing rules and
-/// a pointer to `weaver readme` — instead of the whole WEAVER.md.
+/// re-orientation — the summary catch-up plus the load-bearing rules and a
+/// pointer to registered Loom help — instead of the full primer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn session_start_hook_after_compaction_replays_the_concise_summary() {
@@ -855,13 +855,13 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
         "replay omits the outstanding work: {out}"
     );
     assert!(
-        out.contains("weaver readme"),
-        "replay should point at the full guide: {out}"
+        out.contains("loom help"),
+        "replay should point at registered help: {out}"
     );
     // It must stay concise — not re-feed the whole WEAVER.md.
     assert!(
-        !out.contains("review progress asynchronously"),
-        "compact replay must not dump the full WEAVER.md: {out}"
+        !out.contains("detached Loom session"),
+        "compact replay must not dump the full primer: {out}"
     );
 
     // The hook still records the lifecycle event (with its source) for the monitor.

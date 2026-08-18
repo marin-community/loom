@@ -632,11 +632,13 @@ async fn handoff_session_inner(
     // mint a replacement credential. The old credential remains valid until
     // the replacement policy commits; every failure below revokes only this
     // staged token.
-    let staged_token = crate::auth::stage_session_token(
+    let staged_token = crate::auth::stage_session_token_with_policy(
         &st.db,
         session.created_by.as_deref(),
         &session.id,
         &session.branch_id,
+        plan.restricted,
+        &plan.mcp_access,
     )
     .await?;
     runtime::configure_session_github_auth(

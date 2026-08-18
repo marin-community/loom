@@ -8,6 +8,7 @@ pub mod chatlog;
 pub mod db;
 pub mod github_access;
 pub mod history;
+pub mod permission_requests;
 pub mod profile_data;
 pub mod repo_env;
 pub mod review_inbox;

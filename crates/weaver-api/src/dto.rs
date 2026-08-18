@@ -655,6 +655,9 @@ pub struct McpCapabilitySetView {
     pub description: String,
     pub adapter: String,
     pub tools: Vec<String>,
+    /// Canonical replacement for a compatibility-only capability identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated_by: Option<String>,
 }
 
 /// The trusted MCP registry exposed to operators and the settings UI.
@@ -1051,6 +1054,55 @@ pub struct SessionGithubAccessView {
 pub struct SetSessionGithubAccessReq {
     pub repository: String,
     pub mode: String,
+}
+
+/// Durable request for a human to expand one live session's external access.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionRequestView {
+    pub id: String,
+    pub session_id: String,
+    pub kind: String,
+    pub repository: String,
+    pub mode: String,
+    pub reason: String,
+    pub state: String,
+    pub requested_by: String,
+    pub requested_at: String,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub decision_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CreatePermissionRequestReq {
+    /// Currently `github_repository`.
+    pub kind: String,
+    pub repository: String,
+    #[serde(default = "default_permission_request_mode")]
+    pub mode: String,
+    pub reason: String,
+}
+
+fn default_permission_request_mode() -> String {
+    "write".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecidePermissionRequestReq {
+    /// `approve` or `deny`.
+    pub decision: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Current Loom operation grants and external repository scope for a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EffectivePermissionsView {
+    pub session_id: String,
+    pub actor: String,
+    pub operations: Vec<String>,
+    pub github_repositories: Vec<String>,
+    pub pending_requests: Vec<PermissionRequestView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2193,6 +2245,22 @@ pub struct SelfContextLinks {
     pub channel: String,
     pub artifacts: String,
     pub session: String,
+}
+
+/// One structured catch-up for an agent resuming a session. Consumers render
+/// this for terminals or return it directly over MCP.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCatchupView {
+    pub session_id: String,
+    pub branch_id: String,
+    pub goal: String,
+    pub attention: String,
+    pub status_message: String,
+    pub channel: Option<ChannelView>,
+    pub artifacts: Vec<ArtifactMeta>,
+    pub issues: Vec<IssueView>,
+    pub recent_events: Vec<weaver_core::events::Event>,
+    pub next_actions: Vec<String>,
 }
 
 /// The authenticated caller's subscription to a channel.

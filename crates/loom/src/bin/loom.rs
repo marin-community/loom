@@ -3,21 +3,25 @@
 //! Most subcommands talk to the running loom daemon over HTTP (session
 //! lifecycle, archive, adopt). `loom server run` runs the daemon itself in the
 //! foreground; `loom server start`/`stop`/`restart`/`status` manage its
-//! background lifecycle. To interact with an agent, `loom session attach` to its
+//! background lifecycle. To interact with an agent, `loom sessions attach` to its
 //! terminal (the browser terminal is the other interaction surface).
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::{json, Value};
+use weaver::{
+    ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, ConfigCmd as AgentConfigCmd,
+    IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd, TagCmd as AgentTagCmd,
+};
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, CreateSessionGroupReq,
-    CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction,
-    IssueActionsReq, MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
-    ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions,
-    SessionCreatorFilter, SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
-    SetSessionPlacementDefaultReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    AddReviewCommentReq, ArtifactTextAnchorDto, CreatePermissionRequestReq, CreateReviewReq,
+    CreateSessionGroupReq, CreateSessionSpaceReq, DecidePermissionRequestReq,
+    DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction, IssueActionsReq, MoveSessionsReq,
+    ReorderSessionLayoutReq, RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter, SessionGroupPreferenceReq,
+    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
+    SessionSearchStatus, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
+    UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use loom::client::{self, Client};
@@ -27,7 +31,8 @@ use weaver_core::db::Db;
 #[command(
     name = "loom",
     version,
-    about = "Orchestrate concurrent agent workstreams"
+    about = "Orchestrate concurrent agent workstreams",
+    disable_help_subcommand = true
 )]
 struct Cli {
     /// Select a named client context for this command.
@@ -38,7 +43,22 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-enum Cmd {
+enum HostCmd {
+    /// Explore Loom's registered resource groups and operations.
+    Help {
+        /// Resource group or stable operation id.
+        topic: Option<String>,
+        /// Emit registered operation records as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare this CLI with the connected server's live operation registry.
+    Doctor,
+    /// Inspect live settings through the REST API.
+    Settings {
+        #[command(subcommand)]
+        cmd: AgentConfigCmd,
+    },
     /// Inspect trusted MCP capability sets, or run an internal stdio adapter.
     Mcp {
         #[command(subcommand)]
@@ -56,31 +76,6 @@ enum Cmd {
         cmd: ServerCmd,
     },
 
-    /// Manage sessions: launch, ls, attach, poll, wait, send, interrupt, preview.
-    ///
-    /// The uniform surface for a child session — start one, list the fleet,
-    /// watch one, and interact with its agent pane:
-    ///
-    ///     loom session launch "Add a /health endpoint and a test for it"
-    ///     loom session ls                      # the active fleet
-    ///     loom session poll weaver/health      # one-shot status
-    ///     loom session wait weaver/health      # block until done / needs you
-    ///     loom session send weaver/health "try the curl again"
-    ///     loom session interrupt weaver/health # interrupt the current turn
-    ///     loom session preview weaver/health   # peek at the terminal screen
-    ///     loom session rename weaver/health "Health endpoint + test"
-    ///
-    /// The three you reach for constantly have top-level shortcuts: `loom
-    /// launch`, `loom ps`, `loom attach`.
-    Session {
-        #[command(subcommand)]
-        cmd: SessionCmd,
-    },
-    /// Inspect or adjust a live session's GitHub App repository access.
-    Github {
-        #[command(subcommand)]
-        cmd: GithubCmd,
-    },
     /// Manage watches: periodic / triggered watch programs over the fleet.
     ///
     /// A watch wakes on a trigger (a cron tick or a session event),
@@ -150,16 +145,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: DeploymentCmd,
     },
-    /// Inspect and triage issues with atomic batch actions.
-    Issue {
-        #[command(subcommand)]
-        cmd: IssueCmd,
-    },
-    /// Draft and submit one coherent artifact review into a session.
-    Review {
-        #[command(subcommand)]
-        cmd: ReviewCmd,
-    },
 
     /// Guided one-time credential setup.
     ///
@@ -212,17 +197,444 @@ enum Cmd {
         cmd: ConfigCmd,
     },
 
-    /// Launch a new session — shortcut for `loom session launch`.
-    Launch(LaunchOpts),
-    /// List active sessions — shortcut for `loom session ls`.
-    Ps,
-    /// Attach your terminal to a session — shortcut for `loom session attach`.
-    Attach { session: String },
-
     /// Open the loom web UI in a browser.
     Open,
     /// Generate shell completions.
     Completions { shell: clap_complete::Shell },
+}
+
+/// A typed invocation produced by a registered CLI bundle factory.
+#[allow(clippy::large_enum_variant)]
+enum RegisteredCliCommand {
+    Summary,
+    SelfContext,
+    Status(AgentStatusCmd),
+    Sessions(SessionCmd),
+    Launch(LaunchOpts),
+    Ps,
+    Attach(String),
+    Hook(String),
+    Channels(AgentChannelCmd),
+    Artifacts(AgentArtifactCmd),
+    Review(ReviewCmd),
+    Issues(AgentIssueCmd),
+    IssueCompat(IssueCmd),
+    Permissions(PermissionsCmd),
+    GithubToken,
+    GithubCompat(GithubCmd),
+}
+
+#[allow(clippy::large_enum_variant)]
+enum Cmd {
+    Registered(RegisteredCliCommand),
+    Host(HostCmd),
+}
+
+type ParseCliCommand = fn(&ArgMatches) -> clap::error::Result<RegisteredCliCommand>;
+
+#[derive(Clone, Copy)]
+struct CliCommandFactory {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    build: fn() -> Command,
+    parse: ParseCliCommand,
+}
+
+impl CliCommandFactory {
+    fn accepts(self, name: &str) -> bool {
+        self.name == name || self.aliases.contains(&name)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CliBundleFactory {
+    operation_bundle: &'static str,
+    commands: &'static [CliCommandFactory],
+}
+
+#[derive(Args)]
+struct HookArgs {
+    #[arg(long)]
+    event: String,
+}
+
+#[derive(Args)]
+struct AttachArgs {
+    session: String,
+}
+
+macro_rules! registered_subcommands {
+    ($build:ident, $parse:ident, $name:literal, $about:literal, $ty:ty, $variant:path) => {
+        fn $build() -> Command {
+            let command =
+                <$ty as Subcommand>::augment_subcommands(Command::new($name).about($about));
+            if matches!($name, "issue" | "github") {
+                command.hide(true)
+            } else {
+                command
+            }
+        }
+
+        fn $parse(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+            <$ty as FromArgMatches>::from_arg_matches(matches).map($variant)
+        }
+    };
+}
+
+registered_subcommands!(
+    status_command,
+    parse_status_command,
+    "status",
+    "Read or update the current session's durable status.",
+    AgentStatusCmd,
+    RegisteredCliCommand::Status
+);
+registered_subcommands!(
+    sessions_command,
+    parse_sessions_command,
+    "sessions",
+    "Launch, inspect, and drive concurrent sessions.",
+    SessionCmd,
+    RegisteredCliCommand::Sessions
+);
+registered_subcommands!(
+    channels_command,
+    parse_channels_command,
+    "channels",
+    "Read and write durable conversation channels.",
+    AgentChannelCmd,
+    RegisteredCliCommand::Channels
+);
+registered_subcommands!(
+    artifacts_command,
+    parse_artifacts_command,
+    "artifacts",
+    "Read and write named, versioned deliverables.",
+    AgentArtifactCmd,
+    RegisteredCliCommand::Artifacts
+);
+registered_subcommands!(
+    review_command,
+    parse_review_command,
+    "review",
+    "Draft and submit one coherent artifact review into a session.",
+    ReviewCmd,
+    RegisteredCliCommand::Review
+);
+registered_subcommands!(
+    issues_command,
+    parse_issues_command,
+    "issues",
+    "Manage session-owned and repository backlog work items.",
+    AgentIssueCmd,
+    RegisteredCliCommand::Issues
+);
+registered_subcommands!(
+    issue_compat_command,
+    parse_issue_compat_command,
+    "issue",
+    "Deprecated compatibility issue commands.",
+    IssueCmd,
+    RegisteredCliCommand::IssueCompat
+);
+registered_subcommands!(
+    permissions_command,
+    parse_permissions_command,
+    "permissions",
+    "Inspect effective access, request expansion, or decide requests.",
+    PermissionsCmd,
+    RegisteredCliCommand::Permissions
+);
+registered_subcommands!(
+    github_compat_command,
+    parse_github_compat_command,
+    "github",
+    "Deprecated compatibility GitHub access commands.",
+    GithubCmd,
+    RegisteredCliCommand::GithubCompat
+);
+
+fn summary_command() -> Command {
+    Command::new("summary").about("Print a capability-aware catch-up for the current session.")
+}
+
+fn parse_summary_command(_: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    Ok(RegisteredCliCommand::Summary)
+}
+
+fn self_command() -> Command {
+    Command::new("self").about("Resolve the current session, repository, channel, and links.")
+}
+
+fn parse_self_command(_: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    Ok(RegisteredCliCommand::SelfContext)
+}
+
+fn launch_command() -> Command {
+    LaunchOpts::augment_args(
+        Command::new("launch").about("Launch a new session; shortcut for `loom sessions launch`."),
+    )
+}
+
+fn parse_launch_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    LaunchOpts::from_arg_matches(matches).map(RegisteredCliCommand::Launch)
+}
+
+fn ps_command() -> Command {
+    Command::new("ps").about("List active sessions; shortcut for `loom sessions list`.")
+}
+
+fn parse_ps_command(_: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    Ok(RegisteredCliCommand::Ps)
+}
+
+fn attach_command() -> Command {
+    AttachArgs::augment_args(
+        Command::new("attach").about("Attach to a session; shortcut for `loom sessions attach`."),
+    )
+}
+
+fn parse_attach_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    AttachArgs::from_arg_matches(matches).map(|args| RegisteredCliCommand::Attach(args.session))
+}
+
+fn hook_command() -> Command {
+    HookArgs::augment_args(Command::new("hook").hide(true))
+}
+
+fn parse_hook_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    HookArgs::from_arg_matches(matches).map(|args| RegisteredCliCommand::Hook(args.event))
+}
+
+fn github_token_command() -> Command {
+    Command::new("github-token").hide(true)
+}
+
+fn parse_github_token_command(_: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    Ok(RegisteredCliCommand::GithubToken)
+}
+
+const SESSION_CLI_COMMANDS: &[CliCommandFactory] = &[
+    CliCommandFactory {
+        name: "summary",
+        aliases: &[],
+        build: summary_command,
+        parse: parse_summary_command,
+    },
+    CliCommandFactory {
+        name: "self",
+        aliases: &[],
+        build: self_command,
+        parse: parse_self_command,
+    },
+    CliCommandFactory {
+        name: "status",
+        aliases: &[],
+        build: status_command,
+        parse: parse_status_command,
+    },
+    CliCommandFactory {
+        name: "sessions",
+        aliases: &["session"],
+        build: sessions_command,
+        parse: parse_sessions_command,
+    },
+    CliCommandFactory {
+        name: "launch",
+        aliases: &[],
+        build: launch_command,
+        parse: parse_launch_command,
+    },
+    CliCommandFactory {
+        name: "ps",
+        aliases: &[],
+        build: ps_command,
+        parse: parse_ps_command,
+    },
+    CliCommandFactory {
+        name: "attach",
+        aliases: &[],
+        build: attach_command,
+        parse: parse_attach_command,
+    },
+    CliCommandFactory {
+        name: "hook",
+        aliases: &[],
+        build: hook_command,
+        parse: parse_hook_command,
+    },
+];
+
+const CHANNEL_CLI_COMMANDS: &[CliCommandFactory] = &[CliCommandFactory {
+    name: "channels",
+    aliases: &[],
+    build: channels_command,
+    parse: parse_channels_command,
+}];
+
+const ARTIFACT_CLI_COMMANDS: &[CliCommandFactory] = &[
+    CliCommandFactory {
+        name: "artifacts",
+        aliases: &[],
+        build: artifacts_command,
+        parse: parse_artifacts_command,
+    },
+    CliCommandFactory {
+        name: "review",
+        aliases: &[],
+        build: review_command,
+        parse: parse_review_command,
+    },
+];
+
+const ISSUE_CLI_COMMANDS: &[CliCommandFactory] = &[
+    CliCommandFactory {
+        name: "issues",
+        aliases: &[],
+        build: issues_command,
+        parse: parse_issues_command,
+    },
+    CliCommandFactory {
+        name: "issue",
+        aliases: &[],
+        build: issue_compat_command,
+        parse: parse_issue_compat_command,
+    },
+];
+
+const PERMISSION_CLI_COMMANDS: &[CliCommandFactory] = &[
+    CliCommandFactory {
+        name: "permissions",
+        aliases: &[],
+        build: permissions_command,
+        parse: parse_permissions_command,
+    },
+    CliCommandFactory {
+        name: "github-token",
+        aliases: &[],
+        build: github_token_command,
+        parse: parse_github_token_command,
+    },
+    CliCommandFactory {
+        name: "github",
+        aliases: &[],
+        build: github_compat_command,
+        parse: parse_github_compat_command,
+    },
+];
+
+const CLI_BUNDLE_FACTORIES: &[CliBundleFactory] = &[
+    CliBundleFactory {
+        operation_bundle: "sessions",
+        commands: SESSION_CLI_COMMANDS,
+    },
+    CliBundleFactory {
+        operation_bundle: "channels",
+        commands: CHANNEL_CLI_COMMANDS,
+    },
+    CliBundleFactory {
+        operation_bundle: "artifacts",
+        commands: ARTIFACT_CLI_COMMANDS,
+    },
+    CliBundleFactory {
+        operation_bundle: "issues",
+        commands: ISSUE_CLI_COMMANDS,
+    },
+    CliBundleFactory {
+        operation_bundle: "permissions",
+        commands: PERMISSION_CLI_COMMANDS,
+    },
+];
+
+fn registered_cli_factory(name: &str) -> Option<&'static CliCommandFactory> {
+    CLI_BUNDLE_FACTORIES
+        .iter()
+        .flat_map(|bundle| bundle.commands)
+        .find(|factory| factory.accepts(name))
+}
+
+fn validate_cli_bundle_factories() {
+    weaver_api::validate_operation_bundle_coverage(
+        "CLI",
+        CLI_BUNDLE_FACTORIES
+            .iter()
+            .map(|factory| factory.operation_bundle),
+    )
+    .expect("invalid CLI bundle factory registry");
+    assert_eq!(
+        CLI_BUNDLE_FACTORIES.len(),
+        weaver_api::operation_bundles().count(),
+        "every operation bundle must register exactly one CLI bundle factory"
+    );
+    let mut command_names = std::collections::BTreeSet::new();
+    for bundle in CLI_BUNDLE_FACTORIES {
+        for factory in bundle.commands {
+            assert!(
+                command_names.insert(factory.name),
+                "duplicate registered CLI command {}",
+                factory.name
+            );
+        }
+        for operation in weaver_api::operations_for_bundle(bundle.operation_bundle) {
+            let Some(cli) = operation.cli else {
+                continue;
+            };
+            let root = cli
+                .strip_prefix("loom ")
+                .and_then(|command| command.split_whitespace().next())
+                .expect("registered CLI projections start with `loom `");
+            assert!(
+                bundle.commands.iter().any(|factory| factory.accepts(root)),
+                "operation {} projects an unregistered CLI command {}",
+                operation.id,
+                root
+            );
+        }
+    }
+}
+
+impl FromArgMatches for Cmd {
+    fn from_arg_matches(matches: &ArgMatches) -> clap::error::Result<Self> {
+        if let Some((name, command_matches)) = matches.subcommand() {
+            if let Some(factory) = registered_cli_factory(name) {
+                return (factory.parse)(command_matches).map(Self::Registered);
+            }
+        }
+        HostCmd::from_arg_matches(matches).map(Self::Host)
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> clap::error::Result<()> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Subcommand for Cmd {
+    fn augment_subcommands(command: Command) -> Command {
+        HostCmd::augment_subcommands(augment_registered_subcommands(command))
+    }
+
+    fn augment_subcommands_for_update(command: Command) -> Command {
+        HostCmd::augment_subcommands_for_update(augment_registered_subcommands(command))
+    }
+
+    fn has_subcommand(name: &str) -> bool {
+        registered_cli_factory(name).is_some() || HostCmd::has_subcommand(name)
+    }
+}
+
+fn augment_registered_subcommands(mut command: Command) -> Command {
+    validate_cli_bundle_factories();
+    for bundle in CLI_BUNDLE_FACTORIES {
+        for factory in bundle.commands {
+            let mut registered = (factory.build)();
+            for alias in factory.aliases {
+                registered = registered.alias(*alias);
+            }
+            command = command.subcommand(registered);
+        }
+    }
+    command
 }
 
 /// Subcommands under `loom server` — the daemon lifecycle.
@@ -398,7 +810,7 @@ enum ReviewCmd {
     Retry { review_id: i64 },
 }
 
-/// Subcommands under `loom session` — the uniform way to drive a child session.
+/// Subcommands under `loom sessions` — the uniform way to drive a child session.
 // `Launch` carries the flattened `LaunchOpts` arg struct, which clap derives
 // against by value — boxing it (clippy's `large_enum_variant` suggestion) would
 // fight the `Subcommand` derive. This is a short-lived CLI dispatch enum, so the
@@ -411,7 +823,7 @@ enum SessionCmd {
     /// The positional argument is the task the agent should work on — it
     /// becomes the branch goal and the agent's opening prompt:
     ///
-    ///     loom session launch "Add a /health endpoint and a test for it"
+    ///     loom sessions launch "Add a /health endpoint and a test for it"
     ///
     /// The branch name (`weaver/<slug>`) is derived from the task; override it
     /// with `--name`. To pick up existing work instead of describing a new
@@ -423,7 +835,7 @@ enum SessionCmd {
     /// `$WEAVER_BRANCH`), so an agent opening a PR can link back to the session
     /// that produced it:
     ///
-    ///     gh pr create --body "$(printf 'Fixes #12\n\nloom: %s\n' "$(loom session url)")"
+    ///     gh pr create --body "$(printf 'Fixes #12\n\nloom: %s\n' "$(loom sessions url)")"
     ///
     /// The URL is resolved by the server, which is the only thing that knows
     /// loom's externally-visible address — building it from `$WEAVER_API` inside
@@ -489,6 +901,27 @@ enum SessionCmd {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
     },
+    /// Read, set, or remove free-form session tags.
+    Tags {
+        #[command(subcommand)]
+        cmd: AgentTagCmd,
+    },
+    /// Print recent durable events (defaults to the current session).
+    Events {
+        /// Session key; omit for the session containing this command.
+        session: Option<String>,
+        #[arg(long, default_value = "20")]
+        limit: i64,
+    },
+    /// Render this worktree's local agent transcript without contacting Loom.
+    Transcript {
+        /// Render a specific raw Claude or Codex transcript file.
+        #[arg(long)]
+        file: Option<String>,
+        /// Print normalized iris JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
     /// List active sessions (also `loom ps`).
     ///
     /// Archived (torn-down) sessions are hidden by default — pass `--archived`
@@ -496,7 +929,8 @@ enum SessionCmd {
     /// `--search <text>` spans placement, title/prompt, repo/branch, issue/PR,
     /// tags, status, profile, and provenance. The list is an index: it shows
     /// each session's id, lifecycle, attention, location, and title — pull the
-    /// full detail for one with `loom session show <id>`.
+    /// full detail for one with `loom sessions get <id>`.
+    #[command(name = "list", alias = "ls")]
     Ls {
         /// Include archived (torn-down) sessions.
         #[arg(long)]
@@ -559,7 +993,8 @@ enum SessionCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Show one session's details.
+    /// Get one session's details.
+    #[command(name = "get", alias = "show")]
     Show { session: String },
     /// Attach your terminal to a session (also `loom attach`).
     Attach { session: String },
@@ -619,6 +1054,85 @@ enum GithubCmd {
     },
     /// List explicit access overrides for a live session.
     Ls {
+        /// Session key. Defaults to the session containing this command.
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsCmd {
+    /// Show effective Loom operations, GitHub scope, and pending requests.
+    Show {
+        /// Session key. Defaults to the session containing this command.
+        #[arg(long)]
+        session: Option<String>,
+        /// Emit the typed response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Explain a registered operation's actor, risk, and projections.
+    Explain { operation: String },
+    /// Request a human-approved expansion of this session's external access.
+    Request {
+        #[command(subcommand)]
+        resource: PermissionRequestResource,
+    },
+    /// List durable access requests for a session.
+    Requests {
+        #[arg(long)]
+        session: Option<String>,
+        /// pending, approved, or denied. Omit to list all.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve and apply one pending request (human operator only).
+    Approve {
+        request: String,
+        /// Optional audit reason. Multiple words are joined.
+        reason: Vec<String>,
+    },
+    /// Deny one pending request (human operator only).
+    Deny {
+        request: String,
+        /// Optional audit reason. Multiple words are joined.
+        reason: Vec<String>,
+    },
+    /// Directly grant external access without a prior request (human only).
+    Grant {
+        #[command(subcommand)]
+        resource: PermissionGrantResource,
+    },
+    /// Revoke an explicit external-access override (human only).
+    Revoke {
+        #[command(subcommand)]
+        resource: PermissionGrantResource,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionRequestResource {
+    /// Ask for GitHub App write access to one repository.
+    GithubRepository {
+        repository: String,
+        /// Why the task needs this repository.
+        #[arg(long, required = true)]
+        reason: String,
+        #[arg(long, default_value = "write")]
+        mode: String,
+        /// Session key. Defaults to the session containing this command.
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionGrantResource {
+    /// Grant or revoke GitHub App write access to one repository.
+    GithubRepository {
+        repository: String,
         /// Session key. Defaults to the session containing this command.
         #[arg(long)]
         session: Option<String>,
@@ -1233,7 +1747,7 @@ struct AddOpts {
     cooldown: Option<i64>,
 }
 
-/// Shared `launch` options, used by both `loom session launch` and the
+/// Shared `launch` options, used by both `loom sessions launch` and the
 /// top-level `loom launch` shortcut.
 #[derive(Args)]
 struct LaunchOpts {
@@ -1312,33 +1826,319 @@ async fn run() -> Result<()> {
     let Cli { context, cmd } = Cli::parse();
     client::set_context_override(context.as_deref())?;
     match cmd {
-        Cmd::Mcp { cmd } => run_mcp(cmd).await,
-        Cmd::Server { cmd } => run_server(cmd).await,
-        Cmd::Session { cmd } => run_session(cmd).await,
-        Cmd::Github { cmd } => run_github(cmd).await,
-        Cmd::Issue { cmd } => run_issue(cmd).await,
-        Cmd::Review { cmd } => run_review(cmd).await,
-        Cmd::Watch { cmd } => run_watch(cmd).await,
-        Cmd::Token { cmd } => run_token(cmd).await,
-        Cmd::Login {
+        Cmd::Registered(command) => run_registered_cli(command).await,
+        Cmd::Host(command) => run_host_cli(command).await,
+    }
+}
+
+async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
+    match command {
+        RegisteredCliCommand::Summary => {
+            configure_agent_client()?;
+            weaver::run_summary().await
+        }
+        RegisteredCliCommand::SelfContext => {
+            configure_agent_client()?;
+            weaver::run_self().await
+        }
+        RegisteredCliCommand::Status(cmd) => {
+            configure_agent_client()?;
+            weaver::run_status(cmd).await
+        }
+        RegisteredCliCommand::Sessions(cmd) => run_session(cmd).await,
+        RegisteredCliCommand::Launch(opts) => cmd_launch(opts.into()).await,
+        RegisteredCliCommand::Ps => cmd_ps(PsOptions::default()).await,
+        RegisteredCliCommand::Attach(session) => cmd_attach(session).await,
+        RegisteredCliCommand::Hook(event) => {
+            configure_agent_client()?;
+            weaver::run_hook(event).await
+        }
+        RegisteredCliCommand::Channels(cmd) => {
+            configure_agent_client()?;
+            weaver::run_channel(cmd).await
+        }
+        RegisteredCliCommand::Artifacts(cmd) => {
+            configure_agent_client()?;
+            weaver::run_artifact(cmd).await
+        }
+        RegisteredCliCommand::Review(cmd) => run_review(cmd).await,
+        RegisteredCliCommand::Issues(cmd) => {
+            configure_agent_client()?;
+            weaver::run_issue(cmd).await
+        }
+        RegisteredCliCommand::IssueCompat(cmd) => run_issue(cmd).await,
+        RegisteredCliCommand::Permissions(cmd) => run_permissions(cmd).await,
+        RegisteredCliCommand::GithubToken => {
+            configure_agent_client()?;
+            weaver::run_github_token().await
+        }
+        RegisteredCliCommand::GithubCompat(cmd) => run_github(cmd).await,
+    }
+}
+
+async fn run_host_cli(command: HostCmd) -> Result<()> {
+    match command {
+        HostCmd::Help { topic, json } => run_help(topic, json),
+        HostCmd::Doctor => run_doctor().await,
+        HostCmd::Settings { cmd } => {
+            configure_agent_client()?;
+            weaver::run_settings(cmd).await
+        }
+        HostCmd::Mcp { cmd } => run_mcp(cmd).await,
+        HostCmd::Server { cmd } => run_server(cmd).await,
+        HostCmd::Watch { cmd } => run_watch(cmd).await,
+        HostCmd::Token { cmd } => run_token(cmd).await,
+        HostCmd::Login {
             name,
             url,
             token_stdin,
         } => cmd_login(name, url, token_stdin).await,
-        Cmd::Logout { name } => cmd_logout(name),
-        Cmd::Context { cmd } => run_client_context(cmd),
-        Cmd::Profile { cmd } => run_profile(cmd).await,
-        Cmd::Federation { cmd } => run_federation(cmd).await,
-        Cmd::Deployment { cmd } => run_deployment(cmd).await,
-        Cmd::Setup { cmd } => run_setup(cmd).await,
-        Cmd::Config { cmd } => run_config(cmd).await,
-        Cmd::Launch(opts) => cmd_launch(opts.into()).await,
-        Cmd::Ps => cmd_ps(PsOptions::default()).await,
-        Cmd::Attach { session } => cmd_attach(session).await,
-        Cmd::Open => cmd_open().await,
-        Cmd::Completions { shell } => {
+        HostCmd::Logout { name } => cmd_logout(name),
+        HostCmd::Context { cmd } => run_client_context(cmd),
+        HostCmd::Profile { cmd } => run_profile(cmd).await,
+        HostCmd::Federation { cmd } => run_federation(cmd).await,
+        HostCmd::Deployment { cmd } => run_deployment(cmd).await,
+        HostCmd::Setup { cmd } => run_setup(cmd).await,
+        HostCmd::Config { cmd } => run_config(cmd).await,
+        HostCmd::Open => cmd_open().await,
+        HostCmd::Completions { shell } => {
             let mut cmd = Cli::command();
             clap_complete::generate(shell, &mut cmd, "loom", &mut std::io::stdout());
+            Ok(())
+        }
+    }
+}
+
+fn configure_agent_client() -> Result<()> {
+    weaver::set_client_override(client::default()?)
+}
+
+fn run_help(topic: Option<String>, as_json: bool) -> Result<()> {
+    let operations: Vec<_> = match topic.as_deref() {
+        None => weaver_api::operations().collect(),
+        Some(topic) => {
+            let matches: Vec<_> = weaver_api::operations()
+                .filter(|operation| operation.bundle == topic || operation.id == topic)
+                .collect();
+            if matches.is_empty() {
+                bail!("unknown Loom resource group or operation '{topic}' — run `loom help`");
+            }
+            matches
+        }
+    };
+    if as_json {
+        let views: Vec<weaver_api::OperationView> = operations
+            .into_iter()
+            .map(weaver_api::OperationView::from)
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&views)?);
+        return Ok(());
+    }
+    if let Some(topic) = topic {
+        println!("{topic}\n");
+        for operation in operations {
+            let command = operation.cli.unwrap_or("(API only)");
+            println!("  {command:<58} {}", operation.summary);
+            println!(
+                "    id: {} · actor: {} · scope: {} · risk: {} · {} {}",
+                operation.id,
+                operation.actor.as_str(),
+                operation.scope.as_str(),
+                operation.risk.as_str(),
+                operation.method,
+                operation.path
+            );
+        }
+        return Ok(());
+    }
+
+    println!("Loom's registered operation groups\n");
+    for bundle in weaver_api::operation_bundles() {
+        println!(
+            "  {:<14} {} ({} operations)",
+            bundle.name,
+            bundle.label,
+            bundle.operations.len()
+        );
+    }
+    println!(
+        "\nHost and fleet commands\n  server, setup, auth/login, context, profiles, mcp, watches, review"
+    );
+    println!("\nExplore with `loom help <group>`, `loom <group> --help`, or `loom help --json`.");
+    Ok(())
+}
+
+async fn run_doctor() -> Result<()> {
+    let endpoint = client::current_selection()?;
+    let client = client::default()?;
+    let meta = client.api_meta().await.with_context(|| {
+        format!(
+            "cannot reach Loom at {}; check `loom server status` or the selected context",
+            endpoint.base
+        )
+    })?;
+    let operations = client.operations().await?;
+    let client_version = env!("CARGO_PKG_VERSION");
+    println!("endpoint:             {}", endpoint.base);
+    println!("client version:       {client_version}");
+    println!("server version:       {}", meta.version);
+    println!(
+        "operation registry:   v{} ({} operations)",
+        meta.operation_registry_version,
+        operations.len()
+    );
+    if meta.version == client_version {
+        println!("compatibility:        exact version match");
+    } else {
+        println!(
+            "compatibility:        version mismatch; use `loom help --json` for compiled support and {} for the live server",
+            meta.operations_url
+        );
+    }
+    Ok(())
+}
+
+async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
+    let client = client::default()?;
+    match cmd {
+        PermissionsCmd::Show { session, json } => {
+            let session = github_access_session(session)?;
+            let view = client.effective_permissions(&session).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&view)?);
+            } else {
+                println!("session: {}", view.session_id);
+                println!("actor:   {}", view.actor);
+                println!("operations ({}):", view.operations.len());
+                for operation in view.operations {
+                    println!("  {operation}");
+                }
+                println!("GitHub repositories ({}):", view.github_repositories.len());
+                for repository in view.github_repositories {
+                    println!("  {repository}");
+                }
+                println!("pending requests ({}):", view.pending_requests.len());
+                for request in view.pending_requests {
+                    println!(
+                        "  {}  {} {} — {}",
+                        request.id, request.mode, request.repository, request.reason
+                    );
+                }
+            }
+            Ok(())
+        }
+        PermissionsCmd::Explain { operation } => {
+            let operation = client.operation(&operation).await.with_context(|| {
+                "unknown operation — run `loom help --json` to list operation ids"
+            })?;
+            println!("{}", serde_json::to_string_pretty(&operation)?);
+            Ok(())
+        }
+        PermissionsCmd::Request { resource } => match resource {
+            PermissionRequestResource::GithubRepository {
+                repository,
+                reason,
+                mode,
+                session,
+            } => {
+                let session = github_access_session(session)?;
+                let request = client
+                    .create_permission_request(
+                        &session,
+                        &CreatePermissionRequestReq {
+                            kind: "github_repository".to_string(),
+                            repository,
+                            mode,
+                            reason,
+                        },
+                    )
+                    .await?;
+                println!(
+                    "request {} pending — {} {}",
+                    request.id, request.mode, request.repository
+                );
+                Ok(())
+            }
+        },
+        PermissionsCmd::Requests {
+            session,
+            state,
+            json,
+        } => {
+            let session = github_access_session(session)?;
+            let requests = client
+                .permission_requests(&session, state.as_deref())
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&requests)?);
+            } else if requests.is_empty() {
+                println!("(no permission requests)");
+            } else {
+                for request in requests {
+                    println!(
+                        "{}  {:8} {} {} — {}",
+                        request.id, request.state, request.mode, request.repository, request.reason
+                    );
+                }
+            }
+            Ok(())
+        }
+        PermissionsCmd::Approve { request, reason } => {
+            let decided = client
+                .decide_permission_request(
+                    &request,
+                    &DecidePermissionRequestReq {
+                        decision: "approve".to_string(),
+                        reason: reason.join(" "),
+                    },
+                )
+                .await?;
+            println!("approved {} — {}", decided.id, decided.repository);
+            Ok(())
+        }
+        PermissionsCmd::Deny { request, reason } => {
+            let decided = client
+                .decide_permission_request(
+                    &request,
+                    &DecidePermissionRequestReq {
+                        decision: "deny".to_string(),
+                        reason: reason.join(" "),
+                    },
+                )
+                .await?;
+            println!("denied {} — {}", decided.id, decided.repository);
+            Ok(())
+        }
+        PermissionsCmd::Grant { resource } => {
+            update_permission_resource(&client, resource, "write").await
+        }
+        PermissionsCmd::Revoke { resource } => {
+            update_permission_resource(&client, resource, "none").await
+        }
+    }
+}
+
+async fn update_permission_resource(
+    client: &Client,
+    resource: PermissionGrantResource,
+    mode: &str,
+) -> Result<()> {
+    match resource {
+        PermissionGrantResource::GithubRepository {
+            repository,
+            session,
+        } => {
+            let session = github_access_session(session)?;
+            let view = client
+                .set_session_github_access(
+                    &session,
+                    &SetSessionGithubAccessReq {
+                        repository,
+                        mode: mode.to_string(),
+                    },
+                )
+                .await?;
+            println!("{} {} — {}", view.mode, view.repository, view.granted_by);
             Ok(())
         }
     }
@@ -1676,7 +2476,7 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
     }
 }
 
-/// Dispatch the `loom session <verb>` subcommands.
+/// Dispatch the `loom sessions <verb>` subcommands.
 async fn run_session(cmd: SessionCmd) -> Result<()> {
     match cmd {
         SessionCmd::Launch(opts) => cmd_launch(opts.into()).await,
@@ -1700,6 +2500,28 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&changes)?);
             Ok(())
         }
+        SessionCmd::Tags { cmd } => {
+            configure_agent_client()?;
+            weaver::run_tag(cmd).await
+        }
+        SessionCmd::Events { session, limit } => {
+            if let Some(session) = session {
+                let events = client::default()?.branch_log(&session).await?;
+                for event in events.into_iter().rev().take(limit.max(0) as usize).rev() {
+                    println!(
+                        "{}  {:<14} {}",
+                        event.created_at,
+                        event.kind,
+                        serde_json::to_string(&event.data)?
+                    );
+                }
+                Ok(())
+            } else {
+                configure_agent_client()?;
+                weaver::run_events(limit).await
+            }
+        }
+        SessionCmd::Transcript { file, json } => weaver::run_chatlog(file, json),
         SessionCmd::Ls {
             archived,
             automation: _,
@@ -3832,7 +4654,7 @@ impl From<LaunchOpts> for LaunchArgs {
     }
 }
 
-/// A bare `loom session launch` with nothing to work on — no task, no name, no title,
+/// A bare `loom sessions launch` with nothing to work on — no task, no name, no title,
 /// and nothing to pick up (`--claim`/`--issue`/`--branch`). Launching anyway
 /// would spawn an agent with an empty goal that "starts unprompted", so we
 /// stop and point the user at the useful forms instead.
@@ -3846,12 +4668,12 @@ fn launch_underspecified(a: &LaunchArgs) -> bool {
 }
 
 const LAUNCH_HINT: &str = "nothing to do — give the agent a task or something to pick up:
-  loom session launch \"<what the agent should do>\"   # the common case
-  loom session launch --claim <id>                     # pick up a weaver issue
-  loom session launch --issue <n>                      # seed from a GitHub issue
-  loom session launch --branch <name>                  # resume an existing branch
-  loom session launch --name <slug> --agent shell      # an empty named worktree (no task)
-See `loom session launch --help` for all options.";
+  loom sessions launch \"<what the agent should do>\"  # the common case
+  loom sessions launch --claim <id>                    # pick up a Loom issue
+  loom sessions launch --issue <n>                     # seed from a GitHub issue
+  loom sessions launch --branch <name>                 # resume an existing branch
+  loom sessions launch --name <slug> --agent shell     # an empty named worktree (no task)
+See `loom sessions launch --help` for all options.";
 
 /// What a launch forks from, once `--repo` has been classified.
 #[derive(Debug, PartialEq, Eq)]
@@ -3991,7 +4813,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         println!("  effort: {}", ws.effort);
     }
     println!("  dir:    {}", ws.work_dir);
-    println!("  channel: {id}  (weaver channel read --channel {id} | wait --channel {id})");
+    println!("  channel: {id}  (loom channels read --channel {id} | wait --channel {id})");
     if let Some(n) = ws.tracking_issue {
         // Explicit claimed/imported work items remain attached while ordinary
         // coordination uses the session channel above.
@@ -4038,7 +4860,7 @@ fn attention_summary(ws: &Value) -> String {
     }
 }
 
-/// `loom session url` — print a session's dashboard URL, defaulting to the
+/// `loom sessions url` — print a session's dashboard URL, defaulting to the
 /// session we are running inside. The server resolves the URL (only it knows
 /// loom's public origin); this just prints it bare, so it composes into a
 /// `gh pr create --body "$(…)"` without any trimming.
@@ -4053,7 +4875,7 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
             .filter(|k| !k.is_empty())
             .context(
                 "not inside a loom session ($WEAVER_BRANCH is not set) — \
-                 pass a session key explicitly: loom session url <session>",
+                 pass a session key explicitly: loom sessions url <session>",
             )?,
     };
     let client = client::default()?;
@@ -4069,7 +4891,7 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// `loom session poll` — a one-shot status read: lifecycle + attention.
+/// `loom sessions poll` — a one-shot status read: lifecycle + attention.
 async fn cmd_session_poll(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = fetch_session(&client, &key).await?;
@@ -4088,7 +4910,7 @@ async fn cmd_session_poll(key: String) -> Result<()> {
     Ok(())
 }
 
-/// `loom session wait` — block until the session finishes, is lost, or (unless
+/// `loom sessions wait` — block until the session finishes, is lost, or (unless
 /// `lifecycle_only`) its agent raises attention. Mirrors `weaver issue wait`.
 async fn cmd_session_wait(
     key: String,
@@ -4143,7 +4965,7 @@ fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
     let status = str_field(ws, "status");
     if status == "archived" {
         return Some(format!(
-            "session {key} is archived — its worktree was torn down (try `loom session recover {key}`)"
+            "session {key} is archived — its worktree was torn down (try `loom sessions recover {key}`)"
         ));
     }
     if is_terminal_status(status) {
@@ -4151,7 +4973,7 @@ fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
     }
     if status == "orphaned" {
         return Some(format!(
-            "session {key} is orphaned — its terminal was lost (try `loom session adopt {key}`)"
+            "session {key} is orphaned — its terminal was lost (try `loom sessions adopt {key}`)"
         ));
     }
     if !lifecycle_only && branch_attention(ws) != "ok" {
@@ -4168,7 +4990,7 @@ fn is_terminal_status(status: &str) -> bool {
     matches!(status, "done" | "error" | "archived")
 }
 
-/// `loom session send` — type a message into the agent's pane, submitting it
+/// `loom sessions send` — type a message into the agent's pane, submitting it
 /// (Enter) unless `submit` is false.
 async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<()> {
     if message.trim().is_empty() {
@@ -4188,7 +5010,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     Ok(())
 }
 
-/// `loom session interrupt` — interrupt the agent's current turn.
+/// `loom sessions interrupt` — interrupt the agent's current turn.
 async fn cmd_session_interrupt(key: String) -> Result<()> {
     let client = client::default()?;
     client
@@ -4201,7 +5023,7 @@ async fn cmd_session_interrupt(key: String) -> Result<()> {
     Ok(())
 }
 
-/// `loom session preview` — print the session's recent terminal screen.
+/// `loom sessions preview` — print the session's recent terminal screen.
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     let client = client::default()?;
     let res = client
@@ -4282,7 +5104,7 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
     if rows.is_empty() {
         let hint = match search {
             Some(s) => format!("no sessions match '{s}'"),
-            _ => "no sessions — start one with `loom session launch \"<task>\"`".to_string(),
+            _ => "no sessions — start one with `loom sessions launch \"<task>\"`".to_string(),
         };
         println!("{hint}");
         return Ok(());
@@ -4395,7 +5217,7 @@ async fn cmd_show(key: String) -> Result<()> {
     Ok(())
 }
 
-/// `loom session rename` — set a session's one-line dashboard title via
+/// `loom sessions rename` — set a session's one-line dashboard title via
 /// `PATCH /api/sessions/{key}`. This keeps the CLI at parity with the dashboard's
 /// inline title editor.
 async fn cmd_session_rename(key: String, title: String) -> Result<()> {
@@ -5182,7 +6004,10 @@ mod tests {
         let Cli { context, cmd } =
             Cli::try_parse_from(["loom", "--context", "local", "session", "ls"]).unwrap();
         assert_eq!(context.as_deref(), Some("local"));
-        assert!(matches!(cmd, Cmd::Session { .. }));
+        assert!(matches!(
+            cmd,
+            Cmd::Registered(RegisteredCliCommand::Sessions(_))
+        ));
 
         let Cli { cmd, .. } = Cli::try_parse_from([
             "loom",
@@ -5196,13 +6021,13 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cmd,
-            Cmd::Context {
+            Cmd::Host(HostCmd::Context {
                 cmd: ClientContextCmd::Add {
                     name,
                     use_context: true,
                     ..
                 }
-            } if name == "production"
+            }) if name == "production"
         ));
     }
 
@@ -5213,15 +6038,12 @@ mod tests {
         ])
         .unwrap();
         match cmd {
-            Cmd::Issue {
-                cmd:
-                    IssueCmd::Tag {
-                        key,
-                        value,
-                        note,
-                        ids,
-                    },
-            } => {
+            Cmd::Registered(RegisteredCliCommand::IssueCompat(IssueCmd::Tag {
+                key,
+                value,
+                note,
+                ids,
+            })) => {
                 assert_eq!(key, "area");
                 assert_eq!(value, "ui");
                 assert!(note.is_empty());
@@ -5252,16 +6074,14 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cmd,
-            Cmd::Review {
-                cmd: ReviewCmd::Add {
+            Cmd::Registered(RegisteredCliCommand::Review(ReviewCmd::Add {
                     session,
                     artifact,
                     rev: 3,
                     block: Some(7),
                     body,
                     ..
-                }
-            } if session == "session-1"
+                })) if session == "session-1"
                 && artifact == "design"
                 && body == ["Tighten", "this", "claim."]
         ));
@@ -5328,7 +6148,7 @@ mod tests {
         ] {
             assert!(matches!(
                 Cli::try_parse_from(args).unwrap().cmd,
-                Cmd::Review { .. }
+                Cmd::Registered(RegisteredCliCommand::Review(_))
             ));
         }
     }
@@ -5359,9 +6179,9 @@ mod tests {
             Cli::try_parse_from(["loom", "mcp", "show", "mcp/github/comment@v1"]).unwrap();
         assert!(matches!(
             cmd,
-            Cmd::Mcp {
+            Cmd::Host(HostCmd::Mcp {
                 cmd: McpCmd::Show { name }
-            } if name == "mcp/github/comment@v1"
+            }) if name == "mcp/github/comment@v1"
         ));
 
         let Cli { cmd, .. } = Cli::try_parse_from([
@@ -5379,9 +6199,9 @@ mod tests {
         .unwrap();
         assert!(matches!(
             cmd,
-            Cmd::Profile {
+            Cmd::Host(HostCmd::Profile {
                 cmd: ProfileCmd::Add(options)
-            } if options.mcp == "github,messaging"
+            }) if options.mcp == "github,messaging"
         ));
     }
 
@@ -5453,21 +6273,21 @@ mod tests {
                 .unwrap();
         assert!(matches!(
             parsed.cmd,
-            Cmd::Session {
-                cmd: SessionCmd::TitleGeneration {
+            Cmd::Registered(RegisteredCliCommand::Sessions(
+                SessionCmd::TitleGeneration {
                     session,
                     enabled: false,
                 }
-            } if session == "task-1"
+            )) if session == "task-1"
         ));
 
         for verb in ["interrupt", "break"] {
             let parsed = Cli::try_parse_from(["loom", "session", verb, "task-1"]).unwrap();
             assert!(matches!(
                 parsed.cmd,
-                Cmd::Session {
-                    cmd: SessionCmd::Interrupt { session }
-                } if session == "task-1"
+                Cmd::Registered(RegisteredCliCommand::Sessions(
+                    SessionCmd::Interrupt { session }
+                )) if session == "task-1"
             ));
         }
     }
@@ -5904,5 +6724,66 @@ settings:
         assert_eq!(enc_key("weaver/issue-6"), "weaver%2Fissue-6");
         assert_eq!(enc_key("la1djzrs"), "la1djzrs");
         assert_eq!(enc_key("repo:weaver/issue-6"), "repo:weaver%2Fissue-6");
+    }
+
+    #[test]
+    fn agent_workflow_and_permission_commands_are_explorable_from_loom() {
+        let root = Cli::command();
+        for command in [
+            "summary",
+            "status",
+            "channels",
+            "artifacts",
+            "issues",
+            "permissions",
+        ] {
+            assert!(
+                root.find_subcommand(command).is_some(),
+                "top-level help omitted {command}"
+            );
+        }
+
+        let Cli { cmd, .. } = Cli::try_parse_from([
+            "loom",
+            "permissions",
+            "request",
+            "github-repository",
+            "acme/widgets",
+            "--reason",
+            "open the pull request",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cmd,
+            Cmd::Registered(RegisteredCliCommand::Permissions(PermissionsCmd::Request {
+                resource: PermissionRequestResource::GithubRepository { .. }
+            }))
+        ));
+
+        for (verb, expected) in [
+            ("list", "list"),
+            ("ls", "list"),
+            ("get", "get"),
+            ("show", "get"),
+        ] {
+            let Cli { cmd, .. } = if matches!(verb, "get" | "show") {
+                Cli::try_parse_from(["loom", "sessions", verb, "session-1"]).unwrap()
+            } else {
+                Cli::try_parse_from(["loom", "sessions", verb]).unwrap()
+            };
+            assert!(
+                matches!(
+                    (cmd, expected),
+                    (
+                        Cmd::Registered(RegisteredCliCommand::Sessions(SessionCmd::Ls { .. })),
+                        "list"
+                    ) | (
+                        Cmd::Registered(RegisteredCliCommand::Sessions(SessionCmd::Show { .. })),
+                        "get"
+                    )
+                ),
+                "sessions {verb} did not parse as canonical {expected}"
+            );
+        }
     }
 }

@@ -83,6 +83,8 @@ mod issues;
 mod launches;
 mod logview;
 mod mcps;
+mod operations;
+mod permission_requests;
 mod profiles;
 mod repo_env;
 mod repos;
@@ -91,6 +93,7 @@ mod reviews;
 mod scratch;
 mod self_context;
 mod session_layout;
+mod session_summary;
 pub(crate) mod sessions;
 mod settings;
 mod watches;
@@ -112,6 +115,8 @@ use issues::*;
 use launches::*;
 use logview::*;
 use mcps::*;
+use operations::*;
+use permission_requests::*;
 use profiles::*;
 use repo_env::*;
 use repos::*;
@@ -120,6 +125,7 @@ use reviews::*;
 use scratch::*;
 use self_context::*;
 use session_layout::*;
+use session_summary::*;
 use sessions::*;
 use settings::*;
 use watches::*;
@@ -725,36 +731,57 @@ fn static_dir() -> PathBuf {
         .join("dist")
 }
 
-pub fn router(state: AppState) -> Router {
-    // Public surface: the liveness probe and the login flow itself. No
-    // middleware — these must work for an unauthenticated caller, since they are
-    // how one *becomes* authenticated.
-    let public = Router::new()
-        // `/health` remains the compatibility liveness probe. `/health/live`
-        // names it explicitly; readiness checks DB + migration state.
-        .route("/health", get(liveness))
-        .route("/health/live", get(liveness))
-        .route("/ready", get(readiness))
-        .route("/health/ready", get(readiness))
-        .route("/auth/me", get(auth_me))
-        .route("/auth/login", post(auth_login))
-        .route("/auth/logout", post(auth_logout))
-        .route("/auth/github/login", get(github_login))
-        .route("/auth/github/callback", get(github_callback))
-        .route("/auth/federate", post(federate))
-        // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
-        // authenticated cryptographically by the HMAC signature it carries, not
-        // by a loom principal. The handler is the untrusted-input boundary.
-        .route("/github/webhook", post(github_webhook));
+type ApiBundleMount = fn(Router<AppState>) -> Router<AppState>;
 
-    // Everything else requires an authenticated principal — a bearer token, a
-    // session cookie, or a trusted-loopback request — gated by `require_auth`.
-    let protected = Router::new()
-        // Every live stream the browser wants, folded onto one connection so a
-        // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
-        // routes below remain the single-stream API.
-        .route("/events", get(events_mux))
-        // Shared Spaces → Groups → Sessions workbench organization.
+#[derive(Clone, Copy)]
+struct ApiBundleFactory {
+    operation_bundle: &'static str,
+    mount: ApiBundleMount,
+}
+
+const API_BUNDLE_FACTORIES: &[ApiBundleFactory] = &[
+    ApiBundleFactory {
+        operation_bundle: "sessions",
+        mount: mount_session_api,
+    },
+    ApiBundleFactory {
+        operation_bundle: "channels",
+        mount: mount_channel_api,
+    },
+    ApiBundleFactory {
+        operation_bundle: "artifacts",
+        mount: mount_artifact_api,
+    },
+    ApiBundleFactory {
+        operation_bundle: "issues",
+        mount: mount_issue_api,
+    },
+    ApiBundleFactory {
+        operation_bundle: "permissions",
+        mount: mount_permission_api,
+    },
+];
+
+fn registered_api_router() -> Router<AppState> {
+    weaver_api::validate_operation_bundle_coverage(
+        "API",
+        API_BUNDLE_FACTORIES
+            .iter()
+            .map(|factory| factory.operation_bundle),
+    )
+    .expect("invalid API bundle factory registry");
+    assert_eq!(
+        API_BUNDLE_FACTORIES.len(),
+        weaver_api::operation_bundles().count(),
+        "every operation bundle must register exactly one API router factory"
+    );
+    API_BUNDLE_FACTORIES
+        .iter()
+        .fold(Router::new(), |router, factory| (factory.mount)(router))
+}
+
+fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
+    router
         .route("/session-layout", get(get_session_layout))
         .route("/session-layout/events", get(session_layout_events))
         .route("/session-layout/spaces", post(create_session_space))
@@ -782,7 +809,6 @@ pub fn router(state: AppState) -> Router {
             "/session-layout/defaults/{kind}/{value}",
             delete(delete_session_placement_default),
         )
-        // Sessions
         .route(
             "/sessions",
             get(list_sessions)
@@ -798,8 +824,8 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}",
             get(get_session).patch(patch_session).delete(delete_session),
         )
-        // The session's own dashboard URL — the link an agent hands a human.
         .route("/sessions/{id}/url", get(session_url_route))
+        .route("/sessions/{id}/summary", get(get_session_summary))
         .route(
             "/sessions/{id}/title/regenerate",
             post(regenerate_session_title),
@@ -813,10 +839,6 @@ pub fn router(state: AppState) -> Router {
             get(get_resumption_cue).post(ensure_resumption_cue),
         )
         .route("/sessions/{id}/archive", post(archive_session))
-        .route(
-            "/sessions/{id}/restricted-github/{tool}",
-            post(restricted_github_tool),
-        )
         .route("/sessions/{id}/adopt", post(adopt_session))
         .route(
             "/sessions/{id}/handoff/resolve",
@@ -835,13 +857,6 @@ pub fn router(state: AppState) -> Router {
             post(add_github_session_labels),
         )
         .route("/sessions/{id}/raw", get(raw_session))
-        // Embedded VS Code (code-server), reverse-proxied per session. `ide-info`
-        // is the UI's availability probe; the `ide`/`ide/`/`ide/*` routes serve
-        // the editor itself (the static segments win over the `{*rest}`
-        // catch-all). The bare `…/ide/` (trailing slash, empty rest) needs its
-        // own route: a catch-all does NOT match an empty final segment, so
-        // without it the iframe's exact `…/ide/?folder=…` URL would fall through
-        // to the SPA index.html and render loom inside its own editor pane.
         .route("/sessions/{id}/ide-info", get(crate::ide::info))
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
         .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))
@@ -849,6 +864,87 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}/ide/{*rest}",
             axum::routing::any(crate::ide::proxy),
         )
+        .route(
+            "/sessions/{id}/scratch",
+            get(list_scratch)
+                .post(upload_scratch)
+                .delete(delete_scratch),
+        )
+        .route("/sessions/{id}/log", get(branch_events))
+        .route("/sessions/{id}/conversation", get(conversation_session))
+        .route(
+            "/sessions/{id}/conversation/blocks/{message}/{block}",
+            get(conversation_block),
+        )
+        .route("/sessions/{id}/history", get(session_history))
+        .route("/sessions/{id}/history/search", get(search_session_history))
+        .route("/sessions/{id}/files", get(list_session_files))
+        .route("/sessions/{id}/changes", get(get_session_changes))
+        .route("/sessions/{id}/events", get(events_sse))
+        .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
+        .route("/sessions/{id}/shells", get(list_session_shells))
+        .route(
+            "/sessions/{id}/shell/{idx}",
+            axum::routing::delete(delete_session_shell),
+        )
+        .route(
+            "/sessions/{id}/shell/{idx}/terminal",
+            get(crate::terminal::session_shell_ws),
+        )
+        .route("/sessions/{id}/send", post(send_session))
+        .route("/sessions/{id}/interrupt", post(interrupt_session))
+        .route("/sessions/{id}/preview", get(preview_session))
+        .route("/sessions/{id}/chat", get(get_session_chat))
+        .route("/sessions/{id}/chat/stream", get(chat_stream))
+        .route(
+            "/sessions/{id}/prompt",
+            post(prompt_session).delete(retract_queued_prompt),
+        )
+        .route("/sessions/{id}/mode", axum::routing::put(set_mode))
+        .route(
+            "/sessions/{id}/config/{config_id}",
+            axum::routing::put(set_config_option),
+        )
+        .route(
+            "/sessions/{id}/tags/{key}",
+            axum::routing::put(set_session_tag).delete(clear_session_tag),
+        )
+        .route("/sessions/{id}/tags", axum::routing::put(set_session_tags))
+        .route("/branches", get(list_branches))
+        .route("/branches/{id}", get(get_branch).patch(patch_branch))
+        .route("/branches/{id}/status", post(set_branch_status))
+        .route("/branches/{id}/slack/reply", post(slack_reply))
+        .route(
+            "/branches/{id}/events",
+            get(branch_events).post(create_branch_event),
+        )
+        .route(
+            "/branches/{id}/tags/{key}",
+            axum::routing::put(set_branch_tag).delete(clear_branch_tag),
+        )
+}
+
+fn mount_channel_api(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route("/channels", get(list_channels).post(create_channel))
+        .route("/channels/{id}", get(get_channel).delete(archive_channel))
+        .route("/channels/{id}/bindings", get(list_channel_bindings))
+        .route(
+            "/channels/{id}/messages",
+            get(list_channel_messages).post(create_channel_message),
+        )
+        .route(
+            "/channels/{id}/subscription",
+            axum::routing::put(set_channel_subscription),
+        )
+        .route(
+            "/channels/{id}/read-marker",
+            axum::routing::put(set_channel_read_marker),
+        )
+}
+
+fn mount_artifact_api(router: Router<AppState>) -> Router<AppState> {
+    router
         .route("/sessions/{id}/artifacts", get(list_artifacts))
         .route(
             "/sessions/{id}/reviews",
@@ -876,102 +972,6 @@ pub fn router(state: AppState) -> Router {
             "/sessions/{id}/artifacts/{name}/threads/{tid}/resolve",
             post(resolve_thread),
         )
-        .route(
-            "/sessions/{id}/scratch",
-            get(list_scratch)
-                .post(upload_scratch)
-                .delete(delete_scratch),
-        )
-        // Compatibility alias for the branch-owned history endpoint below.
-        .route("/sessions/{id}/log", get(branch_events))
-        .route("/sessions/{id}/conversation", get(conversation_session))
-        .route(
-            "/sessions/{id}/conversation/blocks/{message}/{block}",
-            get(conversation_block),
-        )
-        .route("/sessions/{id}/history", get(session_history))
-        .route("/sessions/{id}/history/search", get(search_session_history))
-        .route("/sessions/{id}/files", get(list_session_files))
-        .route("/sessions/{id}/changes", get(get_session_changes))
-        .route("/sessions/{id}/events", get(events_sse))
-        .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
-        // Per-session worktree debug shells: `shells` lists the live ones (so the
-        // UI re-opens the tabs after a reload), `shell/{idx}/terminal` is the
-        // lazily-spawned WebSocket bridge, and DELETE closes one (the tab's ×).
-        .route("/sessions/{id}/shells", get(list_session_shells))
-        .route(
-            "/sessions/{id}/shell/{idx}",
-            axum::routing::delete(delete_session_shell),
-        )
-        .route(
-            "/sessions/{id}/shell/{idx}/terminal",
-            get(crate::terminal::session_shell_ws),
-        )
-        // Drive a session's terminal pane: type a message, interrupt, peek at it.
-        .route("/sessions/{id}/send", post(send_session))
-        .route("/sessions/{id}/interrupt", post(interrupt_session))
-        .route("/sessions/{id}/preview", get(preview_session))
-        .route("/sessions/{id}/github/token", post(github_token))
-        .route(
-            "/sessions/{id}/github/access",
-            get(list_github_access).put(set_github_access),
-        )
-        // The ACP chat journal + live stream, and the ACP drive routes (a
-        // `session/prompt` queueing send, a permission answer, a mode change).
-        .route("/sessions/{id}/chat", get(get_session_chat))
-        .route("/sessions/{id}/chat/stream", get(chat_stream))
-        .route(
-            "/sessions/{id}/prompt",
-            post(prompt_session).delete(retract_queued_prompt),
-        )
-        .route(
-            "/sessions/{id}/permissions/{request_id}",
-            post(answer_permission),
-        )
-        .route("/sessions/{id}/mode", axum::routing::put(set_mode))
-        .route(
-            "/sessions/{id}/config/{config_id}",
-            axum::routing::put(set_config_option),
-        )
-        .route(
-            "/sessions/{id}/tags/{key}",
-            axum::routing::put(set_session_tag).delete(clear_session_tag),
-        )
-        .route("/sessions/{id}/tags", axum::routing::put(set_session_tags))
-        // Durable user/agent communication contexts.
-        .route("/channels", get(list_channels).post(create_channel))
-        .route("/channels/{id}", get(get_channel).delete(archive_channel))
-        .route("/channels/{id}/bindings", get(list_channel_bindings))
-        .route(
-            "/channels/{id}/messages",
-            get(list_channel_messages).post(create_channel_message),
-        )
-        .route(
-            "/channels/{id}/subscription",
-            axum::routing::put(set_channel_subscription),
-        )
-        .route(
-            "/channels/{id}/read-marker",
-            axum::routing::put(set_channel_read_marker),
-        )
-        // Branches & legacy work items
-        .route("/branches", get(list_branches))
-        .route("/branches/{id}", get(get_branch).patch(patch_branch))
-        // Command routes: each is a multi-write + event sequence the `weaver`
-        // CLI needs done atomically server-side, not composed client-side out
-        // of generic PATCH calls (which would miss the event or race a
-        // partial write). No live session required — `weaver` runs as an
-        // HTTP-only client of loom and these are its primary write path.
-        .route("/branches/{id}/status", post(set_branch_status))
-        .route("/branches/{id}/slack/reply", post(slack_reply))
-        .route(
-            "/branches/{id}/events",
-            get(branch_events).post(create_branch_event),
-        )
-        .route(
-            "/branches/{id}/tags/{key}",
-            axum::routing::put(set_branch_tag).delete(clear_branch_tag),
-        )
         .route("/branches/{id}/artifacts", get(list_branch_artifacts))
         .route(
             "/branches/{id}/artifacts/{name}",
@@ -996,10 +996,6 @@ pub fn router(state: AppState) -> Router {
             post(resolve_branch_thread),
         )
         .route(
-            "/branches/{id}/issues",
-            get(list_branch_issues).post(create_branch_issue),
-        )
-        .route(
             "/reviews/{id}",
             get(get_review).patch(update_review).delete(discard_review),
         )
@@ -1018,7 +1014,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/reviews/{id}/submit", post(submit_review))
         .route("/reviews/{id}/retry-delivery", post(retry_review_delivery))
-        // The cross-repo issue board (the loom Issues pane consumes this).
+}
+
+fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route(
+            "/branches/{id}/issues",
+            get(list_branch_issues).post(create_branch_issue),
+        )
         .route("/issues", get(list_all_issues))
         .route("/issues/actions", post(issue_actions))
         .route(
@@ -1029,6 +1032,71 @@ pub fn router(state: AppState) -> Router {
             "/issues/{id}/tags/{key}",
             axum::routing::put(set_issue_tag).delete(clear_issue_tag),
         )
+        .route(
+            "/repos/issues",
+            get(list_repo_issues).post(create_repo_issue),
+        )
+}
+
+fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route("/meta", get(api_meta))
+        .route("/operations", get(list_operations))
+        .route("/operations/{id}", get(get_operation))
+        .route("/openapi.json", get(openapi))
+        .route(
+            "/sessions/{id}/restricted-github/{tool}",
+            post(restricted_github_tool),
+        )
+        .route("/sessions/{id}/github/token", post(github_token))
+        .route(
+            "/sessions/{id}/github/access",
+            get(list_github_access).put(set_github_access),
+        )
+        .route(
+            "/sessions/{id}/permission-requests",
+            get(list_permission_requests).post(create_permission_request),
+        )
+        .route("/sessions/{id}/permissions", get(effective_permissions))
+        .route(
+            "/permission-requests/{id}/decision",
+            post(decide_permission_request),
+        )
+        .route(
+            "/sessions/{id}/permissions/{request_id}",
+            post(answer_permission),
+        )
+}
+
+pub fn router(state: AppState) -> Router {
+    // Public surface: the liveness probe and the login flow itself. No
+    // middleware — these must work for an unauthenticated caller, since they are
+    // how one *becomes* authenticated.
+    let public = Router::new()
+        // `/health` remains the compatibility liveness probe. `/health/live`
+        // names it explicitly; readiness checks DB + migration state.
+        .route("/health", get(liveness))
+        .route("/health/live", get(liveness))
+        .route("/ready", get(readiness))
+        .route("/health/ready", get(readiness))
+        .route("/auth/me", get(auth_me))
+        .route("/auth/login", post(auth_login))
+        .route("/auth/logout", post(auth_logout))
+        .route("/auth/github/login", get(github_login))
+        .route("/auth/github/callback", get(github_callback))
+        .route("/auth/federate", post(federate))
+        // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
+        // authenticated cryptographically by the HMAC signature it carries, not
+        // by a loom principal. The handler is the untrusted-input boundary.
+        .route("/github/webhook", post(github_webhook));
+
+    // Everything else requires an authenticated principal — a bearer token, a
+    // session cookie, or a trusted-loopback request — gated by `require_auth`.
+    let protected = registered_api_router()
+        // Every live stream the browser wants, folded onto one connection so a
+        // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
+        // routes below remain the single-stream API.
+        .route("/events", get(events_mux))
         // Misc
         .route("/agents", get(list_agents))
         // Operator-defined custom agents (create + edit/remove by name). The
@@ -1043,10 +1111,6 @@ pub fn router(state: AppState) -> Router {
         .route("/repos/recent", get(recent_repos))
         .route("/repos/branches", get(repo_branches))
         .route("/repos/revisions/validate", get(validate_repo_revision))
-        .route(
-            "/repos/issues",
-            get(list_repo_issues).post(create_repo_issue),
-        )
         // Per-repo environment variables (write-only values), layered into a
         // non-restricted session's terminal above its selected profile.
         .route("/repos/env", get(get_repo_env))

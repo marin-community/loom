@@ -276,7 +276,7 @@ pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec {
         key: "slack.status_updates",
         label: "Show Slack progress updates",
-        description: "Include this session's `weaver status` reports in the \
+        description: "Include this session's `loom status` reports in the \
             editable Slack status card. Reports from an earlier session on the \
             same conversation are never repeated.",
         kind: SettingKind::Bool,

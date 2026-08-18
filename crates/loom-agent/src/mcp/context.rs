@@ -1,20 +1,29 @@
 //! Current caller context as a small, typed REST projection.
 
 use anyhow::{bail, Result};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_context";
 const TOOL_NAMES: [&str; 1] = ["get"];
 const TOOLS: &[&str] = &TOOL_NAMES;
-const CAPABILITY_SETS: &[CapabilitySet] = &[CapabilitySet {
-    name: "mcp/context/read@v1",
-    group: "context",
-    version: "v1",
-    description: "Resolve this session's canonical Loom resource identifiers and links.",
-    tools: TOOLS,
-}];
+const CAPABILITY_SETS: &[CapabilitySet] = &[
+    CapabilitySet {
+        name: "loom/context/read@v1",
+        group: "context",
+        version: "v1",
+        description: "Resolve this session's canonical Loom resource identifiers and links.",
+        tools: TOOLS,
+    },
+    CapabilitySet {
+        name: "mcp/context/read@v1",
+        group: "context",
+        version: "v1",
+        description: "Resolve this session's canonical Loom resource identifiers and links.",
+        tools: TOOLS,
+    },
+];
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "context",
@@ -41,11 +50,7 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    json!([{
-        "name": "get",
-        "description": "Return this caller's session, branch, repository, default channel, dashboard URL, and canonical REST links.",
-        "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} }
-    }])
+    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
@@ -80,6 +85,10 @@ mod tests {
         assert_eq!(tools().as_array().unwrap().len(), 1);
         assert_eq!(
             expand_tool_set("mcp/context/read@v1").unwrap(),
+            vec!["mcp__loom_context__get"]
+        );
+        assert_eq!(
+            expand_tool_set("loom/context/read@v1").unwrap(),
             vec!["mcp__loom_context__get"]
         );
     }

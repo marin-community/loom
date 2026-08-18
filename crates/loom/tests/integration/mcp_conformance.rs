@@ -83,9 +83,11 @@ async fn every_builtin_speaks_mcp_stdio() {
         ("context", 1),
         ("channel", 8),
         ("artifact", 8),
-        ("session", 4),
+        ("issue", 8),
+        ("session", 7),
         ("history", 2),
         ("messaging", 2),
+        ("permission", 4),
     ] {
         let (values, status) = run_adapter(adapter).await;
         assert!(status.success(), "{adapter} did not exit cleanly");

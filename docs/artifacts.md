@@ -34,8 +34,8 @@ state. An embedded image resolves the latest artifact visible to that session,
 using the same branch-scoped-before-repo-shared lookup as an artifact read. A
 plan is simply an artifact convention; there is no plan parser or sync engine.
 
-Pass a local image path directly to `weaver artifact write` (for example,
-`weaver artifact write screenshot /tmp/result.png`). The CLI reads and snapshots
+Pass a local image path directly to `loom artifacts write` (for example,
+`loom artifacts write screenshot /tmp/result.png`). The CLI reads and snapshots
 the image immediately into a bounded `image` artifact, so the stored artifact
 does not depend on that filesystem path and remains available when the dashboard
 or execution is remote. Another Markdown artifact can embed it with
@@ -53,15 +53,10 @@ artifact retain the cache as a compatibility fallback.
 
 ### CLI and UI
 
-The agent-facing commands are:
-
-```sh
-weaver artifact write <name> [<file>]  # stdin with -
-weaver artifact list [--repo]                 # alias: ls
-weaver artifact get <name> [--rev N]          # alias: show
-weaver artifact history <name> [--repo]
-weaver artifact delete <name> [--repo]        # alias: rm
-```
+Artifact syntax, actor policy, risk, REST paths, and MCP projections come from
+the operation registry. Use `loom artifacts --help` for local syntax,
+`loom help artifacts` for the operation index, or `GET /api/operations` for the
+running server's machine-readable contract.
 
 Session **Review → Artifacts** lists branch and shared documents, renders a
 selected revision, and exposes source editing as a secondary mode. Saving an

@@ -12,10 +12,11 @@
 use anyhow::{anyhow, bail, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 use weaver_api::{
     ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq,
-    CreateIssueReq, CreateRepoIssueReq, IssueView, PatchIssueReq, ThreadDto,
+    CreateIssueReq, CreateRepoIssueReq, IssueAction, IssueActionsReq, IssueView, ThreadDto,
 };
 use weaver_core::tags;
 
@@ -23,7 +24,7 @@ use weaver_core::tags;
 #[command(
     name = "weaver",
     version,
-    about = "Agent-facing helpers for sessions, channels, and branches"
+    about = "Deprecated compatibility CLI; use loom"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -31,7 +32,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
-enum StatusCmd {
+pub enum StatusCmd {
     /// Print the current attention level and message.
     Get,
     /// Update the attention level and optional current-state message.
@@ -146,7 +147,7 @@ enum Cmd {
 }
 
 #[derive(Subcommand)]
-enum ChannelCmd {
+pub enum ChannelCmd {
     /// List visible open channels and their unread state.
     #[command(name = "list", visible_alias = "ls")]
     Ls {
@@ -234,7 +235,7 @@ enum ChannelCmd {
 }
 
 #[derive(Subcommand)]
-enum IssueCmd {
+pub enum IssueCmd {
     /// Add an issue. By default it is claimed by the current branch; `--repo`
     /// creates an unclaimed repo-level backlog item instead.
     Add {
@@ -263,6 +264,7 @@ enum IssueCmd {
         branch: Option<String>,
     },
     /// Show one issue, including the live status of the branch working it.
+    #[command(name = "get", visible_alias = "show")]
     Show { id: i64 },
     /// Block until an issue finishes or its sub-tree needs you.
     ///
@@ -282,12 +284,22 @@ enum IssueCmd {
         #[arg(long)]
         closed_only: bool,
     },
-    /// Close an issue.
-    Close { id: i64 },
-    /// Reopen a closed issue.
-    Reopen { id: i64 },
-    /// Delete an issue.
-    Rm { id: i64 },
+    /// Atomically close one or more issues.
+    Close {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Atomically reopen one or more closed issues.
+    Reopen {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
+    /// Atomically delete one or more issues.
+    #[command(name = "delete", visible_alias = "rm")]
+    Rm {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
     /// Label an issue with free-form `(key, value)` tags: set, rm, or ls.
     ///
     /// Issue tags are quiet annotations (priority, area, kind, …) rendered as
@@ -300,15 +312,13 @@ enum IssueCmd {
 }
 
 #[derive(Subcommand)]
-enum IssueTagCmd {
+pub enum IssueTagCmd {
     /// Set (insert or replace) a tag on an issue. The value must be non-empty;
     /// clear a label with `weaver issue tag rm`.
     Set {
-        id: i64,
-        /// The tag key, e.g. `priority` or `area`.
-        key: String,
-        /// The value to store, e.g. `high`.
-        value: String,
+        /// One or more numeric issue ids followed by the tag key and value.
+        #[arg(required = true, num_args = 3..)]
+        args: Vec<String>,
         /// One-line reason accompanying the tag.
         #[arg(long, default_value = "")]
         note: String,
@@ -317,13 +327,18 @@ enum IssueTagCmd {
         by: String,
     },
     /// Clear an issue label — delete the `(key)` tag.
-    Rm { id: i64, key: String },
+    #[command(name = "delete", visible_alias = "rm")]
+    Rm {
+        /// One or more numeric issue ids followed by the tag key.
+        #[arg(required = true, num_args = 2..)]
+        args: Vec<String>,
+    },
     /// List an issue's tags.
     Ls { id: i64 },
 }
 
 #[derive(Subcommand)]
-enum ArtifactCmd {
+pub enum ArtifactCmd {
     /// Write an artifact: append a new revision (creating it if absent). Reads
     /// `<file>`, or stdin when `<file>` is `-` or omitted.
     ///
@@ -438,15 +453,16 @@ enum ArtifactCmd {
 }
 
 #[derive(Subcommand)]
-enum ConfigCmd {
+pub enum ConfigCmd {
     /// Print one setting's value.
     Get { key: String },
     /// List every setting and its value.
+    #[command(name = "list", visible_alias = "ls")]
     Ls,
 }
 
 #[derive(Subcommand)]
-enum TagCmd {
+pub enum TagCmd {
     /// Set (insert or replace) a tag. The loud keys (`attention`, `triage`)
     /// accept only `attention` or `blocked`; clear them with `tag rm`. Any
     /// other key is free-form. Defaults to the current branch; `--session`
@@ -468,6 +484,7 @@ enum TagCmd {
         by: String,
     },
     /// Clear a tag — return that axis to its calm/default (absent) state.
+    #[command(name = "delete", visible_alias = "rm")]
     Rm {
         /// The tag key to clear.
         key: String,
@@ -476,6 +493,7 @@ enum TagCmd {
         session: Option<String>,
     },
     /// List every tag on a session (defaults to the current branch).
+    #[command(name = "list", visible_alias = "ls")]
     Ls {
         /// The session to list; defaults to the current branch.
         #[arg(long)]
@@ -484,15 +502,20 @@ enum TagCmd {
 }
 
 #[tokio::main]
-async fn main() {
+pub async fn main() {
     if let Err(e) = run().await {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(&cli.cmd, Cmd::Hook { .. } | Cmd::GithubToken) {
+        eprintln!(
+            "warning: `weaver` is deprecated; use the equivalent `loom` command (`loom help`)"
+        );
+    }
     match cli.cmd {
         Cmd::Status { cmd } => match cmd {
             StatusCmd::Get => cmd_status(None, String::new()).await,
@@ -518,14 +541,115 @@ async fn run() -> Result<()> {
     }
 }
 
+pub async fn run_status(cmd: StatusCmd) -> Result<()> {
+    match cmd {
+        StatusCmd::Get => cmd_status(None, String::new()).await,
+        StatusCmd::Set { tag, message } => cmd_status(Some(tag), message).await,
+    }
+}
+
+pub async fn run_tag(cmd: TagCmd) -> Result<()> {
+    cmd_tag(cmd).await
+}
+
+pub async fn run_summary() -> Result<()> {
+    let client = client();
+    let key = std::env::var("LOOM_SESSION_ID")
+        .ok()
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or(branch_key()?);
+    let summary = client.session_summary(&key).await?;
+    println!("Goal:    {}", summary.goal);
+    if summary.status_message.is_empty() {
+        println!("Status:  {}", summary.attention);
+    } else {
+        println!(
+            "Status:  {} — {}",
+            summary.attention, summary.status_message
+        );
+    }
+    if let Some(channel) = summary.channel {
+        println!(
+            "Channel: {} — {} unread, {} urgent  (loom channels read)",
+            channel.id, channel.unread_count, channel.unread_urgent_count
+        );
+    }
+    println!(
+        "Artifacts: {}  (loom artifacts list)",
+        summary.artifacts.len()
+    );
+    println!("Issues:    {}  (loom issues list)", summary.issues.len());
+    if !summary.recent_events.is_empty() {
+        println!("Recent:");
+        for event in summary.recent_events.iter().rev().take(3).rev() {
+            println!("  {}  {}", event.created_at, event.kind);
+        }
+    }
+    println!("Next:");
+    for action in summary.next_actions {
+        println!("  - {action}");
+    }
+    Ok(())
+}
+
+pub async fn run_channel(cmd: ChannelCmd) -> Result<()> {
+    cmd_channel(cmd).await
+}
+
+pub async fn run_issue(cmd: IssueCmd) -> Result<()> {
+    cmd_issue(cmd).await
+}
+
+pub async fn run_artifact(cmd: ArtifactCmd) -> Result<()> {
+    cmd_artifact(cmd).await
+}
+
+pub async fn run_self() -> Result<()> {
+    cmd_where().await
+}
+
+pub async fn run_events(limit: i64) -> Result<()> {
+    cmd_log(limit).await
+}
+
+pub async fn run_settings(cmd: ConfigCmd) -> Result<()> {
+    cmd_config(cmd).await
+}
+
+pub async fn run_hook(event: String) -> Result<()> {
+    cmd_hook(event).await
+}
+
+pub async fn run_github_token() -> Result<()> {
+    cmd_github_token().await
+}
+
+pub fn run_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
+    cmd_chatlog(file, as_json)
+}
+
 // ---------------------------------------------------------------------------
 // The loom client and "current branch" resolution
 // ---------------------------------------------------------------------------
 
 /// A client pointed at the server `$WEAVER_API` (or a local loom's recorded
 /// address) resolves, authenticated with `$LOOM_TOKEN` when set.
+static CLIENT_OVERRIDE: OnceLock<Client> = OnceLock::new();
+
+/// Point compatibility handlers at Loom's fully resolved client context.
+/// The standalone binary never calls this and retains environment/local
+/// endpoint resolution.
+pub fn set_client_override(client: Client) -> Result<()> {
+    CLIENT_OVERRIDE
+        .set(client)
+        .map_err(|_| anyhow!("Loom client override is already set"))
+}
+
 fn client() -> Client {
-    weaver_api::endpoint::default_client()
+    CLIENT_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(weaver_api::endpoint::default_client)
 }
 
 /// The branch key every command operates against: `$WEAVER_BRANCH`, set by
@@ -697,7 +821,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     } else {
         "(none set)".to_string()
     };
-    let _ = writeln!(out, "Goal:    {goal}  (weaver artifact get goal)");
+    let _ = writeln!(out, "Goal:    {goal}  (loom artifacts get goal)");
 
     let attention = attention_of(b);
     let status = if b.description.is_empty() {
@@ -705,11 +829,11 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     } else {
         format!("{attention} — {}", b.description)
     };
-    let _ = writeln!(out, "Status:  {status}  (weaver status get)");
+    let _ = writeln!(out, "Status:  {status}  (loom status get)");
     if let Some(wiring) = github_wiring_of(b) {
         let _ = writeln!(
             out,
-            "GitHub:  status messages mirror publicly to {wiring}  (weaver tag rm github stops it)"
+            "GitHub:  status messages mirror publicly to {wiring}  (loom sessions tags delete github stops it)"
         );
     }
 
@@ -725,7 +849,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
             };
             let _ = writeln!(
                 out,
-                "Channel: {} — {} unread{}  (weaver channel read)",
+                "Channel: {} — {} unread{}  (loom channels read)",
                 channel.id, channel.unread_count, urgent
             );
             if channel.unread_count > 0 {
@@ -766,15 +890,12 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         .unwrap_or_default();
     match artifacts.as_slice() {
         [] => {
-            let _ = writeln!(
-                out,
-                "Artifacts: none  (weaver artifact write <name> <file>)"
-            );
+            let _ = writeln!(out, "Artifacts: none  (loom artifacts write <name> <file>)");
         }
         [a] => {
             let _ = writeln!(
                 out,
-                "Artifacts: {} [rev {}]  (weaver artifact get {})",
+                "Artifacts: {} [rev {}]  (loom artifacts get {})",
                 a.name, a.rev, a.name
             );
         }
@@ -782,7 +903,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
             let names = many.iter().map(|a| a.name.as_str()).collect::<Vec<_>>();
             let _ = writeln!(
                 out,
-                "Artifacts: {}  (weaver artifact list)",
+                "Artifacts: {}  (loom artifacts list)",
                 names.join(", ")
             );
         }
@@ -809,7 +930,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         for (name, t) in open_threads.iter().take(SUMMARY_TASK_CAP) {
             let _ = writeln!(
                 out,
-                "  #{} on {name}: \"{}\"  (weaver artifact threads {name})",
+                "  #{} on {name}: \"{}\"  (loom artifacts threads {name})",
                 t.id,
                 truncate(&t.anchor.quote, 60)
             );
@@ -817,7 +938,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         if open_threads.len() > SUMMARY_TASK_CAP {
             let _ = writeln!(
                 out,
-                "  (+{} more — weaver artifact threads <name>)",
+                "  (+{} more — loom artifacts threads <name>)",
                 open_threads.len() - SUMMARY_TASK_CAP
             );
         }
@@ -843,10 +964,10 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         .collect();
     out.push('\n');
     if open.is_empty() && delegated.is_empty() {
-        let _ = writeln!(out, "Backlog: none  (weaver issue ls)");
+        let _ = writeln!(out, "Backlog: none  (loom issues list)");
     } else {
         let total = open.len() + delegated.len();
-        let _ = writeln!(out, "Backlog ({total}):  (weaver issue ls)");
+        let _ = writeln!(out, "Backlog ({total}):  (loom issues list)");
         // Cap the whole list (own issues first, then delegated sub-trees) so a
         // branch that delegated many sub-trees can't blow the summary up; the
         // overflow collapses into one trailing line.
@@ -868,7 +989,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
             shown += 1;
         }
         if total > shown {
-            let _ = writeln!(out, "  (+{} more — weaver issue ls)", total - shown);
+            let _ = writeln!(out, "  (+{} more — loom issues list)", total - shown);
         }
     }
 
@@ -876,7 +997,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // The current status (where work was left off) is already on the `Status:`
     // line above, sourced from the status-description trail.
     out.push('\n');
-    let _ = writeln!(out, "Next steps:  (weaver log · weaver status get)");
+    let _ = writeln!(out, "Next steps:  (loom sessions events · loom status get)");
     let _ = writeln!(out, "  - {}", next_action_hint(&open, &delegated));
     Ok(out)
 }
@@ -900,13 +1021,13 @@ async fn cmd_readme() -> Result<()> {
 fn next_action_hint(open: &[&IssueView], delegated: &[&IssueView]) -> String {
     if let Some(first) = open.first() {
         format!(
-            "pick up #{} ({}); `weaver issue ls` for the rest",
+            "pick up #{} ({}); `loom issues list` for the rest",
             first.id,
             truncate(&first.title, 60)
         )
     } else if !delegated.is_empty() {
         format!(
-            "{} delegated sub-tree(s) still open — `weaver issue show <id>` to poll",
+            "{} delegated sub-tree(s) still open — `loom issues get <id>` to poll",
             delegated.len()
         )
     } else {
@@ -1146,11 +1267,11 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
             if !tags::is_valid_value(tag_key, value) {
                 if tags::is_loud(tag_key) {
                     bail!(
-                        "'{tag_key}' accepts only {} — use `weaver tag rm {tag_key}` to clear it",
+                        "'{tag_key}' accepts only {} — use `loom sessions tags delete {tag_key}` to clear it",
                         tags::ATTENTION_VALUES.join(", ")
                     );
                 }
-                bail!("a tag value cannot be empty — use `weaver tag rm {tag_key}` to clear it");
+                bail!("a tag value cannot be empty — use `loom sessions tags delete {tag_key}` to clear it");
             }
             client
                 .set_branch_tag(&target.id, tag_key, value, note, by)
@@ -1544,39 +1665,32 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             )
             .await?;
         }
-        IssueCmd::Close { id } => {
-            let i = client.get_issue(id).await?;
-            ensure_issue_in_repo(&i, &b.repo_root)?;
-            client
-                .patch_issue(
-                    id,
-                    &PatchIssueReq {
-                        status: Some("closed".to_string()),
-                        ..Default::default()
-                    },
-                )
+        IssueCmd::Close { ids } => {
+            let result = client
+                .issue_actions(&IssueActionsReq {
+                    ids,
+                    action: IssueAction::Close,
+                })
                 .await?;
-            println!("closed #{id}");
+            println!("closed {} issue(s)", result.issues.len());
         }
-        IssueCmd::Reopen { id } => {
-            let i = client.get_issue(id).await?;
-            ensure_issue_in_repo(&i, &b.repo_root)?;
-            client
-                .patch_issue(
-                    id,
-                    &PatchIssueReq {
-                        status: Some("open".to_string()),
-                        ..Default::default()
-                    },
-                )
+        IssueCmd::Reopen { ids } => {
+            let result = client
+                .issue_actions(&IssueActionsReq {
+                    ids,
+                    action: IssueAction::Reopen,
+                })
                 .await?;
-            println!("reopened #{id}");
+            println!("reopened {} issue(s)", result.issues.len());
         }
-        IssueCmd::Rm { id } => {
-            let i = client.get_issue(id).await?;
-            ensure_issue_in_repo(&i, &b.repo_root)?;
-            client.delete_issue(id).await?;
-            println!("removed #{id}");
+        IssueCmd::Rm { ids } => {
+            let result = client
+                .issue_actions(&IssueActionsReq {
+                    ids,
+                    action: IssueAction::Delete,
+                })
+                .await?;
+            println!("deleted {} issue(s)", result.deleted_ids.len());
         }
         IssueCmd::Tag { cmd } => cmd_issue_tag(&client, &b.repo_root, cmd).await?,
     }
@@ -1586,15 +1700,8 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
 /// Set, clear, or list a free-form tag on an issue (`weaver issue tag …`).
 async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Result<()> {
     match cmd {
-        IssueTagCmd::Set {
-            id,
-            key,
-            value,
-            note,
-            by,
-        } => {
-            let i = client.get_issue(id).await?;
-            ensure_issue_in_repo(&i, repo_root)?;
+        IssueTagCmd::Set { args, note, by } => {
+            let (ids, key, value) = parse_issue_tag_set_args(args)?;
             let key = key.trim();
             let value = value.trim();
             let note = note.trim();
@@ -1604,21 +1711,41 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
             }
             if value.is_empty() {
                 bail!(
-                    "a tag value cannot be empty — use `weaver issue tag rm {id} {key}` to clear it"
+                    "a tag value cannot be empty — use `loom issues tag delete <ids...> {key}` to clear it"
                 );
             }
-            client.set_issue_tag(id, key, value, note, by).await?;
+            let result = client
+                .issue_actions(&IssueActionsReq {
+                    ids,
+                    action: IssueAction::Tag {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                        note: note.to_string(),
+                        by: Some(by.to_string()),
+                    },
+                })
+                .await?;
             if note.is_empty() {
-                println!("tag: #{id} → {key} = {value} (by {by})");
+                println!(
+                    "tagged {} issue(s): {key} = {value} (by {by})",
+                    result.issues.len()
+                );
             } else {
-                println!("tag: #{id} → {key} = {value} (by {by}) — {note}");
+                println!(
+                    "tagged {} issue(s): {key} = {value} (by {by}) — {note}",
+                    result.issues.len()
+                );
             }
         }
-        IssueTagCmd::Rm { id, key } => {
-            let i = client.get_issue(id).await?;
-            ensure_issue_in_repo(&i, repo_root)?;
-            client.clear_issue_tag(id, key.trim()).await?;
-            println!("tag: #{id} → cleared {}", key.trim());
+        IssueTagCmd::Rm { args } => {
+            let (ids, key) = parse_issue_tag_delete_args(args)?;
+            let result = client
+                .issue_actions(&IssueActionsReq {
+                    ids,
+                    action: IssueAction::Untag { key: key.clone() },
+                })
+                .await?;
+            println!("cleared {key} from {} issue(s)", result.issues.len());
         }
         IssueTagCmd::Ls { id } => {
             let i = client.get_issue(id).await?;
@@ -1638,6 +1765,36 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
         }
     }
     Ok(())
+}
+
+fn parse_issue_ids(values: &[String]) -> Result<Vec<i64>> {
+    values
+        .iter()
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| anyhow!("'{value}' is not a positive issue id"))
+        })
+        .collect()
+}
+
+fn parse_issue_tag_set_args(mut args: Vec<String>) -> Result<(Vec<i64>, String, String)> {
+    if args.len() < 3 {
+        bail!("tag set requires issue id(s), key, and value");
+    }
+    let value = args.pop().expect("length checked");
+    let key = args.pop().expect("length checked");
+    Ok((parse_issue_ids(&args)?, key, value))
+}
+
+fn parse_issue_tag_delete_args(mut args: Vec<String>) -> Result<(Vec<i64>, String)> {
+    if args.len() < 2 {
+        bail!("tag delete requires issue id(s) and key");
+    }
+    let key = args.pop().expect("length checked");
+    Ok((parse_issue_ids(&args)?, key))
 }
 
 fn issue_line(i: &IssueView) -> String {
@@ -1705,7 +1862,7 @@ async fn print_issue_ls_default(client: &Client, issues: &[IssueView], target: &
             }
             if backlog.len() > BACKLOG_CAP {
                 println!(
-                    "  (+{} more — weaver issue ls --repo)",
+                    "  (+{} more — loom issues list --repo)",
                     backlog.len() - BACKLOG_CAP
                 );
             }
@@ -1883,7 +2040,7 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 .get_branch_artifact(&key, name.trim(), None, repo)
                 .await
                 .map_err(|_| {
-                    anyhow!("no artifact '{}' — see `weaver artifact list`", name.trim())
+                    anyhow!("no artifact '{}' — see `loom artifacts list`", name.trim())
                 })?;
             client
                 .delete_branch_artifact(&key, name.trim(), repo)
@@ -2130,7 +2287,7 @@ fn read_hook_source() -> Option<String> {
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **weaver session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `weaver status set --tag <ok|attention|blocked> --message \"<message>\"`; never block on an interactive TUI prompt — state the question as plain text and raise `weaver status set --tag attention --message \"<question>\"`; finish by opening a PR (`gh pr create`) rather than merging, and `weaver issue close <id>` your tracking issue when the work is done. Run `weaver readme` for the full weaver workflow guide.\n",
+        "Context was just compacted — you are still in a **Loom session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the Loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nReminders: keep your status honest with `loom status set --tag <ok|attention|blocked> --message \"<message>\"`; state questions as plain text and raise attention; finish by opening a PR rather than merging; append a typed result with `loom channels send --kind result \"<outcome>\"`. Run `loom help` to rediscover the command surface.\n",
         branch = b.branch,
     )
 }
@@ -2205,7 +2362,7 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
             let settings = client.list_settings().await?;
             match settings.settings.iter().find(|s| s.key == key) {
                 Some(s) => println!("{}", s.value),
-                None => bail!("no setting '{key}' — see `weaver config ls`"),
+                None => bail!("no setting '{key}' — see `loom settings list`"),
             }
         }
     }

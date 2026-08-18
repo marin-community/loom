@@ -719,10 +719,10 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
 }
 
 async fn prepare_claude(ctx: &AgentLaunchContext<'_>) {
-    let weaver_bin = weaver_bin_path();
+    let loom_bin = loom_bin_path();
 
     if ctx.prelude == "weaver" {
-        if let Err(e) = install_hooks(ctx.work_dir, &weaver_bin, HookMode::Terminal).await {
+        if let Err(e) = install_hooks(ctx.work_dir, &loom_bin, HookMode::Terminal).await {
             tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
                 "agent hook setup failed; launching without lifecycle hooks");
         }
@@ -807,15 +807,15 @@ pub fn session_env(
     env
 }
 
-/// The `weaver` binary path — a sibling of the running executable (they ship
-/// together), falling back to bare `weaver` on `PATH`.
-fn weaver_bin_path() -> String {
+/// The `loom` binary path — a sibling of the running executable, falling back
+/// to bare `loom` on `PATH`.
+fn loom_bin_path() -> String {
     std::env::current_exe()
         .ok()
         .as_deref()
         .and_then(Path::parent)
-        .map(|d| d.join("weaver").display().to_string())
-        .unwrap_or_else(|| "weaver".to_string())
+        .map(|d| d.join("loom").display().to_string())
+        .unwrap_or_else(|| "loom".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -952,8 +952,8 @@ pub async fn build_acp_launch(
         // Install only the SessionStart primer hook; the work-cycle hooks and the
         // launch-gate seed are redundant under ACP (protocol turn edges + the
         // bypass posture replace them).
-        let weaver_bin = weaver_bin_path();
-        if let Err(e) = install_hooks(spec.work_dir, &weaver_bin, HookMode::Acp).await {
+        let loom_bin = loom_bin_path();
+        if let Err(e) = install_hooks(spec.work_dir, &loom_bin, HookMode::Acp).await {
             tracing::warn!(work_dir = %spec.work_dir.display(), error = %e,
                 "acp hook setup failed; launching without the primer hook");
         }
@@ -1319,7 +1319,7 @@ async fn read_opt(path: Option<&Path>) -> Option<String> {
 /// terminal session installs the full working/idle set; an ACP session installs
 /// only `SessionStart` (its turn edges come from the protocol — see
 /// [`weaver_core::agent::HookMode`]).
-pub async fn install_hooks(work_dir: &Path, weaver_bin: &str, mode: HookMode) -> Result<()> {
+pub async fn install_hooks(work_dir: &Path, loom_bin: &str, mode: HookMode) -> Result<()> {
     let dir = work_dir.join(".claude");
     tokio::fs::create_dir_all(&dir).await?;
     let path = dir.join("settings.local.json");
@@ -1327,7 +1327,7 @@ pub async fn install_hooks(work_dir: &Path, weaver_bin: &str, mode: HookMode) ->
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|_| json!({})),
         Err(_) => json!({}),
     };
-    let hooks = hooks_json(weaver_bin, mode);
+    let hooks = hooks_json(loom_bin, mode);
     root["hooks"] = hooks["hooks"].clone();
     tokio::fs::write(&path, serde_json::to_string_pretty(&root)?).await?;
     tracing::debug!(path = %path.display(), ?mode, "claude hooks installed");

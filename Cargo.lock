@@ -1379,6 +1379,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "weaver",
  "weaver-api",
  "weaver-core",
 ]

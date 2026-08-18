@@ -1,5 +1,5 @@
 //! Agent-facing helpers that are pure (no terminal management, no process spawning): the
-//! Claude Code hook config and the SessionStart primer (a WEAVER.md).
+//! Claude Code hook config and the compact SessionStart primer.
 
 use serde_json::{json, Map, Value};
 
@@ -18,21 +18,21 @@ pub enum HookMode {
     Acp,
 }
 
-/// Claude Code hook config that reports session status to weaver.
+/// Claude Code hook config that reports session status to Loom.
 ///
-/// Hooks shell out to `weaver hook --event <name>`. The CLI itself resolves the
+/// Hooks shell out to `loom hook --event <name>`. The CLI itself resolves the
 /// current branch (from `$WEAVER_BRANCH` or cwd) and writes an `events` row;
 /// the orchestrator picks it up on its monitor tick. No daemon required.
 ///
 /// `mode` selects the bundle: a terminal session installs the full set;
 /// an ACP session installs only `SessionStart`, since its working/idle edges
 /// are the protocol's turn boundaries, not the work-cycle hooks.
-pub fn hooks_json(weaver_bin: &str, mode: HookMode) -> Value {
+pub fn hooks_json(loom_bin: &str, mode: HookMode) -> Value {
     let hook = |event: &str| {
         json!([{
             "hooks": [{
                 "type": "command",
-                "command": format!("{weaver_bin} hook --event {event}")
+                "command": format!("{loom_bin} hook --event {event}")
             }]
         }])
     };
@@ -46,11 +46,23 @@ pub fn hooks_json(weaver_bin: &str, mode: HookMode) -> Value {
     json!({ "hooks": hooks })
 }
 
-/// The builtin WEAVER.md — how an agent works inside a weaver session — kept as
-/// a standalone markdown doc and catted in at build time so `weaver hook` stays
-/// self-contained wherever it runs. A repo may ship its own `WEAVER.md` to
-/// override this; see [`session_primer`].
-const BUILTIN_WEAVER_MD: &str = include_str!("../WEAVER.md");
+/// Compact builtin orientation. Executable reference belongs to Loom's
+/// operation registry and `loom help`, not a separately maintained Markdown
+/// catalogue. Repository-specific `WEAVER.md` overrides remain readable during
+/// the compatibility window.
+const BUILTIN_WEAVER_MD: &str = r#"# Loom session
+
+You are working in a detached Loom session. Your opening task is the goal.
+
+- Run `loom summary` to recover durable context after interruption or compaction.
+- Run `loom help` to discover resource groups and `loom <group> --help` for commands.
+- Run `loom permissions show` to inspect effective access; request another GitHub repository with `loom permissions request github-repository owner/repo --reason "..."`.
+- Keep `loom status set --tag <ok|attention|blocked> --message "..."` honest. `attention` and `blocked` mean a person must act.
+- Use `loom channels read` and `loom channels send` for durable communication.
+- Finish delegated work with `loom channels send --kind result "<outcome or PR>"`.
+
+Repository-specific engineering and landing rules live in `AGENTS.md`.
+"#;
 
 /// The builtin WEAVER.md, used when the repo doesn't ship its own.
 pub fn builtin_weaver_md() -> &'static str {
@@ -78,28 +90,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hooks_point_at_the_weaver_binary() {
-        let hooks = hooks_json("/usr/bin/weaver", HookMode::Terminal);
+    fn hooks_point_at_the_loom_binary() {
+        let hooks = hooks_json("/usr/bin/loom", HookMode::Terminal);
         let stop = hooks["hooks"]["Stop"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert_eq!(stop, "/usr/bin/weaver hook --event idle");
+        assert_eq!(stop, "/usr/bin/loom hook --event idle");
     }
 
     #[test]
     fn session_start_hook_uses_a_distinct_event() {
-        let hooks = hooks_json("/usr/bin/weaver", HookMode::Terminal);
+        let hooks = hooks_json("/usr/bin/loom", HookMode::Terminal);
         let cmd = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
             .as_str()
             .unwrap();
-        assert_eq!(cmd, "/usr/bin/weaver hook --event session-start");
+        assert_eq!(cmd, "/usr/bin/loom hook --event session-start");
     }
 
     #[test]
     fn acp_mode_installs_only_the_session_start_hook() {
         // An ACP session's turn boundaries are the protocol's, so only the
         // primer hook is installed — the work-cycle hooks are dropped.
-        let hooks = hooks_json("/usr/bin/weaver", HookMode::Acp);
+        let hooks = hooks_json("/usr/bin/loom", HookMode::Acp);
         let obj = hooks["hooks"].as_object().unwrap();
         assert_eq!(
             obj.keys().collect::<Vec<_>>(),
@@ -118,7 +130,7 @@ mod tests {
         assert!(v["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap()
-            .contains("weaver status"));
+            .contains("loom status"));
     }
 
     #[test]

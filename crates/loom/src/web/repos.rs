@@ -618,7 +618,7 @@ fn trigger_goal(
     let comment_cmd = if is_pr { "pr" } else { "issue" };
     let respond = format!(
         "- Post the final answer or completed result on the thread: `gh {comment_cmd} comment {number} --repo {repo} --body \"…\"`.\n\
-         - Your `weaver status` messages are mirrored onto this thread. When you create or update a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
+         - Your `loom status` messages are mirrored onto this thread. When you create or update a pull request or issue, or otherwise reach a terminal outcome, replace any transient progress such as `waiting` with a final status that names the outcome and includes its URL when available. Use `attention` when a person needs to review or act; otherwise use `ok`.\n\
          - Do not leave the thread with only the editable status card: the final GitHub comment must be self-contained."
     );
     let (introduction, trigger_context) = match event.source() {
