@@ -140,8 +140,8 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
 ///
 /// A resolved session token (personal, profile, repository, or config-file)
 /// wins. Otherwise an allowed and configured GitHub App is brokered through the
-/// session-scoped Loom API. App-less deployments retain their ambient-token
-/// compatibility path, but Loom still explicitly labels that decision.
+/// session-scoped Loom API. A session with neither is disabled; the daemon's
+/// ambient credential is never promoted into a managed session.
 pub async fn stamp_github_auth_mode(
     env: &mut Vec<(String, String)>,
     github_app: Option<&crate::github_app::GithubApp>,
@@ -155,10 +155,10 @@ pub async fn stamp_github_auth_mode(
         if app.is_configured().await {
             GithubAuthMode::Broker
         } else {
-            GithubAuthMode::Direct
+            GithubAuthMode::Disabled
         }
     } else {
-        GithubAuthMode::Direct
+        GithubAuthMode::Disabled
     };
     set_env(env, GITHUB_AUTH_MODE_ENV, mode.as_str().to_string());
     mode
@@ -182,19 +182,9 @@ pub fn session_github_repositories(
         .unwrap_or_default()
 }
 
-fn env_has_key(env: &[(String, String)], name: &str) -> bool {
-    env.iter().any(|(key, _)| key == name)
-}
-
 fn env_has_nonempty(env: &[(String, String)], name: &str) -> bool {
     env.iter()
         .any(|(key, value)| key == name && !value.trim().is_empty())
-}
-
-fn ambient_env_has_nonempty(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
 }
 
 pub async fn github_token_available(
@@ -213,9 +203,7 @@ pub async fn github_token_available(
     if crate::auth::get_user(db, username).await?.is_none() {
         return Ok(true);
     }
-    if env_has_nonempty(env, "GH_TOKEN")
-        || (!env_has_key(env, "GH_TOKEN") && ambient_env_has_nonempty("GH_TOKEN"))
-    {
+    if env_has_nonempty(env, "GH_TOKEN") {
         return Ok(true);
     }
     if crate::user_token::get(db, username)
@@ -252,12 +240,6 @@ mod tests {
     }
 
     impl EnvVarGuard {
-        fn unset(name: &'static str) -> Self {
-            let value = std::env::var_os(name);
-            std::env::remove_var(name);
-            Self { name, value }
-        }
-
         fn set(name: &'static str, new_value: &str) -> Self {
             let value = std::env::var_os(name);
             std::env::set_var(name, new_value);
@@ -367,6 +349,12 @@ mod tests {
             .any(|(name, value)| name == GITHUB_AUTH_MODE_ENV
                 && value == GithubAuthMode::Direct.as_str()));
 
+        let mut unmanaged = Vec::new();
+        assert_eq!(
+            stamp_github_auth_mode(&mut unmanaged, Some(&app), false).await,
+            GithubAuthMode::Disabled
+        );
+
         weaver_core::config::apply(
             &db,
             &[
@@ -420,7 +408,7 @@ mod tests {
     #[serial_test::serial]
     #[tokio::test]
     async fn github_token_preflight_covers_builtin_custom_and_app_paths() {
-        let ambient = EnvVarGuard::unset("GH_TOKEN");
+        let _ambient = EnvVarGuard::set("GH_TOKEN", "ghp_daemon_must_not_leak");
         let db = crate::db::connect_in_memory().await.unwrap();
         seed_user(&db, "alice").await;
 
@@ -481,16 +469,10 @@ mod tests {
                 .unwrap()
         );
 
-        drop(ambient);
-        let _ambient = EnvVarGuard::set("GH_TOKEN", "ghp_ambient");
-        assert!(!github_token_available(
-            &db,
-            &[("GH_TOKEN".to_string(), " ".to_string())],
-            Some("alice"),
-            "codex",
-            None,
-        )
-        .await
-        .unwrap());
+        assert!(
+            !github_token_available(&db, &[], Some("alice"), "codex", None,)
+                .await
+                .unwrap()
+        );
     }
 }
