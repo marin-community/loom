@@ -141,7 +141,8 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
 /// A resolved session token (personal, profile, repository, or config-file)
 /// wins. Otherwise an allowed and configured GitHub App is brokered through the
 /// session-scoped Loom API. A session with neither is disabled; the daemon's
-/// ambient credential is never promoted into a managed session.
+/// ambient credential is never promoted into a managed session. Empty explicit
+/// values mask both GitHub token variables inherited by a non-cleared runtime.
 pub async fn stamp_github_auth_mode(
     env: &mut Vec<(String, String)>,
     github_app: Option<&crate::github_app::GithubApp>,
@@ -160,6 +161,12 @@ pub async fn stamp_github_auth_mode(
     } else {
         GithubAuthMode::Disabled
     };
+    if mode != GithubAuthMode::Direct {
+        set_env(env, "GH_TOKEN", String::new());
+    }
+    // GH_TOKEN is Loom's sole direct-token input. Always mask GitHub CLI's
+    // lower-precedence alias so a daemon credential cannot become a fallback.
+    set_env(env, "GITHUB_TOKEN", String::new());
     set_env(env, GITHUB_AUTH_MODE_ENV, mode.as_str().to_string());
     mode
 }
@@ -339,7 +346,10 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         let app = crate::github_app::GithubApp::new(db.clone());
 
-        let mut direct = vec![("GH_TOKEN".to_string(), "personal".to_string())];
+        let mut direct = vec![
+            ("GH_TOKEN".to_string(), "personal".to_string()),
+            ("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string()),
+        ];
         assert_eq!(
             stamp_github_auth_mode(&mut direct, Some(&app), false).await,
             GithubAuthMode::Direct
@@ -348,12 +358,23 @@ mod tests {
             .iter()
             .any(|(name, value)| name == GITHUB_AUTH_MODE_ENV
                 && value == GithubAuthMode::Direct.as_str()));
+        assert!(direct
+            .iter()
+            .any(|(name, value)| name == "GH_TOKEN" && value == "personal"));
+        assert!(direct
+            .iter()
+            .any(|(name, value)| name == "GITHUB_TOKEN" && value.is_empty()));
 
-        let mut unmanaged = Vec::new();
+        let mut unmanaged = vec![("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string())];
         assert_eq!(
             stamp_github_auth_mode(&mut unmanaged, Some(&app), false).await,
             GithubAuthMode::Disabled
         );
+        for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(unmanaged
+                .iter()
+                .any(|(candidate, value)| candidate == name && value.is_empty()));
+        }
 
         weaver_core::config::apply(
             &db,
@@ -370,17 +391,28 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut brokered = Vec::new();
+        let mut brokered = vec![("GITHUB_TOKEN".to_string(), "wrong-daemon-bot".to_string())];
         assert_eq!(
             stamp_github_auth_mode(&mut brokered, Some(&app), false).await,
             GithubAuthMode::Broker
         );
+        for name in ["GH_TOKEN", "GITHUB_TOKEN"] {
+            assert!(brokered
+                .iter()
+                .any(|(candidate, value)| candidate == name && value.is_empty()));
+        }
 
-        let mut restricted = vec![("GH_TOKEN".to_string(), "must-not-win".to_string())];
+        let mut restricted = vec![
+            ("GH_TOKEN".to_string(), "must-not-win".to_string()),
+            ("GITHUB_TOKEN".to_string(), "also-must-not-win".to_string()),
+        ];
         assert_eq!(
             stamp_github_auth_mode(&mut restricted, Some(&app), true).await,
             GithubAuthMode::Disabled
         );
+        assert!(restricted.iter().all(|(name, value)| {
+            !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN") || value.is_empty()
+        }));
     }
 
     #[test]

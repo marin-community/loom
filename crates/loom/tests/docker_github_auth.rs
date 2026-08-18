@@ -94,10 +94,22 @@ fn git_helper_obeys_loom_owned_auth_mode() {
     assert!(String::from_utf8(incomplete.stderr)
         .unwrap()
         .contains("missing its session credential"));
+
+    let unmarked = run_script(&script, &[("GH_TOKEN", "wrong-daemon-bot")], &["get"]);
+    assert!(!unmarked.status.success());
+    assert!(String::from_utf8(unmarked.stderr)
+        .unwrap()
+        .contains("missing LOOM_GITHUB_AUTH_MODE"));
+
+    let incomplete_direct = run_script(&script, &[("LOOM_GITHUB_AUTH_MODE", "direct")], &["get"]);
+    assert!(!incomplete_direct.status.success());
+    assert!(String::from_utf8(incomplete_direct.stderr)
+        .unwrap()
+        .contains("missing GH_TOKEN"));
 }
 
 #[test]
-fn gh_wrapper_replaces_ambient_tokens_in_broker_mode() {
+fn gh_wrapper_obeys_loom_owned_auth_mode() {
     let script = embedded_script("/usr/local/bin/gh").replace(
         "exec /usr/bin/gh \"$@\"",
         "printf 'GH_TOKEN=%s\\nGITHUB_TOKEN=%s\\n' \"$GH_TOKEN\" \"${GITHUB_TOKEN-unset}\"",
@@ -118,4 +130,52 @@ fn gh_wrapper_replaces_ambient_tokens_in_broker_mode() {
         String::from_utf8(output.stdout).unwrap(),
         "GH_TOKEN=broker-token\nGITHUB_TOKEN=unset\n"
     );
+
+    let direct = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "direct"),
+            ("GH_TOKEN", "personal-token"),
+            ("GITHUB_TOKEN", "wrong-daemon-bot"),
+        ],
+        &["auth", "status"],
+    );
+    assert!(direct.status.success());
+    assert_eq!(
+        String::from_utf8(direct.stdout).unwrap(),
+        "GH_TOKEN=personal-token\nGITHUB_TOKEN=unset\n"
+    );
+
+    let unmarked = run_script(
+        &script,
+        &[("GH_TOKEN", "wrong-daemon-bot")],
+        &["auth", "status"],
+    );
+    assert!(!unmarked.status.success());
+    assert!(String::from_utf8(unmarked.stderr)
+        .unwrap()
+        .contains("missing LOOM_GITHUB_AUTH_MODE"));
+
+    let incomplete_direct = run_script(
+        &script,
+        &[("LOOM_GITHUB_AUTH_MODE", "direct")],
+        &["auth", "status"],
+    );
+    assert!(!incomplete_direct.status.success());
+    assert!(String::from_utf8(incomplete_direct.stderr)
+        .unwrap()
+        .contains("missing GH_TOKEN"));
+
+    let disabled = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "disabled"),
+            ("GH_TOKEN", "wrong-daemon-bot"),
+        ],
+        &["auth", "status"],
+    );
+    assert!(!disabled.status.success());
+    assert!(String::from_utf8(disabled.stderr)
+        .unwrap()
+        .contains("disabled for this Loom session"));
 }

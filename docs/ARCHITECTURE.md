@@ -897,9 +897,14 @@ handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the personal/profile `GH_TOKEN` in the resolved session
 environment, `broker` ignores inherited deployment credentials and requests the
 session's short-lived App token, and `disabled` rejects direct GitHub CLI
-access. An absent mode retains compatibility for sessions launched by an older
-server. This prevents the daemon's ambient clone/webhook identity from silently
-becoming an agent's push identity.
+access. Loom explicitly masks ambient `GH_TOKEN` and `GITHUB_TOKEN` values for
+brokered and disabled sessions, and the adapters fail closed when the reserved
+mode is absent. This prevents the daemon's clone/webhook identity from silently
+becoming an agent's push identity. Adapter registration stays in the image's
+system Git config: linked worktrees share repository-local config, agents may
+clone additional repositories, and the helper must be available before a target
+repository exists. Session selection and credentials remain Loom-owned policy;
+the image registration only teaches stock `git` and `gh` how to ask for them.
 
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
 or an explicit group list. Saving resolves the trusted builtin registry and

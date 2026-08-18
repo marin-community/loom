@@ -257,16 +257,17 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
     ;;
   direct)
     token="$GH_TOKEN"
+    if [ -z "$token" ]; then
+      echo "Loom-managed direct GitHub auth is missing GH_TOKEN" >&2
+      exit 1
+    fi
     ;;
   disabled)
     exit 0
     ;;
   "")
-    # Compatibility for sessions created by an older Loom server.
-    token="$GH_TOKEN"
-    if [ -z "$token" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
-      token="$(/usr/local/bin/weaver github-token)" || exit $?
-    fi
+    echo "missing LOOM_GITHUB_AUTH_MODE; this environment was not prepared by Loom" >&2
+    exit 1
     ;;
   *)
     echo "invalid LOOM_GITHUB_AUTH_MODE: $LOOM_GITHUB_AUTH_MODE" >&2
@@ -290,6 +291,10 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
     unset GITHUB_TOKEN
     ;;
   direct)
+    if [ -z "$GH_TOKEN" ]; then
+      echo "Loom-managed direct GitHub auth is missing GH_TOKEN" >&2
+      exit 1
+    fi
     unset GITHUB_TOKEN
     ;;
   disabled)
@@ -297,11 +302,8 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
     exit 1
     ;;
   "")
-    # Compatibility for sessions created by an older Loom server.
-    if [ -z "$GH_TOKEN" ] && [ -n "$LOOM_SESSION_ID" ] && [ -n "$LOOM_TOKEN" ]; then
-      GH_TOKEN="$(/usr/local/bin/weaver github-token)" || exit $?
-      export GH_TOKEN
-    fi
+    echo "missing LOOM_GITHUB_AUTH_MODE; this environment was not prepared by Loom" >&2
+    exit 1
     ;;
   *)
     echo "invalid LOOM_GITHUB_AUTH_MODE: $LOOM_GITHUB_AUTH_MODE" >&2

@@ -125,7 +125,9 @@ environment, with the environment winning (see `loom_config`'s module docs).
 `GH_TOKEN` and `ANTHROPIC_API_KEY` here cover the daemon's own ambient use
 (cloning private repos; the Claude launch-gate). The daemon's `GH_TOKEN` is not
 automatically a session's push identity: Loom explicitly selects a personal or
-profile token, or brokers an allowlisted GitHub App token, for each session.
+profile token, or brokers an allowlisted GitHub App token, for each session;
+brokered and disabled sessions receive empty token variables that mask the
+daemon environment.
 Session runtimes still need their provider keys. Run
 `loom setup secrets --config /home/app/loom.toml` via `docker compose exec loom`
 against the running deploy, or as part of the [Quick start](#quick-start)
