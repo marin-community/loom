@@ -6,7 +6,7 @@
 //! * **Issue seeding** ([`fetch_issue`], [`repo_slug`]) and PR opening
 //!   ([`create_pr`]) — one-shot shell-outs used when a session is created.
 //! * **PR status polling** ([`poll`], [`refresh`], [`fetch_pr`]) — the
-//!   background loop that snapshots each active session's pull request (link,
+//!   background loop that snapshots each live session's pull request (link,
 //!   review decision, check rollup) into the `branch_github` table, and
 //!   archives a session — closing the weaver issues it was working — once its PR
 //!   merges. The snapshot rides along on `BranchView`; the dashboard renders it.
@@ -122,6 +122,9 @@ pub async fn create_pr(work_dir: &Path, base: &str, title: &str, body: &str) -> 
 
 const POLL_TICK: Duration = Duration::from_secs(60);
 const ACTIVE_POLL_WINDOW_SECS: i64 = 10 * 60;
+const RECENT_POLL_WINDOW_SECS: i64 = 24 * 60 * 60;
+const RECENT_POLL_INTERVAL: Duration = Duration::from_secs(10 * 60);
+const STALE_POLL_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Branch tag marking that loom has back-linked this branch's PR to its session
 /// (posted the `…/s/{id}` comment). Set by the poll loop's back-link poster or,
@@ -792,8 +795,8 @@ pub async fn gh_environment(
     }
 }
 
-/// Fetch every active branch's current open PR plus every previously-known PR
-/// in one GraphQL request. Aliases multiplex the independent branch/number
+/// Fetch every due branch's current open PR plus every previously-known PR in
+/// one GraphQL request. Aliases multiplex the independent branch/number
 /// lookups without downloading a repository's unrelated PRs. Exact-number
 /// lookups keep terminal transitions visible after GitHub removes a merged or
 /// closed PR from the open-head result.
@@ -1338,13 +1341,19 @@ async fn close_claimed_issues(
     }
 }
 
-/// Background loop: snapshot active sessions' PRs on a fixed cadence. A no-op
-/// while `github.poll` is off or `gh` is unavailable, so it is always safe to
-/// spawn. Sibling of the [`crate::monitor`] loop.
+/// Background loop: snapshot live sessions' PRs on an activity-aware cadence. A
+/// no-op while `github.poll` is off or `gh` is unavailable, so it is always safe
+/// to spawn. Sibling of the [`crate::monitor`] loop.
 pub async fn poll(state: AppState) {
     tracing::info!(tick_s = POLL_TICK.as_secs(), "github poll loop started");
     let mut ticks = tokio::time::interval(POLL_TICK);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Snapshots persist successful PR fetches, but an empty discovery result has
+    // no row to carry its fetch time. Keep attempts in memory so every quiet
+    // branch follows the same tiered cadence instead of retrying failures or
+    // empty results every minute. Restarting loom intentionally makes every live
+    // branch immediately eligible once.
+    let mut last_polled = HashMap::new();
     loop {
         ticks.tick().await;
         if !config::get_bool(&state.db, "github.poll", config::DEFAULT_GITHUB_POLL).await {
@@ -1353,7 +1362,7 @@ pub async fn poll(state: AppState) {
         if !gh_available().await {
             continue;
         }
-        if let Err(e) = poll_once(&state).await {
+        if let Err(e) = poll_once(&state, &mut last_polled).await {
             tracing::warn!(error = %e, "github poll tick failed");
         }
     }
@@ -1368,30 +1377,52 @@ struct PollCandidate {
     previous: Option<GithubStatus>,
 }
 
-/// Background GitHub traffic follows sessions that have moved recently. A
-/// never-touched session uses its creation time, matching the monitor's activity
-/// semantics. A corrupt timestamp stays eligible so bad local data does not
-/// silently disable lifecycle handling forever.
-fn active_for_github_poll(session: &Session, now: chrono::DateTime<chrono::Utc>) -> bool {
-    activity_timestamp_is_recent(
-        session.last_activity_at.as_deref(),
-        &session.created_at,
-        now,
-    )
-}
-
-fn activity_timestamp_is_recent(
+/// Select a GitHub cadence from session activity: the existing one-minute path
+/// for active work, ten minutes for the rest of the first quiet day, and hourly
+/// thereafter. A never-touched session uses its creation time, matching the
+/// monitor's activity semantics. Corrupt timestamps stay on the fastest tier so
+/// bad local data cannot silently delay lifecycle handling forever.
+fn github_poll_interval(
     last_activity_at: Option<&str>,
     created_at: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> bool {
+) -> Duration {
     let timestamp = last_activity_at.unwrap_or(created_at);
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|activity| {
-            activity.with_timezone(&chrono::Utc)
-                >= now - chrono::Duration::seconds(ACTIVE_POLL_WINDOW_SECS)
-        })
-        .unwrap_or(true)
+    chrono::DateTime::parse_from_rfc3339(timestamp).map_or(POLL_TICK, |activity| {
+        let age = now.signed_duration_since(activity.with_timezone(&chrono::Utc));
+        if age <= chrono::Duration::seconds(ACTIVE_POLL_WINDOW_SECS) {
+            POLL_TICK
+        } else if age < chrono::Duration::seconds(RECENT_POLL_WINDOW_SECS) {
+            RECENT_POLL_INTERVAL
+        } else {
+            STALE_POLL_INTERVAL
+        }
+    })
+}
+
+fn due_for_github_poll(
+    session: &Session,
+    last_polled: Option<&chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let interval = github_poll_interval(
+        session.last_activity_at.as_deref(),
+        &session.created_at,
+        now,
+    );
+    poll_interval_has_elapsed(last_polled, interval, now)
+}
+
+fn poll_interval_has_elapsed(
+    last_polled: Option<&chrono::DateTime<chrono::Utc>>,
+    interval: Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    last_polled.is_none_or(|last| {
+        now.signed_duration_since(*last)
+            .to_std()
+            .map_or(true, |elapsed| elapsed >= interval)
+    })
 }
 
 fn snapshot_for_candidate(
@@ -1412,7 +1443,10 @@ fn snapshot_for_candidate(
         .cloned()
 }
 
-async fn poll_once(state: &AppState) -> Result<()> {
+async fn poll_once(
+    state: &AppState,
+    last_polled: &mut HashMap<String, chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
     let archive_on_merge = config::get_bool(
         &state.db,
         "github.archive_on_merge",
@@ -1426,7 +1460,9 @@ async fn poll_once(state: &AppState) -> Result<()> {
     let mut repositories: BTreeMap<String, Vec<PollCandidate>> = BTreeMap::new();
     let now = chrono::Utc::now();
     for session in session_mod::list_visible(&state.db).await? {
-        if session_mod::is_terminal(&session.status) || !active_for_github_poll(&session, now) {
+        if session_mod::is_terminal(&session.status)
+            || !due_for_github_poll(&session, last_polled.get(&session.branch_id), now)
+        {
             continue;
         }
         let Some(branch) = branch_mod::get(&state.db, &session.branch_id).await? else {
@@ -1449,6 +1485,9 @@ async fn poll_once(state: &AppState) -> Result<()> {
         let path = PathBuf::from(&repo_root);
         let Some(slug) = crate::repo::github_slug_for_root(&state.db, &path).await? else {
             tracing::debug!(repo = %repo_root, "github batch skipped: repository has no GitHub remote");
+            for candidate in candidates {
+                last_polled.insert(candidate.branch.id, now);
+            }
             continue;
         };
         let (token, host) = gh_environment_for_slug(state, &slug).await;
@@ -1472,7 +1511,7 @@ async fn poll_once(state: &AppState) -> Result<()> {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let snapshots = match fetch_pr_batch(
+        let fetched = fetch_pr_batch(
             &path,
             &slug,
             &heads,
@@ -1480,8 +1519,11 @@ async fn poll_once(state: &AppState) -> Result<()> {
             token.as_deref(),
             host.as_deref(),
         )
-        .await
-        {
+        .await;
+        for candidate in &candidates {
+            last_polled.insert(candidate.branch.id.clone(), now);
+        }
+        let snapshots = match fetched {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::debug!(repo = %slug, error = %e, "github batch refresh failed");
@@ -1742,33 +1784,49 @@ mod tests {
     }
 
     #[test]
-    fn github_poll_only_follows_ten_minutes_of_activity() {
+    fn github_poll_cadence_slows_with_session_activity() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        assert!(activity_timestamp_is_recent(
-            Some("2026-08-16T11:50:00Z"),
-            "2026-08-01T00:00:00Z",
+        for (last_activity, created_at, expected) in [
+            (
+                Some("2026-08-16T11:50:00Z"),
+                "2026-08-01T00:00:00Z",
+                POLL_TICK,
+            ),
+            (
+                Some("2026-08-16T11:49:59Z"),
+                "2026-08-16T11:59:00Z",
+                RECENT_POLL_INTERVAL,
+            ),
+            (None, "2026-08-15T12:00:01Z", RECENT_POLL_INTERVAL),
+            (None, "2026-08-15T12:00:00Z", STALE_POLL_INTERVAL),
+            (Some("corrupt"), "2026-08-16T11:00:00Z", POLL_TICK),
+        ] {
+            assert_eq!(
+                github_poll_interval(last_activity, created_at, now),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn github_poll_waits_for_the_selected_interval() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-16T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let nine_minutes_ago = now - chrono::Duration::minutes(9);
+        let ten_minutes_ago = now - chrono::Duration::minutes(10);
+
+        assert!(poll_interval_has_elapsed(None, RECENT_POLL_INTERVAL, now));
+        assert!(!poll_interval_has_elapsed(
+            Some(&nine_minutes_ago),
+            RECENT_POLL_INTERVAL,
             now,
         ));
-        assert!(!activity_timestamp_is_recent(
-            Some("2026-08-16T11:49:59Z"),
-            "2026-08-16T11:59:00Z",
-            now,
-        ));
-        assert!(activity_timestamp_is_recent(
-            None,
-            "2026-08-16T11:55:00Z",
-            now,
-        ));
-        assert!(!activity_timestamp_is_recent(
-            None,
-            "2026-08-16T11:00:00Z",
-            now,
-        ));
-        assert!(activity_timestamp_is_recent(
-            Some("corrupt"),
-            "2026-08-16T11:00:00Z",
+        assert!(poll_interval_has_elapsed(
+            Some(&ten_minutes_ago),
+            RECENT_POLL_INTERVAL,
             now,
         ));
     }

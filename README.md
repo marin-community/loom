@@ -250,15 +250,15 @@ kept branch's worktree and resume the agent.
 
 ## GitHub
 
-With the `gh` CLI installed and authenticated, loom tracks each active session's
-pull request. A background loop polls `gh pr view` for the branch every five
-minutes, with an immediate refresh available from Session **Details**, and
-surfaces the result on the dashboard: a link straight to the PR, its head-update
-age, its state (open / draft / merged / closed), the review decision (approved /
-changes requested / review required), and a rolled-up CI verdict. Compact rows
-render CI as `OK` / `TESTING` / `FAILED` / `PENDING`; Session **Details** keeps
-the associations and an immediate **Refresh** button available without occupying
-the workbench header.
+With the `gh` CLI installed and authenticated, loom tracks each live session's
+pull request. A background loop batches due branches by repository every minute,
+slowing quiet sessions to ten-minute and then hourly refreshes, with an immediate
+refresh available from Session **Details**. The dashboard surfaces a link
+straight to the PR, its head-update age, its state (open / draft / merged /
+closed), the review decision (approved / changes requested / review required),
+and a rolled-up CI verdict. Compact rows render CI as `OK` / `TESTING` / `FAILED`
+/ `PENDING`; Session **Details** keeps the associations and an immediate
+**Refresh** button available without occupying the workbench header.
 
 Every session detail has a **Conversation** tab that renders the agent's chat
 with the model — user turns, replies, thinking, and tool calls — live and
@@ -288,10 +288,12 @@ routes; `mcp/history/self@v1` remains compatible. See
 [Session history and search](docs/session-history.md) for the record, cursor,
 source, and authorization contract.
 
-Ordinary sessions are archived after ten days without activity by default. For
-sessions active within the last ten minutes, a merged PR is archived on the
-next one-minute GitHub poll. Both paths tear down the terminal and worktree while
-keeping the branch and its weaver history, the same as the Archive button.
+Ordinary sessions are archived after ten days without activity by default. The
+GitHub poller checks sessions active within the last ten minutes every minute,
+the rest of the first quiet day every ten minutes, and older live sessions every
+hour. A merged PR is archived on the next poll for its activity tier. Both paths
+tear down the terminal and worktree while keeping the branch and its weaver
+history, the same as the Archive button.
 Profiles can override the idle interval (an explicit `0` disables that TTL). To
 keep one session until you archive it yourself, choose **Disable auto-archive**
 from that session's **Details** popover, or set its quiet opt-out label:

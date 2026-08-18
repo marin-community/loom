@@ -149,8 +149,9 @@ pub const REGISTRY: &[SettingSpec] = &[
         key: "github.poll",
         label: "Poll GitHub for PR status",
         description: "When enabled, loom uses the `gh` CLI to fetch each \
-            active session's pull request — its link, review decision, and \
-            check rollup — and surfaces it on the dashboard. A no-op for \
+            live session's pull request — its link, review decision, and \
+            check rollup — every minute while active and less often as the \
+            session grows quiet. A no-op for \
             repositories without a GitHub remote, or wherever `gh` is not \
             installed.",
         kind: SettingKind::Bool,
