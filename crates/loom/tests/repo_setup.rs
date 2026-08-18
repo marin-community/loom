@@ -114,6 +114,7 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
     )
     .await
     .unwrap();
+    let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
     let state = AppState {
         ctx: Ctx {
             db: pool.clone(),
@@ -121,7 +122,7 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
             addr: addr.to_string(),
         },
         ide: std::sync::Arc::new(loom::ide::IdeManager::new(loom::ide::ide_home())),
-        trigger: loom::github_trigger::GithubTrigger::production(pool.clone()),
+        trigger: loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app)),
         acp: loom::acp::AcpRegistry::new(),
         launch_gate: loom::launch_gate::RepoLaunchGate::default(),
     };
@@ -136,6 +137,25 @@ async fn start_server() -> (TestHome, loom::client::Client, db::Db, String) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     (home, client, pool, addr.to_string())
+}
+
+async fn register_managed_repo(pool: &db::Db, repo_root: &Path) {
+    repo::register(
+        pool,
+        "acme/widgets",
+        "https://example/acme/widgets.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    let mut profile = loom::profile::get(pool, loom::profile::DEFAULT_PROFILE)
+        .await
+        .unwrap()
+        .unwrap()
+        .as_input()
+        .unwrap();
+    profile.github_repositories = vec!["acme/widgets".to_string()];
+    loom::profile::upsert(pool, &profile).await.unwrap();
 }
 
 async fn create_shell_session(client: &client::Client, cwd: &Path) -> Value {
@@ -171,14 +191,7 @@ async fn setup_runs_for_allowlisted_repo() {
         repo_with_config("[setup]\nscript = \"echo SETUP_RAN\\ntouch setup-marker\"\n");
 
     // Allowlist the repo (register its path as a managed repo).
-    repo::register(
-        &pool,
-        "acme/widgets",
-        "https://example/acme/widgets.git",
-        &repo_root.to_string_lossy(),
-    )
-    .await
-    .unwrap();
+    register_managed_repo(&pool, &repo_root).await;
 
     let ws = create_shell_session(&client, &repo_root).await;
     let id = ws["id"].as_str().unwrap().to_string();
@@ -217,14 +230,7 @@ async fn setup_runs_for_allowlisted_repo() {
 async fn setup_failure_marks_session_error() {
     let (_home, client, pool, _addr) = start_server().await;
     let (_dir, repo_root) = repo_with_config("[setup]\nscript = \"echo BOOM\\nexit 3\"\n");
-    repo::register(
-        &pool,
-        "acme/widgets",
-        "https://example/acme/widgets.git",
-        &repo_root.to_string_lossy(),
-    )
-    .await
-    .unwrap();
+    register_managed_repo(&pool, &repo_root).await;
 
     let ws = create_shell_session(&client, &repo_root).await;
     let id = ws["id"].as_str().unwrap().to_string();
@@ -324,14 +330,7 @@ async fn env_layers_global_then_repo_then_config_file() {
     .await
     .unwrap();
 
-    repo::register(
-        &pool,
-        "acme/widgets",
-        "https://example/acme/widgets.git",
-        &repo_root.to_string_lossy(),
-    )
-    .await
-    .unwrap();
+    register_managed_repo(&pool, &repo_root).await;
 
     let ws = create_shell_session(&client, &repo_root).await;
     let id = ws["id"].as_str().unwrap().to_string();
