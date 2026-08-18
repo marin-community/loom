@@ -12,9 +12,6 @@ Loom exposes one registered operation model through several adapters:
   `sessions` table), the background monitor, and the `git worktree` shell-outs.
   It is the only process that opens the sqlite database directly. Its CLI, MCP
   servers, and browser are thin clients of the same registered REST operations.
-- **`weaver`** — a deprecated compatibility binary that reuses Loom's HTTP-only
-  command handlers. It carries no independent business logic or product model.
-
 ```
 loom CLI / MCP ──HTTP (REST)──▶ loom server run
                                 │
@@ -40,10 +37,10 @@ and the rule for placing a new module.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | lib: `branches`, `issues`, `events`, `db`, `migrations` (ordered SQL + `schema_migrations` indicator), `git`, `config`, `artifacts` (versioned documents), `review` (durable staged feedback + delivery outbox), `repo_config` (`.weaver/config.toml`), `transcript` (agent conversation logs: raw → iris format → markdown), agent helpers. Pure logic; used by `loom` for DB access, and by `weaver` only for the DB-free pieces (`transcript`, `tags` constants/validators, the agent primer). |
-| `crates/weaver-api/` | typed loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver) — the one cross-process seam `weaver` links against instead of `weaver-core`'s DB layer. |
+| `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. It is not a command or product surface. |
+| `crates/weaver-api/` | legacy-named typed Loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver); it is the cross-process API seam. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/weaver/src/bin/weaver.rs` | deprecated compatibility handlers reused by the `loom` CLI while old scripts migrate; every command drives `weaver-api::Client` over HTTP and none touch sqlite |
+| `crates/loom/src/agent_cli.rs` | HTTP-only implementations behind Loom's session, channel, artifact, issue, status, and settings commands |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom-ctx/` | leaf utilities and `Ctx` (the storage handle, event bus and server address every layer above threads through). No loom dependency of its own; knows nothing about sessions |
 | `crates/loom-store/` | durable records and storage operations: sessions, chat, channels, layout, runs, history, and the profile record |
@@ -283,41 +280,26 @@ local SQLite.
 ## REST API
 
 Routes live under `/api`; the Vue SPA, CLI, and MCP adapters are clients of the
-same surface. Agent-facing operations are registered beside the typed API
-contract as explicit resource-bundle factories in `weaver-api::operations`;
-`GET /api/operations` is the live index and `GET /api/openapi.json` is the
-generated route projection. Routine operations declare const argument metadata
-(kind, requiredness, help, defaults, choices, and simple constraints) beside
-their identity and authority boundary. The live index exposes those arguments;
-first-party MCP adapters generate their tool descriptions and input schemas from
-them instead of maintaining `json!` catalogues. Existing capability digests pin
-the complete serialized tool definition, so permanent golden tests protect all
-builtin digests and transport-specific wording remains an explicit projection
-override where compatibility requires it.
+same surface. A routine operation is a `RegisteredOperation` containing its
+descriptor and a type-erased wrapper around one compile-checked async function.
+`register_operation::<O>(handler)` binds the marker's concrete input/output types,
+authority metadata, argument spec, and implementation in one entry. The
+registry mounts that entry at `POST /api/<operation/id>` (for example,
+`issues.tags.set` becomes `/api/issues/tags/set`), publishes it through
+`GET /api/operations`, and invokes it through `weaver_api::Client::invoke<O>`.
+JSON erasure exists only at that HTTP boundary.
 
-Routine API operations may additionally implement `ApiOperation`, associating
-one concrete input type, output type, registered spec, and generated exact REST
-request encoder. `weaver_api::Client::invoke<O>` is the generic cross-process
-executor. Loom binds the same operation marker to an owned-context application
-function, so the compiler checks the server input/output contract while Axum
-extractors remain small explicit route adapters. The issues bundle is the
-reference implementation: scalar close/reopen/delete/tag routes mirror the
-public verbs, while `/api/issues/actions` remains the typed atomic bulk surface
-used by multi-ID CLI commands and compatibility callers. The routine permission
-discovery/request operations use the same binding; human approval and direct
-credential administration remain explicit custom operations.
-
-Each first-party bundle registers one Axum router factory and one typed CLI
-bundle factory under that identity; MCP adapter factories join the same identity
-when the bundle has agent tools. Startup and tests reject missing bundles,
-duplicate commands, operation ids or MCP pairs, invalid argument constraints,
-projection drift, and cross-bundle MCP tools. Typed/custom adapters remain the
-escape hatch for streaming, PTY, file/stdin, nested input, interactive, and
-compatibility behavior; custom means parsing or execution is bespoke, not that
-identity or API authorization is unregistered. The remaining routes in
-[`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs) are internal proxy,
-streaming, compatibility, and administration transports that are intentionally
-not agent operations.
+MCP tool listing resolves names, descriptions, and JSON Schema from the same
+operation descriptors. Tool calls resolve that descriptor and post projected
+arguments to the registered API route; there is no MCP callback table to
+reconcile. Small projections may inject session-relative context or preserve a
+useful text presentation. The CLI's operation help also reads the descriptor
+catalogue, while richer interactive and multi-item presentations remain
+ordinary API clients. Custom adapters are the explicit escape hatch for
+streaming, PTY, file/stdin, interactive, and specialized bulk behavior. The
+remaining routes in [`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs)
+are internal proxy, streaming, UI, and administration transports that are
+intentionally not routine agent operations.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -437,20 +419,21 @@ Details → Advanced, not as the primary file or work surface.
 
 ## Runtime conventions
 
-- **API-first.** New agent features land in a typed REST client/resource bundle
-  first. Routine verbs declare arguments and authority with their operation;
-  Axum, typed/custom CLI, and generated/custom MCP factories register against
-  that bundle. CLI and MCP execution call the REST client. Don't put business
-  logic in `bin/loom.rs`, MCP dispatch, or the Vue layer.
+- **API-first.** New agent features land as executable operation registrations
+  first. Routine operations declare arguments and authority beside their typed
+  implementation; the registry derives Axum routes and discovery, while CLI and
+  MCP call those routes through the REST client. Custom adapters remain for the
+  minority of transport-specific shapes. Don't put business logic in
+  `bin/loom.rs`, MCP dispatch, or the Vue layer.
 - **Errors:** the server returns `AppError` (status + message + optional
   `details` map of per-field reasons); the `loom` CLI uses `anyhow` and prints
   `error: {e:#}`.
 - **Async:** tokio everywhere on the server side. External processes (Tapestry
   runtime supervisors, git, gh, and agent adapters) go through
-  `tokio::process::Command`. The `weaver` CLI remains synchronous-feeling while
-  delegating its reads and writes to `weaver-api` over HTTP.
+  `tokio::process::Command`. The `loom` CLI remains synchronous-feeling while
+  delegating its reads and writes to the internal typed API client over HTTP.
 - **Events:** state changes flow through `EventBus`; the SSE handlers in
-  `web.rs` fan them out. `weaver hook` posts to the branch events route; Loom
+  `web.rs` fan them out. `loom hook` posts to the branch events route; Loom
   writes the row, and the monitor tick promotes it into session status and a
   fresh `EventBus` notification. Browsers cap HTTP/1.1 at 6 connections per
   origin and an EventSource holds one for its whole life, so the SPA subscribes
@@ -921,21 +904,19 @@ revision. Launch validates availability, copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
 descriptors whose subprocess tool surfaces are filtered to the stamped rules.
-Built-in adapter factories are registered against the same operation-bundle
-identities as API and CLI: `loom_context`, `loom_channel`, `loom_artifact`, and
-`loom_session`, alongside the compatibility history, messaging, and
+Built-in adapters include `loom_context`, `loom_channel`, `loom_artifact`, and
+`loom_session`, alongside the specialized history, messaging, and
 fixed-repository GitHub adapters. Resource tools return concise text plus
 machine-readable MCP `structuredContent`; their DTOs are the same ones used by
 the REST client and CLI. The ordinary first-party adapters obtain their names,
-descriptions, and input schemas from `OperationSpec`; compatibility-only tools
-and genuinely nested/special behavior remain explicit custom adapters. Builtin
+descriptions, input schemas, and invocation target from `OperationSpec`;
+genuinely nested or special behavior remains an explicit custom adapter. Builtin
 capability digest goldens ensure this declaration migration cannot invalidate a
 pinned profile accidentally.
-Typed remote projections decode only the advertised MCP argument shape, map
-session defaults when needed, call `Client::invoke<O>`, and add the established
-text presentation. The shared dispatcher retains runtime allow-list gating and
-object-argument checks; authorization and domain validation remain authoritative
-at the REST boundary.
+Small remote projections map session defaults when needed and add the
+established text presentation. The shared descriptor-driven dispatcher retains
+runtime allow-list gating and object-argument checks; authorization and domain
+validation remain authoritative at the REST boundary.
 Neither an unchanged profile nor recovery re-resolves the current registry.
 Custom definitions live under
 absolute identities such as `/engineering/search/docs`; their first segment is

@@ -745,7 +745,7 @@ async fn edits_that_retain_the_mention_are_ignored() {
 }
 
 /// An issue trigger wires the branch to the thread (the `github` tag) and
-/// records the "On it" reply's comment id; a `weaver status` write then edits
+/// records the "On it" reply's comment id; a `loom status` write then edits
 /// that same comment into the status card, and a later write re-renders it
 /// with the whole trail.
 #[serial]

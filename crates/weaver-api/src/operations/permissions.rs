@@ -40,7 +40,7 @@ static REQUEST_ARGS: &[ArgumentSpec] = &[
     session_arg(),
 ];
 
-pub static EFFECTIVE_GET_SPEC: OperationSpec = operation!(
+pub static EFFECTIVE_GET_SPEC: OperationSpec = registered_operation!(
     "permissions.effective.get",
     "permissions",
     "Show effective Loom operations and external repository scope.",
@@ -54,7 +54,7 @@ pub static EFFECTIVE_GET_SPEC: OperationSpec = operation!(
     SHOW_ARGS
 );
 
-pub static EXPLAIN_SPEC: OperationSpec = operation!(
+pub static EXPLAIN_SPEC: OperationSpec = registered_operation!(
     "permissions.explain",
     "permissions",
     "Explain one operation's actor, risk, and capability requirements.",
@@ -68,7 +68,7 @@ pub static EXPLAIN_SPEC: OperationSpec = operation!(
     EXPLAIN_ARGS
 );
 
-pub static REQUESTS_LIST_SPEC: OperationSpec = operation!(
+pub static REQUESTS_LIST_SPEC: OperationSpec = registered_operation!(
     "permissions.requests.list",
     "permissions",
     "List durable external-access requests for a session.",
@@ -82,7 +82,7 @@ pub static REQUESTS_LIST_SPEC: OperationSpec = operation!(
     REQUESTS_ARGS
 );
 
-pub static REQUESTS_CREATE_SPEC: OperationSpec = operation!(
+pub static REQUESTS_CREATE_SPEC: OperationSpec = registered_operation!(
     "permissions.requests.create",
     "permissions",
     "Request a human-approved external credential expansion.",
@@ -203,7 +203,7 @@ typed_api_operation!(
     SessionInput,
     EffectivePermissionsView,
     |input: &SessionInput| {
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &EFFECTIVE_GET_SPEC,
             format!(
                 "/api/sessions/{}/permissions",
@@ -219,7 +219,7 @@ typed_api_operation!(
     ExplainInput,
     OperationView,
     |input: &ExplainInput| {
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &EXPLAIN_SPEC,
             format!("/api/operations/{}", encode_path_segment(&input.operation)),
         ))
@@ -240,7 +240,7 @@ typed_api_operation!(
             path.push_str("?state=");
             path.push_str(&encode_path_segment(state));
         }
-        Ok(OperationRequest::without_body(&REQUESTS_LIST_SPEC, path))
+        Ok(OperationRequest::new(&REQUESTS_LIST_SPEC, path))
     }
 );
 
@@ -250,14 +250,13 @@ typed_api_operation!(
     CreateRequestInput,
     PermissionRequestView,
     |input: &CreateRequestInput| {
-        OperationRequest::json(
+        Ok(OperationRequest::new(
             &REQUESTS_CREATE_SPEC,
             format!(
                 "/api/sessions/{}/permission-requests",
                 encode_path_segment(&input.session)
             ),
-            &input.request,
-        )
+        ))
     }
 );
 
@@ -274,14 +273,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn permission_contracts_encode_path_query_and_body() {
-        let explain = Explain::request(&ExplainInput {
+    fn permission_contracts_encode_authorization_paths() {
+        let explain = Explain::authorization_request(&ExplainInput {
             operation: "issues.tags.set".to_string(),
         })
         .unwrap();
         assert_eq!(explain.path, "/api/operations/issues%2Etags%2Eset");
 
-        let list = RequestsList::request(&ListRequestsInput {
+        let list = RequestsList::authorization_request(&ListRequestsInput {
             session: "session/a".to_string(),
             state: Some("pending".to_string()),
         })
@@ -291,7 +290,7 @@ mod tests {
             "/api/sessions/session%2Fa/permission-requests?state=pending"
         );
 
-        let create = RequestsCreate::request(&CreateRequestInput {
+        let create = RequestsCreate::authorization_request(&CreateRequestInput {
             session: "self".to_string(),
             request: CreatePermissionRequestReq {
                 kind: "github_repository".to_string(),
@@ -302,6 +301,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(create.method, "POST");
-        assert_eq!(create.body.unwrap()["repository"], "acme/widgets");
+        assert_eq!(create.path, "/api/sessions/self/permission-requests");
     }
 }

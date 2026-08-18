@@ -7,7 +7,7 @@
 //! token, receives `slash_commands` / `app_mention` envelopes, and — for an
 //! authorized trigger — continues the session already wired to that thread or
 //! pulls the conversation and launches one, replying in-thread with a live "On
-//! it" card only for a launch. As the session reports `weaver status`,
+//! it" card only for a launch. As the session reports `loom status`,
 //! [`sync_status_message`] edits that Slack message in place, exactly as
 //! [`crate::github::sync_status_comment`] edits the GitHub comment.
 //!
@@ -804,7 +804,7 @@ fn retain_current_session_events(
 }
 
 /// Render the configured Slack status card: its header, optional artifact
-/// links, then the optional `weaver status` trail (oldest-first, capped).
+/// links, then the optional `loom status` trail (oldest-first, capped).
 /// Pure, so the mrkdwn format is unit-testable. Slack link syntax is
 /// `<url|label>`, not Markdown's `[label](url)`.
 pub fn render_status(
@@ -1432,7 +1432,7 @@ async fn launch_inner(
         .map_err(|e| anyhow!("{e:?}"))?;
 
     // Wire the branch to the thread — what `sync_status_message` reads to mirror
-    // every `weaver status` write. Left untouched if already wired to this thread.
+    // every `loom status` write. Left untouched if already wired to this thread.
     let already = matches!(
         tags::get(&state.db, &created.branch.id, WIRED_TAG).await,
         Ok(Some(ref t)) if t.value == wiring

@@ -43,7 +43,7 @@ pub struct Tag {
 // ---------------------------------------------------------------------------
 
 /// The agent's self-reported attention level — "does this need me?". Authored by
-/// the agent via `weaver status`. Loud (raises a badge).
+/// the agent via `loom status`. Loud (raises a badge).
 pub const ATTENTION_KEY: &str = "attention";
 
 /// A watch's (or `manual`) outside assessment of a branch — a second axis
@@ -81,9 +81,9 @@ pub const AUTO_ARCHIVE_DISABLED_VALUE: &str = "disabled";
 
 /// Branch tag wiring a session to a GitHub thread; the value is
 /// `owner/name#number` (an issue or a PR — GitHub comments treat them alike).
-/// Quiet. While present, loom mirrors every `weaver status` write onto one
+/// Quiet. While present, Loom mirrors every `loom status` write onto one
 /// comment on that thread — the "On it" status card, edited in place. The
-/// `@loom` trigger stamps it at launch; `weaver tag set github owner/name#123`
+/// `@loom` trigger stamps it at launch; `loom sessions tags set github owner/name#123`
 /// wires a session by hand; clearing it stops the mirroring.
 pub const GITHUB_KEY: &str = "github";
 
@@ -99,7 +99,7 @@ pub const GITHUB_LINKED_KEY: &str = "github.linked";
 
 /// Branch tag wiring a session to a Slack thread; the value is
 /// `team_id/channel_id/thread_ts` (team-scoped — channel ids only mean something
-/// within a workspace). Quiet. While present, loom mirrors every `weaver status`
+/// within a workspace). Quiet. While present, Loom mirrors every `loom status`
 /// write onto one message in that thread — the "On it" status card, edited in
 /// place. The `/marinbot` (and `@marinbot`) trigger stamps it at launch;
 /// clearing it stops the mirroring.

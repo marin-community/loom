@@ -34,7 +34,7 @@ static TAG_SET_ARGS: &[ArgumentSpec] = &[
 static TAG_DELETE_ARGS: &[ArgumentSpec] =
     &[id_arg(), ArgumentSpec::string("key").minimum(1).required()];
 
-pub static LIST_SPEC: OperationSpec = repository_operation!(
+pub static LIST_SPEC: OperationSpec = registered_repository_operation!(
     "issues.list",
     "issues",
     "List current-session and repository work items.",
@@ -52,7 +52,7 @@ pub static LIST_SPEC: OperationSpec = repository_operation!(
     LIST_ARGS
 );
 
-pub static GET_SPEC: OperationSpec = repository_operation!(
+pub static GET_SPEC: OperationSpec = registered_repository_operation!(
     "issues.get",
     "issues",
     "Inspect one work item and its owner status.",
@@ -70,7 +70,7 @@ pub static GET_SPEC: OperationSpec = repository_operation!(
     ID_ARGS
 );
 
-pub static CREATE_SPEC: OperationSpec = branch_operation!(
+pub static CREATE_SPEC: OperationSpec = registered_branch_operation!(
     "issues.create",
     "issues",
     "Create a session-owned work item.",
@@ -88,7 +88,7 @@ pub static CREATE_SPEC: OperationSpec = branch_operation!(
     ADD_ARGS
 );
 
-pub static BACKLOG_CREATE_SPEC: OperationSpec = repository_operation!(
+pub static BACKLOG_CREATE_SPEC: OperationSpec = registered_repository_operation!(
     "issues.backlog.create",
     "issues",
     "Create an unclaimed repository backlog item.",
@@ -101,7 +101,7 @@ pub static BACKLOG_CREATE_SPEC: OperationSpec = repository_operation!(
     WRITE
 );
 
-pub static CLOSE_SPEC: OperationSpec = repository_operation!(
+pub static CLOSE_SPEC: OperationSpec = registered_repository_operation!(
     "issues.close",
     "issues",
     "Close one work item.",
@@ -115,7 +115,7 @@ pub static CLOSE_SPEC: OperationSpec = repository_operation!(
     ID_ARGS
 );
 
-pub static REOPEN_SPEC: OperationSpec = repository_operation!(
+pub static REOPEN_SPEC: OperationSpec = registered_repository_operation!(
     "issues.reopen",
     "issues",
     "Reopen one work item.",
@@ -129,7 +129,7 @@ pub static REOPEN_SPEC: OperationSpec = repository_operation!(
     ID_ARGS
 );
 
-pub static DELETE_SPEC: OperationSpec = repository_operation!(
+pub static DELETE_SPEC: OperationSpec = registered_repository_operation!(
     "issues.delete",
     "issues",
     "Permanently delete one work item.",
@@ -147,7 +147,7 @@ pub static DELETE_SPEC: OperationSpec = repository_operation!(
     ID_ARGS
 );
 
-pub static TAG_SET_SPEC: OperationSpec = repository_operation!(
+pub static TAG_SET_SPEC: OperationSpec = registered_repository_operation!(
     "issues.tags.set",
     "issues",
     "Set one free-form work-item tag.",
@@ -165,7 +165,7 @@ pub static TAG_SET_SPEC: OperationSpec = repository_operation!(
     TAG_SET_ARGS
 );
 
-pub static TAG_DELETE_SPEC: OperationSpec = repository_operation!(
+pub static TAG_DELETE_SPEC: OperationSpec = registered_repository_operation!(
     "issues.tags.delete",
     "issues",
     "Remove one free-form work-item tag.",
@@ -183,8 +183,8 @@ pub static TAG_DELETE_SPEC: OperationSpec = repository_operation!(
     TAG_DELETE_ARGS
 );
 
-/// Compatibility and bulk API used by multi-ID CLI commands. Scalar MCP
-/// verbs bind to the semantic operations above.
+/// Specialized atomic bulk API used by multi-ID CLI commands. Scalar MCP
+/// operations bind to the routine operations above.
 pub static ACTIONS_SPEC: OperationSpec = repository_operation!(
     "issues.actions",
     "issues",
@@ -279,7 +279,7 @@ typed_api_operation!(
     Vec<IssueView>,
     |input: &ListInput| {
         let repo_root = encode_path_segment(&input.repo_root);
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &LIST_SPEC,
             format!(
                 "/api/repos/issues?repo_root={repo_root}&scope={}&all={}",
@@ -291,7 +291,7 @@ typed_api_operation!(
 );
 
 typed_api_operation!(Get, GET_SPEC, IdInput, IssueView, |input: &IdInput| {
-    Ok(OperationRequest::without_body(
+    Ok(OperationRequest::new(
         &GET_SPEC,
         format!("/api/issues/{}", input.id),
     ))
@@ -303,14 +303,13 @@ typed_api_operation!(
     CreateInput,
     IssueView,
     |input: &CreateInput| {
-        OperationRequest::json(
+        Ok(OperationRequest::new(
             &CREATE_SPEC,
             format!(
                 "/api/branches/{}/issues",
                 encode_path_segment(&input.branch)
             ),
-            &input.request,
-        )
+        ))
     }
 );
 
@@ -319,13 +318,16 @@ typed_api_operation!(
     BACKLOG_CREATE_SPEC,
     CreateRepoIssueReq,
     IssueView,
-    |input: &CreateRepoIssueReq| {
-        OperationRequest::json(&BACKLOG_CREATE_SPEC, "/api/repos/issues", input)
+    |_input: &CreateRepoIssueReq| {
+        Ok(OperationRequest::new(
+            &BACKLOG_CREATE_SPEC,
+            "/api/repos/issues",
+        ))
     }
 );
 
 typed_api_operation!(Close, CLOSE_SPEC, IdInput, IssueView, |input: &IdInput| {
-    Ok(OperationRequest::without_body(
+    Ok(OperationRequest::new(
         &CLOSE_SPEC,
         format!("/api/issues/{}/close", input.id),
     ))
@@ -337,7 +339,7 @@ typed_api_operation!(
     IdInput,
     IssueView,
     |input: &IdInput| {
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &REOPEN_SPEC,
             format!("/api/issues/{}/reopen", input.id),
         ))
@@ -350,7 +352,7 @@ typed_api_operation!(
     IdInput,
     DeleteIssueResult,
     |input: &IdInput| {
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &DELETE_SPEC,
             format!("/api/issues/{}", input.id),
         ))
@@ -363,15 +365,14 @@ typed_api_operation!(
     SetTagInput,
     IssueView,
     |input: &SetTagInput| {
-        OperationRequest::json(
+        Ok(OperationRequest::new(
             &TAG_SET_SPEC,
             format!(
                 "/api/issues/{}/tags/{}",
                 input.id,
                 encode_path_segment(&input.key)
             ),
-            &input.request,
-        )
+        ))
     }
 );
 
@@ -381,7 +382,7 @@ typed_api_operation!(
     DeleteTagInput,
     IssueView,
     |input: &DeleteTagInput| {
-        Ok(OperationRequest::without_body(
+        Ok(OperationRequest::new(
             &TAG_DELETE_SPEC,
             format!(
                 "/api/issues/{}/tags/{}",
@@ -397,9 +398,7 @@ typed_api_operation!(
     ACTIONS_SPEC,
     IssueActionsReq,
     IssueActionsResult,
-    |input: &IssueActionsReq| {
-        OperationRequest::json(&ACTIONS_SPEC, "/api/issues/actions", input)
-    }
+    |_input: &IssueActionsReq| { Ok(OperationRequest::new(&ACTIONS_SPEC, "/api/issues/actions",)) }
 );
 
 pub(super) const fn bundle() -> OperationBundle {
@@ -416,7 +415,7 @@ mod tests {
 
     #[test]
     fn typed_requests_preserve_exact_rest_encoding() {
-        let request = List::request(&ListInput {
+        let request = List::authorization_request(&ListInput {
             repo_root: "/tmp/a repo".to_string(),
             scope: ListScope::Repo,
             all: true,
@@ -428,10 +427,10 @@ mod tests {
             "/api/repos/issues?repo_root=%2Ftmp%2Fa%20repo&scope=repo&all=true"
         );
 
-        let request = Get::request(&IdInput { id: 42 }).unwrap();
+        let request = Get::authorization_request(&IdInput { id: 42 }).unwrap();
         assert_eq!(request.path, "/api/issues/42");
 
-        let request = SetTag::request(&SetTagInput {
+        let request = SetTag::authorization_request(&SetTagInput {
             id: 42,
             key: "review/state".to_string(),
             request: TagReq {
@@ -443,11 +442,10 @@ mod tests {
         .unwrap();
         assert_eq!(request.method, "PUT");
         assert_eq!(request.path, "/api/issues/42/tags/review%2Fstate");
-        assert_eq!(request.body.unwrap()["value"], "ready");
     }
 
     #[test]
-    fn semantic_issue_verbs_have_distinct_routes() {
+    fn semantic_issue_authorization_projections_have_distinct_routes() {
         assert_eq!(Close::SPEC.path, "/api/issues/{issue}/close");
         assert_eq!(Reopen::SPEC.path, "/api/issues/{issue}/reopen");
         assert_eq!(Delete::SPEC.method, "DELETE");

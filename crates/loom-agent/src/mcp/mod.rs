@@ -8,15 +8,14 @@
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::{collections::HashSet, future::Future, pin::Pin};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use weaver_api::{
-    ApiOperation, CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView,
-    McpRegistryView,
+    CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
 pub(crate) mod artifact;
@@ -31,105 +30,23 @@ pub(crate) mod session;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
-pub(crate) type ProjectionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
-
-/// A typed MCP projection onto an API operation executed through Loom's REST
-/// client. Projections own only transport argument decoding, runtime defaults,
-/// and presentation; authorization and domain behavior stay in the API.
-pub(crate) trait RemoteProjection: Send + Sync + 'static {
-    type Operation: ApiOperation;
-    type Args: DeserializeOwned + Send + 'static;
-
-    const ADAPTER: &'static str;
-    const TOOL: &'static str;
-
-    fn decode(arguments: Value) -> Result<Self::Args> {
-        serde_json::from_value(arguments)
-            .with_context(|| format!("invalid {} arguments", Self::TOOL))
-    }
-
-    fn project(
-        client: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<<Self::Operation as ApiOperation>::Input>;
-
-    fn present(
-        input: &<Self::Operation as ApiOperation>::Input,
-        output: <Self::Operation as ApiOperation>::Output,
-    ) -> Result<Value>;
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct RemoteToolBinding {
-    name: &'static str,
-    operation: &'static weaver_api::OperationSpec,
-    invoke: fn(Value) -> ToolFuture,
-}
-
-impl RemoteToolBinding {
-    pub(crate) const fn new<P: RemoteProjection>() -> Self {
-        Self {
-            name: P::TOOL,
-            operation: <P::Operation as ApiOperation>::SPEC,
-            invoke: invoke_remote_projection::<P>,
-        }
-    }
-}
-
-pub(crate) fn validate_remote_tool_bindings(
-    server: &str,
-    expected: &[&str],
-    bindings: &[RemoteToolBinding],
-) {
-    let names = bindings
-        .iter()
-        .map(|binding| {
-            let projection = binding.operation.mcp.unwrap_or_else(|| {
-                panic!(
-                    "remote MCP binding {} targets operation {} without an MCP projection",
-                    binding.name, binding.operation.id
-                )
-            });
-            assert_eq!(projection.server, server);
-            assert_eq!(projection.tool, binding.name);
-            binding.name
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(names, expected, "remote MCP binding order drifted");
-    assert_eq!(
-        names.iter().collect::<HashSet<_>>().len(),
-        names.len(),
-        "remote MCP bindings contain duplicate tools"
-    );
-}
-
-fn invoke_remote_projection<P: RemoteProjection>(arguments: Value) -> ToolFuture {
-    Box::pin(async move {
-        let args = P::decode(arguments)?;
-        let client = runtime_client(P::ADAPTER)?;
-        let input = P::project(client.clone(), args).await?;
-        let output = client.invoke::<P::Operation>(&input).await?;
-        P::present(&input, output)
-    })
-}
-
-pub(crate) async fn call_remote_tool(
+pub(crate) async fn call_registered_tool(
     adapter: &str,
-    bindings: &[RemoteToolBinding],
+    server: &str,
     name: &str,
-    arguments: Value,
+    input: Value,
 ) -> Result<Value> {
-    let binding = bindings
-        .iter()
-        .find(|binding| binding.name == name)
+    let operation = weaver_api::operation_for_mcp(server, name)
         .with_context(|| format!("unknown {adapter} tool '{name}'"))?;
     if !runtime_tool_allowed(name) {
         bail!("{adapter} tool '{name}' is not allowed by this session");
     }
-    arguments
+    input
         .as_object()
         .with_context(|| format!("{adapter} tool arguments must be an object"))?;
-    (binding.invoke)(arguments).await
+    runtime_client(adapter)?
+        .invoke_value(operation.id, input)
+        .await
 }
 
 pub(crate) struct Adapter {
@@ -142,16 +59,6 @@ pub(crate) struct Adapter {
     server_config: fn() -> Value,
     tools: fn() -> Value,
     serve: fn() -> ServeFuture,
-}
-
-/// Compile-time factory registration for one trusted builtin adapter.
-///
-/// `operation_bundle` joins this transport implementation to the neutral API
-/// bundle without making `weaver-api` depend on MCP runtime types.
-#[derive(Clone, Copy)]
-struct AdapterFactory {
-    operation_bundle: &'static str,
-    build: fn() -> &'static Adapter,
 }
 
 /// A stable, provider-neutral set of MCP operations.  A set's digest is part
@@ -221,53 +128,40 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
     }
 }
 
-macro_rules! adapter_factories {
-    ($(($name:ident, $module:ident, $bundle:literal)),+ $(,)?) => {
-        $(
-            fn $name() -> &'static Adapter {
-                &$module::ADAPTER
-            }
-        )+
-
-        const ADAPTER_FACTORIES: &[AdapterFactory] = &[
-            $(
-                AdapterFactory {
-                    operation_bundle: $bundle,
-                    build: $name,
-                },
-            )+
-        ];
-    };
+pub(crate) fn required_string_argument<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
+    string_argument(arguments, key)?.with_context(|| format!("{key} must be a non-empty string"))
 }
 
-adapter_factories!(
-    (github_adapter, github, "permissions"),
-    (context_adapter, context, "sessions"),
-    (channel_adapter, channel, "channels"),
-    (artifact_adapter, artifact, "artifacts"),
-    (issue_adapter, issue, "issues"),
-    (session_adapter, session, "sessions"),
-    (history_adapter, history, "sessions"),
-    (messaging_adapter, messaging, "sessions"),
-    (permission_adapter, permission, "permissions"),
-);
+pub(crate) async fn resolve_session_argument(
+    client: &weaver_api::Client,
+    arguments: &Value,
+) -> Result<String> {
+    match string_argument(arguments, "session")? {
+        Some(session) if session != "self" => Ok(session.to_string()),
+        _ => Ok(client.self_context().await?.session_id),
+    }
+}
+
+const ADAPTERS: &[&Adapter] = &[
+    &github::ADAPTER,
+    &context::ADAPTER,
+    &channel::ADAPTER,
+    &artifact::ADAPTER,
+    &issue::ADAPTER,
+    &session::ADAPTER,
+    &history::ADAPTER,
+    &messaging::ADAPTER,
+    &permission::ADAPTER,
+];
 
 fn adapters() -> impl Iterator<Item = &'static Adapter> {
-    ADAPTER_FACTORIES.iter().map(|factory| (factory.build)())
+    ADAPTERS.iter().copied()
 }
 
-fn validate_adapter_factories() {
-    weaver_api::validate_operation_bundle_coverage(
-        "MCP",
-        ADAPTER_FACTORIES
-            .iter()
-            .map(|factory| factory.operation_bundle),
-    )
-    .expect("invalid MCP bundle factory registry");
+fn validate_adapters() {
     let mut names = std::collections::BTreeSet::new();
     let mut servers = std::collections::BTreeSet::new();
-    for registration in ADAPTER_FACTORIES {
-        let adapter = (registration.build)();
+    for adapter in adapters() {
         assert!(
             names.insert(adapter.name),
             "duplicate MCP adapter {}",
@@ -277,37 +171,6 @@ fn validate_adapter_factories() {
             servers.insert(adapter.server_name),
             "duplicate MCP server {}",
             adapter.server_name
-        );
-    }
-    for operation in weaver_api::operations() {
-        let Some(projection) = operation.mcp else {
-            continue;
-        };
-        let registration = ADAPTER_FACTORIES
-            .iter()
-            .find(|registration| (registration.build)().server_name == projection.server)
-            .unwrap_or_else(|| {
-                panic!(
-                    "operation {} projects unknown MCP server {}",
-                    operation.id, projection.server
-                )
-            });
-        assert_eq!(
-            registration.operation_bundle, operation.bundle,
-            "operation {} projects through an MCP factory owned by another bundle",
-            operation.id
-        );
-        let tools = ((registration.build)().tools)();
-        assert!(
-            tools
-                .as_array()
-                .expect("builtin MCP tools must be an array")
-                .iter()
-                .any(|tool| tool["name"] == projection.tool),
-            "operation {} projects unknown MCP tool {}::{}",
-            operation.id,
-            projection.server,
-            projection.tool
         );
     }
 }
@@ -420,11 +283,10 @@ pub fn is_builtin_group(group: &str) -> bool {
 }
 
 pub fn registry() -> McpRegistryView {
-    validate_adapter_factories();
+    validate_adapters();
     let mut adapter_views = Vec::new();
     let mut capability_sets = Vec::new();
-    for registration in ADAPTER_FACTORIES {
-        let adapter = (registration.build)();
+    for adapter in adapters() {
         let advertised = (adapter.tools)();
         let advertised_names = advertised
             .as_array()
@@ -1151,9 +1013,8 @@ mod tests {
 
     #[test]
     fn every_adapter_satisfies_the_registry_contract() {
-        super::validate_adapter_factories();
-        for registration in super::ADAPTER_FACTORIES {
-            let adapter = (registration.build)();
+        super::validate_adapters();
+        for adapter in super::adapters() {
             let listed = (adapter.tools)();
             let names = listed
                 .as_array()

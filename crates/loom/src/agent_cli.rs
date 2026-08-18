@@ -1,4 +1,4 @@
-//! weaver — the agent-facing CLI.
+//! HTTP-only implementations for Loom's agent-facing commands.
 //!
 //! An HTTP-only client of loom: every command drives the loom REST API
 //! through `weaver-api::Client`, never a local database. The target server is
@@ -10,7 +10,7 @@
 //! error rather than falling back to any local state.
 
 use anyhow::{anyhow, bail, Result};
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::Subcommand;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
@@ -19,17 +19,6 @@ use weaver_api::{
     CreateIssueReq, CreateRepoIssueReq, IssueAction, IssueActionsReq, IssueView, ThreadDto,
 };
 use weaver_core::tags;
-
-#[derive(Parser)]
-#[command(
-    name = "weaver",
-    version,
-    about = "Deprecated compatibility CLI; use loom"
-)]
-struct Cli {
-    #[command(subcommand)]
-    cmd: Cmd,
-}
 
 #[derive(Subcommand)]
 pub enum StatusCmd {
@@ -45,107 +34,6 @@ pub enum StatusCmd {
         message: String,
     },
 }
-
-#[derive(Subcommand)]
-enum Cmd {
-    /// Read or update the agent's status.
-    ///
-    /// This is the agent's single channel for telling the dashboard how it is
-    /// doing. `get` prints the title, goal, status, and open-issue count. `set`
-    /// updates the attention level and optional current-state message together.
-    /// Use `attention` to ask the user to look ("ready for review", a question)
-    /// and `blocked` when stuck and needing help; `ok` covers both progressing
-    /// normally and waiting on something external (a CI run, a PR review) that
-    /// is not the user.
-    Status {
-        #[command(subcommand)]
-        cmd: StatusCmd,
-    },
-    /// Read, set, or clear a tag on a session.
-    ///
-    /// A tag is a single-valued `(key, value)` annotation on a branch with a
-    /// one-line note and an author. The well-known loud keys are `attention`
-    /// (the agent's own signal, normally written by `weaver status`) and `triage`
-    /// (a watch's outside assessment); both accept `attention` or
-    /// `blocked`. Any other key is free-form and quiet.
-    Tag {
-        #[command(subcommand)]
-        cmd: TagCmd,
-    },
-    /// Print a quick orientation for the current branch.
-    ///
-    /// A one-shot catch-up for an agent picking up (or resuming) a branch: the
-    /// goal, current status, channel inbox, intentional backlog items, and a
-    /// line or two of hints for what to do next.
-    Summary,
-    /// Print the full weaver workflow guide (the WEAVER.md for this branch).
-    ///
-    /// The same primer injected at session start — how a weaver session works
-    /// and what is expected of the agent. Re-read it when you need the full
-    /// rules back (e.g. after a context compaction, when only the concise
-    /// catch-up was replayed). Uses the repo's own `WEAVER.md` when it ships
-    /// one, else the builtin.
-    Readme,
-    /// Read and write durable user/agent channels.
-    Channel {
-        #[command(subcommand)]
-        cmd: ChannelCmd,
-    },
-    /// Manage the current branch's issue list.
-    Issue {
-        #[command(subcommand)]
-        cmd: IssueCmd,
-    },
-    /// Read and write artifacts — named, versioned documents stored in weaver.
-    ///
-    /// An artifact is a design, report, diagram, or plan the agent writes *to
-    /// weaver*, not the repo: durable, out-of-repo, and surviving archive. Every
-    /// write appends an immutable revision. Scoped to the current branch by
-    /// default; `--repo` publishes it repo-shared (one plan, many child
-    /// sessions). See `docs/artifacts.md`.
-    Artifact {
-        #[command(subcommand)]
-        cmd: ArtifactCmd,
-    },
-    /// Print the resolved repo / branch / branch-id for the current cwd.
-    Where,
-    /// Print recent events for the current branch.
-    Log {
-        #[arg(long, default_value = "20")]
-        limit: i64,
-    },
-    /// Render the agent's conversation transcript as a markdown log. With no
-    /// `--file`, locates the current worktree's transcript (Claude Code or
-    /// Codex); `--json` prints the normalized iris format instead of markdown.
-    Chatlog {
-        /// Render this raw transcript file instead of locating one.
-        #[arg(long)]
-        file: Option<String>,
-        /// Print the normalized iris JSON rather than rendered markdown.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Record an agent hook event. Writes an `events` row; loom's monitor
-    /// consumes it on its next tick.
-    #[command(hide = true)]
-    Hook {
-        /// Hook event name (e.g. `working`, `waiting`, `idle`, `session-start`).
-        #[arg(long)]
-        event: String,
-    },
-    /// Print a refreshable GitHub App token for the current session.
-    #[command(hide = true)]
-    GithubToken,
-    /// Get or list configuration. Settings are written by operators via
-    /// `loom config set` or the settings pane — not from here.
-    Config {
-        #[command(subcommand)]
-        cmd: ConfigCmd,
-    },
-    /// Generate shell completions.
-    Completions { shell: clap_complete::Shell },
-}
-
 #[derive(Subcommand)]
 pub enum ChannelCmd {
     /// List visible open channels and their unread state.
@@ -314,7 +202,7 @@ pub enum IssueCmd {
 #[derive(Subcommand)]
 pub enum IssueTagCmd {
     /// Set (insert or replace) a tag on an issue. The value must be non-empty;
-    /// clear a label with `weaver issue tag rm`.
+    /// clear a label with `loom issues tag delete`.
     Set {
         /// One or more numeric issue ids followed by the tag key and value.
         #[arg(required = true, num_args = 3..)]
@@ -438,7 +326,7 @@ pub enum ArtifactCmd {
     Resolve {
         /// The artifact name.
         name: String,
-        /// The thread id (see `weaver artifact threads`).
+        /// The thread id (see `loom artifacts threads`).
         thread_id: i64,
     },
     /// List an artifact's discussion threads, each with its comments. Open
@@ -501,46 +389,6 @@ pub enum TagCmd {
     },
 }
 
-#[tokio::main]
-pub async fn main() {
-    if let Err(e) = run().await {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
-    }
-}
-
-pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
-    if !matches!(&cli.cmd, Cmd::Hook { .. } | Cmd::GithubToken) {
-        eprintln!(
-            "warning: `weaver` is deprecated; use the equivalent `loom` command (`loom help`)"
-        );
-    }
-    match cli.cmd {
-        Cmd::Status { cmd } => match cmd {
-            StatusCmd::Get => cmd_status(None, String::new()).await,
-            StatusCmd::Set { tag, message } => cmd_status(Some(tag), message).await,
-        },
-        Cmd::Tag { cmd } => cmd_tag(cmd).await,
-        Cmd::Summary => cmd_summary().await,
-        Cmd::Readme => cmd_readme().await,
-        Cmd::Channel { cmd } => cmd_channel(cmd).await,
-        Cmd::Issue { cmd } => cmd_issue(cmd).await,
-        Cmd::Artifact { cmd } => cmd_artifact(cmd).await,
-        Cmd::Where => cmd_where().await,
-        Cmd::Log { limit } => cmd_log(limit).await,
-        Cmd::Chatlog { file, json } => cmd_chatlog(file, json),
-        Cmd::Hook { event } => cmd_hook(event).await,
-        Cmd::GithubToken => cmd_github_token().await,
-        Cmd::Config { cmd } => cmd_config(cmd).await,
-        Cmd::Completions { shell } => {
-            let mut cmd = Cli::command();
-            clap_complete::generate(shell, &mut cmd, "weaver", &mut std::io::stdout());
-            Ok(())
-        }
-    }
-}
-
 pub async fn run_status(cmd: StatusCmd) -> Result<()> {
     match cmd {
         StatusCmd::Get => cmd_status(None, String::new()).await,
@@ -554,41 +402,8 @@ pub async fn run_tag(cmd: TagCmd) -> Result<()> {
 
 pub async fn run_summary() -> Result<()> {
     let client = client();
-    let key = std::env::var("LOOM_SESSION_ID")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .unwrap_or(branch_key()?);
-    let summary = client.session_summary(&key).await?;
-    println!("Goal:    {}", summary.goal);
-    if summary.status_message.is_empty() {
-        println!("Status:  {}", summary.attention);
-    } else {
-        println!(
-            "Status:  {} — {}",
-            summary.attention, summary.status_message
-        );
-    }
-    if let Some(channel) = summary.channel {
-        println!(
-            "Channel: {} — {} unread, {} urgent  (loom channels read)",
-            channel.id, channel.unread_count, channel.unread_urgent_count
-        );
-    }
-    println!(
-        "Artifacts: {}  (loom artifacts list)",
-        summary.artifacts.len()
-    );
-    println!("Issues:    {}  (loom issues list)", summary.issues.len());
-    if !summary.recent_events.is_empty() {
-        println!("Recent:");
-        for event in summary.recent_events.iter().rev().take(3).rev() {
-            println!("  {}  {}", event.created_at, event.kind);
-        }
-    }
-    println!("Next:");
-    for action in summary.next_actions {
-        println!("  - {action}");
-    }
+    let branch = client.get_branch(&branch_key()?).await?;
+    print!("{}", render_summary(&client, &branch).await?);
     Ok(())
 }
 
@@ -663,7 +478,7 @@ fn branch_key() -> Result<String> {
     if key.is_empty() {
         bail!(
             "not running inside a loom session ($WEAVER_BRANCH is not set) — \
-             weaver only works inside a session loom launched"
+             loom only works inside a session it launched"
         );
     }
     Ok(key.to_string())
@@ -740,7 +555,7 @@ fn image_mime_from_ext(name: &str) -> Option<&'static str> {
 }
 
 /// True when `filename` looks like a standalone HTML document (`.html`/`.htm`),
-/// so a plain `weaver artifact write report report.html` lands as the `html`
+/// so a plain `loom artifacts write report report.html` lands as the `html`
 /// kind loom renders in a sandboxed iframe — no `--kind html` needed. Only
 /// promotes from the default `markdown`; an explicit `--kind` always wins.
 fn is_html_ext(filename: Option<&str>) -> bool {
@@ -788,24 +603,10 @@ fn encode_image_data_uri(filename: Option<&str>, bytes: &[u8]) -> Result<Option<
     Ok(Some(format!("data:{mime};base64,{b64}")))
 }
 
-/// How many backlog items `weaver summary` lists before collapsing the rest.
+/// How many backlog items `loom summary` lists before collapsing the rest.
 const SUMMARY_TASK_CAP: usize = 10;
 
-/// Print a quick orientation for the current branch: the goal, the current
-/// status, channel inbox, intentional backlog, and a hint or two for what to do next.
-///
-/// This is the catch-up an agent reads when it picks up a branch. It overlaps
-/// `weaver status` (read), but where that shows an open-issue *count*, summary
-/// lists the actual tasks and points at the next action.
-async fn cmd_summary() -> Result<()> {
-    let client = client();
-    let key = branch_key()?;
-    let b = client.get_branch(&key).await?;
-    print!("{}", render_summary(&client, &b).await?);
-    Ok(())
-}
-
-/// Render the `weaver summary` catch-up as a string (see [`cmd_summary`]). Kept
+/// Render the `loom summary` catch-up as a string. Kept
 /// separate from the printing so the post-compaction hook can replay the same
 /// text into the agent's context as `additionalContext` (see [`cmd_hook`]).
 async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
@@ -883,7 +684,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     }
 
     // Artifacts visible from this branch (its own + repo-shared) — the documents
-    // the agent has written to weaver (designs, reports, the `plan`).
+    // the agent has written to Loom (designs, reports, the `plan`).
     let artifacts = client
         .list_branch_artifacts(&b.id, false)
         .await
@@ -1002,20 +803,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     Ok(out)
 }
 
-/// Print the full weaver workflow guide for this branch (the repo's own
-/// `WEAVER.md` when it ships one, else the builtin). The same primer injected at
-/// session start; `weaver readme` lets the agent pull it back on demand — most
-/// usefully after a context compaction, when only the concise catch-up was
-/// replayed.
-async fn cmd_readme() -> Result<()> {
-    let client = client();
-    let key = branch_key()?;
-    let b = client.get_branch(&key).await?;
-    print!("{}", weaver_md_for_branch(&b));
-    Ok(())
-}
-
-/// A single suggested next action for `weaver summary`, derived from the open
+/// A single suggested next action for `loom summary`, derived from the open
 /// work: pick up the first open task, else poll a delegated sub-tree, else
 /// (nothing open) wrap up and open a PR.
 fn next_action_hint(open: &[&IssueView], delegated: &[&IssueView]) -> String {
@@ -1210,7 +998,7 @@ fn github_wiring_of(b: &BranchView) -> Option<&str> {
 /// `blocked` set it. One call to loom (`POST /branches/{id}/status`), which
 /// writes the description, sets or clears the tag, and records a single `tag`
 /// event atomically server-side. An empty message leaves the previous message
-/// in place — `weaver status set --tag ok` just lowers the level without wiping
+/// in place — `loom status set --tag ok` just lowers the level without wiping
 /// what the agent last said.
 async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
@@ -1697,7 +1485,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     Ok(())
 }
 
-/// Set, clear, or list a free-form tag on an issue (`weaver issue tag …`).
+/// Set, clear, or list a free-form tag on an issue (`loom issues tag …`).
 async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Result<()> {
     match cmd {
         IssueTagCmd::Set { args, note, by } => {
@@ -2328,8 +2116,7 @@ async fn cmd_hook(event: String) -> Result<()> {
         if is_session_start {
             // After a compaction the agent has lost its working context but the
             // session is unchanged — replay a concise re-orientation (the
-            // `weaver summary` catch-up) rather than the full WEAVER.md, which it
-            // can pull back with `weaver readme` if it needs the full rules. On a
+            // `loom summary` catch-up) rather than the full repository primer. On a
             // genuine start/resume/clear, inject the full primer.
             let b = client.get_branch(&key).await?;
             let context = if is_compact {
@@ -2344,7 +2131,7 @@ async fn cmd_hook(event: String) -> Result<()> {
     })
     .await;
     if let Err(e) = result {
-        eprintln!("weaver hook: {e}");
+        eprintln!("loom hook: {e}");
     }
     Ok(())
 }

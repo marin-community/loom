@@ -8,9 +8,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::issues as issue_operations;
 use weaver_api::{
-    CreateIssueReq, CreateRepoIssueReq, DeleteIssueResult, IssueAction,
+    CreateRepoIssueReq, DeleteIssueResult, IssueAction,
     IssueActionProblem as IssueActionProblemView, IssueActionsReq, IssueActionsResult,
-    IssueTagInput, IssueView, PatchIssueReq, TagReq,
+    IssueTagInput, IssueView, PatchIssueReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
@@ -21,24 +21,25 @@ use crate::git;
 use crate::{auth::Grant, auth::Principal};
 
 use super::{author_or_manual, require_branch};
-use super::{bind_operation, ApiOperationBinding, ApiResult, AppError, AppState, OperationContext};
+use super::{
+    register_operation, ApiResult, AppError, AppState, OperationContext, RegisteredOperation,
+};
 
 // ---------------------------------------------------------------------------
 // Issues
 // ---------------------------------------------------------------------------
 
-pub(super) fn typed_bindings() -> Vec<ApiOperationBinding> {
+pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
     vec![
-        bind_operation::<issue_operations::List, _, _>(list_repo_issues_operation),
-        bind_operation::<issue_operations::Get, _, _>(get_issue_operation),
-        bind_operation::<issue_operations::Create, _, _>(create_branch_issue_operation),
-        bind_operation::<issue_operations::CreateBacklog, _, _>(create_repo_issue_operation),
-        bind_operation::<issue_operations::Close, _, _>(close_issue_operation),
-        bind_operation::<issue_operations::Reopen, _, _>(reopen_issue_operation),
-        bind_operation::<issue_operations::Delete, _, _>(delete_issue_operation),
-        bind_operation::<issue_operations::SetTag, _, _>(set_issue_tag_operation),
-        bind_operation::<issue_operations::DeleteTag, _, _>(clear_issue_tag_operation),
-        bind_operation::<issue_operations::Actions, _, _>(issue_actions_operation),
+        register_operation::<issue_operations::List, _, _>(list_repo_issues_operation),
+        register_operation::<issue_operations::Get, _, _>(get_issue_operation),
+        register_operation::<issue_operations::Create, _, _>(create_branch_issue_operation),
+        register_operation::<issue_operations::CreateBacklog, _, _>(create_repo_issue_operation),
+        register_operation::<issue_operations::Close, _, _>(close_issue_operation),
+        register_operation::<issue_operations::Reopen, _, _>(reopen_issue_operation),
+        register_operation::<issue_operations::Delete, _, _>(delete_issue_operation),
+        register_operation::<issue_operations::SetTag, _, _>(set_issue_tag_operation),
+        register_operation::<issue_operations::DeleteTag, _, _>(clear_issue_tag_operation),
     ]
 }
 
@@ -193,23 +194,6 @@ pub(super) async fn create_branch_issue_operation(
     issue_view(&st.db, issue).await
 }
 
-pub(super) async fn create_branch_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Json(req): Json<CreateIssueReq>,
-) -> ApiResult<Json<IssueView>> {
-    create_branch_issue_operation(
-        OperationContext::new(st, principal),
-        issue_operations::CreateInput {
-            branch: key,
-            request: req,
-        },
-    )
-    .await
-    .map(Json)
-}
-
 /// Resolve the branch row an issue event should be attributed to: the branch
 /// currently working it, else the branch it came from. `None` for a pure
 /// repo-level backlog item (no session feed to notify).
@@ -264,8 +248,8 @@ pub(super) async fn get_issue_operation(
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     let mut view = issue_view(&st.db, issue).await?;
-    // Best-effort live snapshot of the linked GitHub thread, so `weaver issue
-    // show` surfaces "closed / re-titled while you worked". Single-issue reads
+    // Best-effort live snapshot of the linked GitHub thread, so `loom issues
+    // get` surfaces "closed / re-titled while you worked". Single-issue reads
     // only (lists would fan out), bounded so a slow GitHub can't hang the CLI,
     // and a failure just leaves the field absent — the ledger still stands.
     if let (Some(repo), Some(number)) = (view.github_repo.clone(), view.github_issue) {
@@ -286,19 +270,6 @@ pub(super) async fn get_issue_operation(
         });
     }
     Ok(view)
-}
-
-pub(super) async fn get_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<IssueView>> {
-    get_issue_operation(
-        OperationContext::new(st, principal),
-        issue_operations::IdInput { id },
-    )
-    .await
-    .map(Json)
 }
 
 pub(super) async fn patch_issue(
@@ -400,24 +371,6 @@ pub(super) async fn set_issue_tag_operation(
         .ok_or_else(|| AppError::not_found("issue"))
 }
 
-pub(super) async fn set_issue_tag(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((id, tag_key)): Path<(i64, String)>,
-    Json(req): Json<TagReq>,
-) -> ApiResult<Json<IssueView>> {
-    set_issue_tag_operation(
-        OperationContext::new(st, principal),
-        issue_operations::SetTagInput {
-            id,
-            key: tag_key,
-            request: req,
-        },
-    )
-    .await
-    .map(Json)
-}
-
 /// Clear a label on an issue through the same validated semantic operation as
 /// MCP and bulk CLI calls. A missing tag is reported as a conflict.
 pub(super) async fn clear_issue_tag_operation(
@@ -442,19 +395,6 @@ pub(super) async fn clear_issue_tag_operation(
         .ok_or_else(|| AppError::not_found("issue"))
 }
 
-pub(super) async fn clear_issue_tag(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((id, tag_key)): Path<(i64, String)>,
-) -> ApiResult<Json<IssueView>> {
-    clear_issue_tag_operation(
-        OperationContext::new(st, principal),
-        issue_operations::DeleteTagInput { id, key: tag_key },
-    )
-    .await
-    .map(Json)
-}
-
 pub(super) async fn delete_issue_operation(
     context: OperationContext,
     input: issue_operations::IdInput,
@@ -468,19 +408,6 @@ pub(super) async fn delete_issue_operation(
     )
     .await?;
     Ok(DeleteIssueResult { deleted: true })
-}
-
-pub(super) async fn delete_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<DeleteIssueResult>> {
-    delete_issue_operation(
-        OperationContext::new(st, principal),
-        issue_operations::IdInput { id },
-    )
-    .await
-    .map(Json)
 }
 
 fn validate_issue_action(action: &IssueAction) -> ApiResult<()> {
@@ -629,19 +556,6 @@ pub(super) async fn close_issue_operation(
         .ok_or_else(|| AppError::not_found("issue"))
 }
 
-pub(super) async fn close_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<IssueView>> {
-    close_issue_operation(
-        OperationContext::new(st, principal),
-        issue_operations::IdInput { id },
-    )
-    .await
-    .map(Json)
-}
-
 pub(super) async fn reopen_issue_operation(
     context: OperationContext,
     input: issue_operations::IdInput,
@@ -661,37 +575,9 @@ pub(super) async fn reopen_issue_operation(
         .ok_or_else(|| AppError::not_found("issue"))
 }
 
-pub(super) async fn reopen_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<i64>,
-) -> ApiResult<Json<IssueView>> {
-    reopen_issue_operation(
-        OperationContext::new(st, principal),
-        issue_operations::IdInput { id },
-    )
-    .await
-    .map(Json)
-}
-
 // ---------------------------------------------------------------------------
 // Repo-scoped issues (the backlog / board surface)
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub(super) struct RepoIssuesQuery {
-    /// Repo to scope to (canonical primary-worktree path). The frontend has
-    /// this from any `BranchView`.
-    repo_root: Option<String>,
-    /// Alternative for callers that only know a directory (e.g. the `loom`
-    /// CLI): the repo root is resolved from it server-side.
-    cwd: Option<String>,
-    #[serde(default)]
-    all: bool,
-    /// `repo` (default) = every issue; `backlog` = unclaimed only.
-    #[serde(default)]
-    scope: Option<String>,
-}
 
 /// Resolve a repo identity from an explicit `repo_root` or, failing that, a
 /// `cwd` — canonicalized to match how issues are keyed.
@@ -756,29 +642,6 @@ pub(super) async fn list_repo_issues_operation(
     issue_views(&st.db, issues).await
 }
 
-pub(super) async fn list_repo_issues(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Query(q): Query<RepoIssuesQuery>,
-) -> ApiResult<Json<Vec<IssueView>>> {
-    let repo_root = resolve_repo_root(q.repo_root.as_deref(), q.cwd.as_deref()).await?;
-    list_repo_issues_operation(
-        OperationContext::new(st, principal),
-        issue_operations::ListInput {
-            repo_root,
-            scope: q
-                .scope
-                .as_deref()
-                .unwrap_or("repo")
-                .parse()
-                .map_err(AppError::bad_request)?,
-            all: q.all,
-        },
-    )
-    .await
-    .map(Json)
-}
-
 /// Create an unclaimed repo-level backlog item.
 pub(super) async fn create_repo_issue_operation(
     context: OperationContext,
@@ -830,16 +693,6 @@ pub(super) async fn create_repo_issue_operation(
     issue_view(&st.db, issue).await
 }
 
-pub(super) async fn create_repo_issue(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<CreateRepoIssueReq>,
-) -> ApiResult<Json<IssueView>> {
-    create_repo_issue_operation(OperationContext::new(st, principal), req)
-        .await
-        .map(Json)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,21 +730,19 @@ mod tests {
             .await
             .unwrap();
 
-        let issue = create_repo_issue(
-            State(st),
-            Extension(admin_principal()),
-            Json(CreateRepoIssueReq {
+        let issue = create_repo_issue_operation(
+            OperationContext::new(st, admin_principal()),
+            CreateRepoIssueReq {
                 repo_root: "/r".to_string(),
                 title: "backlog item".to_string(),
                 body: String::new(),
                 github_issue: None,
                 source_branch: Some("weaver/a".to_string()),
                 tags: Vec::new(),
-            }),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(issue.claimed_branch, None, "still unclaimed");
         assert_eq!(issue.source_branch.as_deref(), Some("weaver/a"));
 

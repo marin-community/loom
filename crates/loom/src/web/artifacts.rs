@@ -25,7 +25,7 @@ use super::{ApiResult, AppError, AppState};
 // ---------------------------------------------------------------------------
 // Artifacts — named, versioned documents stored in weaver.db. The GET resolves
 // the content's references against the issue ledger (via smartdoc) and returns
-// the projection alongside, so the SPA chips and `weaver artifact show` render
+// the projection alongside, so the SPA chips and `loom artifacts get` render
 // the same join. Structure in the doc, state in the DB. See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
@@ -53,7 +53,7 @@ fn artifact_image_uri(content: &str) -> Option<&str> {
     Some(&content[start..content.len() - 1])
 }
 
-/// Decode the bounded image data-URI formats accepted by `weaver artifact
+/// Decode the bounded image data-URI formats accepted by `loom artifacts
 /// write`. The MIME whitelist prevents a caller from using an artifact as an
 /// arbitrary same-origin response.
 fn decode_artifact_image(content: &str) -> Option<(&'static str, Vec<u8>)> {
@@ -334,7 +334,7 @@ pub(super) async fn delete_artifact(
 
 // ---------------------------------------------------------------------------
 // Branch-scoped artifacts — the twin of the session-scoped routes above, for
-// a `weaver artifact` target with no live session. `PUT` here creates the
+// a `loom artifacts` target with no live session. `PUT` here creates the
 // artifact if absent (the session-scoped `PUT` requires it to already exist,
 // since that route is a *user edit* of something the dashboard is already
 // showing); `author` defaults to `agent`, the CLI's writer.
@@ -471,7 +471,7 @@ pub(super) async fn write_branch_artifact(
 /// `http://0.0.0.0:7878/…` link printed after a write is useless to whoever
 /// reads it. Only the server knows the externally-visible origin (the operator's
 /// `auth.base_url`, else the request's own Host), so resolving it is the
-/// server's job — see `weaver artifact write`.
+/// server's job — see `loom artifacts write`.
 pub(super) async fn branch_artifact_url_route(
     State(st): State<AppState>,
     headers: header::HeaderMap,

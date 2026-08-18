@@ -229,14 +229,14 @@ test.describe('session detail view', () => {
 
     // The tab title tracks the open session (its title, falling back to the
     // branch name) so several loom tabs are tellable apart, composed centrally
-    // as "Weaver - <Section>". It's derived from the shared fleet snapshot, which
+    // as "Loom - <Section>". It's derived from the shared fleet snapshot, which
     // the deep link fills a beat after landing, so toHaveTitle auto-retries until
     // the row arrives.
-    await expect(page).toHaveTitle('Weaver - tab-task');
+    await expect(page).toHaveTitle('Loom - tab-task');
 
     // Leaving the session for the fleet list moves to the list's own section.
     await page.goto(`${weaver.baseUrl}/`);
-    await expect(page).toHaveTitle('Weaver - Sessions');
+    await expect(page).toHaveTitle('Loom - Sessions');
   });
 
   test('edits pull request and issue associations from visible pills', async ({ page, weaver }) => {

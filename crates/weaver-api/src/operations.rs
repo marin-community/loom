@@ -50,6 +50,17 @@ pub enum OperationScope {
     Repository,
 }
 
+/// How an operation reaches Loom's HTTP boundary.
+///
+/// Generated operations derive `POST /api/<dotted/id>` from their identity.
+/// Custom operations retain an explicitly declared method and path because
+/// their streaming, file, bulk, or interactive shape needs a bespoke adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpBinding {
+    Generated,
+    Custom,
+}
+
 impl OperationScope {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -76,7 +87,7 @@ pub struct McpProjection {
     pub server: &'static str,
     pub tool: &'static str,
     /// Preserve transport-specific wording when it is already part of a pinned
-    /// MCP capability digest. New verbs normally inherit `OperationSpec::summary`.
+    /// MCP capability digest. New operations normally inherit `OperationSpec::summary`.
     pub description: Option<&'static str>,
 }
 
@@ -210,6 +221,9 @@ pub struct OperationSpec {
     pub actor: ActorPolicy,
     pub scope: OperationScope,
     pub risk: OperationRisk,
+    pub http_binding: HttpBinding,
+    /// Resource-shaped request used for scope authorization. For custom
+    /// operations this is also the public HTTP method and path.
     pub method: &'static str,
     pub path: &'static str,
     pub cli: Option<&'static str>,
@@ -218,38 +232,24 @@ pub struct OperationSpec {
     pub capabilities: &'static [&'static str],
 }
 
-/// Exact REST request emitted by a typed API operation.
+/// Semantic resource request used to authorize a registered operation's input.
 ///
-/// Operation declarations generate these request builders alongside their
-/// discoverable metadata. Keeping the builder typed avoids a reflective
-/// `Value` walker while still giving [`crate::Client`] one generic invocation
-/// path.
+/// The executable registry owns the canonical API route. This projection maps
+/// typed input onto the resource-shaped route whose existing scope rules apply,
+/// keeping branch/session/repository authorization typed without coupling it to
+/// the generic JSON dispatcher.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OperationRequest {
     pub method: &'static str,
     pub path: String,
-    pub body: Option<Value>,
 }
 
 impl OperationRequest {
-    pub fn without_body(operation: &'static OperationSpec, path: impl Into<String>) -> Self {
+    pub fn new(operation: &'static OperationSpec, path: impl Into<String>) -> Self {
         Self {
             method: operation.method,
             path: path.into(),
-            body: None,
         }
-    }
-
-    pub fn json<T: Serialize>(
-        operation: &'static OperationSpec,
-        path: impl Into<String>,
-        body: &T,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            method: operation.method,
-            path: path.into(),
-            body: Some(serde_json::to_value(body)?),
-        })
     }
 }
 
@@ -262,14 +262,14 @@ pub(crate) fn encode_path_segment(value: &str) -> String {
 ///
 /// Server handlers bind to this identity in `loom`; remote callers execute it
 /// through [`crate::Client::invoke`]. Concrete application code stays typed —
-/// JSON erasure is confined to the generated REST request and response edges.
+/// JSON erasure is confined to the registered REST request and response edge.
 pub trait ApiOperation: Send + Sync + 'static {
     type Input: Serialize + DeserializeOwned + Send + Sync + 'static;
     type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
 
     const SPEC: &'static OperationSpec;
 
-    fn request(input: &Self::Input) -> anyhow::Result<OperationRequest>;
+    fn authorization_request(input: &Self::Input) -> anyhow::Result<OperationRequest>;
 }
 
 /// One first-party resource bundle projected across Loom's transports.
@@ -346,6 +346,13 @@ pub struct OperationView {
 
 impl From<&OperationSpec> for OperationView {
     fn from(spec: &OperationSpec) -> Self {
+        let (method, path) = match spec.http_binding {
+            HttpBinding::Generated => (
+                "POST".to_string(),
+                format!("/api/{}", spec.id.replace('.', "/")),
+            ),
+            HttpBinding::Custom => (spec.method.to_string(), spec.path.to_string()),
+        };
         Self {
             id: spec.id.to_string(),
             bundle: spec.bundle.to_string(),
@@ -353,8 +360,8 @@ impl From<&OperationSpec> for OperationView {
             actor: spec.actor,
             scope: spec.scope,
             risk: spec.risk,
-            method: spec.method.to_string(),
-            path: spec.path.to_string(),
+            method,
+            path,
             cli: spec.cli.map(str::to_string),
             mcp: spec.mcp.map(|projection| McpProjectionView {
                 server: projection.server.to_string(),
@@ -392,6 +399,7 @@ macro_rules! operation {
             actor: ActorPolicy::$actor,
             scope: OperationScope::Session,
             risk: OperationRisk::$risk,
+            http_binding: HttpBinding::Custom,
             method: $method,
             path: $path,
             cli: $cli,
@@ -404,10 +412,55 @@ macro_rules! operation {
     (@args $args:expr) => { $args };
 }
 
+/// Declare a routine operation. The method and path parameters describe its
+/// resource authorization projection; its public API route is inferred from
+/// the operation id.
+macro_rules! registered_operation {
+    ($id:literal, $bundle:literal, $summary:literal, $actor:ident, $risk:ident,
+     $method:literal, $path:literal, $cli:expr, $mcp:expr, $capabilities:expr $(, $args:expr)?) => {{
+        let mut operation = operation!(
+            $id,
+            $bundle,
+            $summary,
+            $actor,
+            $risk,
+            $method,
+            $path,
+            $cli,
+            $mcp,
+            $capabilities
+            $(, $args)?
+        );
+        operation.http_binding = HttpBinding::Generated;
+        operation
+    }};
+}
+
 macro_rules! branch_operation {
     ($id:literal, $bundle:literal, $summary:literal, $actor:ident, $risk:ident,
      $method:literal, $path:literal, $cli:expr, $mcp:expr, $capabilities:expr $(, $args:expr)?) => {{
         let mut operation = operation!(
+            $id,
+            $bundle,
+            $summary,
+            $actor,
+            $risk,
+            $method,
+            $path,
+            $cli,
+            $mcp,
+            $capabilities
+            $(, $args)?
+        );
+        operation.scope = OperationScope::Branch;
+        operation
+    }};
+}
+
+macro_rules! registered_branch_operation {
+    ($id:literal, $bundle:literal, $summary:literal, $actor:ident, $risk:ident,
+     $method:literal, $path:literal, $cli:expr, $mcp:expr, $capabilities:expr $(, $args:expr)?) => {{
+        let mut operation = registered_operation!(
             $id,
             $bundle,
             $summary,
@@ -446,6 +499,27 @@ macro_rules! repository_operation {
     }};
 }
 
+macro_rules! registered_repository_operation {
+    ($id:literal, $bundle:literal, $summary:literal, $actor:ident, $risk:ident,
+     $method:literal, $path:literal, $cli:expr, $mcp:expr, $capabilities:expr $(, $args:expr)?) => {{
+        let mut operation = registered_operation!(
+            $id,
+            $bundle,
+            $summary,
+            $actor,
+            $risk,
+            $method,
+            $path,
+            $cli,
+            $mcp,
+            $capabilities
+            $(, $args)?
+        );
+        operation.scope = OperationScope::Repository;
+        operation
+    }};
+}
+
 /// Bind one addressable descriptor to concrete request/response types and its
 /// exact generated REST encoder. Resource modules keep these declarations next
 /// to the argument and authority metadata that defines the public operation.
@@ -460,7 +534,7 @@ macro_rules! typed_api_operation {
 
             const SPEC: &'static OperationSpec = &$spec;
 
-            fn request(input: &Self::Input) -> anyhow::Result<OperationRequest> {
+            fn authorization_request(input: &Self::Input) -> anyhow::Result<OperationRequest> {
                 ($request)(input)
             }
         }
@@ -759,30 +833,19 @@ pub fn validate_operation_registry() -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure a transport has at least one factory for every operation bundle and
-/// does not reference a bundle outside the neutral registry. Transports that
-/// require exactly one factory per bundle add their own multiplicity check.
-pub fn validate_operation_bundle_coverage<'a>(
-    transport: &str,
-    registered_bundles: impl IntoIterator<Item = &'a str>,
-) -> Result<(), String> {
-    validate_operation_registry()?;
-    let expected = operation_bundles()
-        .map(|bundle| bundle.name)
-        .collect::<std::collections::BTreeSet<_>>();
-    let registered = registered_bundles
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
-    if registered != expected {
-        return Err(format!(
-            "{transport} bundle factories must cover {expected:?}, registered {registered:?}"
-        ));
-    }
-    Ok(())
-}
-
 pub fn operation(id: &str) -> Option<&'static OperationSpec> {
     operations().find(|operation| operation.id == id)
+}
+
+/// Resolve an advertised MCP tool through the operation descriptor that
+/// defines it. Tool listing and invocation use this same lookup, so adding an
+/// MCP projection cannot create an uncallable second registration.
+pub fn operation_for_mcp(server: &str, tool: &str) -> Option<&'static OperationSpec> {
+    operations().find(|operation| {
+        operation
+            .mcp
+            .is_some_and(|projection| projection.server == server && projection.tool == tool)
+    })
 }
 
 fn path_matches(template: &str, path: &str) -> bool {
@@ -889,10 +952,14 @@ pub fn operations_for_bundle(bundle: &str) -> impl Iterator<Item = &'static Oper
 /// operation ids and transport metadata are generated here rather than copied
 /// into prose route tables.
 pub fn openapi_document(version: &str) -> Value {
+    openapi_document_for_views(version, &operation_views())
+}
+
+pub fn openapi_document_for_views(version: &str, operations: &[OperationView]) -> Value {
     let mut paths = serde_json::Map::new();
-    for operation in operations() {
+    for operation in operations {
         let path = paths
-            .entry(operation.path.to_string())
+            .entry(operation.path.clone())
             .or_insert_with(|| json!({}));
         let methods = path.as_object_mut().expect("operation path object");
         let method = operation.method.to_ascii_lowercase();

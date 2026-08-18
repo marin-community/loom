@@ -100,7 +100,7 @@ pub struct BranchView {
     #[serde(default = "default_title_provenance")]
     pub title_provenance: String,
     pub goal: String,
-    /// The agent's current-state message, set via `weaver status`, shown even
+    /// The agent's current-state message, set via `loom status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
     pub description: String,
     /// Every tag on the branch (the agent's `attention`, a watch's
@@ -1526,7 +1526,7 @@ pub struct DeleteIssueResult {
     pub deleted: bool,
 }
 
-/// The minimal live snapshot of a GitHub thread `weaver issue show` renders
+/// The minimal live snapshot of a GitHub thread `loom issues get` renders
 /// beside the weaver ledger: enough to notice "this was closed / re-titled
 /// while I worked". An agent that needs the discussion reads it with `gh`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1571,7 +1571,7 @@ impl From<Issue> for IssueView {
 // ---------------------------------------------------------------------------
 // Artifacts — named, versioned documents an agent (or the user) writes to
 // weaver. The envelope, a version row, and the full view (content + projected
-// references). The projection backs both the SPA chips and `weaver artifact
+// references). The projection backs both the SPA chips and `loom artifacts
 // show`. See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
@@ -2718,8 +2718,7 @@ pub struct AgentOneshotReq {
     pub effort: String,
 }
 
-/// Body for `POST /api/branches/{id}/issues`: create an issue claimed by a
-/// branch.
+/// Issue fields nested in the input to `POST /api/issues/create`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateIssueReq {
     pub title: String,
@@ -2767,8 +2766,8 @@ where
     Ok(Some(Option::<T>::deserialize(deserializer)?))
 }
 
-/// Body for `POST /api/repos/issues`: create an unclaimed repo-level backlog
-/// item.
+/// Body for `POST /api/issues/backlog/create`: create an unclaimed repo-level
+/// backlog item.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CreateRepoIssueReq {
     pub repo_root: String,

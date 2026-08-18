@@ -192,12 +192,13 @@ async fn operation_discovery_and_permission_request_round_trip() {
 
     let meta = session.api_meta().await.unwrap();
     assert_eq!(meta.product, "loom");
-    assert!(session
-        .operations()
-        .await
-        .unwrap()
+    let operations = session.operations().await.unwrap();
+    let request_operation = operations
         .iter()
-        .any(|operation| operation.id == "permissions.requests.create"));
+        .find(|operation| operation.id == "permissions.requests.create")
+        .expect("bound permission request operation is discoverable");
+    assert_eq!(request_operation.method, "POST");
+    assert_eq!(request_operation.path, "/api/permissions/requests/create");
 
     let request = session
         .create_permission_request(

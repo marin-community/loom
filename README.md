@@ -11,8 +11,7 @@ Loom has one public command surface:
   opens the sqlite database directly.
 
 `loom` owns the sqlite database at `~/.weaver/weaver.db`; every CLI, MCP, and
-browser operation goes through its REST API. The former `weaver` binary is a
-deprecated compatibility shim and is not a second product surface.
+browser operation goes through its REST API. There is no separate agent CLI.
 
 ## Getting Started
 
@@ -27,7 +26,7 @@ written for it to run; do them yourself if you'd rather.
    cargo build
    ```
 
-   This produces `target/debug/weaver` and `target/debug/loom`.
+   This produces `target/debug/loom`.
 
 2. **Put `loom` on the PATH.** Symlink it into a directory already on
    `$PATH` (e.g. `~/.local/bin`), so they stay current as you rebuild:
@@ -50,13 +49,12 @@ loom open           # open the web UI (http://127.0.0.1:7878)
 Run `loom help` for registered resource groups, `loom <group> --help` for
 syntax, `loom help --json` for machine-readable discovery, and inspect the
 running server's `/api/operations` or `/api/openapi.json` for its live surface.
-The same compile-time resource-bundle factories mount the API routers and
-register their CLI and MCP projections, so these discovery surfaces cannot
-silently become separate command catalogues. Ordinary verbs also declare their
-argument constraints beside their operation and authority metadata; Loom
-generates MCP tool descriptions and JSON Schema from those declarations. Typed
-or custom adapters remain available for streaming, PTY, file/stdin, interactive,
-and compatibility behavior.
+Each routine operation is one executable registration: descriptor, typed
+input/output, authority boundary, and implementation. Registration mounts the
+canonical `POST /api/<group>/<operation>` route; discovery, typed clients, and
+MCP enumerate that same entry. Argument constraints generate MCP tool
+descriptions and JSON Schema. Custom adapters remain available for streaming,
+PTY, file/stdin, interactive, and genuinely specialized bulk behavior.
 See [AGENTS.md](AGENTS.md) for the contributor build/test loop.
 
 ## Architecture
@@ -161,8 +159,8 @@ an alias for `list`).
 
 Issues remain intentional repository backlog or external mappings.
 `source_branch` records provenance;
-`claimed_branch` records the branch currently working the issue. The agent CLI
-defaults to this branch's claims plus the unclaimed backlog, while the Loom board
+`claimed_branch` records the branch currently working the issue. Loom's
+worktree-facing commands default to this branch's claims plus the unclaimed backlog, while the Loom board
 shows the repository. Batch commands use the same atomic API as the Issues pane:
 `loom issues close 7 9`, `loom issues reopen 7 9`,
 `loom issues tag set 7 9 area ui`,
@@ -293,7 +291,7 @@ Ordinary sessions are archived after ten days without activity by default. The
 GitHub poller checks sessions active within the last ten minutes every minute,
 the rest of the first quiet day every ten minutes, and older live sessions every
 hour. A merged PR is archived on the next poll for its activity tier. Both paths
-tear down the terminal and worktree while keeping the branch and its weaver
+tear down the terminal and worktree while keeping the branch and its Loom
 history, the same as the Archive button.
 Profiles can override the idle interval (an explicit `0` disables that TTL). To
 keep one session until you archive it yourself, choose **Disable auto-archive**
@@ -434,7 +432,7 @@ instructions. Edit both in
 Settings or use the operator CLI:
 
 ```sh
-weaver config ls
+loom settings list
 loom profile ls
 loom profile show default
 loom profile show ops --effective
@@ -472,7 +470,7 @@ live in [deploy/README.md](deploy/README.md). Registered settings share one
 [configuration precedence policy](docs/configuration.md): runtime override →
 deployment default → built-in default.
 
-## Developing weaver
+## Developing Loom
 
 See [AGENTS.md](AGENTS.md) for the proportional test loop, pre-commit gate,
 repository conventions, and PR workflow.

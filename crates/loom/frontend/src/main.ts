@@ -34,7 +34,7 @@ import './styles.css';
 
 const router = createRouter({
   history: createWebHistory(),
-  // `meta.title` is the tab-title section for a route ("Weaver - <title>",
+  // `meta.title` is the tab-title section for a route ("Loom - <title>",
   // composed centrally in App.vue). The `/s/:id…` pages intentionally carry none
   // — their section is the live session name, resolved from the fleet snapshot.
   routes: [

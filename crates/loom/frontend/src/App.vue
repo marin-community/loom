@@ -35,7 +35,7 @@ const { startFleetPoll, stopFleetPoll, sessionById } = useFleet();
 watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: true });
 
 // The browser tab title tracks what you're looking at, composed here in one
-// place so every route reads "Weaver - <Section>" consistently and several open
+// place so every route reads "Loom - <Section>" consistently and several open
 // loom tabs are tellable apart at a glance. The section comes from (in priority
 // order): the live session name on a `/s/:id` page (falling back to its branch
 // name), else the route's declared `meta.title`. The session name is read from the shared fleet
@@ -100,7 +100,7 @@ const globalCommands = computed<Command[]>(() =>
 );
 useCommandScope('global', 'Global', globalCommands, -100);
 useCommandDispatcher();
-const BASE_TITLE = 'Weaver';
+const BASE_TITLE = 'Loom';
 function withSection(section?: string | null): string {
   return section ? `${BASE_TITLE} - ${section}` : BASE_TITLE;
 }

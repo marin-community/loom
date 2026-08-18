@@ -1,16 +1,15 @@
 //! Human approval workflow for session-scoped external access expansions.
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     Extension, Json,
 };
-use serde::Deserialize;
 use serde_json::json;
 use weaver_api::operations::permissions as permission_operations;
 use weaver_api::{
-    CreateChannelMessageReq, CreatePermissionRequestReq, DecidePermissionRequestReq,
-    EffectivePermissionsView, PermissionRequestView,
+    CreateChannelMessageReq, DecidePermissionRequestReq, EffectivePermissionsView,
+    PermissionRequestView,
 };
 use weaver_core::{branch as branch_mod, tags};
 
@@ -22,13 +21,22 @@ use crate::{
 
 use super::{
     channels::{append_and_deliver, record_channel_message_event},
-    effective_repositories, require_session, validate_github_write, ApiResult, AppError, AppState,
-    OperationContext,
+    effective_repositories, register_operation, require_session, validate_github_write, ApiResult,
+    AppError, AppState, OperationContext, RegisteredOperation,
 };
 
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct PermissionRequestQuery {
-    state: Option<String>,
+pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
+    vec![
+        register_operation::<permission_operations::EffectiveGet, _, _>(
+            effective_permissions_operation,
+        ),
+        register_operation::<permission_operations::RequestsList, _, _>(
+            list_permission_requests_operation,
+        ),
+        register_operation::<permission_operations::RequestsCreate, _, _>(
+            create_permission_request_operation,
+        ),
+    ]
 }
 
 fn view(request: permission_requests::PermissionRequest) -> PermissionRequestView {
@@ -118,19 +126,6 @@ pub(super) async fn effective_permissions_operation(
     })
 }
 
-pub(super) async fn effective_permissions(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<EffectivePermissionsView>> {
-    effective_permissions_operation(
-        OperationContext::new(st, principal),
-        permission_operations::SessionInput { session: key },
-    )
-    .await
-    .map(Json)
-}
-
 pub(super) async fn list_permission_requests_operation(
     context: OperationContext,
     input: permission_operations::ListRequestsInput,
@@ -144,23 +139,6 @@ pub(super) async fn list_permission_requests_operation(
         .into_iter()
         .map(view)
         .collect())
-}
-
-pub(super) async fn list_permission_requests(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Query(query): Query<PermissionRequestQuery>,
-) -> ApiResult<Json<Vec<PermissionRequestView>>> {
-    list_permission_requests_operation(
-        OperationContext::new(st, principal),
-        permission_operations::ListRequestsInput {
-            session: key,
-            state: query.state,
-        },
-    )
-    .await
-    .map(Json)
 }
 
 pub(super) async fn create_permission_request_operation(
@@ -261,23 +239,6 @@ pub(super) async fn create_permission_request_operation(
     .await?;
     crate::slack::spawn_status_mirrors(st.clone(), branch.id);
     Ok(view(request))
-}
-
-pub(super) async fn create_permission_request(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<CreatePermissionRequestReq>,
-) -> ApiResult<(StatusCode, Json<PermissionRequestView>)> {
-    create_permission_request_operation(
-        OperationContext::new(st, principal),
-        permission_operations::CreateRequestInput {
-            session: key,
-            request: req,
-        },
-    )
-    .await
-    .map(|value| (StatusCode::CREATED, Json(value)))
 }
 
 pub(super) async fn decide_permission_request(

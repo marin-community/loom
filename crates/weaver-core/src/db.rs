@@ -139,7 +139,7 @@ pub fn run_dir(id: &str) -> PathBuf {
 }
 
 /// The `host:port` of a running loom dashboard, for building shareable URLs
-/// (e.g. the `weaver artifact write` write-back link). Resolved the way loom's
+/// (e.g. the `loom artifacts write` write-back link). Resolved the way Loom's
 /// own clients resolve it, minus a dependency on the loom crate:
 ///
 ///   1. `$WEAVER_API` (a URL or bare `host:port`, normalized to `host:port`),

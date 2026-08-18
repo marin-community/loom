@@ -13,7 +13,7 @@ fn embedded_script(path: &str) -> String {
     let (script, _) = tail
         .split_once("\nSH\n")
         .unwrap_or_else(|| panic!("unterminated {path} heredoc"));
-    script.replace("/usr/local/bin/weaver github-token", "printf broker-token")
+    script.replace("/usr/local/bin/loom github-token", "printf broker-token")
 }
 
 fn run_script(script: &str, env: &[(&str, &str)], args: &[&str]) -> Output {

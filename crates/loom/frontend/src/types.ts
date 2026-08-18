@@ -121,7 +121,7 @@ export interface Branch {
   title_provenance: 'derived' | 'generated' | 'user' | 'issue';
   goal: string;
   /** The agent's current-state message, set together with the `attention` tag
-   *  via `weaver status` (e.g. "Wired up routes; tests pass"). Shown even
+   *  via `loom status` (e.g. "Wired up routes; tests pass"). Shown even
    *  when the branch is calm. */
   description: string;
   /** Every tag on the branch: the agent's own loud `attention`, a watch's typed

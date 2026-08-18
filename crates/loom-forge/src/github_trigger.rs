@@ -634,7 +634,7 @@ pub trait GithubApi: Send + Sync {
     async fn react_to_comment(&self, repo: &str, comment_id: i64, content: &str) -> Result<()>;
 
     /// Fetch the live state of issue-or-PR `number` of `repo` — the minimal
-    /// snapshot `weaver issue show` renders beside the weaver ledger.
+    /// snapshot `loom issues get` renders beside the Loom ledger.
     async fn issue_state(&self, repo: &str, number: i64) -> Result<IssueState>;
 }
 

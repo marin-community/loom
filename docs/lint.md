@@ -813,7 +813,7 @@ Out of scope: generated output (`crates/loom/static/dist/**`, `Cargo.lock`,
 `package-lock.json`, any `*_pb2`/codegen), and anything `cargo fmt` / `clippy` /
 `tsc` already enforce. Security findings belong in `/security-review`.
 
-**Never flag scale or performance.** Weaver is a ~hundred-row SQLite app: N+1
+**Never flag scale or performance.** Loom is a ~hundred-row SQLite app: N+1
 queries, missing indexes, denormalization, join cost, allocation/clone overhead,
 and the like do not apply. Don't emit them.
 

@@ -25,7 +25,6 @@ loom-watch = { path = "../loom-watch" }
 loom-deliver = { path = "../loom-deliver" }
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
-weaver = { path = "../weaver" }
 smartdoc = { path = "../smartdoc" }
 tapestry = { path = "../tapestry" }
 anyhow = "1"

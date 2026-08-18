@@ -174,14 +174,33 @@ impl Client {
         serde_json::from_value(value).map_err(|e| anyhow!("decoding response from {path}: {e}"))
     }
 
-    /// Invoke one code-registered API operation through its generated REST
-    /// request and deserialize the associated output type.
+    /// Invoke one code-registered operation through Loom's canonical JSON boundary
+    /// and deserialize the associated output type.
     pub async fn invoke<O: ApiOperation>(&self, input: &O::Input) -> Result<O::Output> {
-        let request = O::request(input)?;
-        let method = Method::from_bytes(request.method.as_bytes())
-            .map_err(|error| anyhow!("invalid method for operation {}: {error}", O::SPEC.id))?;
-        self.send_typed(method, &request.path, request.body.as_ref())
-            .await
+        let value = serde_json::to_value(input)?;
+        let path = format!(
+            "/api/{}",
+            O::SPEC
+                .id
+                .split('.')
+                .map(Self::seg)
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        let value = self.invoke_value(O::SPEC.id, value).await?;
+        serde_json::from_value(value)
+            .map_err(|error| anyhow!("decoding response from {path}: {error}"))
+    }
+
+    /// Untyped counterpart used by generic adapters such as MCP.  The server
+    /// resolves `id` in its executable registry; adapters do not keep a second
+    /// callback table.
+    pub async fn invoke_value(&self, id: &str, input: Value) -> Result<Value> {
+        let path = format!(
+            "/api/{}",
+            id.split('.').map(Self::seg).collect::<Vec<_>>().join("/")
+        );
+        self.send(Method::POST, &path, Some(input)).await
     }
 
     // -- Sessions ---------------------------------------------------------
@@ -939,7 +958,7 @@ impl Client {
     //
     // Unlike the session-scoped `/api/sessions/{key}/artifacts*` routes (which
     // 404 without a live session — the dashboard's normal case), these work
-    // against the branch row directly: what the `weaver artifact` CLI needs,
+    // against the branch row directly: what the `loom artifacts` CLI needs,
     // since it may target a branch with no active session.
 
     /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
@@ -1030,7 +1049,7 @@ impl Client {
 
     // -- Branch-scoped discussion ---------------------------------------------
     //
-    // The twin of loom's session-scoped thread routes, for `weaver artifact
+    // The twin of Loom's session-scoped thread routes, for `loom artifacts
     // comment/resolve/threads`, which — like every other `weaver` command —
     // needs no live session.
 
@@ -1266,7 +1285,7 @@ impl Client {
 
     // -- Issues ---------------------------------------------------------------
 
-    /// Create an issue claimed by a branch (`POST /api/branches/{key}/issues`).
+    /// Create an issue claimed by a branch (`POST /api/issues/create`).
     pub async fn create_branch_issue(&self, key: &str, req: &CreateIssueReq) -> Result<IssueView> {
         self.invoke::<issue_operations::Create>(&issue_operations::CreateInput {
             branch: key.to_string(),
@@ -1276,14 +1295,14 @@ impl Client {
     }
 
     /// Create an unclaimed repo-level backlog item
-    /// (`POST /api/repos/issues`).
+    /// (`POST /api/issues/backlog/create`).
     pub async fn create_repo_issue(&self, req: &CreateRepoIssueReq) -> Result<IssueView> {
         self.invoke::<issue_operations::CreateBacklog>(req).await
     }
 
     /// Every issue in a repo (`scope: "repo"`), or just the unclaimed backlog
-    /// (`scope: "backlog"`) — the one fetch every `weaver issue ls` view
-    /// partitions client-side (`GET /api/repos/issues`).
+    /// (`scope: "backlog"`) — the one fetch every `loom issues list` view
+    /// partitions client-side (`POST /api/issues/list`).
     pub async fn list_repo_issues(
         &self,
         repo_root: &str,
@@ -1298,7 +1317,7 @@ impl Client {
         .await
     }
 
-    /// Get one issue by id (`GET /api/issues/{id}`).
+    /// Get one issue by id (`POST /api/issues/get`).
     pub async fn get_issue(&self, id: i64) -> Result<IssueView> {
         self.invoke::<issue_operations::Get>(&issue_operations::IdInput { id })
             .await
@@ -1330,7 +1349,7 @@ impl Client {
             .await
     }
 
-    /// Delete an issue (`DELETE /api/issues/{id}`).
+    /// Delete an issue (`POST /api/issues/delete`).
     pub async fn delete_issue(&self, id: i64) -> Result<Value> {
         let deleted = self
             .invoke::<issue_operations::Delete>(&issue_operations::IdInput { id })
@@ -1339,7 +1358,7 @@ impl Client {
     }
 
     /// Set (upsert) a free-form label on an issue
-    /// (`PUT /api/issues/{id}/tags/{key}`). Issue tags carry no
+    /// (`POST /api/issues/tags/set`). Issue tags carry no
     /// `attention`/`triage` ladder — every key is a quiet annotation.
     pub async fn set_issue_tag(
         &self,
@@ -1361,7 +1380,7 @@ impl Client {
         .await
     }
 
-    /// Clear a label on an issue (`DELETE /api/issues/{id}/tags/{key}`).
+    /// Clear a label on an issue (`POST /api/issues/tags/delete`).
     pub async fn clear_issue_tag(&self, id: i64, key: &str) -> Result<IssueView> {
         self.invoke::<issue_operations::DeleteTag>(&issue_operations::DeleteTagInput {
             id,

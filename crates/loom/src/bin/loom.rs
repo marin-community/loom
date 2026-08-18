@@ -8,19 +8,19 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
-use serde_json::{json, Value};
-use weaver::{
+use loom::agent_cli::{
     ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, ConfigCmd as AgentConfigCmd,
     IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd, TagCmd as AgentTagCmd,
 };
+use serde_json::{json, Value};
 use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, CreatePermissionRequestReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, DecidePermissionRequestReq,
-    DeleteSessionGroupReq, DeleteSessionSpaceReq, IssueAction, IssueActionsReq, MoveSessionsReq,
-    ReorderSessionLayoutReq, RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter, SessionGroupPreferenceReq,
-    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
-    SessionSearchStatus, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
+    DeleteSessionGroupReq, DeleteSessionSpaceReq, MoveSessionsReq, ReorderSessionLayoutReq,
+    RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
+    SearchSessionsOptions, SessionCreatorFilter, SessionGroupPreferenceReq, SessionLayoutItemKind,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
+    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
     UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
@@ -203,7 +203,7 @@ enum HostCmd {
     Completions { shell: clap_complete::Shell },
 }
 
-/// A typed invocation produced by a registered CLI bundle factory.
+/// A typed invocation produced by one of Loom's CLI command groups.
 #[allow(clippy::large_enum_variant)]
 enum RegisteredCliCommand {
     Summary,
@@ -218,10 +218,8 @@ enum RegisteredCliCommand {
     Artifacts(AgentArtifactCmd),
     Review(ReviewCmd),
     Issues(AgentIssueCmd),
-    IssueCompat(IssueCmd),
     Permissions(PermissionsCmd),
     GithubToken,
-    GithubCompat(GithubCmd),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -246,12 +244,6 @@ impl CliCommandFactory {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CliBundleFactory {
-    operation_bundle: &'static str,
-    commands: &'static [CliCommandFactory],
-}
-
 #[derive(Args)]
 struct HookArgs {
     #[arg(long)]
@@ -266,13 +258,7 @@ struct AttachArgs {
 macro_rules! registered_subcommands {
     ($build:ident, $parse:ident, $name:literal, $about:literal, $ty:ty, $variant:path) => {
         fn $build() -> Command {
-            let command =
-                <$ty as Subcommand>::augment_subcommands(Command::new($name).about($about));
-            if matches!($name, "issue" | "github") {
-                command.hide(true)
-            } else {
-                command
-            }
+            <$ty as Subcommand>::augment_subcommands(Command::new($name).about($about))
         }
 
         fn $parse(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
@@ -330,28 +316,12 @@ registered_subcommands!(
     RegisteredCliCommand::Issues
 );
 registered_subcommands!(
-    issue_compat_command,
-    parse_issue_compat_command,
-    "issue",
-    "Deprecated compatibility issue commands.",
-    IssueCmd,
-    RegisteredCliCommand::IssueCompat
-);
-registered_subcommands!(
     permissions_command,
     parse_permissions_command,
     "permissions",
     "Inspect effective access, request expansion, or decide requests.",
     PermissionsCmd,
     RegisteredCliCommand::Permissions
-);
-registered_subcommands!(
-    github_compat_command,
-    parse_github_compat_command,
-    "github",
-    "Deprecated compatibility GitHub access commands.",
-    GithubCmd,
-    RegisteredCliCommand::GithubCompat
 );
 
 fn summary_command() -> Command {
@@ -487,20 +457,12 @@ const ARTIFACT_CLI_COMMANDS: &[CliCommandFactory] = &[
     },
 ];
 
-const ISSUE_CLI_COMMANDS: &[CliCommandFactory] = &[
-    CliCommandFactory {
-        name: "issues",
-        aliases: &[],
-        build: issues_command,
-        parse: parse_issues_command,
-    },
-    CliCommandFactory {
-        name: "issue",
-        aliases: &[],
-        build: issue_compat_command,
-        parse: parse_issue_compat_command,
-    },
-];
+const ISSUE_CLI_COMMANDS: &[CliCommandFactory] = &[CliCommandFactory {
+    name: "issues",
+    aliases: &[],
+    build: issues_command,
+    parse: parse_issues_command,
+}];
 
 const PERMISSION_CLI_COMMANDS: &[CliCommandFactory] = &[
     CliCommandFactory {
@@ -515,82 +477,21 @@ const PERMISSION_CLI_COMMANDS: &[CliCommandFactory] = &[
         build: github_token_command,
         parse: parse_github_token_command,
     },
-    CliCommandFactory {
-        name: "github",
-        aliases: &[],
-        build: github_compat_command,
-        parse: parse_github_compat_command,
-    },
 ];
 
-const CLI_BUNDLE_FACTORIES: &[CliBundleFactory] = &[
-    CliBundleFactory {
-        operation_bundle: "sessions",
-        commands: SESSION_CLI_COMMANDS,
-    },
-    CliBundleFactory {
-        operation_bundle: "channels",
-        commands: CHANNEL_CLI_COMMANDS,
-    },
-    CliBundleFactory {
-        operation_bundle: "artifacts",
-        commands: ARTIFACT_CLI_COMMANDS,
-    },
-    CliBundleFactory {
-        operation_bundle: "issues",
-        commands: ISSUE_CLI_COMMANDS,
-    },
-    CliBundleFactory {
-        operation_bundle: "permissions",
-        commands: PERMISSION_CLI_COMMANDS,
-    },
+const CLI_COMMAND_GROUPS: &[&[CliCommandFactory]] = &[
+    SESSION_CLI_COMMANDS,
+    CHANNEL_CLI_COMMANDS,
+    ARTIFACT_CLI_COMMANDS,
+    ISSUE_CLI_COMMANDS,
+    PERMISSION_CLI_COMMANDS,
 ];
 
 fn registered_cli_factory(name: &str) -> Option<&'static CliCommandFactory> {
-    CLI_BUNDLE_FACTORIES
+    CLI_COMMAND_GROUPS
         .iter()
-        .flat_map(|bundle| bundle.commands)
+        .flat_map(|commands| commands.iter())
         .find(|factory| factory.accepts(name))
-}
-
-fn validate_cli_bundle_factories() {
-    weaver_api::validate_operation_bundle_coverage(
-        "CLI",
-        CLI_BUNDLE_FACTORIES
-            .iter()
-            .map(|factory| factory.operation_bundle),
-    )
-    .expect("invalid CLI bundle factory registry");
-    assert_eq!(
-        CLI_BUNDLE_FACTORIES.len(),
-        weaver_api::operation_bundles().count(),
-        "every operation bundle must register exactly one CLI bundle factory"
-    );
-    let mut command_names = std::collections::BTreeSet::new();
-    for bundle in CLI_BUNDLE_FACTORIES {
-        for factory in bundle.commands {
-            assert!(
-                command_names.insert(factory.name),
-                "duplicate registered CLI command {}",
-                factory.name
-            );
-        }
-        for operation in weaver_api::operations_for_bundle(bundle.operation_bundle) {
-            let Some(cli) = operation.cli else {
-                continue;
-            };
-            let root = cli
-                .strip_prefix("loom ")
-                .and_then(|command| command.split_whitespace().next())
-                .expect("registered CLI projections start with `loom `");
-            assert!(
-                bundle.commands.iter().any(|factory| factory.accepts(root)),
-                "operation {} projects an unregistered CLI command {}",
-                operation.id,
-                root
-            );
-        }
-    }
 }
 
 impl FromArgMatches for Cmd {
@@ -624,9 +525,8 @@ impl Subcommand for Cmd {
 }
 
 fn augment_registered_subcommands(mut command: Command) -> Command {
-    validate_cli_bundle_factories();
-    for bundle in CLI_BUNDLE_FACTORIES {
-        for factory in bundle.commands {
+    for commands in CLI_COMMAND_GROUPS {
+        for factory in *commands {
             let mut registered = (factory.build)();
             for alias in factory.aliases {
                 registered = registered.alias(*alias);
@@ -657,54 +557,6 @@ enum ServerCmd {
     Restart,
     /// Show the running server's status.
     Status,
-}
-
-/// Subcommands under `loom issue`.
-#[derive(Subcommand)]
-enum IssueCmd {
-    /// Show the repo's issue board (every issue across branches + backlog).
-    Ls {
-        /// Include closed issues.
-        #[arg(long)]
-        all: bool,
-        /// Show only the unclaimed backlog.
-        #[arg(long)]
-        backlog: bool,
-    },
-    /// Close every issue in one atomic command.
-    Close {
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Reopen every issue in one atomic command.
-    Reopen {
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Set one tag on every issue in one atomic command.
-    Tag {
-        #[arg(long)]
-        key: String,
-        #[arg(long)]
-        value: String,
-        #[arg(long, default_value = "")]
-        note: String,
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Remove one tag from every issue in one atomic command.
-    Untag {
-        #[arg(long)]
-        key: String,
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Permanently delete every issue in one atomic command.
-    #[command(alias = "rm")]
-    Delete {
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
 }
 
 /// Subcommands under `loom review`.
@@ -1036,27 +888,6 @@ enum SessionCmd {
         session: String,
         #[arg(long)]
         keep_branch: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum GithubCmd {
-    /// Grant or revoke one repository on a live session's refreshable token.
-    Access {
-        /// GitHub repository in owner/name form.
-        repository: String,
-        /// Session key. Defaults to the session containing this command.
-        #[arg(long)]
-        session: Option<String>,
-        /// `write` grants the App's reviewed write policy; `none` revokes it.
-        #[arg(long, default_value = "write")]
-        mode: String,
-    },
-    /// List explicit access overrides for a live session.
-    Ls {
-        /// Session key. Defaults to the session containing this command.
-        #[arg(long)]
-        session: Option<String>,
     },
 }
 
@@ -1786,7 +1617,7 @@ struct LaunchOpts {
     /// title, goal, and description.
     #[arg(long)]
     issue: Option<i64>,
-    /// Claim an existing weaver issue (by id) for this session: seeds the goal
+    /// Claim an existing Loom issue (by id) for this session: seeds the goal
     /// from it and moves it out of the repo backlog.
     #[arg(long)]
     claim: Option<i64>,
@@ -1835,15 +1666,15 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
     match command {
         RegisteredCliCommand::Summary => {
             configure_agent_client()?;
-            weaver::run_summary().await
+            loom::agent_cli::run_summary().await
         }
         RegisteredCliCommand::SelfContext => {
             configure_agent_client()?;
-            weaver::run_self().await
+            loom::agent_cli::run_self().await
         }
         RegisteredCliCommand::Status(cmd) => {
             configure_agent_client()?;
-            weaver::run_status(cmd).await
+            loom::agent_cli::run_status(cmd).await
         }
         RegisteredCliCommand::Sessions(cmd) => run_session(cmd).await,
         RegisteredCliCommand::Launch(opts) => cmd_launch(opts.into()).await,
@@ -1851,28 +1682,26 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
         RegisteredCliCommand::Attach(session) => cmd_attach(session).await,
         RegisteredCliCommand::Hook(event) => {
             configure_agent_client()?;
-            weaver::run_hook(event).await
+            loom::agent_cli::run_hook(event).await
         }
         RegisteredCliCommand::Channels(cmd) => {
             configure_agent_client()?;
-            weaver::run_channel(cmd).await
+            loom::agent_cli::run_channel(cmd).await
         }
         RegisteredCliCommand::Artifacts(cmd) => {
             configure_agent_client()?;
-            weaver::run_artifact(cmd).await
+            loom::agent_cli::run_artifact(cmd).await
         }
         RegisteredCliCommand::Review(cmd) => run_review(cmd).await,
         RegisteredCliCommand::Issues(cmd) => {
             configure_agent_client()?;
-            weaver::run_issue(cmd).await
+            loom::agent_cli::run_issue(cmd).await
         }
-        RegisteredCliCommand::IssueCompat(cmd) => run_issue(cmd).await,
         RegisteredCliCommand::Permissions(cmd) => run_permissions(cmd).await,
         RegisteredCliCommand::GithubToken => {
             configure_agent_client()?;
-            weaver::run_github_token().await
+            loom::agent_cli::run_github_token().await
         }
-        RegisteredCliCommand::GithubCompat(cmd) => run_github(cmd).await,
     }
 }
 
@@ -1882,7 +1711,7 @@ async fn run_host_cli(command: HostCmd) -> Result<()> {
         HostCmd::Doctor => run_doctor().await,
         HostCmd::Settings { cmd } => {
             configure_agent_client()?;
-            weaver::run_settings(cmd).await
+            loom::agent_cli::run_settings(cmd).await
         }
         HostCmd::Mcp { cmd } => run_mcp(cmd).await,
         HostCmd::Server { cmd } => run_server(cmd).await,
@@ -1910,7 +1739,7 @@ async fn run_host_cli(command: HostCmd) -> Result<()> {
 }
 
 fn configure_agent_client() -> Result<()> {
-    weaver::set_client_override(client::default()?)
+    loom::agent_cli::set_client_override(client::default()?)
 }
 
 fn run_help(topic: Option<String>, as_json: bool) -> Result<()> {
@@ -2156,37 +1985,6 @@ async fn run_server(cmd: ServerCmd) -> Result<()> {
         ServerCmd::Stop => cmd_stop().await,
         ServerCmd::Restart => cmd_restart().await,
         ServerCmd::Status => cmd_status().await,
-    }
-}
-
-/// Dispatch the `loom issue <verb>` subcommands.
-async fn run_issue(cmd: IssueCmd) -> Result<()> {
-    match cmd {
-        IssueCmd::Ls { all, backlog } => cmd_issues(all, backlog).await,
-        IssueCmd::Close { ids } => cmd_issue_action(ids, IssueAction::Close, "closed").await,
-        IssueCmd::Reopen { ids } => cmd_issue_action(ids, IssueAction::Reopen, "reopened").await,
-        IssueCmd::Tag {
-            key,
-            value,
-            note,
-            ids,
-        } => {
-            cmd_issue_action(
-                ids,
-                IssueAction::Tag {
-                    key,
-                    value,
-                    note,
-                    by: Some("manual".to_string()),
-                },
-                "tagged",
-            )
-            .await
-        }
-        IssueCmd::Untag { key, ids } => {
-            cmd_issue_action(ids, IssueAction::Untag { key }, "untagged").await
-        }
-        IssueCmd::Delete { ids } => cmd_issue_action(ids, IssueAction::Delete, "deleted").await,
     }
 }
 
@@ -2502,7 +2300,7 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         }
         SessionCmd::Tags { cmd } => {
             configure_agent_client()?;
-            weaver::run_tag(cmd).await
+            loom::agent_cli::run_tag(cmd).await
         }
         SessionCmd::Events { session, limit } => {
             if let Some(session) = session {
@@ -2518,10 +2316,10 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
                 Ok(())
             } else {
                 configure_agent_client()?;
-                weaver::run_events(limit).await
+                loom::agent_cli::run_events(limit).await
             }
         }
-        SessionCmd::Transcript { file, json } => weaver::run_chatlog(file, json),
+        SessionCmd::Transcript { file, json } => loom::agent_cli::run_chatlog(file, json),
         SessionCmd::Ls {
             archived,
             automation: _,
@@ -2579,46 +2377,6 @@ fn github_access_session(explicit: Option<String>) -> Result<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .context("not inside a loom session — pass the target explicitly with --session <session>")
-}
-
-async fn run_github(cmd: GithubCmd) -> Result<()> {
-    let client = client::default()?;
-    match cmd {
-        GithubCmd::Access {
-            repository,
-            session,
-            mode,
-        } => {
-            let session = github_access_session(session)?;
-            let grant = client
-                .set_session_github_access(
-                    &session,
-                    &weaver_api::SetSessionGithubAccessReq { repository, mode },
-                )
-                .await?;
-            println!(
-                "{} access for {} is {} (by {})",
-                session, grant.repository, grant.mode, grant.granted_by
-            );
-            Ok(())
-        }
-        GithubCmd::Ls { session } => {
-            let session = github_access_session(session)?;
-            let grants = client.session_github_access(&session).await?;
-            if grants.is_empty() {
-                println!("no explicit GitHub access overrides for {session}");
-                return Ok(());
-            }
-            println!("{:<42}  {:<6}  GRANTED BY", "REPOSITORY", "MODE");
-            for grant in grants {
-                println!(
-                    "{:<42}  {:<6}  {}",
-                    grant.repository, grant.mode, grant.granted_by
-                );
-            }
-            Ok(())
-        }
-    }
 }
 
 async fn layout_revision(client: &Client, requested: Option<i64>) -> Result<i64> {
@@ -3798,7 +3556,7 @@ fn base_url_from_domain(domain: &str) -> Option<String> {
 }
 
 /// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to
-/// loom's sqlite database directly (the same daemon-less path `weaver` uses);
+/// Loom's sqlite database directly through its daemon-less setup path;
 /// it does not need the loom daemon to be running.
 async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     let base_url = opts.base_url.trim_end_matches('/').to_string();
@@ -4746,7 +4504,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     if let Some(r) = managed_repo.as_deref() {
         println!("repo {r} — cloning it if loom doesn't have it yet...");
     }
-    // When an agent in a weaver session runs `loom session launch`,
+    // When an agent in a Loom session runs `loom sessions launch`,
     // `$WEAVER_BRANCH` is its own branch id — pass it so the tracking issue is
     // attributed to the launching (parent) agent. A human shell launch leaves it
     // unset.
@@ -4817,7 +4575,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     if let Some(n) = ws.tracking_issue {
         // Explicit claimed/imported work items remain attached while ordinary
         // coordination uses the session channel above.
-        println!("  work:   weaver issue #{n}  (explicit backlog/external mapping)");
+        println!("  work:   Loom issue #{n}  (explicit backlog/external mapping)");
     }
     println!("  attach: loom attach {id}");
     Ok(())
@@ -4904,14 +4662,14 @@ async fn cmd_session_poll(key: String) -> Result<()> {
     println!("  attention: {}", attention_summary(&ws));
     println!("  channel:   {}", str_field(&ws, "id"));
     if let Some(n) = ws.get("tracking_issue").and_then(Value::as_i64) {
-        println!("  track:     weaver issue #{n}");
+        println!("  track:     Loom issue #{n}");
     }
     println!("  activity:  {}", str_field(&ws, "last_activity_at"));
     Ok(())
 }
 
 /// `loom sessions wait` — block until the session finishes, is lost, or (unless
-/// `lifecycle_only`) its agent raises attention. Mirrors `weaver issue wait`.
+/// `lifecycle_only`) its agent raises attention.
 async fn cmd_session_wait(
     key: String,
     timeout: u64,
@@ -5131,80 +4889,6 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
             truncate(branch_str(&ws, "title"), 46),
         );
     }
-    Ok(())
-}
-
-async fn cmd_issues(all: bool, backlog: bool) -> Result<()> {
-    let client = client::default()?;
-    let cwd = std::env::current_dir()?;
-    let scope = if backlog { "backlog" } else { "repo" };
-    let path = format!(
-        "/api/repos/issues?cwd={}&all={all}&scope={scope}",
-        encode_query(&cwd.display().to_string()),
-    );
-    let rows = client
-        .get(&path)
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if rows.is_empty() {
-        println!("(no issues)");
-        return Ok(());
-    }
-    println!("{:<6}  {:<5}  {:<18}  TITLE", "ID", "STATE", "CLAIM");
-    for i in rows {
-        let id = i.get("id").and_then(Value::as_i64).unwrap_or(0);
-        let state = if str_field(&i, "status") == "open" {
-            "open"
-        } else {
-            "done"
-        };
-        let claim = i
-            .get("claimed_branch")
-            .and_then(Value::as_str)
-            .map(|b| b.strip_prefix("weaver/").unwrap_or(b))
-            .unwrap_or("(backlog)");
-        println!(
-            "{:<6}  {:<5}  {:<18}  {}",
-            format!("#{id}"),
-            state,
-            truncate(claim, 18),
-            truncate(str_field(&i, "title"), 50),
-        );
-    }
-    Ok(())
-}
-
-async fn cmd_issue_action(ids: Vec<i64>, action: IssueAction, verb: &str) -> Result<()> {
-    let count = ids.len();
-    let result = client::default()?
-        .issue_actions(&IssueActionsReq { ids, action })
-        .await?;
-    let affected = result.issues.len() + result.deleted_ids.len();
-    if affected != count {
-        bail!("server returned {affected} affected issues for a {count}-issue command");
-    }
-    println!(
-        "{verb} {affected} issue{}",
-        if affected == 1 { "" } else { "s" }
-    );
-    let ids = if result.deleted_ids.is_empty() {
-        result
-            .issues
-            .into_iter()
-            .map(|issue| issue.id)
-            .collect::<Vec<_>>()
-    } else {
-        result.deleted_ids
-    };
-    println!(
-        "{}",
-        ids.into_iter()
-            .map(|id| format!("#{id}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
     Ok(())
 }
 
@@ -6029,28 +5713,6 @@ mod tests {
                 }
             }) if name == "production"
         ));
-    }
-
-    #[test]
-    fn issue_bulk_commands_parse_multiple_ids() {
-        let Cli { cmd, .. } = Cli::try_parse_from([
-            "loom", "issue", "tag", "--key", "area", "--value", "ui", "41", "42",
-        ])
-        .unwrap();
-        match cmd {
-            Cmd::Registered(RegisteredCliCommand::IssueCompat(IssueCmd::Tag {
-                key,
-                value,
-                note,
-                ids,
-            })) => {
-                assert_eq!(key, "area");
-                assert_eq!(value, "ui");
-                assert!(note.is_empty());
-                assert_eq!(ids, vec![41, 42]);
-            }
-            _ => panic!("expected issue tag command"),
-        }
     }
 
     #[test]

@@ -99,13 +99,6 @@ fn tools() -> Value {
     Value::Array(tools)
 }
 
-async fn resolve_session(client: &weaver_api::Client, arguments: &Value) -> Result<String> {
-    match super::string_argument(arguments, "session")? {
-        Some(session) if session != "self" => Ok(session.to_string()),
-        _ => Ok(client.self_context().await?.session_id),
-    }
-}
-
 fn history_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
     let before = super::string_argument(arguments, "before")?;
     let limit = arguments
@@ -155,17 +148,17 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     let client = super::runtime_client("session")?;
     match name {
         "get" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let session = client.get_session(&id).await?;
             super::structured_result(&format!("session {id}"), &session)
         }
         "summary" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let summary = client.session_summary(&id).await?;
             super::structured_result(&format!("session {id} summary"), &summary)
         }
         "status_get" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let session = client.get_session(&id).await?;
             let attention = session
                 .branch
@@ -203,7 +196,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
             super::structured_result(&format!("status updated to {level}"), &value)
         }
         "history" | "search" => {
-            let id = resolve_session(&client, &arguments).await?;
+            let id = super::resolve_session_argument(&client, &arguments).await?;
             let (before, limit, kinds) = history_args(&arguments)?;
             let page = if name == "history" {
                 client

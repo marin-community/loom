@@ -114,8 +114,8 @@ and keeps the session pane warm behind it instead of squeezing two permanent
 panes into the viewport.
 
 Archive stops the runtime and removes the worktree while preserving the branch,
-conversation, placement, artifacts, and Weaver history. Remove deletes the
-session, runtime, worktree, Git branch, and Weaver history and returns claimed
+conversation, placement, artifacts, and Loom history. Remove deletes the
+session, runtime, worktree, Git branch, and Loom history and returns claimed
 issues to the backlog.
 
 ## Issues and Scratch

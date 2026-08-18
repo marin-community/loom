@@ -12,7 +12,7 @@ use crate::auth::Principal;
 use super::{artifact_meta, issue_views, principal_subject, require_session, ApiResult, AppState};
 
 /// Structured, server-authoritative catch-up for one session. This replaces
-/// client-side orchestration in the old `weaver summary` command.
+/// client-side orchestration in `loom summary`.
 pub(super) async fn get_session_summary(
     State(st): State<AppState>,
     Path(key): Path<String>,

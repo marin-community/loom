@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
-# loom — the weaver orchestrator — packaged for a reverse-proxy deploy.
+# Loom orchestrator packaged for a reverse-proxy deploy.
 
-# ---- build: loom + tapestry + weaver, plus the embedded Vue bundle ----
+# ---- build: Loom + Tapestry, plus the embedded Vue bundle ----
 FROM rust:1-bookworm AS build
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y --no-install-recommends nodejs sccache \
@@ -35,12 +35,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     set -eux; \
     ( cd crates/loom/frontend && npm ci && npm run build ); \
     if [ "$CARGO_PROFILE" = release ]; then \
-        cargo build --release -p loom -p tapestry -p weaver; TARGET_DIR=release; \
+        cargo build --release -p loom -p tapestry; TARGET_DIR=release; \
     else \
-        cargo build -p loom -p tapestry -p weaver; TARGET_DIR=debug; \
+        cargo build -p loom -p tapestry; TARGET_DIR=debug; \
     fi; \
     mkdir -p /out; \
-    cp "target/$TARGET_DIR/loom" "target/$TARGET_DIR/tapestry" "target/$TARGET_DIR/weaver" /out/; \
+    cp "target/$TARGET_DIR/loom" "target/$TARGET_DIR/tapestry" /out/; \
     cp -r crates/loom/static/dist /out/dist
 
 # ---- runtime: loom + the toolchain its agents shell out to ----
@@ -255,7 +255,7 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
       echo "Loom-managed GitHub auth is missing its session credential" >&2
       exit 1
     fi
-    token="$(/usr/local/bin/weaver github-token)" || exit $?
+    token="$(/usr/local/bin/loom github-token)" || exit $?
     ;;
   direct)
     # Loom sets direct only after injecting the launching user's Account token.
@@ -289,7 +289,7 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
       echo "Loom-managed GitHub auth is missing its session credential" >&2
       exit 1
     fi
-    GH_TOKEN="$(/usr/local/bin/weaver github-token)" || exit $?
+    GH_TOKEN="$(/usr/local/bin/loom github-token)" || exit $?
     export GH_TOKEN
     unset GITHUB_TOKEN
     ;;
@@ -440,8 +440,6 @@ EOF
 # (current_exe dir + /tapestry), so the two must land in the same directory.
 COPY --from=build /out/loom     /usr/local/bin/loom
 COPY --from=build /out/tapestry /usr/local/bin/tapestry
-# `weaver` is the agent-facing CLI loom injects into every session's PATH.
-COPY --from=build /out/weaver   /usr/local/bin/weaver
 COPY --from=build /out/dist     /app/static/dist
 
 # static_dir() defaults to a build-time CARGO_MANIFEST_DIR path that doesn't

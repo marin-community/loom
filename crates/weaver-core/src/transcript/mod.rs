@@ -15,7 +15,7 @@
 //! even after it's archived; Codex stores `~/.codex/sessions/.../rollout-*.jsonl`
 //! and records the cwd inside, so we match on that ([`codex_transcripts_for`]).
 //! This module is pure model + filesystem reads — no process spawning. loom calls
-//! it at archive time to capture the log; the `weaver chatlog` CLI renders on
+//! it at archive time to capture the log; the `loom sessions transcript` CLI renders on
 //! demand.
 
 pub mod claude;

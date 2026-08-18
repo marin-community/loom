@@ -1379,7 +1379,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
- "weaver",
  "weaver-api",
  "weaver-core",
 ]
@@ -3246,26 +3245,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "weaver"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "clap",
- "clap_complete",
- "loom",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "tempfile",
- "tokio",
- "weaver-api",
- "weaver-core",
 ]
 
 [[package]]

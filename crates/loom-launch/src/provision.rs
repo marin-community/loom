@@ -747,11 +747,11 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         github_repo = managed_slug.as_ref().map(|repo| repo.slug());
     }
 
-    // Claiming an existing weaver issue seeds the same three fields from it.
+    // Claiming an existing Loom issue seeds the same three fields from it.
     let repo_root_str = repo_root.display().to_string();
     let mut claimed_issue_id: Option<i64> = None;
     if let Some(issue_id) = req.claim_issue {
-        tracing::debug!(issue_id, "claiming existing weaver issue for new session");
+        tracing::debug!(issue_id, "claiming existing Loom issue for new session");
         let issue = weaver_core::issue::get(&st.db, issue_id)
             .await?
             .ok_or_else(|| ProvisionError::not_found("issue"))?;
@@ -1471,7 +1471,7 @@ async fn resolve_explicit_work_item(
     let source = parent_branch.unwrap_or(&branch.branch).to_string();
     tracing::debug!(branch = %branch.id, source = %source, "resolving explicit work item for session");
 
-    // Claiming an existing weaver issue: that issue *is* the tracker, so the
+    // Claiming an existing Loom issue: that issue *is* the tracker, so the
     // claim must actually land — otherwise we'd hand back a tracking id for an
     // issue this branch never claimed. Propagate failures rather than swallow.
     if let Some(id) = claim_issue {

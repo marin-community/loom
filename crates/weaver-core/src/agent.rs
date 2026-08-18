@@ -72,7 +72,7 @@ pub fn builtin_weaver_md() -> &'static str {
 /// Wrap `context` as the JSON a SessionStart hook prints to inject it into the
 /// agent's context (`hookSpecificOutput.additionalContext`). On a genuine
 /// start/resume/clear this carries the full WEAVER.md primer (the repo's own
-/// when present, else [`builtin_weaver_md`]); after a compaction the weaver hook
+/// when present, else [`builtin_weaver_md`]); after a compaction the Loom hook
 /// passes a concise re-orientation instead, so the agent isn't re-fed the whole
 /// guide every time its context is summarized.
 pub fn session_primer(context: &str) -> String {

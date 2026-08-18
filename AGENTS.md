@@ -15,8 +15,7 @@ One public command surface over Loom's REST API:
   detached Tapestry runtime supervisor + agent process, the monitor, and
   `git worktree` shell-outs. The only process that opens the sqlite db
   (`~/.weaver/weaver.db`) directly. Its CLI and MCP adapters are thin REST
-  clients of code-registered operations. `weaver` is a deprecated compatibility
-  shim, not a second product model.
+  clients of code-registered operations. There is no separate agent CLI.
 
 Diagram and module-by-module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

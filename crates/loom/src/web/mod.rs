@@ -14,18 +14,19 @@
 //!   `/terminal`.
 //! * `/api/branches` — list every tracked branch (with or without an active
 //!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
-//! * `/api/branches/{id}/issues` — list / POST issues for a branch.
-//! * `/api/issues/{id}` — GET / PATCH / DELETE an issue by id; `/close` and
-//!   `/reopen` expose the scalar lifecycle operations used by remote tools.
+//! * `/api/branches/{id}/issues` — list issues claimed by a branch.
+//! * `/api/issues/<operation>` — generated JSON operation routes such as
+//!   `/list`, `/get`, `/create`, `/close`, and `/tags/set`.
+//! * `/api/issues/{id}` — the specialized partial-update route for an issue.
 //! * `/api/issues/actions` — validate and atomically mutate a set of issues for
-//!   batch CLI and compatibility callers.
+//!   multi-item CLI and UI requests.
 //! * `/api/health` + `/api/health/live` are process-level liveness;
 //!   `/api/ready` checks the database and migration streams; `/metrics` exposes
 //!   bounded-label OpenMetrics; `/api/diagnostics` is the human-readable inventory.
 //! * `/api/repos/recent`, `/api/repos/branches`, `/api/settings` — unchanged.
 //!
 //! The `/api/hook` endpoint that used to exist is gone — agent hooks now go
-//! through `weaver hook --event …` which writes an `events` row consumed by
+//! through `loom hook --event …` which writes an `events` row consumed by
 //! the monitor loop.
 //!
 //! ### SessionView payload
@@ -48,7 +49,7 @@
 //!     "name": "feature-x",            // short label (weaver/<slug> with prefix stripped)
 //!     "title": "...",
 //!     "goal": "...",
-//!     "description": "...",         // current-state message (weaver status)
+//!     "description": "...",         // current-state message (loom status)
 //!     "tags": [                     // every (key, value) annotation on the branch
 //!       { "key": "attention", "value": "blocked", "note": "...",
 //!         "set_by": "agent", "set_at": "..." }
@@ -733,53 +734,13 @@ fn static_dir() -> PathBuf {
         .join("dist")
 }
 
-type ApiBundleMount = fn(Router<AppState>) -> Router<AppState>;
-
-#[derive(Clone, Copy)]
-struct ApiBundleFactory {
-    operation_bundle: &'static str,
-    mount: ApiBundleMount,
-}
-
-const API_BUNDLE_FACTORIES: &[ApiBundleFactory] = &[
-    ApiBundleFactory {
-        operation_bundle: "sessions",
-        mount: mount_session_api,
-    },
-    ApiBundleFactory {
-        operation_bundle: "channels",
-        mount: mount_channel_api,
-    },
-    ApiBundleFactory {
-        operation_bundle: "artifacts",
-        mount: mount_artifact_api,
-    },
-    ApiBundleFactory {
-        operation_bundle: "issues",
-        mount: mount_issue_api,
-    },
-    ApiBundleFactory {
-        operation_bundle: "permissions",
-        mount: mount_permission_api,
-    },
-];
-
 fn registered_api_router() -> Router<AppState> {
-    weaver_api::validate_operation_bundle_coverage(
-        "API",
-        API_BUNDLE_FACTORIES
-            .iter()
-            .map(|factory| factory.operation_bundle),
-    )
-    .expect("invalid API bundle factory registry");
-    assert_eq!(
-        API_BUNDLE_FACTORIES.len(),
-        weaver_api::operation_bundles().count(),
-        "every operation bundle must register exactly one API router factory"
-    );
-    API_BUNDLE_FACTORIES
-        .iter()
-        .fold(Router::new(), |router, factory| (factory.mount)(router))
+    let router = mount_registered_operations(Router::new());
+    let router = mount_session_api(router);
+    let router = mount_channel_api(router);
+    let router = mount_artifact_api(router);
+    let router = mount_issue_api(router);
+    mount_permission_api(router)
 }
 
 fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
@@ -1019,56 +980,14 @@ fn mount_artifact_api(router: Router<AppState>) -> Router<AppState> {
 }
 
 fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
-    validate_typed_bundle_bindings("issues", &issues::typed_bindings());
     router
-        .route(
-            "/branches/{id}/issues",
-            get(list_branch_issues).post(create_branch_issue),
-        )
+        .route("/branches/{id}/issues", get(list_branch_issues))
         .route("/issues", get(list_all_issues))
         .route("/issues/actions", post(issue_actions))
-        .route("/issues/{id}/close", post(close_issue))
-        .route("/issues/{id}/reopen", post(reopen_issue))
-        .route(
-            "/issues/{id}",
-            get(get_issue).patch(patch_issue).delete(delete_issue),
-        )
-        .route(
-            "/issues/{id}/tags/{key}",
-            axum::routing::put(set_issue_tag).delete(clear_issue_tag),
-        )
-        .route(
-            "/repos/issues",
-            get(list_repo_issues).post(create_repo_issue),
-        )
+        .route("/issues/{id}", axum::routing::patch(patch_issue))
 }
 
 fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
-    let typed = vec![
-        bind_operation::<weaver_api::operations::permissions::EffectiveGet, _, _>(
-            permission_requests::effective_permissions_operation,
-        ),
-        bind_operation::<weaver_api::operations::permissions::Explain, _, _>(
-            operations::explain_operation,
-        ),
-        bind_operation::<weaver_api::operations::permissions::RequestsList, _, _>(
-            permission_requests::list_permission_requests_operation,
-        ),
-        bind_operation::<weaver_api::operations::permissions::RequestsCreate, _, _>(
-            permission_requests::create_permission_request_operation,
-        ),
-    ];
-    let registered = validate_typed_bindings("permissions", &typed);
-    assert_eq!(
-        registered,
-        std::collections::BTreeSet::from([
-            "permissions.effective.get",
-            "permissions.explain",
-            "permissions.requests.create",
-            "permissions.requests.list",
-        ]),
-        "routine permission operations must retain typed server bindings"
-    );
     router
         .route("/meta", get(api_meta))
         .route("/operations", get(list_operations))
@@ -1083,11 +1002,6 @@ fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
             "/sessions/{id}/github/access",
             get(list_github_access).put(set_github_access),
         )
-        .route(
-            "/sessions/{id}/permission-requests",
-            get(list_permission_requests).post(create_permission_request),
-        )
-        .route("/sessions/{id}/permissions", get(effective_permissions))
         .route(
             "/permission-requests/{id}/decision",
             post(decide_permission_request),

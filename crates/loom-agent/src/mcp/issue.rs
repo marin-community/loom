@@ -1,15 +1,11 @@
-//! Repository-scoped work items projected from typed Loom API contracts.
+//! Repository work items projected directly from Loom's operation registry.
 
-use anyhow::{bail, Result};
-use serde::Deserialize;
+use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use weaver_api::operations::issues as issue_operations;
-use weaver_api::{CreateIssueReq, IssueActionsResult, TagReq};
+use weaver_api::{CreateIssueReq, IssueActionsResult, IssueView, TagReq};
 
-use super::{
-    Adapter, CapabilitySet, ProjectionFuture, RemoteProjection, RemoteToolBinding, ServeFuture,
-    ToolFuture,
-};
+use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_issue";
 const TOOL_NAMES: [&str; 8] = [
@@ -66,298 +62,162 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    super::validate_remote_tool_bindings(SERVER_NAME, &TOOL_NAMES, REMOTE_TOOLS);
     weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
-#[derive(Debug, Deserialize)]
-struct ListArgs {
-    #[serde(default)]
-    all: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct IdArgs {
-    id: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct AddArgs {
-    title: String,
-    #[serde(default)]
-    body: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SetTagArgs {
-    id: i64,
-    key: String,
-    value: String,
-    #[serde(default)]
-    note: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DeleteTagArgs {
-    id: i64,
-    key: String,
-}
-
-fn positive_id(id: i64) -> Result<i64> {
+fn positive_id(arguments: &Value) -> Result<i64> {
+    let id = arguments
+        .get("id")
+        .and_then(Value::as_i64)
+        .context("id must be a positive integer")?;
     if id <= 0 {
         bail!("id must be a positive integer");
     }
     Ok(id)
 }
 
-struct ListProjection;
-
-impl RemoteProjection for ListProjection {
-    type Operation = issue_operations::List;
-    type Args = ListArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "list";
-
-    fn project(
-        client: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::ListInput> {
-        Box::pin(async move {
+async fn project_input(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
+    match name {
+        "list" => {
+            let all = arguments
+                .get("all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let context = client.self_context().await?;
-            Ok(issue_operations::ListInput {
+            serde_json::to_value(issue_operations::ListInput {
                 repo_root: context.repo_root,
                 scope: issue_operations::ListScope::Repo,
-                all: args.all,
+                all,
             })
-        })
-    }
-
-    fn present(
-        _: &issue_operations::ListInput,
-        issues: Vec<weaver_api::IssueView>,
-    ) -> Result<Value> {
-        super::structured_result(&format!("{} work item(s)", issues.len()), &issues)
-    }
-}
-
-struct GetProjection;
-
-impl RemoteProjection for GetProjection {
-    type Operation = issue_operations::Get;
-    type Args = IdArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "get";
-
-    fn project(
-        _: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::IdInput> {
-        Box::pin(async move {
-            Ok(issue_operations::IdInput {
-                id: positive_id(args.id)?,
-            })
-        })
-    }
-
-    fn present(input: &issue_operations::IdInput, issue: weaver_api::IssueView) -> Result<Value> {
-        super::structured_result(&format!("work item {}", input.id), &issue)
-    }
-}
-
-struct AddProjection;
-
-impl RemoteProjection for AddProjection {
-    type Operation = issue_operations::Create;
-    type Args = AddArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "add";
-
-    fn project(
-        client: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::CreateInput> {
-        Box::pin(async move {
+            .map_err(Into::into)
+        }
+        "add" => {
+            let title = arguments
+                .get("title")
+                .and_then(Value::as_str)
+                .context("title must be a non-empty string")?;
+            if title.trim().is_empty() {
+                bail!("title must be a non-empty string");
+            }
+            let body = arguments
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let context = client.self_context().await?;
-            Ok(issue_operations::CreateInput {
+            serde_json::to_value(issue_operations::CreateInput {
                 branch: context.branch_id,
                 request: CreateIssueReq {
-                    title: args.title,
-                    body: args.body,
+                    title: title.to_string(),
+                    body: body.to_string(),
                     ..Default::default()
                 },
             })
-        })
-    }
-
-    fn present(_: &issue_operations::CreateInput, issue: weaver_api::IssueView) -> Result<Value> {
-        super::structured_result(&format!("created work item {}", issue.id), &issue)
-    }
-}
-
-macro_rules! status_projection {
-    ($projection:ident, $operation:ty, $tool:literal, $past:literal) => {
-        struct $projection;
-
-        impl RemoteProjection for $projection {
-            type Operation = $operation;
-            type Args = IdArgs;
-
-            const ADAPTER: &'static str = "issue";
-            const TOOL: &'static str = $tool;
-
-            fn project(
-                _: weaver_api::Client,
-                args: Self::Args,
-            ) -> ProjectionFuture<issue_operations::IdInput> {
-                Box::pin(async move {
-                    Ok(issue_operations::IdInput {
-                        id: positive_id(args.id)?,
-                    })
-                })
-            }
-
-            fn present(
-                input: &issue_operations::IdInput,
-                issue: weaver_api::IssueView,
-            ) -> Result<Value> {
-                let result = IssueActionsResult {
-                    issues: vec![issue],
-                    deleted_ids: Vec::new(),
-                };
-                super::structured_result(&format!("{} work item {}", $past, input.id), &result)
-            }
+            .map_err(Into::into)
         }
-    };
-}
-
-status_projection!(CloseProjection, issue_operations::Close, "close", "closed");
-status_projection!(
-    ReopenProjection,
-    issue_operations::Reopen,
-    "reopen",
-    "reopened"
-);
-
-struct DeleteProjection;
-
-impl RemoteProjection for DeleteProjection {
-    type Operation = issue_operations::Delete;
-    type Args = IdArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "delete";
-
-    fn project(
-        _: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::IdInput> {
-        Box::pin(async move {
-            Ok(issue_operations::IdInput {
-                id: positive_id(args.id)?,
-            })
-        })
-    }
-
-    fn present(
-        input: &issue_operations::IdInput,
-        _: weaver_api::DeleteIssueResult,
-    ) -> Result<Value> {
-        let result = IssueActionsResult {
-            issues: Vec::new(),
-            deleted_ids: vec![input.id],
-        };
-        super::structured_result(&format!("deleted work item {}", input.id), &result)
-    }
-}
-
-struct SetTagProjection;
-
-impl RemoteProjection for SetTagProjection {
-    type Operation = issue_operations::SetTag;
-    type Args = SetTagArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "tag_set";
-
-    fn project(
-        _: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::SetTagInput> {
-        Box::pin(async move {
-            Ok(issue_operations::SetTagInput {
-                id: positive_id(args.id)?,
-                key: args.key,
+        "tag_set" => {
+            let id = positive_id(&arguments)?;
+            serde_json::to_value(issue_operations::SetTagInput {
+                id,
+                key: super::required_string_argument(&arguments, "key")?.to_string(),
                 request: TagReq {
-                    value: args.value,
-                    note: args.note,
+                    value: super::required_string_argument(&arguments, "value")?.to_string(),
+                    note: arguments
+                        .get("note")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
                     by: Some("agent".to_string()),
                 },
             })
+            .map_err(Into::into)
+        }
+        "tag_delete" => serde_json::to_value(issue_operations::DeleteTagInput {
+            id: positive_id(&arguments)?,
+            key: arguments
+                .get("key")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .context("key must be a non-empty string")?
+                .to_string(),
         })
-    }
-
-    fn present(
-        input: &issue_operations::SetTagInput,
-        issue: weaver_api::IssueView,
-    ) -> Result<Value> {
-        let result = IssueActionsResult {
-            issues: vec![issue],
-            deleted_ids: Vec::new(),
-        };
-        super::structured_result(&format!("tagged work item {}", input.id), &result)
+        .map_err(Into::into),
+        "get" | "close" | "reopen" | "delete" => {
+            positive_id(&arguments)?;
+            Ok(arguments)
+        }
+        _ => Ok(arguments),
     }
 }
 
-struct DeleteTagProjection;
-
-impl RemoteProjection for DeleteTagProjection {
-    type Operation = issue_operations::DeleteTag;
-    type Args = DeleteTagArgs;
-
-    const ADAPTER: &'static str = "issue";
-    const TOOL: &'static str = "tag_delete";
-
-    fn project(
-        _: weaver_api::Client,
-        args: Self::Args,
-    ) -> ProjectionFuture<issue_operations::DeleteTagInput> {
-        Box::pin(async move {
-            Ok(issue_operations::DeleteTagInput {
-                id: positive_id(args.id)?,
-                key: args.key,
-            })
-        })
-    }
-
-    fn present(
-        input: &issue_operations::DeleteTagInput,
-        issue: weaver_api::IssueView,
-    ) -> Result<Value> {
-        let result = IssueActionsResult {
-            issues: vec![issue],
-            deleted_ids: Vec::new(),
-        };
-        super::structured_result(&format!("removed tag from work item {}", input.id), &result)
+fn present(name: &str, input: &Value, output: Value) -> Result<Value> {
+    match name {
+        "list" => {
+            let issues: Vec<IssueView> = serde_json::from_value(output)?;
+            super::structured_result(&format!("{} work item(s)", issues.len()), &issues)
+        }
+        "get" | "add" => {
+            let issue: IssueView = serde_json::from_value(output)?;
+            let summary = if name == "add" {
+                format!("created work item {}", issue.id)
+            } else {
+                format!("work item {}", issue.id)
+            };
+            super::structured_result(&summary, &issue)
+        }
+        "close" | "reopen" => {
+            let issue: IssueView = serde_json::from_value(output)?;
+            let result = IssueActionsResult {
+                issues: vec![issue],
+                deleted_ids: Vec::new(),
+            };
+            let id = input["id"].as_i64().unwrap_or_default();
+            let past = if name == "close" {
+                "closed"
+            } else {
+                "reopened"
+            };
+            super::structured_result(&format!("{past} work item {id}"), &result)
+        }
+        "delete" => {
+            let id = input["id"].as_i64().unwrap_or_default();
+            let result = IssueActionsResult {
+                issues: Vec::new(),
+                deleted_ids: vec![id],
+            };
+            super::structured_result(&format!("deleted work item {id}"), &result)
+        }
+        "tag_set" | "tag_delete" => {
+            let issue: IssueView = serde_json::from_value(output)?;
+            let id = issue.id;
+            let result = IssueActionsResult {
+                issues: vec![issue],
+                deleted_ids: Vec::new(),
+            };
+            let action = if name == "tag_set" {
+                "tagged"
+            } else {
+                "removed tag from"
+            };
+            super::structured_result(&format!("{action} work item {id}"), &result)
+        }
+        _ => super::structured_result("Loom operation complete", &output),
     }
 }
-
-const REMOTE_TOOLS: &[RemoteToolBinding] = &[
-    RemoteToolBinding::new::<ListProjection>(),
-    RemoteToolBinding::new::<GetProjection>(),
-    RemoteToolBinding::new::<AddProjection>(),
-    RemoteToolBinding::new::<CloseProjection>(),
-    RemoteToolBinding::new::<ReopenProjection>(),
-    RemoteToolBinding::new::<DeleteProjection>(),
-    RemoteToolBinding::new::<SetTagProjection>(),
-    RemoteToolBinding::new::<DeleteTagProjection>(),
-];
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
-    Box::pin(async move { super::call_remote_tool("issue", REMOTE_TOOLS, &name, arguments).await })
+    Box::pin(async move {
+        // Resolution comes from the same descriptor used by tools/list.  The
+        // match above only performs the few input/presentation projections;
+        // it is not a second invocation registry.
+        weaver_api::operation_for_mcp(SERVER_NAME, &name)
+            .with_context(|| format!("unknown issue tool '{name}'"))?;
+        let client = super::runtime_client("issue")?;
+        let input = project_input(&client, &name, arguments).await?;
+        let output =
+            super::call_registered_tool("issue", SERVER_NAME, &name, input.clone()).await?;
+        present(&name, &input, output)
+    })
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -369,10 +229,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn issue_surface_is_registered_by_risk() {
+    fn issue_surface_is_derived_from_operation_descriptors() {
         assert_eq!(tools().as_array().unwrap().len(), TOOL_NAMES.len());
-        assert_eq!(REMOTE_TOOLS.len(), TOOL_NAMES.len());
         assert_eq!(expand_tool_set("loom/issues/read@v1").unwrap().len(), 2);
         assert_eq!(expand_tool_set("loom/issues/write@v1").unwrap().len(), 6);
+        for name in TOOL_NAMES {
+            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
+        }
+    }
+
+    #[test]
+    fn positive_issue_id_is_accepted() {
+        let arguments = serde_json::json!({"id": 7});
+        assert_eq!(positive_id(&arguments).unwrap(), 7);
     }
 }

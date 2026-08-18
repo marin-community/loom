@@ -18,10 +18,10 @@ pub use client::Client;
 pub use dto::*;
 pub use operations::{
     all_session_capabilities, mcp_tools, mcp_tools_ordered, operation, operation_bundles,
-    operation_for_request, operation_input_schema, operation_views, operations,
-    operations_for_bundle, session_capabilities_from_mcp, validate_operation_bundle_coverage,
-    validate_operation_registry, ActorPolicy, ApiMetaView, ApiOperation, ArgumentDefault,
-    ArgumentKind, ArgumentSpec, ArgumentView, McpProjection, McpProjectionView, OperationBundle,
-    OperationBundleFactory, OperationRequest, OperationRisk, OperationScope, OperationSpec,
-    OperationView, OPERATION_BUNDLE_FACTORIES,
+    operation_for_mcp, operation_for_request, operation_input_schema, operation_views, operations,
+    operations_for_bundle, session_capabilities_from_mcp, validate_operation_registry, ActorPolicy,
+    ApiMetaView, ApiOperation, ArgumentDefault, ArgumentKind, ArgumentSpec, ArgumentView,
+    HttpBinding, McpProjection, McpProjectionView, OperationBundle, OperationBundleFactory,
+    OperationRequest, OperationRisk, OperationScope, OperationSpec, OperationView,
+    OPERATION_BUNDLE_FACTORIES,
 };

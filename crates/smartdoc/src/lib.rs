@@ -14,7 +14,7 @@
 //! The crate is deliberately generic: it knows the *syntax* of a reference but
 //! nothing about where its status comes from. weaver-core supplies the probe
 //! data (issue title/status/claim, …); the artifact `GET` returns the resulting
-//! projection so the SPA chips and a terminal `weaver artifact show` render the
+//! projection so the SPA chips and a terminal `loom artifacts get` render the
 //! exact same join — render-time projection, structure in the doc, state in the
 //! DB.
 //!

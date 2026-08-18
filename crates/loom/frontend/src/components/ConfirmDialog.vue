@@ -91,7 +91,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onKeydown));
   <Teleport to="body">
     <div
       v-if="open"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-canvas/75 p-4"
+      class="fixed inset-0 z-[70] flex items-center justify-center bg-canvas/75 p-4"
       data-testid="confirm-dialog-backdrop"
       @mousedown.self="!busy && emit('cancel')"
     >

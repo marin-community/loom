@@ -472,7 +472,7 @@ async fn handle_trigger(
     };
 
     // 11. Wire the branch to the thread: the `github` tag is what
-    //     `github::sync_status_comment` reads to mirror every `weaver status`
+    //     `github::sync_status_comment` reads to mirror every `loom status`
     //     write back here. Stamped before the reply so a failed reply still
     //     wires — the first status write then posts the card instead. Left
     //     untouched when already wired to this thread (a relaunch): the tag's

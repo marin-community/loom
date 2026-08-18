@@ -1339,7 +1339,7 @@ pub async fn install_hooks(work_dir: &Path, loom_bin: &str, mode: HookMode) -> R
 /// instead of stalling — or *quitting* — at a prompt no human can answer.
 ///
 /// On a fresh, persisted container HOME these gates fire in sequence and each
-/// wedges the session (it sits at "launching" with no `weaver status`, worktree
+/// wedges the session (it sits at "launching" with no `loom status`, worktree
 /// idle). Each gate is just state Claude records after a human answers once; we
 /// write the same state ahead of time. Everything here is additive and
 /// idempotent — only missing/false gates are set, existing config is preserved —

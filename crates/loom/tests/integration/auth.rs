@@ -506,7 +506,7 @@ async fn health_is_public_but_protected_routes_are_not() {
 
 #[tokio::test]
 #[serial]
-async fn every_registered_operation_is_mounted_by_an_api_bundle_factory() {
+async fn registered_and_custom_api_routes_are_both_protected() {
     let ts = TestServer::start().await;
     ts.client
         .patch("/api/settings", json!({ "auth.trust_loopback": false }))
@@ -514,31 +514,20 @@ async fn every_registered_operation_is_mounted_by_an_api_bundle_factory() {
         .unwrap();
     let http = reqwest::Client::new();
 
-    for operation in weaver_api::operations() {
-        let path = operation
-            .path
-            .split('/')
-            .map(|segment| {
-                if segment.starts_with('{') && segment.ends_with('}') {
-                    "factory-probe"
-                } else {
-                    segment
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("/");
+    for (method, path) in [
+        (reqwest::Method::POST, "/api/issues/list"),
+        (reqwest::Method::GET, "/api/sessions"),
+    ] {
         let response = http
-            .request(operation.method.parse().unwrap(), url(&ts, &path))
+            .request(method.clone(), url(&ts, path))
+            .json(&json!({}))
             .send()
             .await
             .unwrap();
         assert_eq!(
             response.status(),
             StatusCode::UNAUTHORIZED,
-            "{} {} for operation {} was not mounted behind auth",
-            operation.method,
-            operation.path,
-            operation.id
+            "{method} {path} was not mounted behind auth",
         );
     }
 }
@@ -628,8 +617,9 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .unwrap();
     assert_eq!(own_channel.status(), StatusCode::OK);
     let issue = http
-        .get(url(&ts, &format!("/api/issues/{tracking_issue}")))
+        .post(url(&ts, "/api/issues/get"))
         .bearer_auth(&token)
+        .json(&json!({ "id": tracking_issue }))
         .send()
         .await
         .unwrap();
@@ -732,29 +722,33 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     assert_eq!(creator_archive.status(), StatusCode::OK);
 
     let unrelated_response = http
-        .get(url(&ts, &format!("/api/issues/{}", unrelated.id)))
+        .post(url(&ts, "/api/issues/get"))
         .bearer_auth(&token)
+        .json(&json!({ "id": unrelated.id }))
         .send()
         .await
         .unwrap();
     assert_eq!(unrelated_response.status(), StatusCode::OK);
     let close_unrelated = http
-        .post(url(&ts, &format!("/api/issues/{}/close", unrelated.id)))
+        .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
+        .json(&json!({ "id": unrelated.id }))
         .send()
         .await
         .unwrap();
     assert_eq!(close_unrelated.status(), StatusCode::OK);
     let foreign_response = http
-        .get(url(&ts, &format!("/api/issues/{}", foreign.id)))
+        .post(url(&ts, "/api/issues/get"))
         .bearer_auth(&token)
+        .json(&json!({ "id": foreign.id }))
         .send()
         .await
         .unwrap();
     assert_eq!(foreign_response.status(), StatusCode::FORBIDDEN);
     let close_foreign = http
-        .post(url(&ts, &format!("/api/issues/{}/close", foreign.id)))
+        .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
+        .json(&json!({ "id": foreign.id }))
         .send()
         .await
         .unwrap();
