@@ -644,7 +644,6 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
         "WEAVER_CLAUDE_ACP_CMD",
         &crate::fixtures::fake_acp_agent_cmd(),
     );
-    let _github_token = EnvVarGuard::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
     ts.client
         .post(
@@ -663,6 +662,9 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
                 "prelude": "none"
             }),
         )
+        .await
+        .unwrap();
+    loom::profile::env_set(&ts.state.db, "ops", "GH_TOKEN", "test-token")
         .await
         .unwrap();
 

@@ -3838,9 +3838,12 @@ async fn preview_renders_the_journal_tail_as_text() {
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_codex_launches_over_codex_acp() {
-    // A builtin launch passes the GitHub-token gate; CI has no ambient token.
-    let _token = EnvVarSet::set("GH_TOKEN", "test-token");
     let ts = TestServer::start().await;
+    // A builtin launch passes the GitHub-token gate through Loom's resolved
+    // profile environment, never through the test runner's ambient identity.
+    loom::profile::env_set(&ts.state.db, "default", "GH_TOKEN", "test-token")
+        .await
+        .unwrap();
     weaver_core::config::apply(
         &ts.state.db,
         &[("acp.codex_cmd".to_string(), Some(agent_cmd()))],
