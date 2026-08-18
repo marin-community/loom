@@ -5,7 +5,7 @@
 //! help, capability policy, and adapters can join on one key instead of
 //! maintaining unrelated command catalogues.
 
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,6 +218,56 @@ pub struct OperationSpec {
     pub capabilities: &'static [&'static str],
 }
 
+/// Exact REST request emitted by a typed API operation.
+///
+/// Operation declarations generate these request builders alongside their
+/// discoverable metadata. Keeping the builder typed avoids a reflective
+/// `Value` walker while still giving [`crate::Client`] one generic invocation
+/// path.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperationRequest {
+    pub method: &'static str,
+    pub path: String,
+    pub body: Option<Value>,
+}
+
+impl OperationRequest {
+    pub fn without_body(operation: &'static OperationSpec, path: impl Into<String>) -> Self {
+        Self {
+            method: operation.method,
+            path: path.into(),
+            body: None,
+        }
+    }
+
+    pub fn json<T: Serialize>(
+        operation: &'static OperationSpec,
+        path: impl Into<String>,
+        body: &T,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            method: operation.method,
+            path: path.into(),
+            body: Some(serde_json::to_value(body)?),
+        })
+    }
+}
+
+/// A compile-time API request/response contract bound to one registered
+/// operation identity.
+///
+/// Server handlers bind to this identity in `loom`; remote callers execute it
+/// through [`crate::Client::invoke`]. Concrete application code stays typed —
+/// JSON erasure is confined to the generated REST request and response edges.
+pub trait ApiOperation: Send + Sync + 'static {
+    type Input: Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
+
+    const SPEC: &'static OperationSpec;
+
+    fn request(input: &Self::Input) -> anyhow::Result<OperationRequest>;
+}
+
 /// One first-party resource bundle projected across Loom's transports.
 ///
 /// Factories keep registration explicit and deterministic while allowing each
@@ -392,6 +442,27 @@ macro_rules! repository_operation {
     }};
 }
 
+/// Bind one addressable descriptor to concrete request/response types and its
+/// exact generated REST encoder. Resource modules keep these declarations next
+/// to the argument and authority metadata that defines the public operation.
+macro_rules! typed_api_operation {
+    ($name:ident, $spec:ident, $input:ty, $output:ty, $request:expr) => {
+        #[derive(Debug, Clone, Copy)]
+        pub struct $name;
+
+        impl ApiOperation for $name {
+            type Input = $input;
+            type Output = $output;
+
+            const SPEC: &'static OperationSpec = &$spec;
+
+            fn request(input: &Self::Input) -> anyhow::Result<OperationRequest> {
+                ($request)(input)
+            }
+        }
+    };
+}
+
 const fn mcp(server: &'static str, tool: &'static str) -> Option<McpProjection> {
     Some(McpProjection {
         server,
@@ -414,8 +485,8 @@ const fn described_mcp(
 
 mod artifacts;
 mod channels;
-mod issues;
-mod permissions;
+pub mod issues;
+pub mod permissions;
 mod sessions;
 pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[
     sessions::bundle,

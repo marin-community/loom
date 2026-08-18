@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use weaver_api::operations::permissions as permission_operations;
 use weaver_api::{
     CreateChannelMessageReq, CreatePermissionRequestReq, DecidePermissionRequestReq,
     EffectivePermissionsView, PermissionRequestView,
@@ -22,6 +23,7 @@ use crate::{
 use super::{
     channels::{append_and_deliver, record_channel_message_event},
     effective_repositories, require_session, validate_github_write, ApiResult, AppError, AppState,
+    OperationContext,
 };
 
 const MAX_REASON_LEN: usize = 4_096;
@@ -78,10 +80,12 @@ fn validate_state(state: Option<&str>) -> ApiResult<Option<&str>> {
     }
 }
 
-pub(super) async fn effective_permissions(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<EffectivePermissionsView>> {
+pub(super) async fn effective_permissions_operation(
+    context: OperationContext,
+    input: permission_operations::SessionInput,
+) -> ApiResult<EffectivePermissionsView> {
+    let st = context.state;
+    let key = input.session;
     let (session, _) = require_session(&st.db, &key).await?;
     let github_repositories = effective_repositories(&st.db, &session)
         .await
@@ -107,37 +111,68 @@ pub(super) async fn effective_permissions(
         })
         .map(|operation| operation.id.to_string())
         .collect();
-    Ok(Json(EffectivePermissionsView {
+    Ok(EffectivePermissionsView {
         session_id: session.id,
         actor: "session_self".to_string(),
         operations,
         github_repositories,
         pending_requests,
-    }))
+    })
+}
+
+pub(super) async fn effective_permissions(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(key): Path<String>,
+) -> ApiResult<Json<EffectivePermissionsView>> {
+    effective_permissions_operation(
+        OperationContext::new(st, principal),
+        permission_operations::SessionInput { session: key },
+    )
+    .await
+    .map(Json)
+}
+
+pub(super) async fn list_permission_requests_operation(
+    context: OperationContext,
+    input: permission_operations::ListRequestsInput,
+) -> ApiResult<Vec<PermissionRequestView>> {
+    let st = context.state;
+    let key = input.session;
+    let (session, _) = require_session(&st.db, &key).await?;
+    let state = validate_state(input.state.as_deref())?;
+    Ok(permission_requests::list(&st.db, &session.id, state)
+        .await?
+        .into_iter()
+        .map(view)
+        .collect())
 }
 
 pub(super) async fn list_permission_requests(
     State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(key): Path<String>,
     Query(query): Query<PermissionRequestQuery>,
 ) -> ApiResult<Json<Vec<PermissionRequestView>>> {
-    let (session, _) = require_session(&st.db, &key).await?;
-    let state = validate_state(query.state.as_deref())?;
-    Ok(Json(
-        permission_requests::list(&st.db, &session.id, state)
-            .await?
-            .into_iter()
-            .map(view)
-            .collect(),
-    ))
+    list_permission_requests_operation(
+        OperationContext::new(st, principal),
+        permission_operations::ListRequestsInput {
+            session: key,
+            state: query.state,
+        },
+    )
+    .await
+    .map(Json)
 }
 
-pub(super) async fn create_permission_request(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<CreatePermissionRequestReq>,
-) -> ApiResult<(StatusCode, Json<PermissionRequestView>)> {
+pub(super) async fn create_permission_request_operation(
+    context: OperationContext,
+    input: permission_operations::CreateRequestInput,
+) -> ApiResult<PermissionRequestView> {
+    let st = context.state;
+    let principal = context.principal;
+    let key = input.session;
+    let req = input.request;
     let (session, branch) = require_session(&st.db, &key).await?;
     if req.kind.trim() != permission_requests::GITHUB_REPOSITORY_KIND {
         return Err(AppError::bad_request("kind must be 'github_repository'"));
@@ -226,7 +261,24 @@ pub(super) async fn create_permission_request(
     )
     .await?;
     crate::slack::spawn_status_mirrors(st.clone(), branch.id);
-    Ok((StatusCode::CREATED, Json(view(request))))
+    Ok(view(request))
+}
+
+pub(super) async fn create_permission_request(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<CreatePermissionRequestReq>,
+) -> ApiResult<(StatusCode, Json<PermissionRequestView>)> {
+    create_permission_request_operation(
+        OperationContext::new(st, principal),
+        permission_operations::CreateRequestInput {
+            session: key,
+            request: req,
+        },
+    )
+    .await
+    .map(|value| (StatusCode::CREATED, Json(value)))
 }
 
 pub(super) async fn decide_permission_request(

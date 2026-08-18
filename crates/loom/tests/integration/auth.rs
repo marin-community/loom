@@ -731,20 +731,34 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .unwrap();
     assert_eq!(creator_archive.status(), StatusCode::OK);
 
-    let unrelated = http
+    let unrelated_response = http
         .get(url(&ts, &format!("/api/issues/{}", unrelated.id)))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
-    assert_eq!(unrelated.status(), StatusCode::OK);
-    let foreign = http
+    assert_eq!(unrelated_response.status(), StatusCode::OK);
+    let close_unrelated = http
+        .post(url(&ts, &format!("/api/issues/{}/close", unrelated.id)))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(close_unrelated.status(), StatusCode::OK);
+    let foreign_response = http
         .get(url(&ts, &format!("/api/issues/{}", foreign.id)))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
-    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+    assert_eq!(foreign_response.status(), StatusCode::FORBIDDEN);
+    let close_foreign = http
+        .post(url(&ts, &format!("/api/issues/{}/close", foreign.id)))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(close_foreign.status(), StatusCode::FORBIDDEN);
     for path in [
         format!("/api/sessions/{sibling_id}/history"),
         format!("/api/sessions/{sibling_id}/history/search?q=secret"),

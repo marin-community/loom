@@ -177,14 +177,20 @@ async fn cross_repo_board_and_issue_tags() {
     let cleared = client.clear_issue_tag(issue_id, tag_key).await.unwrap();
     assert!(cleared.tags.is_empty(), "clearing removes the label");
 
-    // Close the issue: it leaves the default board but returns with ?all=true.
-    client
-        .patch(
-            &format!("/api/issues/{issue_id}"),
-            json!({ "status": "closed" }),
-        )
-        .await
-        .unwrap();
+    // Scalar lifecycle operations are the canonical typed API surface. They
+    // retain the bulk endpoint's state validation while mapping directly to
+    // the corresponding MCP verbs.
+    let closed = client.close_issue(issue_id).await.unwrap();
+    assert_eq!(closed.status, "closed");
+    assert!(
+        client.close_issue(issue_id).await.is_err(),
+        "closing an already-closed issue retains atomic action validation"
+    );
+    let reopened = client.reopen_issue(issue_id).await.unwrap();
+    assert_eq!(reopened.status, "open");
+    client.close_issue(issue_id).await.unwrap();
+
+    // A closed issue leaves the default board but returns with ?all=true.
     let open_board = client.get("/api/issues").await.unwrap();
     assert!(
         !open_board

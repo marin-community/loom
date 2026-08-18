@@ -295,6 +295,18 @@ the complete serialized tool definition, so permanent golden tests protect all
 builtin digests and transport-specific wording remains an explicit projection
 override where compatibility requires it.
 
+Routine API operations may additionally implement `ApiOperation`, associating
+one concrete input type, output type, registered spec, and generated exact REST
+request encoder. `weaver_api::Client::invoke<O>` is the generic cross-process
+executor. Loom binds the same operation marker to an owned-context application
+function, so the compiler checks the server input/output contract while Axum
+extractors remain small explicit route adapters. The issues bundle is the
+reference implementation: scalar close/reopen/delete/tag routes mirror the
+public verbs, while `/api/issues/actions` remains the typed atomic bulk surface
+used by multi-ID CLI commands and compatibility callers. The routine permission
+discovery/request operations use the same binding; human approval and direct
+credential administration remain explicit custom operations.
+
 Each first-party bundle registers one Axum router factory and one typed CLI
 bundle factory under that identity; MCP adapter factories join the same identity
 when the bundle has agent tools. Startup and tests reject missing bundles,
@@ -919,6 +931,11 @@ descriptions, and input schemas from `OperationSpec`; compatibility-only tools
 and genuinely nested/special behavior remain explicit custom adapters. Builtin
 capability digest goldens ensure this declaration migration cannot invalidate a
 pinned profile accidentally.
+Typed remote projections decode only the advertised MCP argument shape, map
+session defaults when needed, call `Client::invoke<O>`, and add the established
+text presentation. The shared dispatcher retains runtime allow-list gating and
+object-argument checks; authorization and domain validation remain authoritative
+at the REST boundary.
 Neither an unchanged profile nor recovery re-resolves the current registry.
 Custom definitions live under
 absolute identities such as `/engineering/search/docs`; their first segment is

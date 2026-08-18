@@ -8,14 +8,15 @@
 
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
 use std::{collections::HashSet, future::Future, pin::Pin};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use weaver_api::{
-    CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
+    ApiOperation, CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView,
+    McpRegistryView,
 };
 
 pub(crate) mod artifact;
@@ -30,6 +31,106 @@ pub(crate) mod session;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
+pub(crate) type ProjectionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
+
+/// A typed MCP projection onto an API operation executed through Loom's REST
+/// client. Projections own only transport argument decoding, runtime defaults,
+/// and presentation; authorization and domain behavior stay in the API.
+pub(crate) trait RemoteProjection: Send + Sync + 'static {
+    type Operation: ApiOperation;
+    type Args: DeserializeOwned + Send + 'static;
+
+    const ADAPTER: &'static str;
+    const TOOL: &'static str;
+
+    fn decode(arguments: Value) -> Result<Self::Args> {
+        serde_json::from_value(arguments)
+            .with_context(|| format!("invalid {} arguments", Self::TOOL))
+    }
+
+    fn project(
+        client: weaver_api::Client,
+        args: Self::Args,
+    ) -> ProjectionFuture<<Self::Operation as ApiOperation>::Input>;
+
+    fn present(
+        input: &<Self::Operation as ApiOperation>::Input,
+        output: <Self::Operation as ApiOperation>::Output,
+    ) -> Result<Value>;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RemoteToolBinding {
+    name: &'static str,
+    operation: &'static weaver_api::OperationSpec,
+    invoke: fn(Value) -> ToolFuture,
+}
+
+impl RemoteToolBinding {
+    pub(crate) const fn new<P: RemoteProjection>() -> Self {
+        Self {
+            name: P::TOOL,
+            operation: <P::Operation as ApiOperation>::SPEC,
+            invoke: invoke_remote_projection::<P>,
+        }
+    }
+}
+
+pub(crate) fn validate_remote_tool_bindings(
+    server: &str,
+    expected: &[&str],
+    bindings: &[RemoteToolBinding],
+) {
+    let names = bindings
+        .iter()
+        .map(|binding| {
+            let projection = binding.operation.mcp.unwrap_or_else(|| {
+                panic!(
+                    "remote MCP binding {} targets operation {} without an MCP projection",
+                    binding.name, binding.operation.id
+                )
+            });
+            assert_eq!(projection.server, server);
+            assert_eq!(projection.tool, binding.name);
+            binding.name
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, expected, "remote MCP binding order drifted");
+    assert_eq!(
+        names.iter().collect::<HashSet<_>>().len(),
+        names.len(),
+        "remote MCP bindings contain duplicate tools"
+    );
+}
+
+fn invoke_remote_projection<P: RemoteProjection>(arguments: Value) -> ToolFuture {
+    Box::pin(async move {
+        let args = P::decode(arguments)?;
+        let client = runtime_client(P::ADAPTER)?;
+        let input = P::project(client.clone(), args).await?;
+        let output = client.invoke::<P::Operation>(&input).await?;
+        P::present(&input, output)
+    })
+}
+
+pub(crate) async fn call_remote_tool(
+    adapter: &str,
+    bindings: &[RemoteToolBinding],
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
+    let binding = bindings
+        .iter()
+        .find(|binding| binding.name == name)
+        .with_context(|| format!("unknown {adapter} tool '{name}'"))?;
+    if !runtime_tool_allowed(name) {
+        bail!("{adapter} tool '{name}' is not allowed by this session");
+    }
+    arguments
+        .as_object()
+        .with_context(|| format!("{adapter} tool arguments must be an object"))?;
+    (binding.invoke)(arguments).await
+}
 
 pub(crate) struct Adapter {
     name: &'static str,

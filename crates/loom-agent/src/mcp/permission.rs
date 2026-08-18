@@ -1,10 +1,15 @@
 //! Effective Loom access and human-approved external scope requests.
 
-use anyhow::{bail, Context, Result};
+use anyhow::Result;
+use serde::Deserialize;
 use serde_json::Value;
+use weaver_api::operations::permissions as permission_operations;
 use weaver_api::CreatePermissionRequestReq;
 
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
+use super::{
+    Adapter, CapabilitySet, ProjectionFuture, RemoteProjection, RemoteToolBinding, ServeFuture,
+    ToolFuture,
+};
 
 const SERVER_NAME: &str = "loom_permission";
 const TOOL_NAMES: [&str; 4] = ["show", "explain", "requests", "request"];
@@ -52,72 +57,177 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
+    super::validate_remote_tool_bindings(SERVER_NAME, &TOOL_NAMES, REMOTE_TOOLS);
     weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
-async fn resolve_session(client: &weaver_api::Client, arguments: &Value) -> Result<String> {
-    match super::string_argument(arguments, "session")? {
-        Some(session) if session != "self" => Ok(session.to_string()),
+#[derive(Debug, Deserialize)]
+struct SessionArgs {
+    session: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExplainArgs {
+    operation: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestsArgs {
+    session: Option<String>,
+    state: Option<String>,
+}
+
+fn default_mode() -> String {
+    "write".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestArgs {
+    repository: String,
+    reason: String,
+    #[serde(default = "default_mode")]
+    mode: String,
+    session: Option<String>,
+}
+
+async fn resolve_session(client: &weaver_api::Client, session: Option<String>) -> Result<String> {
+    match session {
+        Some(session) if session != "self" => Ok(session),
         _ => Ok(client.self_context().await?.session_id),
     }
 }
 
-fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
-    let name = name.to_string();
-    Box::pin(async move { call_tool(&name, arguments).await })
+struct ShowProjection;
+
+impl RemoteProjection for ShowProjection {
+    type Operation = permission_operations::EffectiveGet;
+    type Args = SessionArgs;
+
+    const ADAPTER: &'static str = "permission";
+    const TOOL: &'static str = "show";
+
+    fn project(
+        client: weaver_api::Client,
+        args: Self::Args,
+    ) -> ProjectionFuture<permission_operations::SessionInput> {
+        Box::pin(async move {
+            Ok(permission_operations::SessionInput {
+                session: resolve_session(&client, args.session).await?,
+            })
+        })
+    }
+
+    fn present(
+        _: &permission_operations::SessionInput,
+        value: weaver_api::EffectivePermissionsView,
+    ) -> Result<Value> {
+        super::structured_result("effective Loom permissions", &value)
+    }
 }
 
-async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
-        bail!("unknown permission tool '{name}'");
+struct ExplainProjection;
+
+impl RemoteProjection for ExplainProjection {
+    type Operation = permission_operations::Explain;
+    type Args = ExplainArgs;
+
+    const ADAPTER: &'static str = "permission";
+    const TOOL: &'static str = "explain";
+
+    fn project(
+        _: weaver_api::Client,
+        args: Self::Args,
+    ) -> ProjectionFuture<permission_operations::ExplainInput> {
+        Box::pin(async move {
+            Ok(permission_operations::ExplainInput {
+                operation: args.operation,
+            })
+        })
     }
-    if !super::runtime_tool_allowed(name) {
-        bail!("permission tool '{name}' is not allowed by this session");
+
+    fn present(
+        input: &permission_operations::ExplainInput,
+        value: weaver_api::OperationView,
+    ) -> Result<Value> {
+        super::structured_result(&format!("operation {}", input.operation), &value)
     }
-    arguments
-        .as_object()
-        .context("permission tool arguments must be an object")?;
-    let client = super::runtime_client("permission")?;
-    match name {
-        "show" => {
-            let session = resolve_session(&client, &arguments).await?;
-            let value = client.effective_permissions(&session).await?;
-            super::structured_result("effective Loom permissions", &value)
-        }
-        "explain" => {
-            let operation = super::string_argument(&arguments, "operation")?
-                .context("explain requires operation")?;
-            let value = client.operation(operation).await?;
-            super::structured_result(&format!("operation {operation}"), &value)
-        }
-        "requests" => {
-            let session = resolve_session(&client, &arguments).await?;
-            let state = super::string_argument(&arguments, "state")?;
-            let value = client.permission_requests(&session, state).await?;
-            super::structured_result(&format!("{} permission request(s)", value.len()), &value)
-        }
-        "request" => {
-            let session = resolve_session(&client, &arguments).await?;
-            let repository = super::string_argument(&arguments, "repository")?
-                .context("request requires repository")?;
-            let reason =
-                super::string_argument(&arguments, "reason")?.context("request requires reason")?;
-            let mode = super::string_argument(&arguments, "mode")?.unwrap_or("write");
-            let value = client
-                .create_permission_request(
-                    &session,
-                    &CreatePermissionRequestReq {
-                        kind: "github_repository".to_string(),
-                        repository: repository.to_string(),
-                        mode: mode.to_string(),
-                        reason: reason.to_string(),
-                    },
-                )
-                .await?;
-            super::structured_result(&format!("permission request {} pending", value.id), &value)
-        }
-        _ => unreachable!(),
+}
+
+struct RequestsProjection;
+
+impl RemoteProjection for RequestsProjection {
+    type Operation = permission_operations::RequestsList;
+    type Args = RequestsArgs;
+
+    const ADAPTER: &'static str = "permission";
+    const TOOL: &'static str = "requests";
+
+    fn project(
+        client: weaver_api::Client,
+        args: Self::Args,
+    ) -> ProjectionFuture<permission_operations::ListRequestsInput> {
+        Box::pin(async move {
+            Ok(permission_operations::ListRequestsInput {
+                session: resolve_session(&client, args.session).await?,
+                state: args.state,
+            })
+        })
     }
+
+    fn present(
+        _: &permission_operations::ListRequestsInput,
+        value: Vec<weaver_api::PermissionRequestView>,
+    ) -> Result<Value> {
+        super::structured_result(&format!("{} permission request(s)", value.len()), &value)
+    }
+}
+
+struct RequestProjection;
+
+impl RemoteProjection for RequestProjection {
+    type Operation = permission_operations::RequestsCreate;
+    type Args = RequestArgs;
+
+    const ADAPTER: &'static str = "permission";
+    const TOOL: &'static str = "request";
+
+    fn project(
+        client: weaver_api::Client,
+        args: Self::Args,
+    ) -> ProjectionFuture<permission_operations::CreateRequestInput> {
+        Box::pin(async move {
+            Ok(permission_operations::CreateRequestInput {
+                session: resolve_session(&client, args.session).await?,
+                request: CreatePermissionRequestReq {
+                    kind: "github_repository".to_string(),
+                    repository: args.repository,
+                    mode: args.mode,
+                    reason: args.reason,
+                },
+            })
+        })
+    }
+
+    fn present(
+        _: &permission_operations::CreateRequestInput,
+        value: weaver_api::PermissionRequestView,
+    ) -> Result<Value> {
+        super::structured_result(&format!("permission request {} pending", value.id), &value)
+    }
+}
+
+const REMOTE_TOOLS: &[RemoteToolBinding] = &[
+    RemoteToolBinding::new::<ShowProjection>(),
+    RemoteToolBinding::new::<ExplainProjection>(),
+    RemoteToolBinding::new::<RequestsProjection>(),
+    RemoteToolBinding::new::<RequestProjection>(),
+];
+
+fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
+    let name = name.to_string();
+    Box::pin(
+        async move { super::call_remote_tool("permission", REMOTE_TOOLS, &name, arguments).await },
+    )
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -138,6 +248,7 @@ mod tests {
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, TOOL_NAMES);
+        assert_eq!(REMOTE_TOOLS.len(), TOOL_NAMES.len());
         assert!(!names.contains(&"approve"));
         assert_eq!(
             expand_tool_set("loom/permissions/request@v1").unwrap(),

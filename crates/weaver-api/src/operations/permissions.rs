@@ -1,3 +1,11 @@
+//! Typed access-discovery and permission-request API contracts.
+
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    CreatePermissionRequestReq, EffectivePermissionsView, OperationView, PermissionRequestView,
+};
+
 use super::*;
 
 const READ: &[&str] = &["loom/permissions/read@v1"];
@@ -31,59 +39,67 @@ static REQUEST_ARGS: &[ArgumentSpec] = &[
     session_arg(),
 ];
 
+pub static EFFECTIVE_GET_SPEC: OperationSpec = operation!(
+    "permissions.effective.get",
+    "permissions",
+    "Show effective Loom operations and external repository scope.",
+    SessionSelf,
+    Read,
+    "GET",
+    "/api/sessions/{session}/permissions",
+    Some("loom permissions show"),
+    mcp("loom_permission", "show"),
+    READ,
+    SHOW_ARGS
+);
+
+pub static EXPLAIN_SPEC: OperationSpec = operation!(
+    "permissions.explain",
+    "permissions",
+    "Explain one operation's actor, risk, and capability requirements.",
+    SessionSelf,
+    Read,
+    "GET",
+    "/api/operations/{operation}",
+    Some("loom permissions explain <operation>"),
+    mcp("loom_permission", "explain"),
+    READ,
+    EXPLAIN_ARGS
+);
+
+pub static REQUESTS_LIST_SPEC: OperationSpec = operation!(
+    "permissions.requests.list",
+    "permissions",
+    "List durable external-access requests for a session.",
+    SessionSelf,
+    Read,
+    "GET",
+    "/api/sessions/{session}/permission-requests",
+    Some("loom permissions requests"),
+    mcp("loom_permission", "requests"),
+    READ,
+    REQUESTS_ARGS
+);
+
+pub static REQUESTS_CREATE_SPEC: OperationSpec = operation!(
+    "permissions.requests.create",
+    "permissions",
+    "Request a human-approved external credential expansion.",
+    SessionSelf,
+    Write,
+    "POST",
+    "/api/sessions/{session}/permission-requests",
+    Some("loom permissions request github-repository <owner/repo>"),
+    mcp("loom_permission", "request"),
+    REQUEST,
+    REQUEST_ARGS
+);
+
 static OPERATIONS: &[OperationSpec] = &[
-    operation!(
-        "permissions.effective.get",
-        "permissions",
-        "Show effective Loom operations and external repository scope.",
-        SessionSelf,
-        Read,
-        "GET",
-        "/api/sessions/{session}/permissions",
-        Some("loom permissions show"),
-        mcp("loom_permission", "show"),
-        READ,
-        SHOW_ARGS
-    ),
-    operation!(
-        "permissions.explain",
-        "permissions",
-        "Explain one operation's actor, risk, and capability requirements.",
-        SessionSelf,
-        Read,
-        "GET",
-        "/api/operations/{operation}",
-        Some("loom permissions explain <operation>"),
-        mcp("loom_permission", "explain"),
-        READ,
-        EXPLAIN_ARGS
-    ),
-    operation!(
-        "permissions.requests.list",
-        "permissions",
-        "List durable external-access requests for a session.",
-        SessionSelf,
-        Read,
-        "GET",
-        "/api/sessions/{session}/permission-requests",
-        Some("loom permissions requests"),
-        mcp("loom_permission", "requests"),
-        READ,
-        REQUESTS_ARGS
-    ),
-    operation!(
-        "permissions.requests.create",
-        "permissions",
-        "Request a human-approved external credential expansion.",
-        SessionSelf,
-        Write,
-        "POST",
-        "/api/sessions/{session}/permission-requests",
-        Some("loom permissions request github-repository <owner/repo>"),
-        mcp("loom_permission", "request"),
-        REQUEST,
-        REQUEST_ARGS
-    ),
+    EFFECTIVE_GET_SPEC,
+    EXPLAIN_SPEC,
+    REQUESTS_LIST_SPEC,
+    REQUESTS_CREATE_SPEC,
     operation!(
         "permissions.requests.approve",
         "permissions",
@@ -158,10 +174,134 @@ static OPERATIONS: &[OperationSpec] = &[
     ),
 ];
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionInput {
+    pub session: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExplainInput {
+    pub operation: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListRequestsInput {
+    pub session: String,
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateRequestInput {
+    pub session: String,
+    pub request: CreatePermissionRequestReq,
+}
+
+fn segment(value: &str) -> String {
+    percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+typed_api_operation!(
+    EffectiveGet,
+    EFFECTIVE_GET_SPEC,
+    SessionInput,
+    EffectivePermissionsView,
+    |input: &SessionInput| {
+        Ok(OperationRequest::without_body(
+            &EFFECTIVE_GET_SPEC,
+            format!("/api/sessions/{}/permissions", segment(&input.session)),
+        ))
+    }
+);
+
+typed_api_operation!(
+    Explain,
+    EXPLAIN_SPEC,
+    ExplainInput,
+    OperationView,
+    |input: &ExplainInput| {
+        Ok(OperationRequest::without_body(
+            &EXPLAIN_SPEC,
+            format!("/api/operations/{}", segment(&input.operation)),
+        ))
+    }
+);
+
+typed_api_operation!(
+    RequestsList,
+    REQUESTS_LIST_SPEC,
+    ListRequestsInput,
+    Vec<PermissionRequestView>,
+    |input: &ListRequestsInput| {
+        let mut path = format!(
+            "/api/sessions/{}/permission-requests",
+            segment(&input.session)
+        );
+        if let Some(state) = input.state.as_deref() {
+            path.push_str("?state=");
+            path.push_str(&segment(state));
+        }
+        Ok(OperationRequest::without_body(&REQUESTS_LIST_SPEC, path))
+    }
+);
+
+typed_api_operation!(
+    RequestsCreate,
+    REQUESTS_CREATE_SPEC,
+    CreateRequestInput,
+    PermissionRequestView,
+    |input: &CreateRequestInput| {
+        OperationRequest::json(
+            &REQUESTS_CREATE_SPEC,
+            format!(
+                "/api/sessions/{}/permission-requests",
+                segment(&input.session)
+            ),
+            &input.request,
+        )
+    }
+);
+
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {
         name: "permissions",
         label: "Access and approvals",
         operations: OPERATIONS,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_contracts_encode_path_query_and_body() {
+        let explain = Explain::request(&ExplainInput {
+            operation: "issues.tags.set".to_string(),
+        })
+        .unwrap();
+        assert_eq!(explain.path, "/api/operations/issues%2Etags%2Eset");
+
+        let list = RequestsList::request(&ListRequestsInput {
+            session: "session/a".to_string(),
+            state: Some("pending".to_string()),
+        })
+        .unwrap();
+        assert_eq!(
+            list.path,
+            "/api/sessions/session%2Fa/permission-requests?state=pending"
+        );
+
+        let create = RequestsCreate::request(&CreateRequestInput {
+            session: "self".to_string(),
+            request: CreatePermissionRequestReq {
+                kind: "github_repository".to_string(),
+                repository: "acme/widgets".to_string(),
+                mode: "write".to_string(),
+                reason: "ship the change".to_string(),
+            },
+        })
+        .unwrap();
+        assert_eq!(create.method, "POST");
+        assert_eq!(create.body.unwrap()["repository"], "acme/widgets");
     }
 }

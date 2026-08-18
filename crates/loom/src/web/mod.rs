@@ -15,8 +15,10 @@
 //! * `/api/branches` — list every tracked branch (with or without an active
 //!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
 //! * `/api/branches/{id}/issues` — list / POST issues for a branch.
-//! * `/api/issues/{id}` — GET / PATCH / DELETE an issue by id.
-//! * `/api/issues/actions` — validate and atomically mutate a set of issues.
+//! * `/api/issues/{id}` — GET / PATCH / DELETE an issue by id; `/close` and
+//!   `/reopen` expose the scalar lifecycle operations used by remote tools.
+//! * `/api/issues/actions` — validate and atomically mutate a set of issues for
+//!   batch CLI and compatibility callers.
 //! * `/api/health` + `/api/health/live` are process-level liveness;
 //!   `/api/ready` checks the database and migration streams; `/metrics` exposes
 //!   bounded-label OpenMetrics; `/api/diagnostics` is the human-readable inventory.
@@ -1017,6 +1019,7 @@ fn mount_artifact_api(router: Router<AppState>) -> Router<AppState> {
 }
 
 fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
+    validate_typed_bundle_bindings("issues", &issues::typed_bindings());
     router
         .route(
             "/branches/{id}/issues",
@@ -1024,6 +1027,8 @@ fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
         )
         .route("/issues", get(list_all_issues))
         .route("/issues/actions", post(issue_actions))
+        .route("/issues/{id}/close", post(close_issue))
+        .route("/issues/{id}/reopen", post(reopen_issue))
         .route(
             "/issues/{id}",
             get(get_issue).patch(patch_issue).delete(delete_issue),
@@ -1039,6 +1044,31 @@ fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
 }
 
 fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
+    let typed = vec![
+        bind_operation::<weaver_api::operations::permissions::EffectiveGet, _, _>(
+            permission_requests::effective_permissions_operation,
+        ),
+        bind_operation::<weaver_api::operations::permissions::Explain, _, _>(
+            operations::explain_operation,
+        ),
+        bind_operation::<weaver_api::operations::permissions::RequestsList, _, _>(
+            permission_requests::list_permission_requests_operation,
+        ),
+        bind_operation::<weaver_api::operations::permissions::RequestsCreate, _, _>(
+            permission_requests::create_permission_request_operation,
+        ),
+    ];
+    let registered = validate_typed_bindings("permissions", &typed);
+    assert_eq!(
+        registered,
+        std::collections::BTreeSet::from([
+            "permissions.effective.get",
+            "permissions.explain",
+            "permissions.requests.create",
+            "permissions.requests.list",
+        ]),
+        "routine permission operations must retain typed server bindings"
+    );
     router
         .route("/meta", get(api_meta))
         .route("/operations", get(list_operations))

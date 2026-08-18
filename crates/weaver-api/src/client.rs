@@ -10,7 +10,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::operations::{ApiMetaView, OperationView};
+use crate::operations::{
+    issues as issue_operations, permissions as permission_operations, ApiMetaView, ApiOperation,
+    OperationView,
+};
 
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
@@ -171,6 +174,16 @@ impl Client {
         serde_json::from_value(value).map_err(|e| anyhow!("decoding response from {path}: {e}"))
     }
 
+    /// Invoke one code-registered API operation through its generated REST
+    /// request and deserialize the associated output type.
+    pub async fn invoke<O: ApiOperation>(&self, input: &O::Input) -> Result<O::Output> {
+        let request = O::request(input)?;
+        let method = Method::from_bytes(request.method.as_bytes())
+            .map_err(|error| anyhow!("invalid method for operation {}: {error}", O::SPEC.id))?;
+        self.send_typed(method, &request.path, request.body.as_ref())
+            .await
+    }
+
     // -- Sessions ---------------------------------------------------------
 
     pub async fn self_context(&self) -> Result<SelfContextView> {
@@ -188,8 +201,10 @@ impl Client {
     }
 
     pub async fn operation(&self, id: &str) -> Result<OperationView> {
-        self.get_typed(&format!("/api/operations/{}", Self::seg(id)))
-            .await
+        self.invoke::<permission_operations::Explain>(&permission_operations::ExplainInput {
+            operation: id.to_string(),
+        })
+        .await
     }
 
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
@@ -229,10 +244,9 @@ impl Client {
         &self,
         session_id: &str,
     ) -> Result<EffectivePermissionsView> {
-        self.get_typed(&format!(
-            "/api/sessions/{}/permissions",
-            Self::seg(session_id)
-        ))
+        self.invoke::<permission_operations::EffectiveGet>(&permission_operations::SessionInput {
+            session: session_id.to_string(),
+        })
         .await
     }
 
@@ -241,15 +255,13 @@ impl Client {
         session_id: &str,
         state: Option<&str>,
     ) -> Result<Vec<PermissionRequestView>> {
-        let mut path = format!(
-            "/api/sessions/{}/permission-requests",
-            Self::seg(session_id)
-        );
-        if let Some(state) = state {
-            path.push_str("?state=");
-            path.push_str(&Self::seg(state));
-        }
-        self.get_typed(&path).await
+        self.invoke::<permission_operations::RequestsList>(
+            &permission_operations::ListRequestsInput {
+                session: session_id.to_string(),
+                state: state.map(str::to_string),
+            },
+        )
+        .await
     }
 
     pub async fn create_permission_request(
@@ -257,13 +269,11 @@ impl Client {
         session_id: &str,
         request: &CreatePermissionRequestReq,
     ) -> Result<PermissionRequestView> {
-        self.send_typed(
-            Method::POST,
-            &format!(
-                "/api/sessions/{}/permission-requests",
-                Self::seg(session_id)
-            ),
-            Some(request),
+        self.invoke::<permission_operations::RequestsCreate>(
+            &permission_operations::CreateRequestInput {
+                session: session_id.to_string(),
+                request: request.clone(),
+            },
         )
         .await
     }
@@ -1258,19 +1268,17 @@ impl Client {
 
     /// Create an issue claimed by a branch (`POST /api/branches/{key}/issues`).
     pub async fn create_branch_issue(&self, key: &str, req: &CreateIssueReq) -> Result<IssueView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/branches/{}/issues", Self::seg(key)),
-            Some(req),
-        )
+        self.invoke::<issue_operations::Create>(&issue_operations::CreateInput {
+            branch: key.to_string(),
+            request: req.clone(),
+        })
         .await
     }
 
     /// Create an unclaimed repo-level backlog item
     /// (`POST /api/repos/issues`).
     pub async fn create_repo_issue(&self, req: &CreateRepoIssueReq) -> Result<IssueView> {
-        self.send_typed(Method::POST, "/api/repos/issues", Some(req))
-            .await
+        self.invoke::<issue_operations::CreateBacklog>(req).await
     }
 
     /// Every issue in a repo (`scope: "repo"`), or just the unclaimed backlog
@@ -1282,17 +1290,18 @@ impl Client {
         scope: &str,
         all: bool,
     ) -> Result<Vec<IssueView>> {
-        let repo_root =
-            percent_encoding::utf8_percent_encode(repo_root, percent_encoding::NON_ALPHANUMERIC);
-        self.get_typed(&format!(
-            "/api/repos/issues?repo_root={repo_root}&scope={scope}&all={all}"
-        ))
+        self.invoke::<issue_operations::List>(&issue_operations::ListInput {
+            repo_root: repo_root.to_string(),
+            scope: scope.parse().map_err(anyhow::Error::msg)?,
+            all,
+        })
         .await
     }
 
     /// Get one issue by id (`GET /api/issues/{id}`).
     pub async fn get_issue(&self, id: i64) -> Result<IssueView> {
-        self.get_typed(&format!("/api/issues/{id}")).await
+        self.invoke::<issue_operations::Get>(&issue_operations::IdInput { id })
+            .await
     }
 
     /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
@@ -1306,13 +1315,27 @@ impl Client {
     /// The server validates every id and precondition before applying the
     /// command atomically. Validation failure changes nothing.
     pub async fn issue_actions(&self, req: &IssueActionsReq) -> Result<IssueActionsResult> {
-        self.send_typed(Method::POST, "/api/issues/actions", Some(req))
+        self.invoke::<issue_operations::Actions>(req).await
+    }
+
+    /// Close one issue through its semantic operation.
+    pub async fn close_issue(&self, id: i64) -> Result<IssueView> {
+        self.invoke::<issue_operations::Close>(&issue_operations::IdInput { id })
+            .await
+    }
+
+    /// Reopen one issue through its semantic operation.
+    pub async fn reopen_issue(&self, id: i64) -> Result<IssueView> {
+        self.invoke::<issue_operations::Reopen>(&issue_operations::IdInput { id })
             .await
     }
 
     /// Delete an issue (`DELETE /api/issues/{id}`).
     pub async fn delete_issue(&self, id: i64) -> Result<Value> {
-        self.delete(&format!("/api/issues/{id}")).await
+        let deleted = self
+            .invoke::<issue_operations::Delete>(&issue_operations::IdInput { id })
+            .await?;
+        Ok(serde_json::to_value(deleted)?)
     }
 
     /// Set (upsert) a free-form label on an issue
@@ -1326,27 +1349,25 @@ impl Client {
         note: &str,
         by: &str,
     ) -> Result<IssueView> {
-        let req = TagReq {
-            value: value.to_string(),
-            note: note.to_string(),
-            by: Some(by.to_string()),
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/issues/{id}/tags/{}", Self::seg(key)),
-            Some(&req),
-        )
+        self.invoke::<issue_operations::SetTag>(&issue_operations::SetTagInput {
+            id,
+            key: key.to_string(),
+            request: TagReq {
+                value: value.to_string(),
+                note: note.to_string(),
+                by: Some(by.to_string()),
+            },
+        })
         .await
     }
 
     /// Clear a label on an issue (`DELETE /api/issues/{id}/tags/{key}`).
     pub async fn clear_issue_tag(&self, id: i64, key: &str) -> Result<IssueView> {
-        self.delete(&format!("/api/issues/{id}/tags/{}", Self::seg(key)))
-            .await
-            .and_then(|v| {
-                serde_json::from_value(v)
-                    .map_err(|e| anyhow!("decoding response from /api/issues/{id}/tags/{key}: {e}"))
-            })
+        self.invoke::<issue_operations::DeleteTag>(&issue_operations::DeleteTagInput {
+            id,
+            key: key.to_string(),
+        })
+        .await
     }
 
     // -- Settings -------------------------------------------------------------

@@ -1520,6 +1520,12 @@ pub struct IssueActionsResult {
     pub deleted_ids: Vec<i64>,
 }
 
+/// Response from the scalar `DELETE /api/issues/{id}` operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeleteIssueResult {
+    pub deleted: bool,
+}
+
 /// The minimal live snapshot of a GitHub thread `weaver issue show` renders
 /// beside the weaver ledger: enough to notice "this was closed / re-titled
 /// while I worked". An agent that needs the discussion reads it with `gh`.

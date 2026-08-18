@@ -76,6 +76,37 @@ async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
     values
 }
 
+async fn run_scoped_calls(
+    ts: &TestServer,
+    adapter: &str,
+    token: &str,
+    calls: &[Value],
+) -> Vec<Value> {
+    let mut child = Command::new(loom_bin())
+        .args(["mcp", "serve", adapter])
+        .env("WEAVER_API", format!("http://{}", ts.addr))
+        .env("LOOM_TOKEN", token)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    for call in calls {
+        stdin
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    drop(stdin);
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut values = Vec::new();
+    while let Some(line) = lines.next_line().await.unwrap() {
+        values.push(serde_json::from_str(&line).unwrap());
+    }
+    assert!(child.wait().await.unwrap().success());
+    values
+}
+
 #[tokio::test]
 async fn every_builtin_speaks_mcp_stdio() {
     for (adapter, expected_tools) in [
@@ -113,6 +144,110 @@ async fn every_builtin_speaks_mcp_stdio() {
             .unwrap()
             .contains("unknown"));
     }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .create_session(&weaver_api::CreateReq {
+            cwd: ts.cwd(),
+            goal: Some("typed MCP projections".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let issue = ts
+        .client
+        .create_branch_issue(
+            &created.branch.id,
+            &weaver_api::CreateIssueReq {
+                title: "close through MCP".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, None, &created.id, &created.branch.id)
+            .await
+            .unwrap();
+
+    let issue_responses = run_scoped_calls(
+        &ts,
+        "issue",
+        &token,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "get",
+                    "arguments": { "id": issue.id, "schema_invisible": "ignored" }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": { "name": "close", "arguments": { "id": issue.id } }
+            }),
+        ],
+    )
+    .await;
+    assert_eq!(issue_responses.len(), 2);
+    assert_eq!(issue_responses[0]["result"]["isError"], false);
+    assert_eq!(
+        issue_responses[0]["result"]["structuredContent"]["id"],
+        issue.id
+    );
+    assert_eq!(issue_responses[1]["result"]["isError"], false);
+    assert_eq!(
+        issue_responses[1]["result"]["structuredContent"]["issues"][0]["status"],
+        "closed"
+    );
+
+    let permission_responses = run_scoped_calls(
+        &ts,
+        "permission",
+        &token,
+        &[
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": { "name": "show", "arguments": {} }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "explain",
+                    "arguments": { "operation": "issues.close" }
+                }
+            }),
+        ],
+    )
+    .await;
+    assert_eq!(permission_responses.len(), 2);
+    assert_eq!(
+        permission_responses[0]["result"]["structuredContent"]["session_id"],
+        created.id
+    );
+    assert_eq!(
+        permission_responses[1]["result"]["structuredContent"]["id"],
+        "issues.close"
+    );
+
+    ts.client
+        .delete(&format!("/api/sessions/{}", created.id))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
