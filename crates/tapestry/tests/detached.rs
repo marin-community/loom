@@ -83,6 +83,48 @@ async fn detached_supervisor_outlives_its_launcher() {
 
 #[tokio::test]
 #[serial]
+async fn env_clear_supervisor_keeps_the_default_socket_root() {
+    let home = TempDir::new().unwrap();
+    let previous_home = std::env::var_os("HOME");
+    let previous_weaver_home = std::env::var_os("WEAVER_HOME");
+    let previous_tapestry_dir = std::env::var_os("WEAVER_TAPESTRY_DIR");
+    std::env::set_var("HOME", home.path());
+    std::env::remove_var("WEAVER_HOME");
+    std::env::remove_var("WEAVER_TAPESTRY_DIR");
+
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_tapestry"));
+    let name = format!("tap-default-root-{}", std::process::id());
+    tapestry::spawn_detached(&LaunchOptions {
+        name: &name,
+        cwd: &std::env::temp_dir(),
+        script: "exec sleep 60",
+        env: &[],
+        env_clear: true,
+        cols: 80,
+        rows: 24,
+        mode: Mode::Pty,
+        segment_max_bytes: None,
+        supervisor_bin: Some(bin),
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        home.path()
+            .join(".weaver/sock")
+            .join(format!("{name}.sock"))
+            .exists(),
+        "env-cleared supervisor must bind under the launcher's default root"
+    );
+    Client::connect(&name).await.unwrap().kill().await.unwrap();
+
+    restore_env("HOME", previous_home);
+    restore_env("WEAVER_HOME", previous_weaver_home);
+    restore_env("WEAVER_TAPESTRY_DIR", previous_tapestry_dir);
+}
+
+#[tokio::test]
+#[serial]
 async fn pty_and_relay_supervisors_derive_shells_with_their_exact_environment() {
     let home = TempDir::new().unwrap();
     std::env::set_var("WEAVER_HOME", home.path());
@@ -271,4 +313,11 @@ async fn spawn_via_binary(bin: &str, name: &str, script: &str) {
         .await
         .expect("spawn tapestry");
     assert!(status.success(), "tapestry spawn failed");
+}
+
+fn restore_env(name: &str, value: Option<std::ffi::OsString>) {
+    match value {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
+    }
 }

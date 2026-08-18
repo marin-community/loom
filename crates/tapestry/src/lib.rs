@@ -189,14 +189,14 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
 
     let mut cmd = std::process::Command::new(&exe);
     if opts.env_clear {
-        // The detached supervisor must resolve the same isolated socket root
-        // as its parent, but it does not need the rest of loom's environment.
-        let socket_env: Vec<_> = ["WEAVER_HOME", "WEAVER_TAPESTRY_DIR"]
-            .into_iter()
-            .filter_map(|name| std::env::var(name).ok().map(|value| (name, value)))
-            .collect();
+        // Pin the detached supervisor to the socket root the launcher already
+        // resolved. Merely forwarding explicit overrides is insufficient: the
+        // default root derives from HOME, which env_clear deliberately removes.
+        // Without this, an isolated/derived supervisor falls back to
+        // `<cwd>/.weaver/sock` while its launcher waits under `$HOME/.weaver`.
+        let socket_dir = paths::run_dir();
         cmd.env_clear();
-        cmd.envs(socket_env);
+        cmd.env("WEAVER_TAPESTRY_DIR", socket_dir);
     }
     // `-` tells the supervisor to read its JSON spec from stdin (see below); the
     // spec never appears on argv.
