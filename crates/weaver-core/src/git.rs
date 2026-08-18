@@ -98,7 +98,7 @@ fn token_auth_envs(token: &str) -> Vec<(&'static str, String)> {
 ///
 /// `token` authenticates this one clone/fetch with a caller-supplied credential
 /// (a GitHub App installation token) via [`token_auth_envs`]. `None` performs an
-/// unauthenticated operation; there is no ambient credential fallback.
+/// unauthenticated operation.
 pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
     let envs = token.map(token_auth_envs).unwrap_or_default();
     // An existing clone (its `.git` is present) is refreshed, not re-cloned.

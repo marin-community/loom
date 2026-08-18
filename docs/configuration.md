@@ -33,9 +33,8 @@ credentials in repository configuration.
 An ordinary interactive session uses the launching user's write-only GitHub PAT
 from **Settings → Account** when one is set. Otherwise, `git` and `gh` ask Loom
 for a short-lived GitHub App installation token, limited to repositories
-allowlisted by the selected profile. Both credentials are Loom-owned session
-policy; profile, repository, committed, and daemon environments cannot define
-`GH_TOKEN` or `GITHUB_TOKEN`. See [Restricted GitHub
+allowlisted by the selected profile. Loom presents the selected credential
+through the image's managed Git and GitHub CLI adapters. See [Restricted GitHub
 sessions](restricted-sessions.md#github-credential-policy) for automation's
 tighter tool boundary.
 
@@ -108,10 +107,10 @@ starter text lives under `crates/loom-policy/profiles/<name>/instructions.md`.
 The origin profiles are opt-in so an upgrade does not silently change the
 environment or runtime used by existing triggers.
 
-Profiles may declare `github_repositories`. When the launching user has no
-Account PAT, `git` and `gh` transparently request a short-lived GitHub App
-installation token from Loom. Interactive profiles use the list as the App
-allowlist and stamp only the session's current repository. Strict,
+Profiles may declare `github_repositories` to define the GitHub App broker's
+scope. Ordinary interactive sessions select the launching user's Account PAT
+first and use this broker when the App path is selected. Interactive profiles
+stamp only the session's current allowlisted repository. Strict,
 environment-cleared automation profiles retain the complete list for reviewed
 cross-repository workflows, so their entries must use one owner. Tokens grant
 write access to repository contents, issues, pull requests, Actions, and

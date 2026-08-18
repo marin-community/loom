@@ -546,8 +546,7 @@ mod tests {
     }
 
     /// An unconfigured GitHub App (`Some(&app)`, but no App id/key stored) can't
-    /// mint an installation token and must fail closed rather than silently use
-    /// ambient Git credentials.
+    /// mint the installation token required for an authenticated clone.
     #[tokio::test]
     async fn resolve_clone_fails_when_the_app_cannot_mint_a_token() {
         let db = connect_in_memory().await.unwrap();

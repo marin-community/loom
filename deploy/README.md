@@ -104,7 +104,7 @@ and why; you don't hand-edit `.env` itself.
 |---|---|---|
 | `LOOM_DOMAIN` | **yes** | Public domain Caddy serves and gets a cert for (e.g. `loom.team.dev`); `localhost` for local testing. Also seeded as `auth.base_url`. |
 | `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database — the only account that can sign in until it approves others. Approved users are also who may drive the `@loom` trigger; add more in **Settings → Approved users**. |
-| `LOOM_GITHUB_APP_ID` / `_PRIVATE_KEY` | **yes** | GitHub App identity Loom uses to mint repository-scoped installation tokens for clones, polling, replies, server-side GitHub tools, and interactive sessions whose user has no Account PAT. |
+| `LOOM_GITHUB_APP_ID` / `_PRIVATE_KEY` | **yes** | GitHub App identity Loom uses to mint repository-scoped installation tokens for clones, polling, replies, server-side GitHub tools, and profile-approved interactive sessions. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
 | `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
@@ -122,11 +122,11 @@ invocation without touching `loom.toml`, by exporting the same-named env var:
 `loom config render-env`/`push-secrets` resolve `loom.toml` *and* the process
 environment, with the environment winning (see `loom_config`'s module docs).
 
-There is no deployment `GH_TOKEN`. Loom uses its GitHub App for daemon and
-server-side GitHub operations. An ordinary interactive session uses the
-launching user's optional PAT stored under **Settings → Account**, or brokers
-the selected profile's allowlisted App access when that PAT is absent. Session
-runtimes still need their model-provider keys. Run
+Loom uses its GitHub App for daemon and server-side GitHub operations. For
+ordinary interactive sessions, users may set an Account PAT under **Settings →
+Account**; Loom prefers that identity and otherwise brokers the selected
+profile's allowlisted App access. Session runtimes also need their
+model-provider keys. Run
 `loom setup secrets --config /home/app/loom.toml` via `docker compose exec loom`
 against the running deploy, or as part of the [Quick start](#quick-start)
 sequence before first start. It prompts for `ANTHROPIC_API_KEY` and

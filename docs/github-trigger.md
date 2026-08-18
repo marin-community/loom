@@ -78,7 +78,6 @@ The reply (step 8) reaches GitHub through the [GitHub App](#the-github-app) with
 a short-lived, per-installation token. The **session itself** receives access
 from the triggering user's Loom-stored Account PAT when present, otherwise
 through Loom's App broker for the repositories its selected profile allows.
-Profile, repository, and deployment PATs are never credential sources.
 Separately, the poll loop
 posts a one-time back-link comment (`Working on this in loom: {base}/s/{id}`) on
 a session's open PR when one isn't already linked, so a reader of the PR can
@@ -235,10 +234,8 @@ signed from the App's private key (an RS256 JWT exchanged for an installation
 token via `POST /app/installations/{id}/access_tokens`) and cached until they
 near expiry.
 
-When the App is not configured, App-backed clones, polling, trigger replies,
-restricted GitHub tools, and interactive sessions without a per-user Account
-PAT fail closed. Loom never consults an ambient, profile, repository, or
-deployment PAT.
+The App id and private key are required for App-backed clones, polling, trigger
+replies, restricted GitHub tools, and brokered interactive-session access.
 
 ### Create the App
 

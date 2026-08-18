@@ -1,6 +1,5 @@
-//! The GitHub **App** identity (shared-loom design §6.3): the hardening that
-//! replaces the v1 webhook's reliance on a long-lived, over-scoped ambient
-//! `GH_TOKEN` with **short-lived, least-privilege, per-installation** tokens.
+//! Loom's GitHub **App** identity (shared-loom design §6.3), which provides
+//! short-lived, least-privilege, per-installation tokens.
 //!
 //! An App is configured with an `app_id` and an RSA **private key** (a PEM,
 //! held outside the settings registry like the OAuth client secret — never
@@ -20,8 +19,8 @@
 //!
 //! [`GithubApp`] implements the [`GithubApi`] gateway the trigger calls for the
 //! commenter permission check and the issue reply, performing both over the
-//! **REST API with the installation token** instead of the `gh` CLI. Missing App
-//! configuration is an error; Loom has no PAT or ambient-token fallback.
+//! **REST API with the installation token**. App-backed operations require the
+//! App id and private key to be configured.
 
 use std::collections::HashMap;
 use std::sync::Mutex;

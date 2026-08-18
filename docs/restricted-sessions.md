@@ -15,12 +15,10 @@ adapter command. New adapter families belong in `crates/loom-agent/src/mcp/` and
 be registered by Loom before a profile can select one.
 The MCP bridge calls a session-scoped Loom endpoint; Loom calls GitHub through
 its App client against the session's fixed repository and linked issue/PR
-number, so neither a general shell nor a GitHub token enters the agent process. Anything outside
-the configured Claude permission rules is rejected by Loom.
-The profile intentionally has no token in its seed. Loom uses the configured
-GitHub App's short-lived installation token for the fixed repository. If the
-App is unavailable or is not installed on that repository, the operation fails;
-there is no PAT or profile-token fallback. The stock policy lives in
+number. The agent receives the fixed GitHub tool rather than a general GitHub
+shell surface, and Loom enforces the configured Claude permission rules. Loom
+uses the configured GitHub App's short-lived installation token for the fixed
+repository. The stock policy lives in
 `crates/loom-policy/profiles/github_comment/profile.json`, not in a schema migration. Loom
 seeds a missing stock profile through normal validation and does not overwrite
 later operator edits. Custom profiles use the same REST/CLI/UI or
@@ -35,17 +33,16 @@ both use the same provider-neutral `mcp_access` contract.
 
 ## GitHub credential policy
 
-| Use case | Primary credential | Fallback |
-| --- | --- | --- |
-| Ordinary interactive session | Launching user's Loom-stored Account PAT | Short-lived GitHub App installation token scoped to the profile-approved repositories |
-| Restricted GitHub tool | Loom's App-backed REST call for the session's fixed repository | None |
-| GitHub Actions calling Loom | GitHub OIDC exchanged for a ten-minute Loom automation token | None |
+| Use case | Credential path |
+| --- | --- |
+| Ordinary interactive session | Launching user's Loom-stored Account PAT, then the App broker scoped to the profile-approved repositories |
+| Restricted GitHub tool | Loom's App-backed REST call for the session's fixed repository |
+| GitHub Actions calling Loom | GitHub OIDC exchanged for a ten-minute Loom automation token |
 
 For ordinary sessions, Loom explicitly selects the user's Account PAT or the
 App broker and stamps that choice for the image's `git` helper and `gh` wrapper.
 Restricted sessions use neither adapter: their fixed GitHub tools call Loom,
-which uses the App internally. A mint or installation failure is an error;
-restricted work never falls back to a personal or shared PAT.
+which uses the App internally.
 
 ## GitHub Actions request
 
@@ -104,10 +101,9 @@ durable ACP prompt path; a provisioning or orphaned channel returns a retryable
 error instead of acknowledging an undelivered update. Channel names accept up
 to 64 ASCII letters, digits, `.`, `_`, `:`, and `-`.
 
-Do not put `GH_TOKEN` in the request or prompt. Automation requests are stored
-for audit and idempotency. Loom resolves an App credential only while executing
-a fixed GitHub tool; the installation token is short-lived and scoped to the
-session's fixed repository.
+Automation requests carry the task prompt and are stored for audit and
+idempotency. Loom resolves the short-lived, repository-scoped App credential
+while executing a fixed GitHub tool.
 
 ## Deployment checklist
 
@@ -119,8 +115,8 @@ session's fixed repository.
    profile show github_comment` and `loom federation ls`.
 4. Run a synthetic issue through the direct API. Verify the prompt appears as
    the first turn without `WEAVER.md`, a duplicate body-hash key returns the
-   original run, no shell or code-writing tool is visible, the agent environment
-   contains no GitHub token, and only the requested GitHub mutation occurs.
+   original run, the fixed tool surface is visible, and only the requested
+   GitHub mutation occurs.
 5. Move callers to the OIDC exchange without changing their idempotency keys or
    stale-write preconditions, then roll the workflow revision out in controlled
    batches.

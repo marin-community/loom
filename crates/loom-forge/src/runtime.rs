@@ -70,9 +70,8 @@ pub async fn layer_launch_environment(
     strict: bool,
     restricted: bool,
 ) -> Vec<(String, String)> {
-    // Reject legacy snapshot values as well as newly configured values. This
-    // guarantees that the only non-empty GH_TOKEN reaching mode selection is
-    // the per-user credential overlaid later by `apply_user_github_token`.
+    // Clear the stock clients' reserved credential slots before Loom selects
+    // the session's Account or App identity.
     env.retain(|(name, _)| !crate::agent_env::is_github_token_name(name));
     let repo_root_str = repo_root.display().to_string();
     if restricted {
@@ -115,9 +114,8 @@ pub async fn launch_environment(
     layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
 }
 
-/// Overlay the launching user's Loom-stored PAT after all user-configurable
-/// environment layers have been validated. This is the only path that may put
-/// a non-empty `GH_TOKEN` into a managed session environment.
+/// Load the launching user's Loom-stored PAT into the image adapter's direct
+/// credential slot after all configurable environment layers are resolved.
 pub async fn apply_user_github_token(
     db: &Db,
     env: &mut Vec<(String, String)>,
@@ -151,8 +149,7 @@ pub fn set_env(env: &mut Vec<(String, String)>, name: &str, value: String) {
     }
 }
 
-/// Personal Account PATs are an ordinary interactive-session convenience, not
-/// an automation or restricted-session credential source.
+/// Personal Account PATs are available to ordinary interactive sessions.
 pub fn user_github_token_allowed(class: &str, restricted: bool) -> bool {
     class == "interactive" && !restricted
 }
@@ -160,9 +157,9 @@ pub fn user_github_token_allowed(class: &str, restricted: bool) -> bool {
 /// Stamp the GitHub credential policy consumed by the Docker image's `git`
 /// credential helper and `gh` wrapper.
 ///
-/// A Loom-injected per-user token selects `direct`; otherwise an allowed and
-/// configured GitHub App selects `broker`. Restricted sessions and sessions
-/// without either are disabled. Empty values mask ambient client variables.
+/// A Loom-injected per-user token selects `direct`; an allowed and configured
+/// GitHub App selects `broker`; restricted sessions select `disabled`. Client
+/// credential slots are normalized to match the selected mode.
 pub async fn stamp_github_auth_mode(
     env: &mut Vec<(String, String)>,
     github_app: Option<&crate::github_app::GithubApp>,

@@ -48,8 +48,8 @@ async function savePassword() {
 }
 
 // -- Your GitHub token ------------------------------------------------------
-// This is Loom-owned user state, not an ambient process credential. Loom
-// injects it only into ordinary interactive sessions launched by this user.
+// This Loom-owned Account credential is selected for ordinary interactive
+// sessions launched by this user.
 const PAT_CREATE_URL =
   'https://github.com/settings/personal-access-tokens/new' +
   '?name=Loom' +

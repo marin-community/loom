@@ -1,12 +1,10 @@
 //! A user's own GitHub token (a fine-grained PAT), stored in the
 //! `user_github_tokens` table.
 //!
-//! Loom may inject this token as `GH_TOKEN` into an ordinary interactive
-//! session launched by that user. It is the only direct-token source: profile,
-//! repository, committed, and daemon environments cannot provide GitHub
-//! credentials. If no per-user token is stored, the session uses its
-//! profile-approved GitHub App credential instead. Restricted sessions never
-//! receive the personal token.
+//! Loom selects this token for an ordinary interactive session launched by that
+//! user. Sessions use their profile-approved GitHub App credential when the
+//! Account PAT is not selected. Restricted sessions use Loom's App-backed fixed
+//! GitHub tools.
 //!
 //! The value is **write-only** over the API: callers learn only *that* a token is
 //! set and when it changed, never the token itself. Export into ordinary shared

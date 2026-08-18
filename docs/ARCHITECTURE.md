@@ -359,7 +359,7 @@ canonical space/group placement.
 `BranchView::github` is the branch's latest GitHub pull-request snapshot
 (`pr_number`, `pr_url`, `pr_state`, `pr_title`, `is_draft`, `review_decision`,
 `checks`, `mergeable`, `merged_at`, `head_sha`, `head_updated_at`, `fetched_at`),
-or `null` when GitHub polling is off, there is no PR, or `gh` is unavailable.
+or `null` when GitHub polling is off, there is no PR, or the App is unavailable.
 See [GitHub integration](#github-integration).
 
 Status is two orthogonal axes. The session's `status` is the **lifecycle**
@@ -877,8 +877,8 @@ Restricted launch and recovery omit repository environment/setup and Claude
 user/project/local settings. Repository reads are path-scoped, and GitHub
 mutations use a fixed MCP bridge backed by a session-scoped REST endpoint. Loom
 uses the configured GitHub App client to call GitHub's REST API against the
-session's fixed repository and linked thread. No GitHub credential enters the
-restricted agent environment. Allowed rules execute directly;
+session's fixed repository and linked thread. The restricted agent reaches
+GitHub only through this fixed bridge. Allowed rules execute directly;
 any remaining ACP permission request is answered with the adapter's one-shot
 rejection (or a cancelled outcome), including after `session/load`. Runtime
 handoff and permission-mode changes are forbidden. The stock `github_comment`
@@ -891,13 +891,9 @@ They are transport adapters, not policy owners: every fresh, resumed, warm, or
 handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the launching user's write-only PAT stored in Loom Account
 settings, `broker` requests the session's short-lived App installation token,
-and `disabled` rejects direct GitHub CLI access. Loom reserves `GH_TOKEN` and
-`GITHUB_TOKEN` from profile, repository, and committed environment
-configuration, overlays a per-user PAT only after those layers are resolved,
-and masks token variables in brokered and disabled sessions. The adapters fail
-closed when the reserved mode is absent. The `gh` wrapper exports `GH_TOKEN`
-only for the stock CLI; it is the compatibility boundary for a client that does
-not speak Loom's session API.
+and `disabled` rejects direct GitHub CLI access. The adapters fail closed when
+the reserved mode is absent. The `gh` wrapper translates the selected mode into
+the stock CLI's native authentication contract for each invocation.
 Adapter registration stays in the image's system Git config: linked worktrees
 share repository-local config, agents may clone additional repositories, and
 the helper must be available before a target repository exists. Session
