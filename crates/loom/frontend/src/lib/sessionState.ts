@@ -15,6 +15,7 @@ const SEVERITY: Record<string, number> = { attention: 1, blocked: 2 };
 // longer reads as needing the user. The status watch may replace it with a real
 // loud status. Mirrors weaver-core's `IDLE_KEY`.
 export const IDLE_KEY = 'idle';
+export const ACP_RUNTIME_KEY = 'runtime';
 export const AUTO_ARCHIVE_KEY = 'auto-archive';
 export const AUTO_ARCHIVE_DISABLED_VALUE = 'disabled';
 
@@ -53,6 +54,12 @@ function isAgentTag(tag: Tag): boolean {
 // sessions so torn-down workstreams don't show stale chatter.
 export function messageOf(s: SessionSummary): string {
   if (s.status === 'archived') return '';
+  if (s.status === 'error' || s.status === 'orphaned') {
+    const runtime = (s.branch.tags ?? []).find(
+      (tag) => tag.key === ACP_RUNTIME_KEY && tag.set_by === 'loom',
+    );
+    if (runtime?.note) return runtime.note;
+  }
   return s.branch.description ?? '';
 }
 
@@ -128,14 +135,13 @@ export function effectiveAttention(s: SessionSummary): EffectiveAttention {
   };
   if (s.status === 'archived') return calm;
   const tags = loudTags(s);
-  if (tags.length) {
-    const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
-    const pool = live.length ? live : tags;
-    const stale = live.length === 0;
-    const top = [...pool].sort(louder)[0];
-    if (top.value === 'blocked') return { ...markOf(s, top), stale };
-  }
+  const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
+  const pool = live.length ? live : tags;
+  const stale = tags.length > 0 && live.length === 0;
+  const top = [...pool].sort(louder)[0];
+  if (top?.value === 'blocked') return { ...markOf(s, top), stale };
   if (s.status === 'error' || s.status === 'orphaned') {
+    if (top) return { ...markOf(s, top), stale };
     return {
       level: 'attention',
       raisedBy: 'watch',
@@ -146,10 +152,7 @@ export function effectiveAttention(s: SessionSummary): EffectiveAttention {
     };
   }
   if (!tags.length) return calm;
-  const live = tags.filter((t) => !tagStale(t, s.last_activity_at));
-  const pool = live.length ? live : tags;
-  const stale = live.length === 0;
-  return { ...markOf(s, [...pool].sort(louder)[0]), stale };
+  return { ...markOf(s, top), stale };
 }
 
 // One loud tag surfaced as an individually-dismissable chip. Unlike

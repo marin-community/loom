@@ -349,7 +349,7 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
       || echo "loom: WARNING: could not disable Codex account-level apps" >&2
   fi
   claude_acp_version="${CLAUDE_ACP_VERSION:-0.66.0}"
-  codex_acp_version="${CODEX_ACP_VERSION:-1.1.4}"
+  codex_acp_version="${CODEX_ACP_VERSION:-1.4.0}"
   if ! command -v claude-agent-acp >/dev/null 2>&1 \
     || ! command -v codex-acp >/dev/null 2>&1 \
     || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \

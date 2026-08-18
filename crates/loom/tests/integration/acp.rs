@@ -1885,6 +1885,90 @@ async fn crash_recovery_replays_without_duplicates() {
     );
 }
 
+/// Losing only Loom's relay subscription must not leave a session claiming it
+/// is live while every prompt route has already lost its ACP task.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
+    let ts = TestServer::start().await;
+    let id = "acp-relay-disconnect";
+    start_new(&ts, id, None, None).await;
+    let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({
+                "text": "say:before-disconnect|usage:1:10|wait:1000|say:after-disconnect"
+            }),
+        )
+        .await
+        .unwrap();
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| block["kind"] == "usage")
+    })
+    .await;
+
+    // Tapestry permits one live relay subscriber. A replacement subscriber
+    // evicts Loom's driver while leaving the relay and ACP child alive, which is
+    // the production failure shape this regression covers.
+    let _replacement = backend::subscribe_relay(&session.term_session, 0)
+        .await
+        .expect("replacement relay subscriber connects");
+
+    let view = poll_view(&ts, id, Duration::from_secs(10), |view| {
+        view["status"] == "orphaned" && branch_tag_value(view, "runtime") == "attention"
+    })
+    .await;
+    assert!(!ts.state.acp.is_live(id), "the disconnected task is gone");
+    assert!(
+        backend::has_session(&session.term_session).await,
+        "the relay child remains available for adoption"
+    );
+    let runtime = view["branch"]["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tag| tag["key"] == "runtime")
+        .unwrap();
+    assert_eq!(runtime["set_by"], "loom");
+    assert!(runtime["note"]
+        .as_str()
+        .unwrap()
+        .contains("select Adopt to reconnect"));
+
+    let messages = ts
+        .client
+        .get(&format!("/api/channels/{id}/messages"))
+        .await
+        .unwrap();
+    assert!(messages.as_array().unwrap().iter().any(|message| {
+        message["kind"] == "status"
+            && message["urgency"] == "attention"
+            && message["author_kind"] == "system"
+            && message["body"]
+                .as_str()
+                .is_some_and(|body| body.contains("select Adopt to reconnect"))
+    }));
+
+    loom::server::repair_acp_sessions(&ts.state).await;
+    let adopted = poll_view(&ts, id, Duration::from_secs(10), |view| {
+        view["status"] == "running" && branch_tag_value(view, "runtime").is_empty()
+    })
+    .await;
+    assert_eq!(adopted["status"], "running");
+    assert!(
+        ts.state.acp.is_live(id),
+        "the repair loop restored the ACP driver"
+    );
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message"
+                && block["payload"]["text"] == "before-disconnectafter-disconnect"
+        }) && blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+}
+
 /// A relay can survive while its Loom-side task exits (for example after a
 /// journal write loses a prolonged SQLite lock race). The repair pass must
 /// re-register the driver, replay the unacked frames, and leave the session

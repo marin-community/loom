@@ -326,7 +326,44 @@ pub async fn repair_acp_sessions(state: &AppState) {
             continue; // dead relay — the monitor will mark it orphaned.
         }
         match crate::acp::attach(&state.acp_ctx(), &session.id).await {
-            Ok(()) => tracing::info!("acp repair: re-attached session {}", session.id),
+            Ok(()) => {
+                if session.status == "orphaned" {
+                    match session_mod::set_status(&state.db, &session.id, "running").await {
+                        Ok(()) => {
+                            crate::status::clear_acp_failure(
+                                &state.db,
+                                &state.bus,
+                                &session.branch_id,
+                            )
+                            .await;
+                            if let Err(error) = crate::events::record(
+                                &state.db,
+                                &state.bus,
+                                &session.branch_id,
+                                "status",
+                                serde_json::json!({
+                                    "status": "running",
+                                    "reason": "ACP runtime reattached",
+                                }),
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    session = %session.id,
+                                    %error,
+                                    "acp repair could not record restored session status"
+                                );
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            session = %session.id,
+                            %error,
+                            "acp repair reattached the runtime but could not restore session status"
+                        ),
+                    }
+                }
+                tracing::info!("acp repair: re-attached session {}", session.id);
+            }
             Err(e) => tracing::warn!(
                 "acp repair: could not re-attach session {}: {e}",
                 session.id

@@ -9,6 +9,7 @@
 
 use serde_json::json;
 
+use crate::channels::{self, MessageKind, NewMessage, Subject, SubjectKind, Urgency};
 use crate::db::now_iso;
 use crate::db::Db;
 use crate::events;
@@ -16,6 +17,9 @@ use crate::events::EventBus;
 use crate::session::{self as session_mod, Session};
 use weaver_core::tags;
 use weaver_core::BoxFut;
+
+/// Machine-owned signal raised when Loom loses an ACP runtime unexpectedly.
+pub const ACP_RUNTIME_TAG: &str = "runtime";
 
 /// The tag mutations a work-cycle hook implies: `(key, value)` where an empty
 /// value clears the tag (absence is the calm/default state). `working` returns
@@ -236,4 +240,115 @@ pub async fn record_acp_lifecycle(db: &Db, bus: &EventBus, session_id: &str, kin
         tracing::warn!(session = %session_id, error = %e, "acp lifecycle: hook audit write failed");
     }
     let _ = promote_lifecycle(db, bus, &session, kind).await;
+}
+
+/// Detach an ACP session whose driver stopped unexpectedly and leave durable,
+/// user-facing recovery instructions in every existing status surface.
+pub async fn record_acp_failure(db: &Db, bus: &EventBus, session_id: &str, reason: &str) {
+    let session = match session_mod::get(db, session_id).await {
+        Ok(Some(session)) => session,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(session = %session_id, %error, "ACP failure session lookup failed");
+            return;
+        }
+    };
+    match session_mod::mark_orphaned(db, session_id).await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            tracing::warn!(session = %session_id, %error, "could not detach failed ACP session");
+            return;
+        }
+    }
+
+    tracing::warn!(session = %session_id, branch = %session.branch_id, reason, "ACP session detached after runtime failure");
+    if let Err(error) = tags::set(
+        db,
+        &session.branch_id,
+        ACP_RUNTIME_TAG,
+        "attention",
+        reason,
+        "loom",
+    )
+    .await
+    {
+        tracing::warn!(session = %session_id, %error, "could not persist ACP runtime signal");
+    }
+    if let Err(error) = events::record(
+        db,
+        bus,
+        &session.branch_id,
+        "status",
+        json!({ "status": "orphaned", "reason": reason }),
+    )
+    .await
+    {
+        tracing::warn!(session = %session_id, %error, "could not record ACP failure status event");
+    }
+    if let Err(error) = events::record_tag(
+        db,
+        bus,
+        &session.branch_id,
+        ACP_RUNTIME_TAG,
+        "attention",
+        reason,
+        "loom",
+    )
+    .await
+    {
+        tracing::warn!(session = %session_id, %error, "could not record ACP runtime signal event");
+    }
+
+    let author = Subject::new(SubjectKind::System, "loom");
+    let idempotency_key = format!(
+        "acp-runtime-failure:{}",
+        session.acp_session_id.as_deref().unwrap_or(session_id)
+    );
+    if let Err(error) = channels::append(
+        db,
+        session_id,
+        NewMessage {
+            kind: MessageKind::Status,
+            urgency: Urgency::Attention,
+            author: &author,
+            body: reason,
+            payload: &json!({ "level": "attention", "status": "orphaned" }),
+            reply_to: None,
+            idempotency_key: Some(&idempotency_key),
+        },
+    )
+    .await
+    {
+        tracing::warn!(session = %session_id, %error, "could not append ACP failure channel status");
+    }
+}
+
+/// Clear Loom's runtime-failure signal after a successful ACP adoption.
+pub async fn clear_acp_failure(db: &Db, bus: &EventBus, branch_id: &str) {
+    let failure = match tags::get(db, branch_id, ACP_RUNTIME_TAG).await {
+        Ok(Some(failure)) if failure.set_by == "loom" => failure,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::warn!(branch = %branch_id, %error, "ACP failure signal lookup failed");
+            return;
+        }
+    };
+    if let Err(error) = tags::clear(db, branch_id, ACP_RUNTIME_TAG).await {
+        tracing::warn!(branch = %branch_id, %error, "could not clear ACP failure signal");
+        return;
+    }
+    if let Err(error) = events::record_tag(
+        db,
+        bus,
+        branch_id,
+        ACP_RUNTIME_TAG,
+        "",
+        &failure.note,
+        "loom",
+    )
+    .await
+    {
+        tracing::warn!(branch = %branch_id, %error, "could not record cleared ACP failure signal");
+    }
 }

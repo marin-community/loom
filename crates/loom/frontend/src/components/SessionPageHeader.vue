@@ -190,7 +190,10 @@ const surfacedLinks = computed<SurfacedLink[]>(() => {
 
 function statusEventLine(event: WeaverEvent): string {
   const data = event.data ?? {};
-  if (event.kind === 'status') return `Lifecycle → ${String(data.status ?? 'unknown')}`;
+  if (event.kind === 'status') {
+    const reason = typeof data.reason === 'string' && data.reason ? ` — ${data.reason}` : '';
+    return `Lifecycle → ${String(data.status ?? 'unknown')}${reason}`;
+  }
   const key = String(data.key ?? 'tag');
   const value = String(data.value ?? '');
   const note = typeof data.note === 'string' && data.note ? ` — ${data.note}` : '';
