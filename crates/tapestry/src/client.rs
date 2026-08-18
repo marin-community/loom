@@ -20,6 +20,7 @@ const ATTACH_BUFFER: usize = 256;
 
 /// A connected control client for one session.
 pub struct Client {
+    name: String,
     stream: UnixStream,
 }
 
@@ -31,7 +32,10 @@ impl Client {
         let stream = UnixStream::connect(&path)
             .await
             .with_context(|| format!("connecting to session {name}"))?;
-        Ok(Self { stream })
+        Ok(Self {
+            name: name.to_string(),
+            stream,
+        })
     }
 
     /// Whether a supervisor is alive for `name` — connect and ping. A stale
@@ -117,6 +121,7 @@ impl Client {
     /// streams live frames, and finally an [`RelayEvent::Exit`] once the child has
     /// exited. Only one subscriber exists at a time — this evicts any previous one.
     pub async fn subscribe(self, cursor: u64) -> Result<RelayStream> {
+        let name = self.name;
         let mut stream = self.stream;
         protocol::write_frame(&mut stream, &req::subscribe(cursor)).await?;
         let (rd, wr) = stream.into_split();
@@ -149,7 +154,14 @@ impl Client {
                         break;
                     }
                     Ok(Some(_)) => {} // ignore stray frames
-                    Ok(None) | Err(_) => break,
+                    Ok(None) => {
+                        tracing::warn!(session = %name, "relay subscription closed before child exit");
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session = %name, %error, "relay subscription read failed");
+                        break;
+                    }
                 }
             }
         }));

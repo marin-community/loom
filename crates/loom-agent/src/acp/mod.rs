@@ -1387,11 +1387,33 @@ impl TurnEndSource {
 
 #[derive(Debug)]
 enum TaskStopReason {
-    AgentExit,
+    AgentExit { status: Option<i32> },
     CommandChannelClosed,
     Handoff,
     JournalFailure,
     RelayClosed,
+}
+
+impl TaskStopReason {
+    fn failure_message(&self) -> Option<String> {
+        match self {
+            Self::AgentExit { status: Some(status) } => Some(format!(
+                "The ACP agent exited unexpectedly (status {status}). Select Adopt to restart it."
+            )),
+            Self::AgentExit { status: None } => Some(
+                "The ACP agent exited unexpectedly. Select Adopt to restart it.".to_string(),
+            ),
+            Self::JournalFailure => Some(
+                "Loom could not persist ACP output. The session was detached to preserve the relay backlog; select Adopt to retry."
+                    .to_string(),
+            ),
+            Self::RelayClosed => Some(
+                "Loom lost its connection to the ACP agent. The agent may still be running; select Adopt to reconnect."
+                    .to_string(),
+            ),
+            Self::CommandChannelClosed | Self::Handoff => None,
+        }
+    }
 }
 
 struct Task {
@@ -2012,8 +2034,7 @@ impl Task {
                         }
                     }
                     Some(RelayEvent::Exit { status }) => {
-                        self.on_exit(status).await;
-                        break TaskStopReason::AgentExit;
+                        break TaskStopReason::AgentExit { status };
                     }
                     None => break TaskStopReason::RelayClosed,
                 },
@@ -2051,6 +2072,20 @@ impl Task {
                 },
             }
         };
+        let failure_message = stop_reason.failure_message();
+        if let TaskStopReason::AgentExit { .. } = stop_reason {
+            self.on_failure(
+                failure_message
+                    .as_deref()
+                    .expect("agent exit always carries a failure message"),
+            )
+            .await;
+        } else if let Some(message) = &failure_message {
+            tracing::warn!(session = %self.session_id, reason = message, "acp task failed");
+        }
+        if let Some(message) = &failure_message {
+            crate::status::record_acp_failure(&self.db, &self.bus, &self.session_id, message).await;
+        }
         self.registry.remove_own(&self.session_id, self.generation);
         if let Some((reply, snapshot)) = handoff_reply {
             let _ = reply.send(Ok(snapshot));
@@ -3339,11 +3374,11 @@ impl Task {
 
     // -- exit ---------------------------------------------------------------
 
-    async fn on_exit(&mut self, status: Option<i32>) {
-        tracing::warn!(session = %self.session_id, ?status, "acp agent exited");
+    async fn on_failure(&mut self, reason: &str) {
+        tracing::warn!(session = %self.session_id, reason, "acp task failed");
         self.settle_inflight_review(
             crate::review_inbox::ReviewClaimSettlement::Abandoned,
-            "ACP process exit",
+            "ACP task failure",
         )
         .await;
         let ending_turn = self

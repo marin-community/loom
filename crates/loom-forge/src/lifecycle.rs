@@ -976,6 +976,7 @@ pub async fn adopt_acp(
     // A re-adopted ACP session is live again — mark it running.
     let status = agent::initial_status(&st.db, &session.agent_kind).await;
     session_mod::set_status(&st.db, &session.id, status).await?;
+    crate::status::clear_acp_failure(&st.db, &st.bus, &branch.id).await;
     events::record(
         &st.db,
         &st.bus,
