@@ -487,9 +487,9 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       });
 
       // UI-created sessions should use a plain shell, never the real claude CLI.
-      await fetchJson(`${baseUrl}/api/settings`, {
-        method: "PATCH",
-        body: JSON.stringify({ "agent.default": "shell" }),
+      await fetchJson(`${baseUrl}/api/settings/patch`, {
+        method: "POST",
+        body: JSON.stringify({ changes: { "agent.default": "shell" } }),
       });
 
       await use({ baseUrl, repoPath, childEnv });
@@ -592,9 +592,9 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         // /tmp/weaver-conv-* dirs leak across runs) and drop the log there,
         // slugging the branch the same way the server does.
         const logRoot = mkdtempSync(join(childEnv.WEAVER_HOME!, "conv-"));
-        await fetchJson(`${baseUrl}/api/settings`, {
-          method: "PATCH",
-          body: JSON.stringify({ "session.log_dir": logRoot }),
+        await fetchJson(`${baseUrl}/api/settings/patch`, {
+          method: "POST",
+          body: JSON.stringify({ changes: { "session.log_dir": logRoot } }),
         });
         const slug = session.branch.branch.replace(/[^A-Za-z0-9._-]/g, "-");
         mkdirSync(join(logRoot, slug), { recursive: true });

@@ -184,7 +184,10 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
     // The webhook builds a CreateReq with no agent, so it uses `agent.default`;
     // pin it to `shell` so the test doesn't try to launch a real claude.
     ts.client
-        .patch("/api/settings", json!({ "agent.default": "shell" }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "agent.default": "shell" } }),
+        )
         .await
         .unwrap();
     remotes
@@ -756,9 +759,9 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     // The card links sessions through the configured public base; without one
     // the mirror deliberately stays quiet.
     ts.client
-        .patch(
-            "/api/settings",
-            json!({ "auth.base_url": "http://loom.test" }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.base_url": "http://loom.test" } }),
         )
         .await
         .unwrap();

@@ -77,8 +77,8 @@ async fn status_and_logs_are_shaped_and_human_only() {
 
     // Lock down loopback trust — every subsequent bare request needs a credential.
     let r = http
-        .patch(url(&ts, "/api/settings"))
-        .json(&json!({ "auth.trust_loopback": false }))
+        .post(url(&ts, "/api/settings/patch"))
+        .json(&json!({ "changes": { "auth.trust_loopback": false } }))
         .send()
         .await
         .unwrap();

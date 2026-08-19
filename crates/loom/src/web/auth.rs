@@ -237,6 +237,19 @@ pub(super) async fn grant_allows(
                 }
                 return issue_belongs_to_session(st, branch_id, segments[1]).await;
             }
+            // Bare collection reads a session may perform. Each entry must be a
+            // route this file still mounts, and
+            // `no_session_allowlist_path_is_unmounted` in
+            // `tests/surface_parity.rs` is what enforces that. Three entries had
+            // already gone stale: `/settings` and `/profiles`, whose routes were
+            // deleted in favour of `settings.get` and `profiles.list` (both
+            // `actor = SessionSelf`, so the permission survives in the
+            // declaration), and `/repos/issues`, unmounted since #309.
+            //
+            // A stale entry is worse than dead code. It pre-authorizes a path
+            // nothing serves, so whatever gets mounted there next is readable by
+            // every session credential in the fleet before anyone decides it
+            // should be.
             *method == axum::http::Method::GET
                 && matches!(
                     path,
@@ -247,11 +260,7 @@ pub(super) async fn grant_allows(
                         | "/repos"
                         | "/repos/recent"
                         | "/repos/branches"
-                        | "/settings"
-                        | "/profiles"
                 )
-                || (path == "/repos/issues"
-                    && matches!(*method, axum::http::Method::GET | axum::http::Method::POST))
         }
     }
 }
@@ -289,6 +298,16 @@ pub(super) fn operation_grant_allows(
     }
 }
 
+/// Which raw paths an `Admin`-less human may reach.
+///
+/// Like the session allowlist above, this only decides routes that are *not*
+/// registered operations; for an operation, `actor = Admin` says the same thing
+/// in the declaration and this function never runs. So an entry here whose route
+/// became an operation is dead, and several were: `/deployment/reconcile`,
+/// `/shell/terminal`, `/shell/restart`, `/settings`, `/env`, `/profiles` and
+/// `/mcps/custom` all named routes this file no longer mounts. Each is now
+/// `actor = Admin` on its operation, so removing the entry changed nothing —
+/// which is exactly why it had to be checked rather than assumed.
 fn user_grant_allows(method: &axum::http::Method, path: &str) -> bool {
     if path == "/auth/users"
         || path.starts_with("/auth/users/")
@@ -296,24 +315,14 @@ fn user_grant_allows(method: &axum::http::Method, path: &str) -> bool {
         || path == "/auth/automation-token"
         || path == "/auth/federations"
         || path.starts_with("/auth/federations/")
-        || path == "/deployment/reconcile"
-        || path == "/shell/terminal"
-        || path == "/shell/restart"
     {
         return false;
     }
     if matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD) {
         return true;
     }
-    !(path == "/settings"
-        || path == "/env"
-        || path.starts_with("/env/")
-        || path == "/profiles"
-        || path.starts_with("/profiles/")
-        || path == "/agents/custom"
+    !(path == "/agents/custom"
         || path.starts_with("/agents/custom/")
-        || path == "/mcps/custom"
-        || path.starts_with("/mcps/custom/")
         || path == "/watches"
         || path.starts_with("/watches/"))
 }

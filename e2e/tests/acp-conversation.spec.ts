@@ -254,7 +254,7 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
     await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
-    await fetch(`${weaver.baseUrl}/api/profiles`, {
+    await fetch(`${weaver.baseUrl}/api/profiles/create`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({

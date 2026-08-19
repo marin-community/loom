@@ -141,7 +141,10 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 
@@ -162,7 +165,10 @@ async fn health_readiness_and_metrics_are_public_and_label_safe() {
     let ts = TestServer::start().await;
     seed_operational_state(&ts).await;
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();

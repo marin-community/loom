@@ -1,33 +1,40 @@
 //! axum REST API + SSE. The Vue SPA is the primary consumer.
 //!
-//! Endpoint layout (post phase-4 rename):
+//! ## The router is derived, not written
 //!
-//! * `/api/sessions` — list + create active sessions (each session is one
-//!   terminal + one agent attached to a branch).
-//! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild an archived
-//!   session or restart a failed live ACP runtime), `/tags` (PUT to atomically
-//!   replace one author's tag set), `/tags/{key}` (PUT to set a tag, DELETE to
-//!   clear it), `/log`, `/events`, and `/terminal` (a WebSocket bridged to the
-//!   session's terminal via a PTY — see `crate::terminal`).
-//!   Interacting with the agent (keystrokes, keys, TUIs) happens entirely over
-//!   `/terminal`.
-//! * `/api/branches` — list every tracked branch (with or without an active
-//!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
-//! * `/api/branches/{id}/issues` — list issues claimed by a branch.
-//! * `/api/issues/<operation>` — generated JSON operation routes such as
-//!   `/list`, `/get`, `/create`, `/close`, and `/tags/set`.
-//! * `/api/issues/{id}` — the specialized partial-update route for an issue.
-//! * `/api/issues/actions` — validate and atomically mutate a set of issues for
-//!   multi-item CLI and UI requests.
-//! * `/api/health` + `/api/health/live` are process-level liveness;
-//!   `/api/ready` checks the database and migration streams; `/metrics` exposes
-//!   bounded-label OpenMetrics; `/api/diagnostics` is the human-readable inventory.
-//! * `/api/repos/recent`, `/api/repos/branches`, `/api/settings` — unchanged.
+//! Almost every endpoint here is a **registered operation**: it is declared
+//! once in `weaver_api::operations`, and its route, method, input schema,
+//! actor policy, CLI projection and MCP tool all fall out of that one
+//! declaration. The path is mechanical — `issues.list` is
+//! `POST /api/issues/list`, `sessions.shells.terminal` is
+//! `GET /api/sessions/shells/terminal` — so there is no route table to keep in
+//! sync with anything.
 //!
-//! The `/api/hook` endpoint that used to exist is gone — agent hooks now go
-//! through `loom hook --event …` which writes an `events` row consumed by
-//! the monitor loop.
+//! Two functions build the surface:
+//!
+//! * `operations::mount` mounts every operation whose response is JSON — the
+//!   overwhelming majority — on one dispatcher. Arguments arrive as a JSON body
+//!   matching the operation's `Input`; there are no path parameters and no query
+//!   strings, because an operand is a field rather than a URL position. The
+//!   three `io = Session` operations go through the same dispatcher: their body
+//!   is JSON too and only the `Set-Cookie` header differs, which is why they are
+//!   mounted beside the auth routes rather than here.
+//! * `streams::mount` mounts every `io = Stream | Duplex` operation. Same
+//!   declarations, same authorization; these need their own handlers only
+//!   because axum wants a concrete SSE or websocket-upgrade response type.
+//!   Their operands arrive in the query string, which is the one place the
+//!   encoding shows through.
+//!
+//! What is left is mounted by hand, and `crates/loom/tests/surface_parity.rs`
+//! is the ledger that says which and why: transport that is not an operation
+//! (the code-server proxy, liveness probes, the GitHub webhook, OAuth
+//! redirects), routes an operation has superseded but whose last caller has
+//! not moved, and — the list that is supposed to reach zero — routes with no
+//! operation behind them at all. That test fails if this file grows a route
+//! the ledger does not name, in either direction.
+//!
+//! Response encoding is the only thing an operation's declaration varies about
+//! its transport; see `docs/ARCHITECTURE.md` for the projection table.
 //!
 //! ### SessionView payload
 //!
@@ -64,10 +71,10 @@
 //! }
 //! ```
 //!
-//! A branch's status axes — the agent's self-reported `attention` and an
-//! watch's `triage` — are **tags**: well-known keys under `tags`, set
-//! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
-//! Absence is the calm state; there is no stored `ok` tag.
+//! A branch's status axes — the agent's self-reported `attention` and a
+//! watch's `triage` — are **tags**: well-known keys under `tags`, set through
+//! `sessions.tags.set` and cleared through `sessions.tags.delete`. Absence is
+//! the calm state; there is no stored `ok` tag.
 
 mod agents;
 mod artifacts;
@@ -112,14 +119,11 @@ use changes::*;
 use channels::*;
 use diagnostics::*;
 use discussion::*;
-use env::*;
 use github_access::*;
 use issues::*;
 use launches::*;
 use logview::*;
-use mcps::*;
 use operations::*;
-use profiles::*;
 use repo_env::*;
 use repos::*;
 use restricted_github::*;
@@ -130,7 +134,6 @@ use self_context::*;
 use session_layout::*;
 use session_summary::*;
 use sessions::*;
-use settings::*;
 use watches::*;
 
 use std::collections::hash_map::DefaultHasher;
@@ -1063,40 +1066,11 @@ fn protected_api_router() -> Router<AppState> {
             "/repos/env/{name}",
             axum::routing::put(put_repo_env).delete(delete_repo_env),
         )
-        .route("/settings", get(get_settings).patch(patch_settings))
-        .route(
-            "/preferences",
-            get(get_preferences).patch(patch_preferences),
-        )
-        .route("/mcps", get(list_mcps))
-        .route(
-            "/mcps/custom",
-            get(list_custom_mcps).post(create_custom_mcp),
-        )
-        .route(
-            "/mcps/custom/{*identity}",
-            get(get_custom_mcp)
-                .put(put_custom_mcp)
-                .delete(delete_custom_mcp),
-        )
-        .route("/profiles", get(list_profiles).post(create_profile))
-        .route("/profiles/{name}/effective", get(effective_profile))
-        .route("/profiles/{name}/clone", post(clone_profile))
-        .route(
-            "/profiles/{name}",
-            get(get_profile).put(put_profile).delete(delete_profile),
-        )
-        .route(
-            "/profiles/{profile}/env/{name}",
-            axum::routing::put(put_profile_env).delete(delete_profile_env),
-        )
+        // Settings, operator preferences, profiles, the MCP registry and the
+        // default profile's environment facade are registered operations —
+        // `settings.*`, `preferences.*`, `profiles.*`, `mcps.*`,
+        // `settings.env.*`. Nothing is mounted by hand here.
         .route("/slack/status", get(slack_status))
-        // Readable compatibility facade for the default profile's environment.
-        .route("/env", get(get_env))
-        .route(
-            "/env/{name}",
-            axum::routing::put(put_env).delete(delete_env),
-        )
         // The operator scratch shell — a single persistent login shell in the
         // container, for one-time setup like `gcloud auth login`.
         // Server logs + background tasks (Settings → Diagnostics) — snapshot +

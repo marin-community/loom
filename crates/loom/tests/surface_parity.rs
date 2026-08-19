@@ -94,14 +94,9 @@ const SUPERSEDED_ROUTES: &[&str] = &[
     "/channels",
     "/channels/{id}",
     "/diagnostics",
-    "/env",
     "/issues",
     "/issues/{id}",
     "/logs",
-    "/mcps",
-    "/profiles",
-    "/profiles/{name}/clone",
-    "/profiles/{name}/effective",
     "/repos",
     "/repos/env",
     "/reviews/{id}",
@@ -164,7 +159,6 @@ const SUPERSEDED_ROUTES: &[&str] = &[
     "/sessions/{id}/title-generation",
     "/sessions/{id}/title/regenerate",
     "/sessions/{id}/url",
-    "/settings",
     "/slack/status",
     "/status",
     "/tasks",
@@ -189,11 +183,6 @@ const SUPERSEDED_ROUTES: &[&str] = &[
     "/channels/{id}/messages",
     "/channels/{id}/read-marker",
     "/channels/{id}/subscription",
-    "/env/{name}",
-    "/mcps/custom",
-    "/mcps/custom/{*identity}",
-    "/profiles/{name}",
-    "/profiles/{profile}/env/{name}",
     "/repos/env/{name}",
     "/sessions",
     "/sessions/{id}/artifacts/{name}",
@@ -216,7 +205,10 @@ const SUPERSEDED_ROUTES: &[&str] = &[
 /// below is a place that is not yet true.
 ///
 /// This list became visible only when the route scan above was fixed. Before
-/// that it read as zero, which is the most expensive kind of wrong number.
+/// that it read as zero, which is the most expensive kind of wrong number. It
+/// was 26 lines then and is two now; both survivors are about a wire encoding
+/// the `Io` enum does not yet serve, not about the registry lacking the shape.
+///
 /// A caveat this list cannot express: it is keyed by path, while an operation is
 /// keyed by method *and* path. Two routes are therefore in [`SUPERSEDED_ROUTES`]
 /// with one method still unregistered — `PATCH /issues/{id}` (there is no
@@ -225,18 +217,15 @@ const SUPERSEDED_ROUTES: &[&str] = &[
 /// is not). Both are named here so the gap is written down somewhere.
 const UNREGISTERED_ROUTES: &[(&str, &str)] = &[
     (
-        "/preferences",
-        "operator UI preferences: GET is preferences.get; PATCH takes an \
-         arbitrary key->value map of mixed JSON types (string/number/null) \
-         the Operands derive cannot express losslessly",
-    ),
-    (
         "/sessions/{id}/artifacts/{name}/raw",
-        "artifacts: image bytes",
+        "artifacts: the response is image bytes, and `Io` has no variant for a \
+         raw binary body — adding one is a design decision, not a port",
     ),
     (
         "/sessions/{id}/scratch",
-        "sessions: scratch upload (multipart)",
+        "sessions: three methods on one path. GET (list) and DELETE are ordinary \
+         JSON and could be registered today; POST takes a raw octet-stream body, \
+         which is what `Io::Upload` is for — it is declared and so far unused",
     ),
 ];
 
@@ -457,5 +446,98 @@ fn every_cli_operation_is_reachable() {
     assert!(
         unreachable.is_empty(),
         "operations advertise a CLI invocation that nothing serves: {unreachable:?}"
+    );
+}
+
+/// Every literal path in the session-credential allowlist is a route the server
+/// still mounts.
+///
+/// `grant_allows` in `src/web/auth.rs` decides a *raw path* — it is the legacy
+/// authority model, and it now applies only to routes that are not operations.
+/// So when a route becomes an operation, its entry there has to go, and two did
+/// not: `/settings` and `/profiles` sat in the bare-GET list for a while after
+/// their routes were deleted.
+///
+/// A stale entry is worse than dead code. It is a *pre-authorization* for a path
+/// nothing serves — so the day someone mounts something else at `/settings`,
+/// every session credential in the fleet can already read it, and nothing in
+/// this repository would have said so.
+///
+/// Scanned rather than enumerated, for the same reason the route ledger is: a
+/// hand-kept copy of this list is the thing that goes stale.
+#[test]
+fn no_session_allowlist_path_is_unmounted() {
+    check_path_literals_are_mounted(
+        "Grant::Session {",
+        "pub(super) fn operation_grant_allows",
+        "pre-authorized for session credentials",
+    );
+}
+
+/// The same check for the human-operator deny-list.
+///
+/// A stale entry here is the milder direction — a dead *denial* rather than a
+/// dead permission — but it still reads as policy that is being enforced when it
+/// is not, and it is how you end up believing `/settings` is admin-gated by this
+/// function when the real gate is `settings.patch`'s `actor`.
+#[test]
+fn no_user_denylist_path_is_unmounted() {
+    check_path_literals_are_mounted(
+        "fn user_grant_allows(",
+        "\n/// ",
+        "denied to non-admin humans",
+    );
+}
+
+/// Every `"/…"` literal between two markers in `web/auth.rs` names a mounted
+/// route. Scanned rather than enumerated, for the same reason the route ledger
+/// is: a hand-kept copy of the list is the thing that goes stale.
+fn check_path_literals_are_mounted(from: &str, to: &str, role: &str) {
+    let source = include_str!("../src/web/auth.rs");
+    let start = source
+        .find(from)
+        .unwrap_or_else(|| panic!("web/auth.rs no longer contains `{from}`"));
+    let end = source[start..]
+        .find(to)
+        .map(|offset| start + offset)
+        .unwrap_or_else(|| panic!("no `{to}` after `{from}` in web/auth.rs"));
+    let arm = &source[start..end];
+
+    // Every string literal in the arm that looks like a whole path. Structural
+    // checks (`segments.first() == Some(&"channels")`) name a single segment
+    // without a leading slash, so they are excluded by that test rather than by
+    // a list of exceptions.
+    let mut claimed: BTreeSet<&str> = BTreeSet::new();
+    for (index, _) in arm.match_indices('"') {
+        let rest = &arm[index + 1..];
+        let Some((literal, _)) = rest.split_once('"') else {
+            continue;
+        };
+        if literal.starts_with('/') && !literal.is_empty() {
+            claimed.insert(literal);
+        }
+    }
+    assert!(
+        claimed.len() > 3,
+        "the scan between `{from}` and `{to}` found only {claimed:?} — \
+         it stopped matching the source"
+    );
+
+    let mounted = mounted_routes();
+    // A prefix rule (`path.starts_with("/operations/")`) authorizes a family
+    // whose members are mounted with a path parameter, so accept either an exact
+    // route or one that extends the claim.
+    let unmounted: Vec<&str> = claimed
+        .iter()
+        .copied()
+        .filter(|claim| {
+            !mounted.contains(*claim) && !mounted.iter().any(|route| route.starts_with(*claim))
+        })
+        .collect();
+    assert!(
+        unmounted.is_empty(),
+        "these paths are {role} in `web/auth.rs` but no longer mounted: \
+         {unmounted:?}. Delete the entry — the operation that replaced the route \
+         carries the policy through `actor` instead."
     );
 }

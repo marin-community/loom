@@ -1,12 +1,8 @@
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
+use axum::http::StatusCode;
 use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
     CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView,
-    ProfileDeleteResult, ProfileEnvView, ProfileReq, ProfileView, PutProfileEnvReq,
+    ProfileDeleteResult, ProfileEnvView, ProfileReq, ProfileView,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -150,7 +146,12 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
     })
 }
 
-async fn list_profiles_core(st: &AppState) -> ApiResult<Vec<ProfileView>> {
+/// `profiles.list`.
+pub(super) async fn list_profiles_operation(
+    context: OperationContext,
+    _input: profiles_operations::list::Input,
+) -> ApiResult<Vec<ProfileView>> {
+    let st = &context.state;
     let mut views = Vec::new();
     for item in profile::list(&st.db).await? {
         views.push(view(st, item).await?);
@@ -158,38 +159,17 @@ async fn list_profiles_core(st: &AppState) -> ApiResult<Vec<ProfileView>> {
     Ok(views)
 }
 
-pub(super) async fn list_profiles(State(st): State<AppState>) -> ApiResult<Json<Vec<ProfileView>>> {
-    Ok(Json(list_profiles_core(&st).await?))
-}
-
-/// `profiles.list` — the twin of [`list_profiles`].
-pub(super) async fn list_profiles_operation(
-    context: OperationContext,
-    _input: profiles_operations::list::Input,
-) -> ApiResult<Vec<ProfileView>> {
-    list_profiles_core(&context.state).await
-}
-
-async fn get_profile_core(st: &AppState, name: &str) -> ApiResult<ProfileView> {
-    let item = profile::get(&st.db, name)
-        .await?
-        .ok_or_else(|| AppError::not_found("profile"))?;
-    view(st, item).await
-}
-
-pub(super) async fn get_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<ProfileView>> {
-    Ok(Json(get_profile_core(&st, &name).await?))
-}
-
-/// `profiles.get` — the twin of [`get_profile`].
+/// `profiles.get`.
 pub(super) async fn get_profile_operation(
     context: OperationContext,
     input: profiles_operations::get::Input,
 ) -> ApiResult<ProfileView> {
-    get_profile_core(&context.state, &input.name).await
+    let st = &context.state;
+    let name = &input.name;
+    let item = profile::get(&st.db, name)
+        .await?
+        .ok_or_else(|| AppError::not_found("profile"))?;
+    view(st, item).await
 }
 
 async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileView> {
@@ -221,33 +201,27 @@ async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileVi
     })
 }
 
-async fn effective_profile_core(st: &AppState, name: &str) -> ApiResult<EffectiveProfileView> {
+/// `profiles.effective`.
+pub(super) async fn effective_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::effective::Input,
+) -> ApiResult<EffectiveProfileView> {
+    let st = &context.state;
+    let name = &input.name;
     let item = profile::get(&st.db, name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
     effective(st, item).await
 }
 
-pub(super) async fn effective_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<EffectiveProfileView>> {
-    Ok(Json(effective_profile_core(&st, &name).await?))
-}
-
-/// `profiles.effective` — the twin of [`effective_profile`].
-pub(super) async fn effective_profile_operation(
+/// `profiles.create`.
+pub(super) async fn create_profile_operation(
     context: OperationContext,
-    input: profiles_operations::effective::Input,
-) -> ApiResult<EffectiveProfileView> {
-    effective_profile_core(&context.state, &input.name).await
-}
-
-async fn create_profile_core(
-    st: &AppState,
-    name: String,
-    profile_input: ProfileInput,
+    input: profiles_operations::create::Input,
 ) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let name = input.name.trim().to_string();
+    let profile_input = profile_input_from_create(input, name.clone());
     let _permit = st.launch_gate.acquire_profile(&name).await;
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
     match profile::create(&st.db, &profile_input)
@@ -262,35 +236,15 @@ async fn create_profile_core(
     }
 }
 
-pub(super) async fn create_profile(
-    State(st): State<AppState>,
-    Json(req): Json<ProfileReq>,
-) -> ApiResult<(StatusCode, Json<ProfileView>)> {
-    let name = req.name.trim().to_string();
-    let created = create_profile_core(&st, name.clone(), input(req, name)).await?;
-    Ok((StatusCode::CREATED, Json(created)))
-}
-
-/// `profiles.create` — the twin of [`create_profile`].
-pub(super) async fn create_profile_operation(
+/// `profiles.update`.
+pub(super) async fn update_profile_operation(
     context: OperationContext,
-    input: profiles_operations::create::Input,
+    input: profiles_operations::update::Input,
 ) -> ApiResult<ProfileView> {
-    let name = input.name.trim().to_string();
-    create_profile_core(
-        &context.state,
-        name.clone(),
-        profile_input_from_create(input, name),
-    )
-    .await
-}
-
-async fn update_profile_core(
-    st: &AppState,
-    name: String,
-    profile_input: ProfileInput,
-    expected_revision: Option<i64>,
-) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let name = input.name.clone();
+    let expected_revision = input.expected_revision;
+    let profile_input = profile_input_from_update(input, name.clone());
     let _permit = st.launch_gate.acquire_profile(&name).await;
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
     if let Some(expected) = expected_revision {
@@ -316,38 +270,25 @@ async fn update_profile_core(
     view(st, item).await
 }
 
-pub(super) async fn put_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-    Json(req): Json<ProfileReq>,
-) -> ApiResult<Json<ProfileView>> {
-    let expected_revision = req.expected_revision;
-    Ok(Json(
-        update_profile_core(&st, name.clone(), input(req, name), expected_revision).await?,
-    ))
-}
-
-/// `profiles.update` — the twin of [`put_profile`].
-pub(super) async fn update_profile_operation(
+/// `profiles.clone`. `source` and `name` are separate positional fields on
+/// the operation, where the route this replaced split them as a URL path
+/// segment plus a body field; [`CloneProfileReq`] is otherwise the same
+/// frozen shape both take.
+pub(super) async fn clone_profile_operation(
     context: OperationContext,
-    input: profiles_operations::update::Input,
+    input: profiles_operations::clone::Input,
 ) -> ApiResult<ProfileView> {
-    let name = input.name.clone();
-    let expected_revision = input.expected_revision;
-    update_profile_core(
-        &context.state,
-        name.clone(),
-        profile_input_from_update(input, name),
-        expected_revision,
-    )
-    .await
-}
-
-async fn clone_profile_core(
-    st: &AppState,
-    source_name: String,
-    req: CloneProfileReq,
-) -> ApiResult<ProfileView> {
+    let source_name = input.source;
+    let req = CloneProfileReq {
+        name: input.name,
+        expected_profile_revision: input.expected_profile_revision,
+        expected_resolver_revision: input.expected_resolver_revision,
+        overrides: input.overrides,
+        template: input.template,
+        copy_environment: input.copy_environment,
+        environment: input.environment,
+    };
+    let st = &context.state;
     let target_name = req.name.trim().to_string();
     let _permits = st
         .launch_gate
@@ -428,7 +369,7 @@ async fn clone_profile_core(
     }
     let has_template = req.template.is_some();
     let mut cloned = match req.template {
-        Some(template) => input(template, target_name.clone()),
+        Some(template) => self::input(template, target_name.clone()),
         None => source
             .as_input()
             .map_err(|error| AppError::bad_request(error.to_string()))?,
@@ -496,37 +437,13 @@ async fn clone_profile_core(
     }
 }
 
-pub(super) async fn clone_profile(
-    State(st): State<AppState>,
-    Path(source_name): Path<String>,
-    Json(req): Json<CloneProfileReq>,
-) -> ApiResult<(StatusCode, Json<ProfileView>)> {
-    let cloned = clone_profile_core(&st, source_name, req).await?;
-    Ok((StatusCode::CREATED, Json(cloned)))
-}
-
-/// `profiles.clone` — the twin of [`clone_profile`]. `source` and `name` are
-/// separate positional fields on the operation (the legacy route split them
-/// as a URL path segment plus a body field); [`CloneProfileReq`] is otherwise
-/// the same frozen shape both take.
-pub(super) async fn clone_profile_operation(
+/// `profiles.delete`.
+pub(super) async fn delete_profile_operation(
     context: OperationContext,
-    input: profiles_operations::clone::Input,
-) -> ApiResult<ProfileView> {
-    let source = input.source;
-    let req = CloneProfileReq {
-        name: input.name,
-        expected_profile_revision: input.expected_profile_revision,
-        expected_resolver_revision: input.expected_resolver_revision,
-        overrides: input.overrides,
-        template: input.template,
-        copy_environment: input.copy_environment,
-        environment: input.environment,
-    };
-    clone_profile_core(&context.state, source, req).await
-}
-
-async fn delete_profile_core(st: &AppState, name: String) -> ApiResult<ProfileDeleteResult> {
+    input: profiles_operations::delete::Input,
+) -> ApiResult<ProfileDeleteResult> {
+    let st = &context.state;
+    let name = input.name;
     let _permit = st.launch_gate.acquire_profile(&name).await;
     match profile::remove(&st.db, &name).await {
         Ok(true) => Ok(ProfileDeleteResult {
@@ -538,29 +455,16 @@ async fn delete_profile_core(st: &AppState, name: String) -> ApiResult<ProfileDe
     }
 }
 
-pub(super) async fn delete_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
-    delete_profile_core(&st, name).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-/// `profiles.delete` — the twin of [`delete_profile`].
-pub(super) async fn delete_profile_operation(
+/// `profiles.env.set`.
+pub(super) async fn set_profile_env_operation(
     context: OperationContext,
-    input: profiles_operations::delete::Input,
-) -> ApiResult<ProfileDeleteResult> {
-    delete_profile_core(&context.state, input.name).await
-}
-
-async fn env_set_profile_core(
-    st: &AppState,
-    profile_name: String,
-    name: String,
-    value: Option<String>,
-    secret_ref: Option<String>,
+    input: profiles_operations::env::set::Input,
 ) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let profile_name = input.profile;
+    let name = input.name;
+    let value = input.value;
+    let secret_ref = input.secret_ref;
     let _permit = st.launch_gate.acquire_profile(&profile_name).await;
     match (value.as_deref(), secret_ref.as_deref()) {
         (Some(value), None) => profile::env_set(&st.db, &profile_name, &name, value).await,
@@ -578,36 +482,14 @@ async fn env_set_profile_core(
     view(st, item).await
 }
 
-pub(super) async fn put_profile_env(
-    State(st): State<AppState>,
-    Path((profile_name, name)): Path<(String, String)>,
-    Json(req): Json<PutProfileEnvReq>,
-) -> ApiResult<Json<ProfileView>> {
-    Ok(Json(
-        env_set_profile_core(&st, profile_name, name, req.value, req.secret_ref).await?,
-    ))
-}
-
-/// `profiles.env.set` — the twin of [`put_profile_env`].
-pub(super) async fn set_profile_env_operation(
+/// `profiles.env.delete`.
+pub(super) async fn delete_profile_env_operation(
     context: OperationContext,
-    input: profiles_operations::env::set::Input,
+    input: profiles_operations::env::delete::Input,
 ) -> ApiResult<ProfileView> {
-    env_set_profile_core(
-        &context.state,
-        input.profile,
-        input.name,
-        input.value,
-        input.secret_ref,
-    )
-    .await
-}
-
-async fn env_delete_profile_core(
-    st: &AppState,
-    profile_name: String,
-    name: String,
-) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let profile_name = input.profile;
+    let name = input.name;
     let _permit = st.launch_gate.acquire_profile(&profile_name).await;
     profile::get(&st.db, &profile_name)
         .await?
@@ -617,23 +499,6 @@ async fn env_delete_profile_core(
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
     view(st, item).await
-}
-
-pub(super) async fn delete_profile_env(
-    State(st): State<AppState>,
-    Path((profile_name, name)): Path<(String, String)>,
-) -> ApiResult<Json<ProfileView>> {
-    Ok(Json(
-        env_delete_profile_core(&st, profile_name, name).await?,
-    ))
-}
-
-/// `profiles.env.delete` — the twin of [`delete_profile_env`].
-pub(super) async fn delete_profile_env_operation(
-    context: OperationContext,
-    input: profiles_operations::env::delete::Input,
-) -> ApiResult<ProfileView> {
-    env_delete_profile_core(&context.state, input.profile, input.name).await
 }
 
 // ---------------------------------------------------------------------------

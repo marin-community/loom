@@ -32,7 +32,7 @@ use crate::AppState;
 use crate::Db;
 
 /// Env var / settings key for the app-level token (`xapp-…`). Held outside the
-/// settings registry (like the GitHub webhook secret) so `GET /api/settings`
+/// settings registry (like the GitHub webhook secret) so `settings.get`
 /// never returns it; set it through the environment or `loom config`.
 pub const APP_TOKEN_ENV: &str = "LOOM_SLACK_APP_TOKEN";
 pub const APP_TOKEN_KEY: &str = "slack.app_token";

@@ -41,7 +41,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// The settings key (read via env-or-DB) holding the webhook's shared secret.
 /// Kept **out** of the settings registry, like the OAuth client secret, so it is
-/// never returned by `GET /api/settings`; set it through the environment.
+/// never returned by `settings.get`; set it through the environment.
 pub const WEBHOOK_SECRET_KEY: &str = "github.webhook_secret";
 /// The settings key for the optional bot login whose own comments are ignored.
 pub const BOT_LOGIN_KEY: &str = "github.bot_login";

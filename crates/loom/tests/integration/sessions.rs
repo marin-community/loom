@@ -389,9 +389,9 @@ async fn settings_validate_agent_model_effort_against_registry() {
     let client = &ts.client;
 
     let err = client
-        .patch(
-            "/api/settings",
-            json!({ "agent.default": "codex", "agent.model": "haiku" }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "agent.default": "codex", "agent.model": "haiku" } }),
         )
         .await
         .unwrap_err()
@@ -957,9 +957,9 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
     // Once the operator declares a public origin, the URL is one an off-box
     // reader (of a PR, say) can actually open. The trailing slash is absorbed.
     client
-        .patch(
-            "/api/settings",
-            json!({ "auth.base_url": "https://loom.example.com/" }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.base_url": "https://loom.example.com/" } }),
         )
         .await
         .unwrap();

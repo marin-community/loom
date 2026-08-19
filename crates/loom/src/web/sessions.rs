@@ -2748,7 +2748,7 @@ async fn op_status_get(
     super::branch_view(&context.state.db, &branch).await
 }
 
-/// `sessions.status.set` — ported from [`set_branch_status`] (branches.rs),
+/// `sessions.status.set` — the same write `branches.status.set` performs,
 /// resolved from a session id instead of a branch key.
 async fn op_status_set(
     context: OperationContext,

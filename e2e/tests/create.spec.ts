@@ -26,7 +26,7 @@ test.describe('creating a session via the UI form', () => {
   });
 
   test('launches from the workbench with canonical profile and title', async ({ page, weaver }) => {
-    await fetch(`${weaver.baseUrl}/api/profiles`, {
+    await fetch(`${weaver.baseUrl}/api/profiles/create`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({

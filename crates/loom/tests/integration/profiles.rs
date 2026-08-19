@@ -830,7 +830,10 @@ async fn deployment_reconcile_rest_journey() {
 
     let runtime = ts
         .client
-        .patch("/api/settings", json!({ "slack.status_updates": true }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "slack.status_updates": true } }),
+        )
         .await
         .unwrap();
     let runtime_setting = runtime["settings"]
@@ -845,9 +848,9 @@ async fn deployment_reconcile_rest_journey() {
 
     let inherited = ts
         .client
-        .patch(
-            "/api/settings",
-            json!({ "slack.status_updates": serde_json::Value::Null }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "slack.status_updates": serde_json::Value::Null } }),
         )
         .await
         .unwrap();
@@ -875,7 +878,11 @@ async fn deployment_reconcile_rest_journey() {
         )
         .await
         .unwrap();
-    let pruned = ts.client.get("/api/settings").await.unwrap();
+    let pruned = ts
+        .client
+        .post("/api/settings/get", json!({}))
+        .await
+        .unwrap();
     let pruned_setting = pruned["settings"]
         .as_array()
         .unwrap()

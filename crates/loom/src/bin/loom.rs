@@ -4044,7 +4044,7 @@ async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     println!();
     println!(
         "Stored {} on the default profile — future sessions using that profile get them \
-         (Settings → Agents & profiles in the web UI, or `GET /api/env`).",
+         (Settings → Agents & profiles in the web UI, or `loom settings env list`).",
         stored.join(", ")
     );
     let mut updates: Vec<(&str, &str)> = Vec::new();
@@ -4143,7 +4143,7 @@ async fn run_config(cmd: ConfigCmd) -> Result<()> {
 
 /// `loom config set` — write one runtime setting straight into the sqlite
 /// `settings` table, no running server needed. The direct-db counterpart to
-/// the settings pane's `PATCH /api/settings` against a running daemon — the
+/// the settings pane's `settings.patch` against a running daemon — the
 /// form a deploy's boot sequence needs, since it must seed the auth settings
 /// *before* loom starts listening.
 async fn cmd_config_set(key: String, value: String) -> Result<()> {

@@ -41,7 +41,7 @@ use super::ApiResult;
 /// the auth routes because their response must carry a `Set-Cookie`, which is a
 /// header concern rather than an encoding one. Everything else reaching this
 /// match is a stream or a websocket, and the ids it accepts are the whole list —
-/// [`mounted_stream_operations`] is that same match read back, so the test below
+/// `mounted_stream_operations` is that same match read back, so the test below
 /// cannot pass by describing a different one.
 pub(super) fn mount(router: Router<AppState>) -> Router<AppState> {
     mount_inner(router).0

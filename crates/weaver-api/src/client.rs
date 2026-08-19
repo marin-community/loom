@@ -1537,13 +1537,19 @@ impl Client {
     }
 
     /// Apply setting changes: a `null` value clears a key back to its default
-    /// (`PATCH /api/settings`).
+    /// (`settings.patch`).
     pub async fn patch_settings(
         &self,
         changes: serde_json::Map<String, Value>,
     ) -> Result<SettingsEnvelope> {
-        self.send_typed(Method::PATCH, "/api/settings", Some(&changes))
-            .await
+        use crate::operations::settings::patch;
+        self.invoke::<patch::Patch>(&patch::Input {
+            changes: changes
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+        })
+        .await
     }
 
     // -- Watches ------------------------------------------------------

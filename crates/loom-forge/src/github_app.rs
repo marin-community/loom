@@ -3,7 +3,7 @@
 //!
 //! An App is configured with an `app_id` and an RSA **private key** (a PEM,
 //! held outside the settings registry like the OAuth client secret — never
-//! returned by `GET /api/settings`). From those two secrets loom can:
+//! returned by `settings.get`). From those two secrets loom can:
 //!
 //! 1. **Mint an App JWT** ([`build_app_jwt`]) — an RS256 token, signed with the
 //!    private key, that authenticates loom *as the App* for the next ~10 minutes.
@@ -37,7 +37,7 @@ use weaver_core::db::Db;
 /// Settings key (env-overridable) holding the App's numeric id.
 pub const APP_ID_KEY: &str = "github.app_id";
 /// Settings key (env-overridable) holding the App's RSA private key PEM. Like
-/// the OAuth client secret, this is **never** returned by `GET /api/settings`.
+/// the OAuth client secret, this is **never** returned by `settings.get`.
 pub const APP_PRIVATE_KEY_KEY: &str = "github.app_private_key";
 /// Settings key (env-overridable) holding the App's URL slug (e.g. `loom-acme`,
 /// from the manifest conversion). Public and non-secret. Read at runtime via

@@ -113,8 +113,8 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
 
     // 3. Lock it down: stop trusting loopback.
     let r = http
-        .patch(url(&ts, "/api/settings"))
-        .json(&json!({ "auth.trust_loopback": false }))
+        .post(url(&ts, "/api/settings/patch"))
+        .json(&json!({ "changes": { "auth.trust_loopback": false } }))
         .send()
         .await
         .unwrap();
@@ -233,7 +233,10 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         .await
         .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 
@@ -338,7 +341,6 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
 
     for path in [
         "/api/sessions",
-        "/api/settings",
         "/api/agents",
         "/api/diagnostics",
         "/api/logs",
@@ -357,11 +359,13 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         assert_eq!(response.status(), StatusCode::OK, "user GET {path}");
     }
 
-    // `profiles.list` and `mcps.get` are the twins of the legacy `GET
-    // /api/profiles` and `GET /api/mcps` above — same `User`-reachable read.
+    // `profiles.list`, `mcps.get`, and `settings.get` are the twins of the
+    // legacy `GET /api/profiles`, `GET /api/mcps`, and `GET /api/settings`
+    // above — same `User`-reachable read, now a POST with a body.
     for (path, body) in [
         ("/api/profiles/list", json!({})),
         ("/api/mcps/get", json!({})),
+        ("/api/settings/get", json!({})),
     ] {
         let response = http
             .post(url(&ts, path))
@@ -374,9 +378,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     }
 
     let preferences: Value = http
-        .patch(url(&ts, "/api/preferences"))
+        .post(url(&ts, "/api/preferences/patch"))
         .bearer_auth(&user_token)
-        .json(&json!({ "terminal.theme": "light" }))
+        .json(&json!({ "changes": { "terminal.theme": "light" } }))
         .send()
         .await
         .unwrap()
@@ -393,8 +397,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(theme["is_overridden"], true);
 
     let admin_preferences: Value = http
-        .get(url(&ts, "/api/preferences"))
+        .post(url(&ts, "/api/preferences/get"))
         .bearer_auth(&admin_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -423,7 +428,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(tokens[0]["name"], "alice-api");
 
     let forbidden = [
-        (reqwest::Method::PATCH, "/api/settings"),
+        (reqwest::Method::POST, "/api/settings/patch"),
         (reqwest::Method::POST, "/api/deployment/reconcile"),
         (reqwest::Method::GET, "/api/auth/users"),
         (reqwest::Method::GET, "/api/auth/github/config"),
@@ -432,7 +437,6 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         (reqwest::Method::POST, "/api/profiles/create"),
         (reqwest::Method::POST, "/api/agents/custom"),
         (reqwest::Method::POST, "/api/mcps/custom/create"),
-        (reqwest::Method::PUT, "/api/env/SHARED_VALUE"),
         (reqwest::Method::GET, "/api/shell/terminal"),
         (reqwest::Method::POST, "/api/shell/restart"),
         (reqwest::Method::POST, "/api/watches"),
@@ -453,6 +457,24 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         );
     }
 
+    // `settings.env.set` takes the variable name in the body rather than the
+    // path, so unlike the bare entries above it needs a real payload to clear
+    // input validation before the actor check gets a chance to reject it —
+    // the same reason `/api/settings/get` was lifted into the `(path, body)`
+    // reachable list earlier in this test.
+    let response = http
+        .post(url(&ts, "/api/settings/env/set"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "name": "SHARED_VALUE", "value": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "user request /api/settings/env/set"
+    );
+
     let promoted: Value = http
         .put(url(&ts, "/api/auth/users/alice/role"))
         .bearer_auth(&admin_token)
@@ -465,9 +487,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         .unwrap();
     assert_eq!(promoted["role"], "admin");
     let response = http
-        .patch(url(&ts, "/api/settings"))
+        .post(url(&ts, "/api/settings/patch"))
         .bearer_auth(&user_token)
-        .json(&json!({ "terminal.theme": "light" }))
+        .json(&json!({ "changes": { "terminal.theme": "light" } }))
         .send()
         .await
         .unwrap();
@@ -494,8 +516,8 @@ async fn health_is_public_but_protected_routes_are_not() {
     let http = reqwest::Client::new();
 
     // Lock down loopback so the gate is in force.
-    http.patch(url(&ts, "/api/settings"))
-        .json(&json!({ "auth.trust_loopback": false }))
+    http.post(url(&ts, "/api/settings/patch"))
+        .json(&json!({ "changes": { "auth.trust_loopback": false } }))
         .send()
         .await
         .unwrap();
@@ -527,7 +549,10 @@ async fn health_is_public_but_protected_routes_are_not() {
 async fn registered_and_custom_api_routes_are_both_protected() {
     let ts = TestServer::start().await;
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -615,7 +640,10 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();
@@ -850,7 +878,10 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 

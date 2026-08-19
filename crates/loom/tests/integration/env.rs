@@ -17,7 +17,10 @@ async fn env_crud_and_name_validation() {
     let client = &ts.client;
 
     // Starts empty.
-    let env = client.post("/api/settings/env/list", json!({})).await.unwrap();
+    let env = client
+        .post("/api/settings/env/list", json!({}))
+        .await
+        .unwrap();
     assert_eq!(env.as_array().unwrap().len(), 0, "env starts empty");
     let initial_revision = profile_revision(client, "default").await;
 

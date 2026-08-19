@@ -1,6 +1,7 @@
 //! Resource-scope checks for registered operations.
 //!
-//! An operation declares *which* resource it acts on through [`Scoped`], and
+//! An operation declares *which* resource it acts on through
+//! `weaver_api::operations::Scoped`, and
 //! this module answers whether the caller may reach that instance. Splitting the
 //! question in two — actor answers "may you call this at all", scope answers
 //! "may you reach this one" — is what lets authorization be decided from typed

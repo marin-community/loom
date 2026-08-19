@@ -1,10 +1,9 @@
-use axum::{extract::State, Extension, Json};
 use serde_json::{json, Value};
 use weaver_api::operations::preferences as preferences_operations;
 use weaver_api::operations::settings as settings_operations;
 use weaver_api::{SettingsEnvelope, UserPreferenceView, UserPreferencesEnvelope};
 
-use crate::auth::{self, Principal};
+use crate::auth;
 use crate::config;
 use crate::db::Db;
 use crate::profile;
@@ -28,15 +27,7 @@ async fn settings_envelope_core(db: &Db) -> ApiResult<SettingsEnvelope> {
     Ok(SettingsEnvelope { settings })
 }
 
-async fn settings_envelope(db: &Db) -> ApiResult<Json<SettingsEnvelope>> {
-    settings_envelope_core(db).await.map(Json)
-}
-
-pub(super) async fn get_settings(State(st): State<AppState>) -> ApiResult<Json<SettingsEnvelope>> {
-    settings_envelope(&st.db).await
-}
-
-/// `settings.get` — the twin of [`get_settings`].
+/// `settings.get`.
 pub(super) async fn get_settings_operation(
     context: OperationContext,
     _input: settings_operations::get::Input,
@@ -44,10 +35,10 @@ pub(super) async fn get_settings_operation(
     settings_envelope_core(&context.state.db).await
 }
 
-/// Apply accepted changes (already allowlist-checked) and return the
-/// refreshed envelope. Shared tail for both the legacy JSON-body handler and
-/// `settings.patch` — the two differ only in how they turn the wire body into
-/// `changes`/`legacy_agent_changes`, not in what happens once it's accepted.
+/// Apply accepted changes (already allowlist-checked) and return the refreshed
+/// envelope. Split out from `settings.patch` because the `agent.*`
+/// compatibility keys mutate the default profile instead of the settings table
+/// and so need the launch gate held across both writes.
 async fn apply_settings_changes(
     st: &AppState,
     changes: Vec<config::Change>,
@@ -76,65 +67,6 @@ async fn apply_settings_changes(
         .collect();
     tracing::info!(keys = ?keys, "settings updated");
     settings_envelope_core(&st.db).await
-}
-
-pub(super) async fn patch_settings(
-    State(st): State<AppState>,
-    Json(body): Json<serde_json::Map<String, Value>>,
-) -> ApiResult<Json<SettingsEnvelope>> {
-    let mut changes: Vec<config::Change> = Vec::with_capacity(body.len());
-    let mut legacy_agent_changes: Vec<config::Change> = Vec::new();
-    let mut errors = serde_json::Map::new();
-
-    for (key, raw) in body {
-        let legacy_agent = matches!(
-            key.as_str(),
-            "agent.default" | "agent.model" | "agent.effort" | "agent.mode"
-        );
-        if config::spec(&key).is_none() && !legacy_agent {
-            errors.insert(key, json!("unknown setting"));
-            continue;
-        }
-        let value = match raw {
-            Value::Null => None,
-            Value::String(s) => Some(s),
-            Value::Bool(b) => Some(b.to_string()),
-            Value::Number(n) => Some(n.to_string()),
-            _ => {
-                errors.insert(
-                    key,
-                    json!("value must be a string, number, boolean, or null"),
-                );
-                continue;
-            }
-        };
-        if !legacy_agent {
-            if let Some(value) = &value {
-                if let Err(why) = config::validate(&key, value) {
-                    errors.insert(key, json!(why));
-                    continue;
-                }
-            }
-        }
-        if legacy_agent {
-            legacy_agent_changes.push((key, value));
-        } else {
-            changes.push((key, value));
-        }
-    }
-
-    if !errors.is_empty() {
-        let message = if errors.len() == 1 {
-            let (key, why) = errors.iter().next().unwrap();
-            format!("{key}: {}", why.as_str().unwrap_or("invalid"))
-        } else {
-            "one or more settings are invalid".to_string()
-        };
-        return Err(AppError::bad_request(message).with_details(Value::Object(errors)));
-    }
-    Ok(Json(
-        apply_settings_changes(&st, changes, legacy_agent_changes).await?,
-    ))
 }
 
 /// A setting value as a caller writes it, reduced to the string it is stored as.
@@ -204,7 +136,7 @@ pub(super) async fn patch_settings_operation(
     apply_settings_changes(&context.state, changes, legacy_agent_changes).await
 }
 
-async fn preferences_envelope(db: &Db, username: &str) -> ApiResult<Json<UserPreferencesEnvelope>> {
+async fn preferences_envelope(db: &Db, username: &str) -> ApiResult<UserPreferencesEnvelope> {
     let overrides = auth::user_preferences(db, username).await?;
     let preferences = config::describe(db)
         .await?
@@ -232,44 +164,35 @@ async fn preferences_envelope(db: &Db, username: &str) -> ApiResult<Json<UserPre
             }
         })
         .collect();
-    Ok(Json(UserPreferencesEnvelope { preferences }))
+    Ok(UserPreferencesEnvelope { preferences })
 }
 
-pub(super) async fn get_preferences(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<UserPreferencesEnvelope>> {
-    preferences_envelope(&st.db, &principal.username).await
-}
-
-/// `preferences.get` — the twin of [`get_preferences`].
+/// `preferences.get`.
 async fn get_preferences_operation(
     context: OperationContext,
     _input: preferences_operations::get::Input,
 ) -> ApiResult<UserPreferencesEnvelope> {
-    Ok(preferences_envelope(&context.state.db, &context.principal.username)
-        .await?
-        .0)
+    preferences_envelope(&context.state.db, &context.principal.username).await
 }
 
-pub(super) async fn patch_preferences(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<serde_json::Map<String, Value>>,
-) -> ApiResult<Json<UserPreferencesEnvelope>> {
-    let mut changes = Vec::with_capacity(body.len());
+/// `preferences.patch`. The three personal keys are the whole allowlist; a
+/// value that is not a JSON scalar, or that `config::validate` refuses for its
+/// key, fails the whole patch rather than applying the rest.
+async fn patch_preferences_operation(
+    context: OperationContext,
+    input: preferences_operations::patch::Input,
+) -> ApiResult<UserPreferencesEnvelope> {
+    let mut changes = Vec::with_capacity(input.changes.len());
     let mut errors = serde_json::Map::new();
-    for (key, raw) in body {
+    for (key, raw) in input.changes {
         if !PERSONAL_PREFERENCE_KEYS.contains(&key.as_str()) {
             errors.insert(key, json!("unknown personal preference"));
             continue;
         }
-        let value = match raw {
-            Value::Null => None,
-            Value::String(value) => Some(value),
-            Value::Number(value) => Some(value.to_string()),
-            _ => {
-                errors.insert(key, json!("value must be a string, number, or null"));
+        let value = match setting_value(raw) {
+            Ok(value) => value,
+            Err(why) => {
+                errors.insert(key, json!(why));
                 continue;
             }
         };
@@ -285,8 +208,10 @@ pub(super) async fn patch_preferences(
         return Err(AppError::bad_request("one or more preferences are invalid")
             .with_details(Value::Object(errors)));
     }
-    auth::apply_user_preferences(&st.db, &principal.username, &changes).await?;
-    preferences_envelope(&st.db, &principal.username).await
+    let db = &context.state.db;
+    let username = &context.principal.username;
+    auth::apply_user_preferences(db, username, &changes).await?;
+    preferences_envelope(db, username).await
 }
 
 fn change_for<'a>(changes: &'a [config::Change], key: &str) -> Option<&'a Option<String>> {
@@ -343,11 +268,10 @@ async fn apply_legacy_agent_patch(db: &Db, changes: &[config::Change]) -> anyhow
 // `weaver_api::operations::settings`. `settings.env.*` handlers live in
 // `web/env.rs` (the file that already owns the default profile's environment
 // facade); this bundle just registers them alongside `settings.get`/`.patch`.
-// `preferences.get` is a separate bundle (per-operator overrides, not
-// server-wide configuration) but its handler sits here, next to
-// `get_preferences`/`patch_preferences`, which it ports the read half of —
-// `preferences.patch` is not registered; see `operations::preferences`'s
-// module doc for why.
+// `preferences.*` is a separate bundle — per-operator overrides rather than
+// server-wide configuration, and human-but-not-admin where `settings.patch` is
+// admin — but its two handlers sit here, beside the settings ones they share
+// `config::validate` and `setting_value` with.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -364,5 +288,6 @@ pub(super) fn bound_operations() -> Vec<Bound> {
             super::env::delete_settings_env_operation,
         ),
         register::<preferences_operations::get::Get, _, _>(get_preferences_operation),
+        register::<preferences_operations::patch::Patch, _, _>(patch_preferences_operation),
     ]
 }

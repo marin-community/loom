@@ -933,7 +933,7 @@ pub struct ResolveLaunchReq {
     pub selection: LaunchSelection,
 }
 
-/// Body for `POST /api/profiles/{name}/clone`. Creation is insert-only and
+/// Body for `profiles.clone`. Creation is insert-only and
 /// atomic; the caller may submit the fully edited proposed template.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloneProfileReq {
@@ -2957,7 +2957,7 @@ impl From<weaver_core::config::SettingSource> for SettingSource {
 }
 
 /// One registered setting with all registry metadata and its effective value,
-/// as both `GET` and `PATCH /api/settings` return it.
+/// as both `settings.get` and `settings.patch` return it.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettingView {
     pub key: String,
@@ -2996,7 +2996,7 @@ impl From<weaver_core::config::SettingView> for SettingView {
     }
 }
 
-/// The envelope both `GET` and `PATCH /api/settings` return.
+/// The envelope both `settings.get` and `settings.patch` return.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettingsEnvelope {
     pub settings: Vec<SettingView>,
@@ -3015,7 +3015,8 @@ pub struct UserPreferenceView {
     pub is_overridden: bool,
 }
 
-/// Effective personal preferences returned by `GET` and `PATCH /api/preferences`.
+/// Effective personal preferences returned by `preferences.get` and
+/// `preferences.patch`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserPreferencesEnvelope {
     pub preferences: Vec<UserPreferenceView>,

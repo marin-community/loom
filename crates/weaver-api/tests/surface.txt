@@ -88,6 +88,7 @@ permissions.requests.create        POST /api/permissions/requests/create        
 permissions.requests.deny          POST /api/permissions/requests/deny               user          write          json    cli=loom permissions deny        mcp=-                            grants=[]
 permissions.requests.list          POST /api/permissions/requests/list               session_self  read           json    cli=loom permissions requests    mcp=loom_permission::requests    grants=[loom/permissions/read@v1]
 preferences.get                    POST /api/preferences/get                         user          read           json    cli=-                            mcp=-                            grants=[]
+preferences.patch                  POST /api/preferences/patch                       user          write          json    cli=-                            mcp=-                            grants=[]
 profiles.clone                     POST /api/profiles/clone                          admin         write          json    cli=loom profiles clone          mcp=-                            grants=[]
 profiles.create                    POST /api/profiles/create                         admin         write          json    cli=loom profiles create         mcp=-                            grants=[]
 profiles.delete                    POST /api/profiles/delete                         admin         destructive    json    cli=loom profiles delete         mcp=-                            grants=[]

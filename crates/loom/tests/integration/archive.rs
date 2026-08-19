@@ -40,9 +40,9 @@ async fn archive_captures_the_conversation_log() {
 
     // Set the capture sink via the settings API.
     client
-        .patch(
-            "/api/settings",
-            json!({ "session.log_dir": logs.path().to_string_lossy() }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "session.log_dir": logs.path().to_string_lossy() } }),
         )
         .await
         .unwrap();

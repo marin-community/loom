@@ -767,8 +767,8 @@ fn thread_dto(t: &discussion::Thread) -> ThreadDto {
 }
 
 /// Resolve `{branch, name}` to the artifact a branch-scoped thread operation
-/// targets — branch-scoped first, then repo-shared, same resolution as
-/// [`branch_artifact`] in `web/discussion.rs`.
+/// targets — branch-scoped first, then repo-shared, the same resolution
+/// `artifacts.get` does.
 async fn thread_artifact(
     st: &AppState,
     branch_key: &str,
@@ -781,9 +781,9 @@ async fn thread_artifact(
     Ok((branch, a))
 }
 
-/// `artifacts.threads.list` — the twin of [`list_branch_threads`], plus the
-/// new `all` filter the operation's `Input` declares (legacy route always
-/// listed every status; `all` defaulting to `false` means the default here is
+/// `artifacts.threads.list`, plus the `all` filter the operation's `Input`
+/// declares that the route it replaced did not have (that route always listed
+/// every status; `all` defaulting to `false` means the default here is
 /// open-only unless the caller asks for everything).
 async fn threads_list_operation(
     context: OperationContext,
@@ -796,9 +796,9 @@ async fn threads_list_operation(
     Ok(threads.iter().map(thread_dto).collect())
 }
 
-/// `artifacts.threads.comment` — the twin of [`create_branch_thread`] (the
-/// `New` target) and [`add_branch_thread_comment`] (the `Reply` target).
-/// Author is `"agent"`, matching the branch-scoped legacy routes (the
+/// `artifacts.threads.comment` — one operation over what used to be two
+/// routes, opening a thread (`New`) and replying to one (`Reply`).
+/// Author is `"agent"`, matching the branch-scoped routes it replaced (the
 /// session-scoped ones hardcoded `"user"` for the dashboard's own edits,
 /// which is not what this session-actor, MCP-reachable operation is). Output
 /// is the full [`ThreadDto`] for both targets — `add_branch_thread_comment`
@@ -863,8 +863,8 @@ async fn threads_comment_operation(
     Ok(thread_dto(&thread))
 }
 
-/// `artifacts.threads.resolve` — the twin of [`resolve_branch_thread`].
-/// That route returned `{"resolved": true}`; the declared `Output` for
+/// `artifacts.threads.resolve`.
+/// The route it replaced returned `{"resolved": true}`; the declared `Output` for
 /// `artifacts.threads.resolve` is `ThreadDto`, so this re-fetches the thread
 /// after resolving and returns it in full (a superset of the old body, not a
 /// dropped field).

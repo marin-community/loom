@@ -481,9 +481,9 @@ pub(super) async fn create_branch_event(
     Ok(Json(event))
 }
 
-/// Set (upsert) a tag on a branch — the branch-scoped twin of
-/// [`set_session_tag`], for a `loom sessions tags` target with no live session (a
-/// finished session, or `--session` pointing at another branch entirely).
+/// Set (upsert) a tag on a branch — the branch-scoped counterpart of
+/// `sessions.tags.set`, for a `loom sessions tags` target with no live session
+/// (a finished session, or `--session` pointing at another branch entirely).
 pub(super) async fn set_branch_tag(
     State(st): State<AppState>,
     Path((key, tag_key)): Path<(String, String)>,
@@ -524,7 +524,8 @@ pub(super) async fn set_branch_tag(
     Ok(Json(branch_view(&st.db, &branch).await?))
 }
 
-/// Clear a tag on a branch — the branch-scoped twin of [`clear_session_tag`].
+/// Clear a tag on a branch — the branch-scoped counterpart of
+/// `sessions.tags.delete`.
 pub(super) async fn clear_branch_tag(
     State(st): State<AppState>,
     Path((key, tag_key)): Path<(String, String)>,

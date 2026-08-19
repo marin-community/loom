@@ -362,7 +362,10 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .await
         .unwrap();
     client
-        .post("/api/profiles/delete", json!({ "name": "respawn-lifetime" }))
+        .post(
+            "/api/profiles/delete",
+            json!({ "name": "respawn-lifetime" }),
+        )
         .await
         .unwrap();
 

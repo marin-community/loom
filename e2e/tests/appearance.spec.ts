@@ -25,7 +25,11 @@ test.describe('settings · terminal appearance', () => {
 
     // The server is the source of truth — the API reflects the new values.
     const settings = (await page.evaluate(async () => {
-      const r = await fetch('/api/preferences');
+      const r = await fetch('/api/preferences/get', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
       return (await r.json()).preferences as { key: string; value: string }[];
     })) as { key: string; value: string }[];
     const value = (k: string) => settings.find((s) => s.key === k)?.value;
@@ -33,7 +37,7 @@ test.describe('settings · terminal appearance', () => {
     expect(value('terminal.font')).toBe('jetbrains');
     expect(value('terminal.font_size')).toBe('16');
 
-    // …and the selection survives a reload (the panel reads back from /preferences).
+    // …and the selection survives a reload (the panel reads back from `preferences.get`).
     await page.reload();
     await expect(page.getByTestId('theme-light')).toHaveAttribute('aria-pressed', 'true');
     await expect(page.getByTestId('font-jetbrains')).toHaveAttribute('aria-pressed', 'true');

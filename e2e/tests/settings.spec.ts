@@ -46,7 +46,11 @@ test.describe("settings · profiles", () => {
     await expect(page.getByText("Saved default.")).toBeVisible();
 
     const saved = (await (
-      await fetch(`${weaver.baseUrl}/api/profiles/default`)
+      await fetch(`${weaver.baseUrl}/api/profiles/get`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "default" }),
+      })
     ).json()) as {
       agent_kind: string;
       model: string;
@@ -76,7 +80,11 @@ test.describe("settings · profiles", () => {
     await expect(page.getByText("Saved default.")).toBeVisible();
 
     const saved = (await (
-      await fetch(`${weaver.baseUrl}/api/profiles/default`)
+      await fetch(`${weaver.baseUrl}/api/profiles/get`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "default" }),
+      })
     ).json()) as {
       mode: string;
     };
@@ -139,7 +147,11 @@ for line in sys.stdin:
     });
 
     const custom = (await (
-      await fetch(`${weaver.baseUrl}/api/mcps/custom/docs/search`)
+      await fetch(`${weaver.baseUrl}/api/mcps/custom/get`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ identity: "/docs/search" }),
+      })
     ).json()) as {
       identity: string;
       group: string;
@@ -167,7 +179,11 @@ for line in sys.stdin:
     await expect(page.getByText("Saved default.")).toBeVisible();
 
     const profile = (await (
-      await fetch(`${weaver.baseUrl}/api/profiles/default`)
+      await fetch(`${weaver.baseUrl}/api/profiles/get`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "default" }),
+      })
     ).json()) as {
       mcp_access: { mode: string; groups: string[] };
     };
@@ -179,12 +195,11 @@ for line in sys.stdin:
     await access.getByRole("radio", { name: "none" }).check();
     await page.getByTestId("profile-save").click();
     await expect(page.getByText("Saved default.")).toBeVisible();
-    const removed = await fetch(
-      `${weaver.baseUrl}/api/mcps/custom/docs/search`,
-      {
-        method: "DELETE",
-      },
-    );
+    const removed = await fetch(`${weaver.baseUrl}/api/mcps/custom/delete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ identity: "/docs/search" }),
+    });
     expect(removed.ok).toBe(true);
   });
 
