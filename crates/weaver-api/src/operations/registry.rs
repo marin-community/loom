@@ -21,18 +21,39 @@ use serde_json::Value;
 #[serde(rename_all = "snake_case")]
 pub enum ActorPolicy {
     SessionSelf,
+    /// The session credential itself, and nothing else — not even a human.
+    ///
+    /// `SessionSelf` lets a human operator stand in for a session, which is
+    /// right for almost everything: an operator reading a session's issues is
+    /// ordinary. It is wrong for operations that hand back *credential
+    /// material*, where standing in means one user obtaining another user's
+    /// session token. `permissions.github.token` is that case, and the route it
+    /// replaces refused Admin and User outright.
+    SessionOnly,
     User,
     Admin,
     Internal,
+    /// Reachable with no credential at all.
+    ///
+    /// This is how you log in: `auth.login` must run before a principal exists.
+    /// Declaring it makes the unauthenticated surface enumerable — previously it
+    /// was a path prefix (`/auth/...`) matched in middleware, so the answer to
+    /// "what can an anonymous caller reach?" lived in a string comparison rather
+    /// than anywhere you could read or test. `anonymous_operations_are_pinned`
+    /// asserts the exact set, so widening it requires editing a test that says
+    /// so in as many words.
+    Anonymous,
 }
 
 impl ActorPolicy {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SessionSelf => "session_self",
+            Self::SessionOnly => "session_only",
             Self::User => "user",
             Self::Admin => "admin",
             Self::Internal => "internal",
+            Self::Anonymous => "anonymous",
         }
     }
 
@@ -42,7 +63,7 @@ impl ActorPolicy {
     /// operation, which is how "agents cannot approve their own permission
     /// requests" stops being an absence and becomes a checked property.
     pub const fn agent_reachable(self) -> bool {
-        matches!(self, Self::SessionSelf)
+        matches!(self, Self::SessionSelf | Self::SessionOnly)
     }
 }
 

@@ -255,3 +255,68 @@ fn every_operation_file_declares_a_registered_operation() {
         "operation files that declare nothing the registry knows about: {orphans:#?}"
     );
 }
+
+/// The unauthenticated surface, pinned.
+///
+/// An operation reachable without a credential is the highest-consequence thing
+/// this registry can declare, so the set is written out here rather than merely
+/// validated by shape. Adding one is a deliberate edit to a test whose name says
+/// what it is guarding.
+#[test]
+fn anonymous_operations_are_pinned() {
+    let anonymous: BTreeSet<&str> = operations::operations()
+        .filter(|operation| operation.actor == weaver_api::operations::ActorPolicy::Anonymous)
+        .map(|operation| operation.id)
+        .collect();
+    let expected: BTreeSet<&str> = ["auth.login", "auth.federate"].into_iter().collect();
+    assert_eq!(
+        anonymous, expected,
+        "the set of operations reachable WITHOUT ANY CREDENTIAL changed. \
+         If that is intended, update this test deliberately."
+    );
+}
+
+/// Nothing anonymous may be destructive, and nothing anonymous may carry a grant.
+///
+/// A grant is a property of a credential; an operation that needs no credential
+/// cannot meaningfully require one, and a declaration that says otherwise is
+/// confused about which check protects it.
+#[test]
+fn anonymous_operations_are_narrow() {
+    for operation in operations::operations() {
+        if operation.actor != weaver_api::operations::ActorPolicy::Anonymous {
+            continue;
+        }
+        assert!(
+            operation.grants.is_empty(),
+            "{} is anonymous but declares grants {:?}",
+            operation.id,
+            operation.grants
+        );
+        assert!(
+            operation.mcp.is_none(),
+            "{} is anonymous and must not expose an MCP tool",
+            operation.id
+        );
+    }
+}
+
+/// The operations no human may call, pinned.
+///
+/// `SessionOnly` exists for operations that return credential material, where
+/// letting an operator stand in for a session means one user obtaining
+/// another's token. Like the anonymous set, it is small enough to write down,
+/// and writing it down is what makes widening it a visible decision.
+#[test]
+fn session_only_operations_are_pinned() {
+    let restricted: BTreeSet<&str> = operations::operations()
+        .filter(|operation| operation.actor == weaver_api::operations::ActorPolicy::SessionOnly)
+        .map(|operation| operation.id)
+        .collect();
+    let expected: BTreeSet<&str> = ["permissions.github.token"].into_iter().collect();
+    assert_eq!(
+        restricted, expected,
+        "the set of operations NO HUMAN may call changed. \
+         Widening it hands session credential material to operators."
+    );
+}

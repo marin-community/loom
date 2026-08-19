@@ -86,6 +86,13 @@ impl AuthVia {
 pub enum Grant {
     Admin,
     User,
+    /// No credential was presented.
+    ///
+    /// Only operations declaring `actor = Anonymous` accept this — currently
+    /// exactly `auth.login` and `auth.federate`, pinned by a test. It exists so
+    /// that "runs before a principal exists" is a value the same authorization
+    /// function can reason about, rather than a route mounted outside it.
+    Anonymous,
     Automation {
         subject: String,
         profiles: Vec<String>,
@@ -124,7 +131,7 @@ impl Principal {
         match self.grant {
             Grant::Admin => Some(UserRole::Admin),
             Grant::User => Some(UserRole::User),
-            Grant::Automation { .. } | Grant::Session { .. } => None,
+            Grant::Automation { .. } | Grant::Session { .. } | Grant::Anonymous => None,
         }
     }
 }

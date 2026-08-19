@@ -5,6 +5,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use weaver_api::operations::channels as ops;
 use weaver_api::{
     ChannelBindingView, ChannelMessageView, ChannelSubscriptionView, ChannelView,
     CreateChannelMessageReq, CreateChannelReq, SendReq, SetChannelReadMarkerReq,
@@ -17,6 +18,7 @@ use crate::{
     events,
 };
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 const MAX_NAME_LEN: usize = 120;
@@ -496,4 +498,303 @@ fn validate_text(name: &str, value: &str, min: usize, max: usize) -> ApiResult<(
         )));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry bindings
+//
+// The handlers above stay put — their `.route(...)` lines in `web/mod.rs`
+// still serve them and that file is off-limits during this port — but every
+// operation also gets a typed handler here, registered below. Authorization
+// (actor policy, grants, and branch scope from `Scoped`) happens once in
+// `register`/`authorize`; a manual check only remains where it polices
+// something the declared `Branch` scope cannot see, such as which *session*
+// a caller may act as a proxy for.
+// ---------------------------------------------------------------------------
+
+/// Resolve the `channel` operand all eight operations share: an explicit id
+/// (or the legacy `"self"` alias some MCP callers still send), or — when
+/// omitted — the calling session's own channel (its id equals the session
+/// id, the same resolution `GET /api/self` performs for `channel_id`). A
+/// credential with no session of its own (`User`/`Admin`) has no implicit
+/// channel and must name one.
+fn resolve_channel_id(principal: &Principal, channel: &str) -> ApiResult<String> {
+    let trimmed = channel.trim();
+    if !trimmed.is_empty() && trimmed != "self" {
+        return Ok(trimmed.to_string());
+    }
+    match &principal.grant {
+        Grant::Session { session_id, .. } => Ok(session_id.clone()),
+        _ => Err(AppError::bad_request(
+            "channel is required for a credential with no session of its own",
+        )),
+    }
+}
+
+/// Fill in a [`ChannelView`]'s delivery bindings. The row mapper in
+/// `loom-store` always leaves `bindings` empty (a comment there says as
+/// much) because only the server handler knows how to resolve delivery
+/// targets and the Slack origin thread. The old MCP `get`/`list` tools
+/// fetched these with a second round trip per channel and merged them in by
+/// hand; `channels.get` and `channels.list` must still return them, just as
+/// part of the one response now.
+async fn with_bindings(st: &AppState, mut view: ChannelView) -> ApiResult<ChannelView> {
+    if let Some(access) = channels::access(&st.db, &view.id).await? {
+        view.bindings = channel_bindings(st, &view.id, &access).await?;
+    }
+    Ok(view)
+}
+
+pub(super) async fn list_channels_operation(
+    context: OperationContext,
+    input: ops::list::Input,
+) -> ApiResult<Vec<ChannelView>> {
+    let st = context.state;
+    let principal = context.principal;
+    let subject = principal_subject(&principal);
+    let channels = match &principal.grant {
+        Grant::Session { session_id, .. } => {
+            channels::list_for_session_tree(&st.db, session_id, &subject, input.archived).await?
+        }
+        _ => channels::list_all(&st.db, &subject, input.archived).await?,
+    };
+    let mut out = Vec::with_capacity(channels.len());
+    for channel in channels {
+        out.push(with_bindings(&st, channel).await?);
+    }
+    Ok(out)
+}
+
+pub(super) async fn get_channel_operation(
+    context: OperationContext,
+    input: ops::get::Input,
+) -> ApiResult<ChannelView> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    let subject = principal_subject(&principal);
+    let channel = channels::get(&st.db, &channel_id, &subject)
+        .await?
+        .ok_or_else(|| AppError::not_found("channel"))?;
+    with_bindings(&st, channel).await
+}
+
+/// Read a channel's history and, unless `peek`, advance the read marker
+/// through the last item actually returned (not the full unbounded scan) —
+/// advancing past a `kinds`-filtered or `limit`-truncated tail would mark
+/// items the caller never saw as read.
+pub(super) async fn list_channel_messages_operation(
+    context: OperationContext,
+    input: ops::messages::list::Input,
+) -> ApiResult<Vec<ChannelMessageView>> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    require_channel(&st, &channel_id).await?;
+    if !(1..=weaver_api::CHANNEL_MESSAGE_LIMIT_MAX as i64).contains(&input.limit) {
+        return Err(AppError::bad_request(format!(
+            "limit must be between 1 and {}",
+            weaver_api::CHANNEL_MESSAGE_LIMIT_MAX
+        )));
+    }
+    let mut messages = channels::messages(&st.db, &channel_id, input.after.max(0)).await?;
+    if !input.kinds.is_empty() {
+        messages.retain(|message| input.kinds.iter().any(|kind| kind == &message.kind));
+    }
+    messages.truncate(input.limit as usize);
+    if !input.peek {
+        if let Some(last) = messages.last() {
+            let subject = principal_subject(&principal);
+            channels::mark_read(&st.db, &channel_id, &subject, Some(last.seq)).await?;
+        }
+    }
+    Ok(messages)
+}
+
+pub(super) async fn create_channel_message_operation(
+    context: OperationContext,
+    input: ops::messages::create::Input,
+) -> ApiResult<ChannelMessageView> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    let channel = require_channel(&st, &channel_id).await?;
+    let author = principal_subject(&principal);
+    let req = CreateChannelMessageReq {
+        kind: input.kind,
+        urgency: input.urgency,
+        body: input.body,
+        payload: input.payload,
+        reply_to: input.reply_to,
+        idempotency_key: input.idempotency_key,
+    };
+    let (inserted, message) = append_and_deliver(&st, &channel_id, &channel, &author, &req).await?;
+    record_channel_message_event(&st, &channel_id, &author, &message, inserted).await;
+    Ok(message)
+}
+
+pub(super) async fn create_channel_operation(
+    context: OperationContext,
+    input: ops::create::Input,
+) -> ApiResult<ChannelView> {
+    let st = context.state;
+    let principal = context.principal;
+    let name = input.name.trim();
+    let topic = input.topic.trim();
+    validate_text("name", name, 1, MAX_NAME_LEN)?;
+    validate_text("topic", topic, 0, MAX_TOPIC_LEN)?;
+    let branch = super::require_branch(&st.db, &input.branch).await?;
+    let subject = principal_subject(&principal);
+    let channel = channels::create_custom(
+        &st.db,
+        &branch.repo_root,
+        Some(branch.id.as_str()),
+        name,
+        topic,
+        &subject,
+    )
+    .await?;
+    events::record_system(
+        &st.db,
+        &st.bus,
+        "channel_created",
+        json!({ "channel_id": channel.id, "by": subject.id }),
+    )
+    .await
+    .ok();
+    Ok(channel)
+}
+
+pub(super) async fn set_channel_subscription_operation(
+    context: OperationContext,
+    input: ops::subscription::set::Input,
+) -> ApiResult<ChannelSubscriptionView> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    require_channel(&st, &channel_id).await?;
+    let mode = SubscriptionMode::parse(&input.mode)
+        .ok_or_else(|| AppError::bad_request("unknown channel subscription mode"))?;
+    // Not a duplicate of the central branch-scope check: `Scoped` only names
+    // this operation's own branch, so it says nothing about which *session*
+    // a caller may subscribe on behalf of. That authority question is
+    // answered here, same as before the port.
+    let subject = match input
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty())
+    {
+        None => principal_subject(&principal),
+        Some(target) => {
+            if let Grant::Session { session_id, .. } = &principal.grant {
+                if !super::auth::is_session_descendant(&st, session_id, target).await {
+                    return Err(AppError::new(
+                        StatusCode::FORBIDDEN,
+                        "a session may subscribe only itself or a descendant",
+                    ));
+                }
+            } else if !principal.is_human() {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    "credential may not subscribe another session",
+                ));
+            }
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+                    .bind(target)
+                    .fetch_one(&st.db)
+                    .await?;
+            if !exists {
+                return Err(AppError::not_found("session"));
+            }
+            Subject::new(SubjectKind::Session, target)
+        }
+    };
+    Ok(channels::set_subscription(&st.db, &channel_id, &subject, mode).await?)
+}
+
+pub(super) async fn set_channel_read_marker_operation(
+    context: OperationContext,
+    input: ops::read_marker::set::Input,
+) -> ApiResult<ChannelSubscriptionView> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    require_channel(&st, &channel_id).await?;
+    let subject = principal_subject(&principal);
+    Ok(channels::mark_read(&st.db, &channel_id, &subject, input.seq).await?)
+}
+
+/// Long-poll for the next channel message matching `kind`/`urgent`, exactly
+/// as the old `loom_channel::wait` MCP tool did it (this operation absorbs
+/// that tool's server-side loop rather than a client polling the server
+/// repeatedly): default the scan cursor to the channel's latest known
+/// message, validate `timeout` to the same `1..=3600` second window, then
+/// poll once a second until a match lands or the deadline passes. `io =
+/// Json` — this returns exactly one response, after the wait, never a
+/// stream.
+pub(super) async fn wait_for_channel_message_operation(
+    context: OperationContext,
+    input: ops::wait::Input,
+) -> ApiResult<ChannelMessageView> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    let subject = principal_subject(&principal);
+    let channel = channels::get(&st.db, &channel_id, &subject)
+        .await?
+        .ok_or_else(|| AppError::not_found("channel"))?;
+    let mut cursor = input.after.unwrap_or_else(|| {
+        channel
+            .last_message
+            .as_ref()
+            .map(|message| message.seq)
+            .unwrap_or(0)
+    });
+    if cursor < 0 {
+        return Err(AppError::bad_request("after must be non-negative"));
+    }
+    if !(1..=3600).contains(&input.timeout) {
+        return Err(AppError::bad_request(
+            "timeout must be between 1 and 3600 seconds",
+        ));
+    }
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(input.timeout as u64);
+    loop {
+        let messages = channels::messages(&st.db, &channel_id, cursor).await?;
+        if let Some(last) = messages.last() {
+            cursor = last.seq;
+        }
+        if let Some(message) = messages.into_iter().find(|message| {
+            input
+                .kind
+                .as_deref()
+                .is_none_or(|kind| message.kind == kind)
+                && (!input.urgent || matches!(message.urgency.as_str(), "attention" | "blocked"))
+        }) {
+            return Ok(message);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(AppError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                format!("timed out waiting for channel {channel_id}"),
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<ops::list::List, _, _>(list_channels_operation),
+        register::<ops::get::Get, _, _>(get_channel_operation),
+        register::<ops::messages::list::List, _, _>(list_channel_messages_operation),
+        register::<ops::messages::create::Create, _, _>(create_channel_message_operation),
+        register::<ops::create::Create, _, _>(create_channel_operation),
+        register::<ops::subscription::set::Set, _, _>(set_channel_subscription_operation),
+        register::<ops::read_marker::set::Set, _, _>(set_channel_read_marker_operation),
+        register::<ops::wait::Wait, _, _>(wait_for_channel_message_operation),
+    ]
 }

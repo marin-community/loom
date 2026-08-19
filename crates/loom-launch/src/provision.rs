@@ -147,8 +147,16 @@ enum ActorKind {
 pub struct Actor(ActorKind);
 
 impl Actor {
-    pub fn from_principal(principal: &Principal, delegated: bool) -> Self {
-        match &principal.grant {
+    /// The actor a credential launches as, or `None` if it cannot launch at all.
+    ///
+    /// `None` is currently only an anonymous caller. `authorize()` already
+    /// refuses an anonymous grant on every operation that does not declare
+    /// `actor = Anonymous`, so this is unreachable in practice — which is
+    /// exactly why it returns an `Option` rather than panicking on it. A
+    /// provisioning path should fail closed if that ever stops being true.
+    pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
+        Some(match &principal.grant {
+            Grant::Anonymous => return None,
             Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,
@@ -169,7 +177,7 @@ impl Actor {
                 session_id: session_id.clone(),
                 branch_id: branch_id.clone(),
             }),
-        }
+        })
     }
 
     pub fn producer(origin: &'static str, subject: impl Into<String>) -> Self {

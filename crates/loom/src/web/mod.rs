@@ -995,19 +995,15 @@ fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
         .route("/operations", get(list_operations))
         .route("/operations/{id}", get(get_operation))
         .route("/openapi.json", get(openapi))
-        .route(
-            "/sessions/{id}/restricted-github/{tool}",
-            post(restricted_github_tool),
-        )
-        .route("/sessions/{id}/github/token", post(github_token))
-        .route(
-            "/sessions/{id}/github/access",
-            get(list_github_access).put(set_github_access),
-        )
-        .route(
-            "/permission-requests/{id}/decision",
-            post(decide_permission_request),
-        )
+        // `restricted-github/{tool}`, `github/token`, and the `PUT` half of
+        // `github/access` are now `permissions.github.restricted.invoke`,
+        // `permissions.github.token`, and `permissions.github.{grant,revoke}` —
+        // registered operations mounted by `operations::mount` above, not routes
+        // here. `github/access` keeps its `GET` for now: listing a session's
+        // GitHub overrides has no operation-registry counterpart yet.
+        .route("/sessions/{id}/github/access", get(list_github_access))
+        // `/permission-requests/{id}/decision` is now the two operations
+        // `permissions.requests.approve` and `permissions.requests.deny`.
         .route(
             "/sessions/{id}/permissions/{request_id}",
             post(answer_permission),

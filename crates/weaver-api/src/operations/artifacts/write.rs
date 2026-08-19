@@ -31,8 +31,12 @@ pub struct Input {
     /// artifact.
     pub title: Option<String>,
     /// Content kind, e.g. `markdown` or `image`.
-    #[operand(default = String::from("markdown"))]
-    pub kind: String,
+    ///
+    /// Optional so that omitting it *keeps the artifact's current kind*. A plain
+    /// `String` defaulting to `"markdown"` cannot express that: every update
+    /// that did not restate the kind would silently reset a `plan` or `image`
+    /// artifact to markdown.
+    pub kind: Option<String>,
     /// Optimistic-concurrency guard: `0` guards creation; a later revision
     /// number rejects a stale edit instead of silently overwriting it.
     pub base_rev: Option<i64>,

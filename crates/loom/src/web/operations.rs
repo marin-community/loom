@@ -111,14 +111,27 @@ async fn authorize(
 
 fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
     use crate::auth::Grant;
+    // An operation that needs no credential is reachable by everyone, including
+    // a caller that has one. The converse is the point: `Grant::Anonymous`
+    // reaches nothing else, so forgetting to authenticate a route cannot quietly
+    // widen it — the declaration is what opens the door.
+    if operation.actor == ActorPolicy::Anonymous {
+        return true;
+    }
     match &principal.grant {
-        Grant::Admin => true,
+        Grant::Anonymous => false,
+        Grant::Admin => operation.actor != ActorPolicy::SessionOnly,
+        // A human may stand in for a session on `SessionSelf`, but never on
+        // `SessionOnly` — see that variant's doc comment.
         Grant::User => matches!(
             operation.actor,
             ActorPolicy::SessionSelf | ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == ActorPolicy::Internal,
-        Grant::Session { .. } => operation.actor == ActorPolicy::SessionSelf,
+        Grant::Session { .. } => matches!(
+            operation.actor,
+            ActorPolicy::SessionSelf | ActorPolicy::SessionOnly
+        ),
     }
 }
 

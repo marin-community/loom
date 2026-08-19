@@ -5,17 +5,14 @@
 //! the stamped tool grant, and calls GitHub through Loom's App client. Neither
 //! the repository nor the credential is caller-controlled.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::http::StatusCode;
 use serde::Deserialize;
-use weaver_api::{GithubTokenView, RestrictedGithubToolReq, RestrictedGithubToolView};
+use weaver_api::operations::permissions as permission_operations;
+use weaver_api::{GithubTokenView, RestrictedGithubToolView};
 
-use crate::auth::{Grant, Principal};
 use crate::github_app::{GithubApp, GithubThreadKind};
 
+use super::operations::OperationContext;
 use super::{ApiResult, AppError, AppState};
 
 #[derive(Deserialize)]
@@ -28,22 +25,12 @@ struct ToolArguments {
     title: Option<String>,
 }
 
-fn principal_owns_session(principal: &Principal, id: &str) -> bool {
-    matches!(&principal.grant, Grant::Session { session_id, .. } if session_id == id)
-}
-
-pub(super) async fn github_token(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<GithubTokenView>> {
-    if !principal_owns_session(&principal, &id) {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "only the session itself may request its GitHub credential",
-        ));
-    }
-    let session = crate::session::get(&st.db, &id)
+pub(super) async fn github_token_operation(
+    context: OperationContext,
+    input: permission_operations::github::token::Input,
+) -> ApiResult<permission_operations::github::token::Output> {
+    let st = context.state;
+    let session = crate::session::get(&st.db, &input.session)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
     if session.policy_restricted {
@@ -66,7 +53,7 @@ pub(super) async fn github_token(
         .token_for_repositories(&repositories)
         .await
         .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
-    Ok(Json(GithubTokenView { token }))
+    Ok(GithubTokenView { token })
 }
 
 fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArguments> {
@@ -169,12 +156,12 @@ async fn invoke_app(
     })
 }
 
-pub(super) async fn restricted_github_tool(
-    State(st): State<AppState>,
-    Path((id, tool)): Path<(String, String)>,
-    Json(req): Json<RestrictedGithubToolReq>,
-) -> ApiResult<Json<RestrictedGithubToolView>> {
-    let session = crate::session::get(&st.db, &id)
+pub(super) async fn restricted_github_invoke_operation(
+    context: OperationContext,
+    input: permission_operations::github::restricted::invoke::Input,
+) -> ApiResult<permission_operations::github::restricted::invoke::Output> {
+    let st = context.state;
+    let session = crate::session::get(&st.db, &input.session)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
     if !session.policy_restricted {
@@ -183,7 +170,7 @@ pub(super) async fn restricted_github_tool(
             "session is not restricted",
         ));
     }
-    let rule = crate::mcp::github::permission_rule(&tool)
+    let rule = crate::mcp::github::permission_rule(&input.tool)
         .ok_or_else(|| AppError::not_found("restricted GitHub tool"))?;
     let allowed: Vec<String> = serde_json::from_str(&session.policy_allowed_tools)
         .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
@@ -200,7 +187,7 @@ pub(super) async fn restricted_github_tool(
     let repo = crate::repo::parse_slug(repo)
         .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
     let repo_slug = repo.slug();
-    let arguments = validate_arguments(&tool, req.arguments)?;
+    let arguments = validate_arguments(&input.tool, input.arguments)?;
     let tracking_issue = match session.tracking_issue_id {
         Some(id) => weaver_core::issue::get(&st.db, id).await?,
         None => None,
@@ -215,50 +202,21 @@ pub(super) async fn restricted_github_tool(
         ));
     }
     let app = super::configured_github_app(&st).await?;
-    let text = invoke_app(app, &repo, &tool, &arguments).await?;
-    Ok(Json(RestrictedGithubToolView { text }))
+    let text = invoke_app(app, &repo, &input.tool, &arguments).await?;
+    Ok(RestrictedGithubToolView { text })
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{principal_owns_session, validate_arguments};
-    use crate::auth::{AuthVia, Grant, Principal};
+    use super::validate_arguments;
 
-    fn principal(grant: Grant) -> Principal {
-        Principal {
-            username: "test".to_string(),
-            github_login: None,
-            via: AuthVia::Token,
-            grant,
-            automation_context: None,
-        }
-    }
-
-    #[test]
-    fn github_token_is_available_only_to_the_exact_session_principal() {
-        assert!(principal_owns_session(
-            &principal(Grant::Session {
-                session_id: "session-1".to_string(),
-                branch_id: "branch-1".to_string(),
-                capabilities: None,
-            }),
-            "session-1"
-        ));
-        assert!(!principal_owns_session(
-            &principal(Grant::Session {
-                session_id: "parent".to_string(),
-                branch_id: "branch-1".to_string(),
-                capabilities: None,
-            }),
-            "child"
-        ));
-        assert!(!principal_owns_session(
-            &principal(Grant::Admin),
-            "session-1"
-        ));
-    }
+    // `github_token` used to gate itself with a local `principal_owns_session`
+    // check (Grant::Session only, no Admin/User path at all). That check is now
+    // `permissions.github.token`'s declared `scope = Session`, enforced once for
+    // every operation by `crate::web::scope::require_session_access` — not
+    // duplicated here.
 
     #[test]
     fn only_the_fixed_mcp_tools_map_to_permissions() {

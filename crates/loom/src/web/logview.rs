@@ -12,13 +12,48 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use weaver_api::operations::tasks as task_operations;
+use weaver_api::TaskView;
 
 use crate::auth::Principal;
 use crate::db::Db;
 use crate::logs::{self, LogLine, LogRedactor};
 use crate::tasks::{self, TaskRecord};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppState};
+
+/// The `tasks` bundle: one read-only operation over the in-memory background
+/// task ring buffer.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<task_operations::list::List, _, _>(list_tasks)]
+}
+
+/// `tasks.list`, `crates/weaver-api/src/operations/tasks/list.rs`. [`TaskView`]
+/// mirrors [`TaskRecord`] field-for-field but is a distinct wire type owned by
+/// weaver-api, so the mapping is spelled out rather than assumed.
+fn task_view(record: TaskRecord) -> TaskView {
+    TaskView {
+        id: record.id,
+        kind: record.kind,
+        label: record.label,
+        state: record.state,
+        detail: record.detail,
+        started_at: record.started_at,
+        finished_at: record.finished_at,
+    }
+}
+
+pub(super) async fn list_tasks(
+    _context: OperationContext,
+    _input: task_operations::list::Input,
+) -> ApiResult<Vec<TaskView>> {
+    Ok(tasks::registry()
+        .snapshot()
+        .into_iter()
+        .map(task_view)
+        .collect())
+}
 
 #[derive(Debug, Deserialize)]
 pub(super) struct LogsQuery {

@@ -4,7 +4,7 @@ use super::prelude::*;
 /// session.
 #[operation(
     id = "permissions.github.token",
-    actor = SessionSelf,
+    actor = SessionOnly,
     scope = Session,
     risk = ExternalWrite,
     grants = ["loom/github/use@v1"],

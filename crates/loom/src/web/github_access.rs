@@ -9,10 +9,12 @@ use axum::{
     Extension, Json,
 };
 use serde_json::json;
-use weaver_api::{SessionGithubAccessView, SetSessionGithubAccessReq};
+use weaver_api::operations::permissions as permission_operations;
+use weaver_api::SessionGithubAccessView;
 
 use crate::auth::Principal;
 
+use super::operations::OperationContext;
 use super::{require_session, ApiResult, AppError, AppState};
 
 fn require_human(principal: &Principal) -> ApiResult<()> {
@@ -99,29 +101,30 @@ pub(super) async fn list_github_access(
     Ok(Json(grants))
 }
 
-pub(super) async fn set_github_access(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<SetSessionGithubAccessReq>,
-) -> ApiResult<Json<SessionGithubAccessView>> {
-    require_human(&principal)?;
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let repository = crate::repo::parse_slug(req.repository.trim())
+/// Shared body for `permissions.github.grant` and `permissions.github.revoke`:
+/// store the requested mode for one repository and audit the change. Which
+/// humans may reach this at all is `actor = User` on each declaration,
+/// enforced centrally — nothing here re-checks who the caller is.
+async fn set_github_access_and_record(
+    st: &AppState,
+    granted_by: &str,
+    session_key: &str,
+    repository: &str,
+    mode: crate::github_access::Mode,
+) -> ApiResult<SessionGithubAccessView> {
+    let (session, branch) = require_session(&st.db, session_key).await?;
+    let repository = crate::repo::parse_slug(repository.trim())
         .map_err(AppError::bad_request)?
         .slug();
-    let mode_text = req.mode.trim().to_ascii_lowercase();
-    let mode = crate::github_access::Mode::try_from(mode_text.as_str())
-        .map_err(|_| AppError::bad_request("GitHub access mode must be 'write' or 'none'"))?;
 
     // Validate the complete prospective token scope before changing durable
     // access. This catches an uninstalled repo and cross-installation mixes at
     // grant time instead of surprising the agent on its next push.
     if mode == crate::github_access::Mode::Write {
-        validate_github_write(&st, &session, &repository).await?;
+        validate_github_write(st, &session, &repository).await?;
     }
 
-    crate::github_access::set(&st.db, &session.id, &repository, mode, &principal.username).await?;
+    crate::github_access::set(&st.db, &session.id, &repository, mode, granted_by).await?;
     let grant = crate::github_access::list(&st.db, &session.id)
         .await?
         .into_iter()
@@ -148,24 +151,50 @@ pub(super) async fn set_github_access(
         tracing::warn!(session = %session.id, %repository, error = %error,
             "failed to record GitHub access audit event");
     }
-    Ok(Json(SessionGithubAccessView {
+    Ok(SessionGithubAccessView {
         repository: grant.repository,
         mode: grant.mode.as_str().to_string(),
         granted_by: grant.granted_by,
         granted_at: grant.granted_at,
-    }))
+    })
+}
+
+pub(super) async fn grant_github_access_operation(
+    context: OperationContext,
+    input: permission_operations::github::grant::Input,
+) -> ApiResult<permission_operations::github::grant::Output> {
+    set_github_access_and_record(
+        &context.state,
+        &context.principal.username,
+        &input.session,
+        &input.repository,
+        crate::github_access::Mode::Write,
+    )
+    .await
+}
+
+pub(super) async fn revoke_github_access_operation(
+    context: OperationContext,
+    input: permission_operations::github::revoke::Input,
+) -> ApiResult<permission_operations::github::revoke::Output> {
+    set_github_access_and_record(
+        &context.state,
+        &context.principal.username,
+        &input.session,
+        &input.repository,
+        crate::github_access::Mode::None,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use axum::extract::{Path, State};
-    use axum::{Extension, Json};
-
-    use super::{effective_repositories, require_human, set_github_access};
+    use super::{
+        effective_repositories, grant_github_access_operation, require_human, OperationContext,
+    };
     use crate::auth::{AuthVia, Grant, Principal};
-    use weaver_api::SetSessionGithubAccessReq;
 
     fn principal(grant: Grant) -> Principal {
         Principal {
@@ -291,14 +320,12 @@ mod tests {
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
 
-        let Json(view) = set_github_access(
-            State(state),
-            Path("grant".to_string()),
-            Extension(principal(Grant::Admin)),
-            Json(SetSessionGithubAccessReq {
+        let view = grant_github_access_operation(
+            OperationContext::new(state, principal(Grant::Admin)),
+            weaver_api::operations::permissions::github::grant::Input {
                 repository: "marin-community/loom".to_string(),
-                mode: "write".to_string(),
-            }),
+                session: "grant".to_string(),
+            },
         )
         .await
         .unwrap();

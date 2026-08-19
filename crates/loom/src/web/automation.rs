@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     Extension, Json,
 };
+use weaver_api::operations::runs as run_operations;
 use weaver_api::{
     AutomationTokenReq, AutomationTokenView, FederateReq, FederationReq, FederationView, RunReq,
     RunView, SlackThreadRef,
@@ -10,7 +11,20 @@ use weaver_api::{
 
 use crate::auth::{Grant, Principal};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
+
+/// The `runs` bundle: automation-triggered session launches (GitHub Actions,
+/// ops scripts, Grafana alerts). Federation/token minting (`federate`,
+/// `mint_automation_token`, `list_federations`, `add_federation`,
+/// `remove_federation`) below are a different bundle and are untouched here.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<run_operations::list::List, _, _>(list_runs),
+        register::<run_operations::get::Get, _, _>(get_run),
+        register::<run_operations::create::Create, _, _>(create_run),
+    ]
+}
 
 fn github_idempotency_key(
     context: &crate::automation::GithubContext,
@@ -90,12 +104,18 @@ pub(super) async fn remove_federation(
     }
 }
 
+/// The requesting identity's subject and allowed profile set. `runs.create` is
+/// declared `actor = Internal`, so `authorize()` has already refused anything
+/// but `Grant::Admin` or `Grant::Automation` by the time a handler runs
+/// (`Grant::User`/`Grant::Session` never reach here); the automation grant's
+/// own profile allowlist is per-token business state, not something the
+/// central actor/scope check can see, so it stays.
 fn run_identity(
     principal: &Principal,
     requested_profile: &str,
 ) -> ApiResult<(String, Vec<String>)> {
     match &principal.grant {
-        Grant::Admin | Grant::User => Ok((
+        Grant::Admin => Ok((
             principal.username.clone(),
             vec![requested_profile.to_string()],
         )),
@@ -108,18 +128,17 @@ fn run_identity(
             }
             Ok((subject.clone(), profiles.clone()))
         }
-        Grant::Session { .. } => Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "session credentials cannot create automation runs",
-        )),
+        Grant::Anonymous | Grant::User | Grant::Session { .. } => unreachable!(
+            "authorize() only admits Admin/Automation grants to an actor = Internal operation"
+        ),
     }
 }
 
-async fn run_view(st: &AppState, id: &str) -> ApiResult<Json<RunView>> {
+async fn run_view(st: &AppState, id: &str) -> ApiResult<RunView> {
     let run = crate::runs::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("automation run"))?;
-    Ok(Json(run.into()))
+    Ok(run.into())
 }
 
 enum LaunchFailure {
@@ -188,7 +207,7 @@ async fn launch_run(
     profiles: Vec<String>,
     run: crate::runs::Run,
     failure: LaunchFailure,
-) -> ApiResult<Json<RunView>> {
+) -> ApiResult<RunView> {
     let actor = crate::provision::Actor::automation(
         req.source.clone(),
         subject,
@@ -249,7 +268,7 @@ async fn prompt_channel_run(
     st: &AppState,
     req: &RunReq,
     run: crate::runs::Run,
-) -> ApiResult<Json<RunView>> {
+) -> ApiResult<RunView> {
     let Some(session) = crate::session::get(&st.db, &run.session_id)
         .await?
         .filter(|session| session.status == "running" && session.protocol == "acp")
@@ -314,14 +333,14 @@ async fn dispatch_channel_run(
     subject: String,
     profiles: Vec<String>,
     run: crate::runs::Run,
-) -> ApiResult<Json<RunView>> {
+) -> ApiResult<RunView> {
     let req: RunReq = serde_json::from_str(&run.request_json)?;
     match crate::runs::route_channel(&st.db, &run.id).await? {
         crate::runs::ChannelAction::Launch(run) => {
             launch_run(st, req, subject, profiles, run, LaunchFailure::Retryable).await
         }
         crate::runs::ChannelAction::Prompt(run) => prompt_channel_run(st, &req, run).await,
-        crate::runs::ChannelAction::Ready(run) => Ok(Json(run.into())),
+        crate::runs::ChannelAction::Ready(run) => Ok(run.into()),
         crate::runs::ChannelAction::Busy(_) => Err(AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "automation channel is provisioning or orphaned; retry this delivery",
@@ -330,10 +349,20 @@ async fn dispatch_channel_run(
 }
 
 pub(super) async fn create_run(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(mut req): Json<RunReq>,
-) -> ApiResult<Json<RunView>> {
+    context: OperationContext,
+    input: run_operations::create::Input,
+) -> ApiResult<RunView> {
+    let st = context.state;
+    let principal = context.principal;
+    let mut req = RunReq {
+        profile: input.profile,
+        idempotency_key: input.idempotency_key,
+        source: input.source,
+        watch_id: input.watch_id,
+        channel: input.channel,
+        slack: input.slack,
+        session: input.session,
+    };
     let profile = req.profile.trim().to_string();
     let (subject, profiles) = run_identity(&principal, &profile)?;
     if !matches!(req.source.as_str(), "actions" | "ops" | "grafana") {
@@ -438,7 +467,7 @@ pub(super) async fn create_run(
             crate::runs::Reservation::Existing(run)
                 if run.channel.as_deref() != req.channel.as_deref() =>
             {
-                return Ok(Json(run.into()));
+                return Ok(run.into());
             }
             crate::runs::Reservation::Existing(run)
                 if matches!(
@@ -446,7 +475,7 @@ pub(super) async fn create_run(
                     "running" | "failed" | "cancelled" | "completed"
                 ) =>
             {
-                return Ok(Json(run.into()));
+                return Ok(run.into());
             }
             crate::runs::Reservation::Existing(run) if run.status == "delivering" => {
                 if !crate::runs::claim_stale_delivery(&st.db, &run.id).await? {
@@ -475,10 +504,10 @@ pub(super) async fn create_run(
                 let run = crate::runs::get(&st.db, &run.id)
                     .await?
                     .ok_or_else(|| AppError::not_found("automation run"))?;
-                return Ok(Json(run.into()));
+                return Ok(run.into());
             }
             if !crate::runs::claim_stale(&st.db, &run.id).await? {
-                return Ok(Json(run.into()));
+                return Ok(run.into());
             }
             run
         }
@@ -487,39 +516,33 @@ pub(super) async fn create_run(
     launch_run(&st, req, subject, profiles, run, LaunchFailure::Final).await
 }
 
+/// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`
+/// ever reach this handler (`Grant::Automation` and `Grant::Session` are
+/// refused by `authorize()` before the body runs), and the old handler showed
+/// both of those every run unfiltered — so there is no subject to filter by
+/// here any more.
 pub(super) async fn list_runs(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<RunView>>> {
-    let subject = match &principal.grant {
-        Grant::Admin | Grant::User => None,
-        Grant::Automation { subject, .. } => Some(subject.as_str()),
-        Grant::Session { .. } => {
-            return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))
-        }
-    };
-    Ok(Json(
-        crate::runs::list_for(&st.db, subject)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    ))
+    context: OperationContext,
+    _input: run_operations::list::Input,
+) -> ApiResult<Vec<RunView>> {
+    Ok(crate::runs::list_for(&context.state.db, None)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
+/// `runs.get` is declared `actor = User`, same reasoning as `runs.list`: only
+/// `Grant::Admin`/`Grant::User` reach here, so the old handler's
+/// `Grant::Automation`-subject-match check is now unreachable and dropped.
 pub(super) async fn get_run(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<RunView>> {
-    let run = crate::runs::get(&st.db, &id)
+    context: OperationContext,
+    input: run_operations::get::Input,
+) -> ApiResult<RunView> {
+    let run = crate::runs::get(&context.state.db, &input.id)
         .await?
         .ok_or_else(|| AppError::not_found("automation run"))?;
-    if matches!(&principal.grant, Grant::Automation { subject, .. } if subject != &run.actor_subject)
-    {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
-    }
-    Ok(Json(run.into()))
+    Ok(run.into())
 }
 
 #[cfg(test)]

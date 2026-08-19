@@ -559,7 +559,11 @@ pub(super) async fn create_session(
         .as_deref()
         .map(str::trim)
         .is_some_and(|value| !value.is_empty());
-    let actor = crate::provision::Actor::from_principal(&principal, delegated);
+    // `None` means the credential cannot launch anything at all. `authorize()`
+    // already refuses an anonymous grant here, so this fails closed rather than
+    // depending on that.
+    let actor = crate::provision::Actor::from_principal(&principal, delegated)
+        .ok_or_else(|| AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session"))?;
     match &principal.grant {
         crate::auth::Grant::Session { .. } => {
             req.parent_branch = actor.bound_parent_branch().map(str::to_string);
