@@ -6,7 +6,10 @@ use crate::operations::{NoView, Render};
 
 fn row(issue: &IssueView) -> String {
     let claim = issue.claimed_branch.as_deref().unwrap_or("(backlog)");
-    format!("#{:<5} {:<9} {:<24} {}", issue.id, issue.status, claim, issue.title)
+    format!(
+        "#{:<5} {:<9} {:<24} {}",
+        issue.id, issue.status, claim, issue.title
+    )
 }
 
 fn detail(issue: &IssueView) -> String {
@@ -32,7 +35,11 @@ fn applied(result: &IssueActionsResult, verb: &str) -> String {
         parts.push(format!("{verb} {}", ids.join(" ")));
     }
     if !result.deleted_ids.is_empty() {
-        let ids: Vec<_> = result.deleted_ids.iter().map(|id| format!("#{id}")).collect();
+        let ids: Vec<_> = result
+            .deleted_ids
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect();
         parts.push(format!("deleted {}", ids.join(" ")));
     }
     if parts.is_empty() {

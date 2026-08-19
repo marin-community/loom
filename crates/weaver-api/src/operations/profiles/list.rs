@@ -4,10 +4,10 @@ use super::prelude::*;
 /// returned.
 #[operation(
     id = "profiles.list",
-    actor = Admin,
+    actor = SessionSelf,
     scope = Global,
     risk = Read,
-    grants = [],
+    grants = ["loom/sessions/read@v1"],
     cli = "profiles list",
     cli_alias = "ls",
 )]

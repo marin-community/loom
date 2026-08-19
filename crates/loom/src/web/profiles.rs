@@ -41,7 +41,10 @@ pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
 
 /// The twin of [`input`], from `profiles.create`'s own typed fields rather
 /// than the shared [`ProfileReq`] the legacy route deserializes.
-fn profile_input_from_create(input: profiles_operations::create::Input, name: String) -> ProfileInput {
+fn profile_input_from_create(
+    input: profiles_operations::create::Input,
+    name: String,
+) -> ProfileInput {
     ProfileInput {
         name,
         description: input.description,
@@ -67,7 +70,10 @@ fn profile_input_from_create(input: profiles_operations::create::Input, name: St
 }
 
 /// The twin of [`input`], from `profiles.update`'s own typed fields.
-fn profile_input_from_update(input: profiles_operations::update::Input, name: String) -> ProfileInput {
+fn profile_input_from_update(
+    input: profiles_operations::update::Input,
+    name: String,
+) -> ProfileInput {
     ProfileInput {
         name,
         description: input.description,

@@ -4,6 +4,8 @@ fn main() {
         *by_bundle.entry(op.bundle).or_insert(0) += 1;
     }
     let total: i32 = by_bundle.values().sum();
-    for (b, n) in &by_bundle { println!("  {b:12} {n}"); }
+    for (b, n) in &by_bundle {
+        println!("  {b:12} {n}");
+    }
     println!("  {:12} {total}", "TOTAL");
 }

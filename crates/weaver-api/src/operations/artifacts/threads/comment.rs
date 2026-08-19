@@ -33,9 +33,7 @@ pub enum CommentTarget {
         anchor: AnchorDto,
     },
     /// Reply to an already-open thread.
-    Reply {
-        thread_id: i64,
-    },
+    Reply { thread_id: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]

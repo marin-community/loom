@@ -100,6 +100,7 @@ mod session_layout;
 mod session_summary;
 pub(crate) mod sessions;
 mod settings;
+mod streams;
 mod watches;
 
 use agents::*;
@@ -109,11 +110,9 @@ use automation::*;
 use branches::*;
 use changes::*;
 use channels::*;
-use deployment::*;
 use diagnostics::*;
 use discussion::*;
 use env::*;
-use eventmux::*;
 use github_access::*;
 use issues::*;
 use launches::*;
@@ -742,6 +741,9 @@ fn registered_api_router() -> Router<AppState> {
     // advertise operations that 404ed.
     operations::assert_registry_is_complete();
     let router = operations::mount(Router::new());
+    // The non-JSON half of the same registry: SSE feeds and terminal
+    // websockets, mounted at their derived paths off the same declarations.
+    let router = streams::mount(router);
     let router = mount_session_api(router);
     let router = mount_channel_api(router);
     let router = mount_artifact_api(router);
@@ -752,7 +754,6 @@ fn registered_api_router() -> Router<AppState> {
 fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/session-layout", get(get_session_layout))
-        .route("/session-layout/events", get(session_layout_events))
         .route("/session-layout/spaces", post(create_session_space))
         .route(
             "/session-layout/spaces/{id}",
@@ -849,22 +850,15 @@ fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
         .route("/sessions/{id}/history/search", get(search_session_history))
         .route("/sessions/{id}/files", get(list_session_files))
         .route("/sessions/{id}/changes", get(get_session_changes))
-        .route("/sessions/{id}/events", get(events_sse))
-        .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
         .route("/sessions/{id}/shells", get(list_session_shells))
         .route(
             "/sessions/{id}/shell/{idx}",
             axum::routing::delete(delete_session_shell),
         )
-        .route(
-            "/sessions/{id}/shell/{idx}/terminal",
-            get(crate::terminal::session_shell_ws),
-        )
         .route("/sessions/{id}/send", post(send_session))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/preview", get(preview_session))
         .route("/sessions/{id}/chat", get(get_session_chat))
-        .route("/sessions/{id}/chat/stream", get(chat_stream))
         .route(
             "/sessions/{id}/prompt",
             post(prompt_session).delete(retract_queued_prompt),
@@ -1048,10 +1042,6 @@ fn protected_api_router() -> Router<AppState> {
     // Everything else requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
     registered_api_router()
-        // Every live stream the browser wants, folded onto one connection so a
-        // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
-        // routes below remain the single-stream API.
-        .route("/events", get(events_mux))
         // Misc
         .route("/agents", get(list_agents))
         // Operator-defined custom agents (create + edit/remove by name). The
@@ -1109,13 +1099,10 @@ fn protected_api_router() -> Router<AppState> {
         )
         // The operator scratch shell — a single persistent login shell in the
         // container, for one-time setup like `gcloud auth login`.
-        .route("/shell/terminal", get(crate::terminal::shell_ws))
-        .route("/shell/restart", post(restart_shell))
         // Server logs + background tasks (Settings → Diagnostics) — snapshot +
         // live SSE tail + build status + the detached trigger-task list. These
         // are available to human users for self-service debugging.
         .route("/logs", get(logs_snapshot))
-        .route("/logs/stream", get(logs_stream))
         .route("/status", get(server_status))
         .route("/tasks", get(tasks_snapshot))
         .route("/diagnostics", get(diagnostics))

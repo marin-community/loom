@@ -11,7 +11,7 @@ import {
   nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
-import { clearSessionTag, get, getSession, ideInfo, markChannelRead } from '../api';
+import { clearSessionTag, getSession, ideInfo, invokeOperation, markChannelRead } from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
@@ -420,7 +420,9 @@ async function acknowledgeSessionAttention(): Promise<string> {
 async function loadAllWith(sessionLoad: () => Promise<string>) {
   try {
     const acknowledgementError = await sessionLoad();
-    events.value = (await get(`/sessions/${props.id}/log`)) as WeaverEvent[];
+    events.value = (await invokeOperation('sessions.events.list', {
+      session: props.id,
+    })) as WeaverEvent[];
     error.value = acknowledgementError;
   } catch (e) {
     error.value = (e as Error).message;

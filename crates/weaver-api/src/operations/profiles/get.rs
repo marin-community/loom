@@ -4,7 +4,7 @@ use super::prelude::*;
 /// returned.
 #[operation(
     id = "profiles.get",
-    actor = Admin,
+    actor = User,
     scope = Global,
     risk = Read,
     grants = [],

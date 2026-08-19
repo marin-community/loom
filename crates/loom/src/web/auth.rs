@@ -69,7 +69,11 @@ pub(super) async fn is_session_descendant(st: &AppState, ancestor: &str, candida
     .unwrap_or(false)
 }
 
-pub(super) async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id: &str) -> bool {
+pub(super) async fn branch_belongs_to_session_tree(
+    st: &AppState,
+    ancestor: &str,
+    branch_id: &str,
+) -> bool {
     sqlx::query_scalar::<_, bool>(
         "WITH RECURSIVE tree(id, branch_id) AS (
            SELECT id, branch_id FROM sessions WHERE id = ?

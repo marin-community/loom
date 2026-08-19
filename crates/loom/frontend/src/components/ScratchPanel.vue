@@ -31,6 +31,10 @@ function fmtBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// UNMAPPED: the only registered scratch operation is `sessions.scratch.limits`
+// (metadata). Listing, uploading, and deleting scratch files have no
+// operation counterpart — these raw-body/list/delete calls stay on the
+// legacy `/sessions/{id}/scratch` routes.
 async function refresh() {
   try {
     files.value = (await get(`/sessions/${props.id}/scratch`)) as ScratchFile[];

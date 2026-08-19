@@ -1,12 +1,18 @@
 use super::prelude::*;
 
 /// Every registered runtime setting and its effective value.
+///
+/// `SessionSelf` because an agent may read the configuration it runs under —
+/// `GET /settings` was reachable by a session credential before this was a
+/// declaration. Writing one is `settings.patch`, which is `Admin`. The grant is
+/// the session read grant: there is no narrower capability a session can hold,
+/// and minting one nothing issues would deny the read outright.
 #[operation(
     id = "settings.get",
-    actor = Admin,
+    actor = SessionSelf,
     scope = Global,
     risk = Read,
-    grants = [],
+    grants = ["loom/sessions/read@v1"],
     cli = "settings get",
 )]
 pub struct Get;

@@ -3,7 +3,7 @@ use super::prelude::*;
 /// List operator-authored custom MCP servers.
 #[operation(
     id = "mcps.custom.list",
-    actor = Admin,
+    actor = User,
     scope = Global,
     risk = Read,
     grants = [],

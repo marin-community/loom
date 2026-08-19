@@ -120,7 +120,6 @@ enum GithubFixture {
     ConfiguredApp,
 }
 
-
 /// Per-test timeout.
 ///
 /// libtest has no such thing: a test that deadlocks blocks the whole suite
@@ -416,7 +415,7 @@ pub type TermWs =
 /// Connect a terminal WebSocket to a session. No `Origin` header is sent, so the
 /// server's same-origin check takes the missing-Origin (non-browser) path.
 pub async fn connect_terminal(addr: &SocketAddr, id: &str) -> TermWs {
-    let url = format!("ws://{addr}/api/sessions/{id}/terminal");
+    let url = format!("ws://{addr}/api/sessions/terminal?session={id}");
     let (ws, _resp) = tokio_tungstenite::connect_async(url)
         .await
         .expect("terminal websocket should connect");

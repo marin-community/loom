@@ -76,13 +76,11 @@ where
                         missing.join(", ")
                     );
                 }
-                let defaults = serde_json::to_value(O::Input::default()).map_err(|error| {
-                    anyhow!("building defaults for {}: {error}", O::SPEC.id)
-                })?;
+                let defaults = serde_json::to_value(O::Input::default())
+                    .map_err(|error| anyhow!("building defaults for {}: {error}", O::SPEC.id))?;
                 let merged = merge_defaults(arguments, defaults);
-                let mut input: O::Input = serde_json::from_value(merged).map_err(|error| {
-                    anyhow!("invalid arguments for {}: {error}", O::SPEC.id)
-                })?;
+                let mut input: O::Input = serde_json::from_value(merged)
+                    .map_err(|error| anyhow!("invalid arguments for {}: {error}", O::SPEC.id))?;
                 // Fetched once by the caller of `call` and handed down here —
                 // not an extra `self_context()` round-trip per tool, as the old
                 // per-adapter `project_input` functions each made their own.
@@ -91,9 +89,8 @@ where
                 }
                 let value = serde_json::to_value(&input)?;
                 let response = client.invoke_value(O::SPEC.id, value).await?;
-                let output: O::Output = serde_json::from_value(response).map_err(|error| {
-                    anyhow!("decoding response from {}: {error}", O::SPEC.id)
-                })?;
+                let output: O::Output = serde_json::from_value(response)
+                    .map_err(|error| anyhow!("decoding response from {}: {error}", O::SPEC.id))?;
                 let text = O::text(&output, &O::View::default());
                 super::structured_result(&text, &output)
             })
@@ -312,7 +309,10 @@ mod tests {
     /// rather than mirrored per adapter — see `call_tool` below.
     #[test]
     fn registered_operations_have_a_binding() {
-        let bound: Vec<_> = bindings().iter().map(|binding| binding.operation.id).collect();
+        let bound: Vec<_> = bindings()
+            .iter()
+            .map(|binding| binding.operation.id)
+            .collect();
         let missing: Vec<_> = weaver_api::operations()
             .filter(|operation| operation.mcp.is_some())
             .map(|operation| operation.id)
@@ -350,7 +350,10 @@ mod tests {
     #[test]
     fn issue_capability_sets_are_derived_from_the_registry() {
         let sets = derive_capability_sets("loom_issue", "issue", |_| "d");
-        let read = sets.iter().find(|set| set.name == "loom/issues/read@v1").unwrap();
+        let read = sets
+            .iter()
+            .find(|set| set.name == "loom/issues/read@v1")
+            .unwrap();
         let write = sets
             .iter()
             .find(|set| set.name == "loom/issues/write@v1")

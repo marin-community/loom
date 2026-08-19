@@ -699,7 +699,7 @@ async fn new_session_end_to_end() {
         .starts_with("fake-session-"));
 }
 
-/// 1b. The HTTP `/chat/stream` route streams the same events over SSE.
+/// 1b. The `sessions.chat.stream` operation streams the same events over SSE.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_route_delivers_sse() {
@@ -707,7 +707,10 @@ async fn chat_stream_route_delivers_sse() {
     start_new(&ts, "acp-sse", None, None).await;
 
     // Opening the stream subscribes the broadcast before we prompt.
-    let url = format!("http://{}/api/sessions/acp-sse/chat/stream", ts.addr);
+    let url = format!(
+        "http://{}/api/sessions/chat/stream?session=acp-sse",
+        ts.addr
+    );
     let resp = reqwest::Client::new().get(&url).send().await.unwrap();
     assert!(resp.status().is_success());
 

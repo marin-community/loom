@@ -4,7 +4,7 @@ use super::prelude::*;
 /// and operator-authored custom servers.
 #[operation(
     id = "mcps.get",
-    actor = Admin,
+    actor = User,
     scope = Global,
     risk = Read,
     grants = [],

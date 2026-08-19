@@ -122,7 +122,6 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
     }
 }
 
-
 const ADAPTERS: &[&Adapter] = &[
     &github::ADAPTER,
     &context::ADAPTER,
@@ -999,4 +998,3 @@ mod tests {
         }
     }
 }
-

@@ -7,7 +7,6 @@
 //! whose variant was `Ls`, and shipped three advertised commands that did not
 //! exist.
 
-
 use anyhow::{anyhow, Result};
 use clap::{ArgMatches, Command};
 use weaver_api::operations::{

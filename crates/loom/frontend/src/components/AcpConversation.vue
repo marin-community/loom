@@ -63,7 +63,7 @@ import ToolContentPreview from './ToolContentPreview.vue';
 // "Thinking…" while reasoning streams) rather than bare card churn.
 //
 // Its data source is the durable chat journal: it paints the `GET /chat`
-// snapshot, then applies the `/chat/stream` SSE tail in place — `block` upserts
+// snapshot, then applies the `sessions.chat.stream` SSE tail in place — `block` upserts
 // by (turn, seq), `delta` streams into a shadow message/thought, `tool` tracks
 // live tool state (feeding the status line), `turn` drives the live-turn state,
 // and `queue` carries the complete durable next-turn prompt.

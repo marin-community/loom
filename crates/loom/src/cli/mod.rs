@@ -144,6 +144,7 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<settings::env::set::Set>(),
         bind::<settings::get::Get>(),
         bind::<settings::patch::Patch>(),
+        bind::<shell::restart::Restart>(),
         bind::<tasks::list::List>(),
         bind::<watches::create::Create>(),
         bind::<watches::delete::Delete>(),

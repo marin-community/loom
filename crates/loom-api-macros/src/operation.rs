@@ -141,8 +141,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             )
         })?;
 
-    let actor = actor
-        .ok_or_else(|| syn::Error::new_spanned(&item, "operation needs an `actor`"))?;
+    let actor =
+        actor.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs an `actor`"))?;
     let scope = scope.unwrap_or_else(|| Ident::new("Session", name.span()));
     let risk = risk.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs a `risk`"))?;
     let io = io.unwrap_or_else(|| Ident::new("Json", name.span()));
@@ -165,7 +165,9 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     "`cli` must name at least one command segment",
                 ));
             }
-            let segments = segments.iter().map(|segment| LitStr::new(segment, name.span()));
+            let segments = segments
+                .iter()
+                .map(|segment| LitStr::new(segment, name.span()));
             let aliases = cli_aliases
                 .iter()
                 .map(|alias| LitStr::new(alias, name.span()));
@@ -200,9 +202,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         None => quote!(None),
     };
 
-    let grant_literals = grants
-        .iter()
-        .map(|grant| LitStr::new(grant, name.span()));
+    let grant_literals = grants.iter().map(|grant| LitStr::new(grant, name.span()));
 
     let attrs = &item.attrs;
     let vis = &item.vis;

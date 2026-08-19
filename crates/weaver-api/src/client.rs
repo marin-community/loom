@@ -14,24 +14,23 @@ use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
-    AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelBindingView,
-    ChannelMessageView, ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto,
-    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateReq, CreateReviewReq,
-    CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
-    CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeleteSessionGroupReq,
-    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
+    AutomationTokenReq, AutomationTokenView, BranchView, ChannelBindingView, ChannelMessageView,
+    ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
+    CreateChannelReq, CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq,
+    CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView,
+    DecidePermissionRequestReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
+    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
     ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
-    HistoryPageView, IssueView, McpRegistryView,
-    MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
-    PermissionRequestView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
+    HistoryPageView, IssueView, McpRegistryView, MoveSessionsReq, NewCommentBody, PatchIssueReq,
+    PatchSessionReq, PatchWatchReq, PermissionRequestView, ProfileReq, ProfileView, ReadinessView,
     ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
     RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
     RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView, SendReq,
     SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
-    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
-    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq,
+    SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq, SettingsEnvelope,
+    SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq,
+    UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -82,6 +81,7 @@ impl Client {
 
     async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{}", self.base, path);
+        let method_name = method.to_string();
         let mut req = self.http.request(method, &url);
         if let Some(token) = &self.token {
             req = req.bearer_auth(token);
@@ -120,7 +120,15 @@ impl Client {
                 .get("error")
                 .and_then(|e| e.as_str())
                 .unwrap_or(text.as_str());
-            bail!("server returned {} — {}", status.as_u16(), message);
+            // Name the request. A bare "server returned 405" says nothing about
+            // which of a hundred operations was refused, and 404/405 in
+            // particular are almost always about the path rather than the body.
+            bail!(
+                "server returned {} for {} {path} — {}",
+                status.as_u16(),
+                method_name,
+                message
+            );
         }
         Ok(value)
     }
@@ -182,17 +190,34 @@ impl Client {
     /// resolves `id` in its executable registry; adapters do not keep a second
     /// callback table.
     pub async fn invoke_value(&self, id: &str, input: Value) -> Result<Value> {
-        let path = format!(
-            "/api/{}",
-            id.split('.').map(Self::seg).collect::<Vec<_>>().join("/")
-        );
-        self.send(Method::POST, &path, Some(input)).await
+        self.send(Method::POST, &Self::operation_path(id), Some(input))
+            .await
+    }
+
+    /// An operation id's route, derived exactly as `OperationSpec::path` derives
+    /// it.
+    ///
+    /// Not percent-encoded, and that is the point: this used to run each dotted
+    /// segment through [`Self::seg`], which escapes `NON_ALPHANUMERIC` and so
+    /// turned every id containing an underscore into a path the server does not
+    /// serve — `channels.read_marker.set` was requested as
+    /// `/api/channels/read%5Fmarker/set` and came back 405. `seg` exists for
+    /// *caller-supplied* path segments on the legacy routes, where a channel name
+    /// or branch really can contain a slash. An operation id cannot: it is
+    /// `[a-z0-9_]` joined by dots, which is why the derivation is a plain
+    /// substitution on both sides.
+    fn operation_path(id: &str) -> String {
+        format!("/api/{}", id.replace('.', "/"))
     }
 
     // -- Sessions ---------------------------------------------------------
 
     pub async fn self_context(&self) -> Result<SelfContextView> {
-        self.get_typed("/api/self").await
+        use crate::operations::sessions::context;
+        self.invoke::<context::Get>(&context::Input {
+            session: String::new(),
+        })
+        .await
     }
 
     /// Discover the connected Loom server and its operation registry version.
@@ -205,13 +230,13 @@ impl Client {
         self.get_typed("/api/operations").await
     }
 
-
+    /// Broker a short-lived GitHub App installation token scoped to a
+    /// session's effective repositories (`permissions.github.token`).
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
-        self.send_typed::<Value, GithubTokenView>(
-            Method::POST,
-            &format!("/api/sessions/{}/github/token", Self::seg(session_id)),
-            None,
-        )
+        use crate::operations::permissions::github::token;
+        self.invoke::<token::Token>(&token::Input {
+            session: session_id.to_string(),
+        })
         .await
     }
 
@@ -226,21 +251,31 @@ impl Client {
         .await
     }
 
+    /// Grant or revoke one session's override access to a GitHub repository.
+    /// Dispatches to `permissions.github.grant` for `mode: "write"`, else
+    /// `permissions.github.revoke` — the two operations that replaced this
+    /// route's `PUT` half; `write`/`none` are the only modes the store
+    /// recognizes.
     pub async fn set_session_github_access(
         &self,
         session_id: &str,
         request: &SetSessionGithubAccessReq,
     ) -> Result<SessionGithubAccessView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/sessions/{}/github/access", Self::seg(session_id)),
-            Some(request),
-        )
-        .await
+        use crate::operations::permissions::github::{grant, revoke};
+        if request.mode == "write" {
+            self.invoke::<grant::Grant>(&grant::Input {
+                repository: request.repository.clone(),
+                session: session_id.to_string(),
+            })
+            .await
+        } else {
+            self.invoke::<revoke::Revoke>(&revoke::Input {
+                repository: request.repository.clone(),
+                session: session_id.to_string(),
+            })
+            .await
+        }
     }
-
-
-
 
     /// Approve or deny a pending permission request.
     ///
@@ -272,46 +307,46 @@ impl Client {
         }
     }
 
-    /// List active non-automation sessions (`GET /api/sessions`).
+    /// List visible sessions with default filters (`sessions.list`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
-        self.get_typed("/api/sessions").await
+        self.search_sessions(&SearchSessionsOptions::default())
+            .await
     }
 
-    /// Search the documented fleet facets with typed route scope and filters.
+    /// Search the documented fleet facets (`sessions.list`).
     pub async fn search_sessions(
         &self,
         options: &SearchSessionsOptions,
     ) -> Result<Vec<SessionView>> {
-        let mut query = vec![
-            format!("q={}", Self::seg(&options.query)),
-            format!("history={}", options.history),
-            format!("archived_only={}", options.archived_only),
-        ];
-        if let Some(status) = options.status {
-            query.push(format!("status={status}"));
-        }
-        if let Some(attention) = options.attention {
-            query.push(format!("attention={attention}"));
-        }
-        if let Some(creator) = options.creator {
-            query.push(format!("creator={creator}"));
-        }
-        self.get_typed(&format!("/api/sessions/search?{}", query.join("&")))
-            .await
+        use crate::operations::sessions::list;
+        self.invoke::<list::List>(&list::Input {
+            q: options.query.clone(),
+            history: options.history,
+            archived_only: options.archived_only,
+            status: options.status,
+            attention: options.attention,
+            creator: options.creator,
+        })
+        .await
     }
 
     // -- Session layout ---------------------------------------------------
 
     pub async fn get_session_layout(&self) -> Result<SessionLayoutView> {
-        self.get_typed("/api/session-layout").await
+        use crate::operations::session_layout::get;
+        self.invoke::<get::Get>(&get::Input {}).await
     }
 
     pub async fn create_session_space(
         &self,
         req: &CreateSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(Method::POST, "/api/session-layout/spaces", Some(req))
-            .await
+        use crate::operations::session_layout::spaces::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: req.name.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn update_session_space(
@@ -344,8 +379,13 @@ impl Client {
         &self,
         req: &CreateSessionGroupReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(Method::POST, "/api/session-layout/groups", Some(req))
-            .await
+        use crate::operations::session_layout::groups::create;
+        self.invoke::<create::Create>(&create::Input {
+            space_id: req.space_id.clone(),
+            name: req.name.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn update_session_group(
@@ -378,21 +418,38 @@ impl Client {
         &self,
         req: &ReorderSessionLayoutReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(Method::POST, "/api/session-layout/reorder", Some(req))
-            .await
+        use crate::operations::session_layout::reorder;
+        self.invoke::<reorder::Reorder>(&reorder::Input {
+            kind: req.kind,
+            id: req.id.clone(),
+            before_id: req.before_id.clone(),
+            destination_space_id: req.destination_space_id.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
-        self.send_typed(Method::POST, "/api/session-layout/moves", Some(req))
-            .await
+        use crate::operations::session_layout::r#move;
+        self.invoke::<r#move::Move>(&r#move::Input {
+            session_ids: req.session_ids.clone(),
+            destination_group_id: req.destination_group_id.clone(),
+            before_session_id: req.before_session_id.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn restore_session_groups(
         &self,
         req: &RestoreSessionGroupsReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(Method::POST, "/api/session-layout/restores", Some(req))
-            .await
+        use crate::operations::session_layout::restore;
+        self.invoke::<restore::Restore>(&restore::Input {
+            groups: req.groups.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn set_session_group_preference(
@@ -435,20 +492,26 @@ impl Client {
     }
 
     /// Get one session by key — id, branch id, branch name, or `repo:branch`
-    /// (`GET /api/sessions/{key}`).
+    /// (`sessions.get`).
     pub async fn get_session(&self, key: &str) -> Result<SessionView> {
-        self.get_typed(&format!("/api/sessions/{}", Self::seg(key)))
-            .await
+        use crate::operations::sessions::get;
+        self.invoke::<get::Get>(&get::Input {
+            session: key.to_string(),
+        })
+        .await
     }
 
+    /// Catch-up summary for one session (`sessions.summary.get`).
     pub async fn session_summary(&self, key: &str) -> Result<SessionCatchupView> {
-        self.get_typed(&format!("/api/sessions/{}/summary", Self::seg(key)))
-            .await
+        use crate::operations::sessions::summary::get;
+        self.invoke::<get::Get>(&get::Input {
+            session: key.to_string(),
+        })
+        .await
     }
 
-    /// Page normalized records for one session
-    /// (`GET /api/sessions/{key}/history`). `before` is the exclusive opaque
-    /// cursor returned by the preceding page.
+    /// Page normalized records for one session (`sessions.history.list`).
+    /// `before` is the exclusive opaque cursor returned by the preceding page.
     pub async fn get_session_history(
         &self,
         key: &str,
@@ -456,13 +519,18 @@ impl Client {
         limit: Option<usize>,
         kinds: &[String],
     ) -> Result<HistoryPageView> {
-        let query = Self::history_query(before, limit, kinds, None);
-        self.get_typed(&format!("/api/sessions/{}/history{query}", Self::seg(key)))
-            .await
+        use crate::operations::sessions::history::list;
+        self.invoke::<list::List>(&list::Input {
+            before: before.map(str::to_string),
+            limit: limit.map(|l| l as i64),
+            kinds: kinds.to_vec(),
+            session: key.to_string(),
+        })
+        .await
     }
 
     /// Case-insensitive literal search over one session's normalized records
-    /// (`GET /api/sessions/{key}/history/search`).
+    /// (`sessions.history.search`).
     pub async fn search_session_history(
         &self,
         key: &str,
@@ -471,42 +539,15 @@ impl Client {
         limit: Option<usize>,
         kinds: &[String],
     ) -> Result<HistoryPageView> {
-        let query = Self::history_query(before, limit, kinds, Some(search));
-        self.get_typed(&format!(
-            "/api/sessions/{}/history/search{query}",
-            Self::seg(key)
-        ))
+        use crate::operations::sessions::history::search;
+        self.invoke::<search::Search>(&search::Input {
+            q: search.to_string(),
+            before: before.map(str::to_string),
+            limit: limit.map(|l| l as i64),
+            kinds: kinds.to_vec(),
+            session: key.to_string(),
+        })
         .await
-    }
-
-    fn history_query(
-        before: Option<&str>,
-        limit: Option<usize>,
-        kinds: &[String],
-        search: Option<&str>,
-    ) -> String {
-        let encode = |value: &str| {
-            percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
-                .to_string()
-        };
-        let mut fields = Vec::new();
-        if let Some(search) = search {
-            fields.push(format!("q={}", encode(search)));
-        }
-        if let Some(before) = before {
-            fields.push(format!("before={}", encode(before)));
-        }
-        if let Some(limit) = limit {
-            fields.push(format!("limit={limit}"));
-        }
-        if !kinds.is_empty() {
-            fields.push(format!("kinds={}", encode(&kinds.join(","))));
-        }
-        if fields.is_empty() {
-            String::new()
-        } else {
-            format!("?{}", fields.join("&"))
-        }
     }
 
     /// Launch a new session (`POST /api/sessions`).
@@ -515,13 +556,17 @@ impl Client {
             .await
     }
 
-    /// Resolve and validate a profile selection without launching.
+    /// Resolve and validate a profile selection without launching
+    /// (`sessions.launches.resolve`).
     pub async fn resolve_session_launch(
         &self,
         req: &ResolveLaunchReq,
     ) -> Result<ResolvedLaunchView> {
-        self.send_typed(Method::POST, "/api/session-launches/resolve", Some(req))
-            .await
+        use crate::operations::sessions::launches::resolve;
+        self.invoke::<resolve::Resolve>(&resolve::Input {
+            selection: req.selection.clone(),
+        })
+        .await
     }
 
     /// Resolve a canonical profile selection in the context of an existing
@@ -594,13 +639,19 @@ impl Client {
     }
 
     /// Replace the provider behind a live ACP session while preserving the
-    /// loom session, worktree, branch, and canonical journal.
+    /// loom session, worktree, branch, and canonical journal (`sessions.handoff`).
     pub async fn handoff_session(&self, key: &str, req: &HandoffReq) -> Result<SessionView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/sessions/{}/handoff", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::handoff;
+        self.invoke::<handoff::Handoff>(&handoff::Input {
+            agent: req.agent.clone(),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            mode: req.mode.clone(),
+            selection: req.selection.clone(),
+            expected_profile_revision: req.expected_profile_revision,
+            expected_resolver_revision: req.expected_resolver_revision.clone(),
+            session: key.to_string(),
+        })
         .await
     }
 
@@ -692,59 +743,76 @@ impl Client {
     }
 
     /// Type a message into a session's agent pane, submitting it by default
-    /// (`POST /api/sessions/{key}/send`). For ACP, this steers a supported live
-    /// turn and otherwise cancels it before starting a normal turn.
+    /// (`sessions.send`). For ACP, this steers a supported live turn and
+    /// otherwise cancels it before starting a normal turn.
     pub async fn nudge(&self, key: &str, req: &SendReq) -> Result<Value> {
-        let body = serde_json::to_value(req)?;
-        self.post(&format!("/api/sessions/{}/send", Self::seg(key)), body)
-            .await
+        use crate::operations::sessions::send;
+        let result = self
+            .invoke::<send::Send>(&send::Input {
+                text: req.text.clone(),
+                submit: Some(req.submit),
+                by: req.by.clone(),
+                session: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     /// Send a break (Escape) to interrupt the agent's current turn
-    /// (`POST /api/sessions/{key}/interrupt`).
+    /// (`sessions.interrupt`).
     pub async fn interrupt(&self, key: &str) -> Result<Value> {
-        self.post(
-            &format!("/api/sessions/{}/interrupt", Self::seg(key)),
-            Value::Null,
-        )
-        .await
+        use crate::operations::sessions::interrupt;
+        let result = self
+            .invoke::<interrupt::Interrupt>(&interrupt::Input {
+                session: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     /// Capture the session's terminal pane as plain text, with `lines` of extra
-    /// scrollback above the visible screen (`GET /api/sessions/{key}/preview`).
+    /// scrollback above the visible screen (`sessions.preview`).
     pub async fn preview(&self, key: &str, lines: usize) -> Result<String> {
-        let value = self
-            .get(&format!(
-                "/api/sessions/{}/preview?lines={lines}",
-                Self::seg(key)
-            ))
+        use crate::operations::sessions::preview;
+        let result = self
+            .invoke::<preview::Preview>(&preview::Input {
+                lines: lines as i64,
+                session: key.to_string(),
+            })
             .await?;
-        Ok(value
-            .get("screen")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string())
+        Ok(result.screen)
     }
 
-    /// Typed, bounded worktree changes relative to the session's local base.
+    /// Typed, bounded worktree changes relative to the session's local base
+    /// (`sessions.changes`).
     pub async fn changes(&self, key: &str) -> Result<crate::ChangeSetDto> {
-        self.get_typed(&format!("/api/sessions/{}/changes", Self::seg(key)))
-            .await
+        use crate::operations::sessions::changes;
+        self.invoke::<changes::Changes>(&changes::Input {
+            session: key.to_string(),
+        })
+        .await
     }
 
     /// Recent events for a branch, newest first, capped at 200 server-side
-    /// (`GET /api/branches/{key}/events`). `key` may be a branch id,
-    /// `repo:branch`, or unambiguous id prefix — no live session required.
+    /// (`branches.events.list`). `key` may be a branch id, `repo:branch`, or
+    /// unambiguous id prefix — no live session required.
     pub async fn branch_log(&self, key: &str) -> Result<Vec<weaver_core::events::Event>> {
-        self.get_typed(&format!("/api/branches/{}/events", Self::seg(key)))
-            .await
+        use crate::operations::branches::events::list;
+        self.invoke::<list::List>(&list::Input {
+            branch: key.to_string(),
+        })
+        .await
     }
 
     // -- Channels ----------------------------------------------------------
 
     pub async fn list_channels(&self, archived: bool) -> Result<Vec<ChannelView>> {
-        self.get_typed(&format!("/api/channels?archived={archived}"))
-            .await
+        use crate::operations::channels::list;
+        self.invoke::<list::List>(&list::Input {
+            archived,
+            branch: String::new(),
+        })
+        .await
     }
 
     pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
@@ -753,8 +821,12 @@ impl Client {
     }
 
     pub async fn get_channel(&self, id: &str) -> Result<ChannelView> {
-        self.get_typed(&format!("/api/channels/{}", Self::seg(id)))
-            .await
+        use crate::operations::channels::get;
+        self.invoke::<get::Get>(&get::Input {
+            channel: id.to_string(),
+            branch: String::new(),
+        })
+        .await
     }
 
     pub async fn channel_bindings(&self, id: &str) -> Result<Vec<ChannelBindingView>> {
@@ -763,12 +835,7 @@ impl Client {
     }
 
     pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
-        self.get_typed(&format!(
-            "/api/channels/{}/messages?after={}",
-            Self::seg(id),
-            after.max(0)
-        ))
-        .await
+        self.channel_messages_bounded(id, after, 100).await
     }
 
     pub async fn channel_messages_bounded(
@@ -777,11 +844,15 @@ impl Client {
         after: i64,
         limit: usize,
     ) -> Result<Vec<ChannelMessageView>> {
-        self.get_typed(&format!(
-            "/api/channels/{}/messages?after={}&limit={limit}",
-            Self::seg(id),
-            after.max(0)
-        ))
+        use crate::operations::channels::messages::list;
+        self.invoke::<list::List>(&list::Input {
+            channel: id.to_string(),
+            after: after.max(0),
+            limit: limit as i64,
+            kinds: Vec::new(),
+            peek: false,
+            branch: String::new(),
+        })
         .await
     }
 
@@ -790,11 +861,17 @@ impl Client {
         id: &str,
         req: &CreateChannelMessageReq,
     ) -> Result<ChannelMessageView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/channels/{}/messages", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::channels::messages::create;
+        self.invoke::<create::Create>(&create::Input {
+            channel: id.to_string(),
+            body: req.body.clone(),
+            kind: req.kind.clone(),
+            urgency: req.urgency.clone(),
+            payload: req.payload.clone(),
+            reply_to: req.reply_to.clone(),
+            idempotency_key: req.idempotency_key.clone(),
+            branch: String::new(),
+        })
         .await
     }
 
@@ -804,14 +881,13 @@ impl Client {
         mode: &str,
         session_id: Option<&str>,
     ) -> Result<ChannelSubscriptionView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/channels/{}/subscription", Self::seg(id)),
-            Some(&SetChannelSubscriptionReq {
-                mode: mode.to_string(),
-                session_id: session_id.map(str::to_string),
-            }),
-        )
+        use crate::operations::channels::subscription::set;
+        self.invoke::<set::Set>(&set::Input {
+            channel: id.to_string(),
+            mode: mode.to_string(),
+            session: session_id.map(str::to_string),
+            branch: String::new(),
+        })
         .await
     }
 
@@ -820,46 +896,47 @@ impl Client {
         id: &str,
         seq: Option<i64>,
     ) -> Result<ChannelSubscriptionView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/channels/{}/read-marker", Self::seg(id)),
-            Some(&SetChannelReadMarkerReq { seq }),
-        )
+        use crate::operations::channels::read_marker::set;
+        self.invoke::<set::Set>(&set::Input {
+            channel: id.to_string(),
+            seq,
+            branch: String::new(),
+        })
         .await
     }
 
     // -- Branches -----------------------------------------------------------
 
     /// Get one branch by id, `repo:branch`, or unambiguous id prefix — no live
-    /// session required (`GET /api/branches/{key}`).
+    /// session required (`branches.get`).
     pub async fn get_branch(&self, key: &str) -> Result<BranchView> {
-        self.get_typed(&format!("/api/branches/{}", Self::seg(key)))
-            .await
+        use crate::operations::branches::get;
+        self.invoke::<get::Get>(&get::Input {
+            branch: key.to_string(),
+        })
+        .await
     }
 
     /// Set the agent's attention level and current-state message in one call
-    /// (`POST /api/branches/{key}/status`). `level` is `ok` | `attention` |
-    /// `blocked`; an empty `message` leaves the previous one in place.
+    /// (`branches.status.set`). `level` is `ok` | `attention` | `blocked`; an
+    /// empty `message` leaves the previous one in place.
     pub async fn set_branch_status(
         &self,
         key: &str,
         level: &str,
         message: &str,
     ) -> Result<BranchView> {
-        let req = BranchStatusReq {
+        use crate::operations::branches::status::set;
+        self.invoke::<set::Set>(&set::Input {
             level: level.to_string(),
             message: (!message.is_empty()).then(|| message.to_string()),
-        };
-        self.send_typed(
-            Method::POST,
-            &format!("/api/branches/{}/status", Self::seg(key)),
-            Some(&req),
-        )
+            branch: key.to_string(),
+        })
         .await
     }
 
     /// Set (upsert) a tag on a branch, no live session required
-    /// (`PUT /api/branches/{key}/tags/{tag_key}`).
+    /// (`branches.tags.set`).
     pub async fn set_branch_tag(
         &self,
         key: &str,
@@ -868,49 +945,42 @@ impl Client {
         note: &str,
         by: &str,
     ) -> Result<BranchView> {
-        let req = TagReq {
+        use crate::operations::branches::tags::set;
+        self.invoke::<set::Set>(&set::Input {
+            key: tag_key.to_string(),
             value: value.to_string(),
             note: note.to_string(),
             by: Some(by.to_string()),
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!(
-                "/api/branches/{}/tags/{}",
-                Self::seg(key),
-                Self::seg(tag_key)
-            ),
-            Some(&req),
-        )
+            branch: key.to_string(),
+        })
         .await
     }
 
     /// Clear a tag on a branch, no live session required
-    /// (`DELETE /api/branches/{key}/tags/{tag_key}`).
+    /// (`branches.tags.delete`).
     pub async fn clear_branch_tag(&self, key: &str, tag_key: &str, by: &str) -> Result<BranchView> {
-        let query = Self::seg(by);
-        let value = self
-            .delete(&format!(
-                "/api/branches/{}/tags/{}?by={query}",
-                Self::seg(key),
-                Self::seg(tag_key)
-            ))
-            .await?;
-        serde_json::from_value(value)
-            .map_err(|e| anyhow!("decoding response from /api/branches/{key}/tags/{tag_key}: {e}"))
+        use crate::operations::branches::tags::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            key: tag_key.to_string(),
+            by: Some(by.to_string()),
+            branch: key.to_string(),
+        })
+        .await
     }
 
     /// Append a raw event row to a branch's log — the escape hatch for an
     /// event kind with no dedicated mutating route (e.g. an agent hook)
     /// (`POST /api/branches/{key}/events`).
     pub async fn record_branch_event(&self, key: &str, kind: &str, data: Value) -> Result<Value> {
-        let req = CreateEventReq {
-            kind: kind.to_string(),
-            data,
-        };
-        let body = serde_json::to_value(&req)?;
-        self.post(&format!("/api/branches/{}/events", Self::seg(key)), body)
-            .await
+        use crate::operations::branches::events::create;
+        let event = self
+            .invoke::<create::Create>(&create::Input {
+                kind: kind.to_string(),
+                data,
+                branch: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(event)?)
     }
 
     // -- Branch-scoped artifacts ---------------------------------------------
@@ -921,20 +991,20 @@ impl Client {
     // since it may target a branch with no active session.
 
     /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
-    /// every artifact in the repo regardless of scope
-    /// (`GET /api/branches/{key}/artifacts`).
+    /// every artifact in the repo regardless of scope (`artifacts.list`).
     pub async fn list_branch_artifacts(&self, key: &str, repo: bool) -> Result<Vec<ArtifactMeta>> {
-        self.get_typed(&format!(
-            "/api/branches/{}/artifacts?repo={repo}",
-            Self::seg(key)
-        ))
+        use crate::operations::artifacts::list;
+        self.invoke::<list::List>(&list::Input {
+            repo,
+            branch: key.to_string(),
+        })
         .await
     }
 
     /// Fetch an artifact's content. By default resolves branch-scoped first
     /// then repo-shared (what `show` displays); `repo: true` targets the
     /// repo-shared row of this name specifically. `rev` selects a revision;
-    /// `None` is the latest (`GET /api/branches/{key}/artifacts/{name}`).
+    /// `None` is the latest (`artifacts.get`).
     pub async fn get_branch_artifact(
         &self,
         key: &str,
@@ -942,36 +1012,36 @@ impl Client {
         rev: Option<i64>,
         repo: bool,
     ) -> Result<ArtifactView> {
-        let rev = match rev {
-            Some(r) => format!("&rev={r}"),
-            None => String::new(),
-        };
-        self.get_typed(&format!(
-            "/api/branches/{}/artifacts/{}?repo={repo}{rev}",
-            Self::seg(key),
-            Self::seg(name)
-        ))
+        use crate::operations::artifacts::get;
+        self.invoke::<get::Get>(&get::Input {
+            name: name.to_string(),
+            rev,
+            repo,
+            branch: key.to_string(),
+        })
         .await
     }
 
     /// Write a new revision of an artifact, creating it if absent
-    /// (`PUT /api/branches/{key}/artifacts/{name}`) — unlike the session-scoped
-    /// `PUT`, which requires the artifact to already exist.
+    /// (`artifacts.write`) — unlike the session-scoped `PUT`, which requires
+    /// the artifact to already exist. `author` is dropped: the operation
+    /// derives the writer from the credential.
     pub async fn write_branch_artifact(
         &self,
         key: &str,
         name: &str,
         req: &ArtifactUpsertReq,
     ) -> Result<ArtifactView> {
-        self.send_typed(
-            Method::PUT,
-            &format!(
-                "/api/branches/{}/artifacts/{}",
-                Self::seg(key),
-                Self::seg(name)
-            ),
-            Some(req),
-        )
+        use crate::operations::artifacts::write;
+        self.invoke::<write::Write>(&write::Input {
+            name: name.to_string(),
+            content: req.content.clone(),
+            title: req.title.clone(),
+            kind: req.kind.clone(),
+            base_rev: req.base_rev,
+            repo: req.repo,
+            branch: key.to_string(),
+        })
         .await
     }
 
@@ -998,12 +1068,15 @@ impl Client {
     /// the repo-shared row of this name rather than the branch-scoped one
     /// (`DELETE /api/branches/{key}/artifacts/{name}`).
     pub async fn delete_branch_artifact(&self, key: &str, name: &str, repo: bool) -> Result<Value> {
-        self.delete(&format!(
-            "/api/branches/{}/artifacts/{}?repo={repo}",
-            Self::seg(key),
-            Self::seg(name)
-        ))
-        .await
+        use crate::operations::artifacts::delete;
+        let result = self
+            .invoke::<delete::Delete>(&delete::Input {
+                name: name.to_string(),
+                repo,
+                branch: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     // -- Branch-scoped discussion ---------------------------------------------
@@ -1013,18 +1086,19 @@ impl Client {
     // needs no live session.
 
     /// Every thread on an artifact, open and resolved, each with its comments
-    /// (`GET /api/branches/{key}/artifacts/{name}/threads`).
+    /// (`artifacts.threads.list`).
     pub async fn list_branch_threads(&self, key: &str, name: &str) -> Result<Vec<ThreadDto>> {
-        self.get_typed(&format!(
-            "/api/branches/{}/artifacts/{}/threads",
-            Self::seg(key),
-            Self::seg(name)
-        ))
+        use crate::operations::artifacts::threads::list;
+        self.invoke::<list::List>(&list::Input {
+            name: name.to_string(),
+            open_only: false,
+            branch: key.to_string(),
+        })
         .await
     }
 
     /// Open a new thread anchored to a quoted span, seeded with its first
-    /// comment (`POST /api/branches/{key}/artifacts/{name}/threads`).
+    /// comment (`artifacts.threads.comment`, `target: {"kind": "new", ...}`).
     pub async fn create_branch_thread(
         &self,
         key: &str,
@@ -1033,20 +1107,13 @@ impl Client {
         anchor: AnchorDto,
         body: &str,
     ) -> Result<ThreadDto> {
-        let req = NewThreadBody {
-            base_rev,
-            anchor,
+        use crate::operations::artifacts::threads::comment;
+        self.invoke::<comment::Comment>(&comment::Input {
+            name: name.to_string(),
             body: body.to_string(),
-        };
-        self.send_typed(
-            Method::POST,
-            &format!(
-                "/api/branches/{}/artifacts/{}/threads",
-                Self::seg(key),
-                Self::seg(name)
-            ),
-            Some(&req),
-        )
+            target: comment::CommentTarget::New { base_rev, anchor },
+            branch: key.to_string(),
+        })
         .await
     }
 
@@ -1074,23 +1141,22 @@ impl Client {
         .await
     }
 
-    /// Mark a thread resolved
-    /// (`POST /api/branches/{key}/artifacts/{name}/threads/{tid}/resolve`).
+    /// Mark a thread resolved (`artifacts.threads.resolve`).
     pub async fn resolve_branch_thread(
         &self,
         key: &str,
         name: &str,
         thread_id: i64,
     ) -> Result<Value> {
-        self.post(
-            &format!(
-                "/api/branches/{}/artifacts/{}/threads/{thread_id}/resolve",
-                Self::seg(key),
-                Self::seg(name)
-            ),
-            Value::Null,
-        )
-        .await
+        use crate::operations::artifacts::threads::resolve;
+        let thread = self
+            .invoke::<resolve::Resolve>(&resolve::Input {
+                name: name.to_string(),
+                thread_id,
+                branch: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(thread)?)
     }
 
     // -- Staged reviews ------------------------------------------------------
@@ -1128,11 +1194,15 @@ impl Client {
         review_id: i64,
         req: &AddReviewCommentReq,
     ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/reviews/{review_id}/comments"),
-            Some(req),
-        )
+        use crate::operations::reviews::comments::create;
+        self.invoke::<create::Create>(&create::Input {
+            id: review_id,
+            expected_revision: req.expected_revision,
+            subject_version: req.subject_version.clone(),
+            anchor_kind: req.anchor_kind,
+            anchor: req.anchor.clone(),
+            body: req.body.clone(),
+        })
         .await
     }
 
@@ -1187,11 +1257,12 @@ impl Client {
     }
 
     pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/reviews/{review_id}/submit"),
-            Some(req),
-        )
+        use crate::operations::reviews::submit;
+        self.invoke::<submit::Submit>(&submit::Input {
+            id: review_id,
+            expected_revision: req.expected_revision,
+            acknowledge_outdated: req.acknowledge_outdated,
+        })
         .await
     }
 
@@ -1234,31 +1305,18 @@ impl Client {
     }
 
     pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
-        self.send_typed::<Value, ReviewDto>(
-            Method::POST,
-            &format!("/api/reviews/{review_id}/retry-delivery"),
-            Some(&Value::Object(Default::default())),
-        )
-        .await
+        use crate::operations::reviews::retry_delivery;
+        self.invoke::<retry_delivery::RetryDelivery>(&retry_delivery::Input { id: review_id })
+            .await
     }
 
     // -- Issues ---------------------------------------------------------------
-
-
-
-
 
     /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
     pub async fn patch_issue(&self, id: i64, req: &PatchIssueReq) -> Result<IssueView> {
         self.send_typed(Method::PATCH, &format!("/api/issues/{id}"), Some(req))
             .await
     }
-
-
-
-
-
-
 
     // -- Settings -------------------------------------------------------------
 
@@ -1272,14 +1330,24 @@ impl Client {
         self.get_typed("/api/diagnostics").await
     }
 
-    /// Trusted MCP adapters and their provider-neutral capability sets.
+    /// Trusted MCP adapters and their provider-neutral capability sets
+    /// (`mcps.get`).
     pub async fn mcp_registry(&self) -> Result<McpRegistryView> {
-        self.get_typed("/api/mcps").await
+        use crate::operations::mcps::get;
+        self.invoke::<get::Get>(&get::Input {}).await
     }
 
     pub async fn create_custom_mcp(&self, req: &CustomMcpReq) -> Result<CustomMcpView> {
-        self.send_typed(Method::POST, "/api/mcps/custom", Some(req))
-            .await
+        use crate::operations::mcps::custom::create;
+        self.invoke::<create::Create>(&create::Input {
+            identity: req.identity.clone(),
+            label: req.label.clone(),
+            description: req.description.clone(),
+            source: req.source.clone(),
+            test_source: req.test_source.clone(),
+            enabled: req.enabled,
+        })
+        .await
     }
 
     pub async fn put_custom_mcp(
@@ -1287,70 +1355,138 @@ impl Client {
         identity: &str,
         req: &CustomMcpReq,
     ) -> Result<CustomMcpView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/mcps/custom/{}", identity.trim_start_matches('/')),
-            Some(req),
-        )
+        use crate::operations::mcps::custom::update;
+        self.invoke::<update::Update>(&update::Input {
+            identity: identity.to_string(),
+            label: req.label.clone(),
+            description: req.description.clone(),
+            source: req.source.clone(),
+            test_source: req.test_source.clone(),
+            enabled: req.enabled,
+        })
         .await
     }
 
     pub async fn delete_custom_mcp(&self, identity: &str) -> Result<Value> {
-        self.delete(&format!(
-            "/api/mcps/custom/{}",
-            identity.trim_start_matches('/')
-        ))
-        .await
+        use crate::operations::mcps::custom::delete;
+        let result = self
+            .invoke::<delete::Delete>(&delete::Input {
+                identity: identity.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
-    /// List named launch profiles. Secret environment values are withheld.
+    /// List named launch profiles. Secret environment values are withheld
+    /// (`profiles.list`).
     pub async fn list_profiles(&self) -> Result<Vec<ProfileView>> {
-        self.get_typed("/api/profiles").await
+        use crate::operations::profiles::list;
+        self.invoke::<list::List>(&list::Input {}).await
     }
 
     pub async fn get_profile(&self, name: &str) -> Result<ProfileView> {
-        self.get_typed(&format!("/api/profiles/{}", Self::seg(name)))
-            .await
+        use crate::operations::profiles::get;
+        self.invoke::<get::Get>(&get::Input {
+            name: name.to_string(),
+        })
+        .await
     }
 
     pub async fn effective_profile(&self, name: &str) -> Result<EffectiveProfileView> {
-        self.get_typed(&format!("/api/profiles/{}/effective", Self::seg(name)))
-            .await
+        use crate::operations::profiles::effective;
+        self.invoke::<effective::Effective>(&effective::Input {
+            name: name.to_string(),
+        })
+        .await
     }
 
     pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
-        self.send_typed(Method::POST, "/api/profiles", Some(req))
-            .await
+        use crate::operations::profiles::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: req.name.clone(),
+            description: req.description.clone(),
+            agent_kind: req.agent_kind.clone(),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            protocol: req.protocol.clone(),
+            mode: req.mode.clone(),
+            class: req.class.clone(),
+            strict: req.strict,
+            env_clear: req.env_clear,
+            ambient_allowlist: req.ambient_allowlist.clone(),
+            idle_archive_secs: req.idle_archive_secs,
+            max_concurrent: req.max_concurrent,
+            turn_budget: req.turn_budget,
+            prelude: req.prelude.clone(),
+            instructions: req.instructions.clone(),
+            restricted: req.restricted,
+            github_repositories: req.github_repositories.clone(),
+            runtime_permissions: req.runtime_permissions.clone(),
+            mcp_access: req.mcp_access.clone(),
+        })
+        .await
     }
 
     pub async fn put_profile(&self, name: &str, req: &ProfileReq) -> Result<ProfileView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/profiles/{}", Self::seg(name)),
-            Some(req),
-        )
+        use crate::operations::profiles::update;
+        self.invoke::<update::Update>(&update::Input {
+            name: name.to_string(),
+            description: req.description.clone(),
+            agent_kind: req.agent_kind.clone(),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            protocol: req.protocol.clone(),
+            mode: req.mode.clone(),
+            class: req.class.clone(),
+            strict: req.strict,
+            env_clear: req.env_clear,
+            ambient_allowlist: req.ambient_allowlist.clone(),
+            idle_archive_secs: req.idle_archive_secs,
+            max_concurrent: req.max_concurrent,
+            turn_budget: req.turn_budget,
+            prelude: req.prelude.clone(),
+            instructions: req.instructions.clone(),
+            restricted: req.restricted,
+            github_repositories: req.github_repositories.clone(),
+            runtime_permissions: req.runtime_permissions.clone(),
+            mcp_access: req.mcp_access.clone(),
+            expected_revision: req.expected_revision,
+        })
         .await
     }
 
     /// Clone one profile's policy on the server, optionally copying its
-    /// write-only environment in the same transaction.
+    /// write-only environment in the same transaction (`profiles.clone`).
     pub async fn clone_profile(&self, source: &str, req: &CloneProfileReq) -> Result<ProfileView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/profiles/{}/clone", Self::seg(source)),
-            Some(req),
-        )
+        use crate::operations::profiles::clone;
+        self.invoke::<clone::Clone>(&clone::Input {
+            source: source.to_string(),
+            name: req.name.clone(),
+            expected_profile_revision: req.expected_profile_revision,
+            expected_resolver_revision: req.expected_resolver_revision.clone(),
+            overrides: req.overrides.clone(),
+            template: req.template.clone(),
+            copy_environment: req.copy_environment,
+            environment: req.environment.clone(),
+        })
         .await
     }
 
-    /// Return the upload limits shared by launch and live-session Scratch.
+    /// Return the upload limits shared by launch and live-session Scratch
+    /// (`sessions.scratch.limits`).
     pub async fn scratch_limits(&self) -> Result<ScratchLimitsView> {
-        self.get_typed("/api/scratch/limits").await
+        use crate::operations::sessions::scratch::limits;
+        self.invoke::<limits::Limits>(&limits::Input {}).await
     }
 
     pub async fn delete_profile(&self, name: &str) -> Result<Value> {
-        self.delete(&format!("/api/profiles/{}", Self::seg(name)))
-            .await
+        use crate::operations::profiles::delete;
+        let result = self
+            .invoke::<delete::Delete>(&delete::Input {
+                name: name.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     pub async fn set_profile_env(
@@ -1359,19 +1495,13 @@ impl Client {
         name: &str,
         value: &str,
     ) -> Result<ProfileView> {
-        let req = PutProfileEnvReq {
+        use crate::operations::profiles::env::set;
+        self.invoke::<set::Set>(&set::Input {
+            profile: profile.to_string(),
+            name: name.to_string(),
             value: Some(value.to_string()),
             secret_ref: None,
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!(
-                "/api/profiles/{}/env/{}",
-                Self::seg(profile),
-                Self::seg(name)
-            ),
-            Some(&req),
-        )
+        })
         .await
     }
 
@@ -1381,36 +1511,29 @@ impl Client {
         name: &str,
         secret_ref: &str,
     ) -> Result<ProfileView> {
-        let req = PutProfileEnvReq {
+        use crate::operations::profiles::env::set;
+        self.invoke::<set::Set>(&set::Input {
+            profile: profile.to_string(),
+            name: name.to_string(),
             value: None,
             secret_ref: Some(secret_ref.to_string()),
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!(
-                "/api/profiles/{}/env/{}",
-                Self::seg(profile),
-                Self::seg(name)
-            ),
-            Some(&req),
-        )
+        })
         .await
     }
 
     pub async fn remove_profile_env(&self, profile: &str, name: &str) -> Result<ProfileView> {
-        let value = self
-            .delete(&format!(
-                "/api/profiles/{}/env/{}",
-                Self::seg(profile),
-                Self::seg(name)
-            ))
-            .await?;
-        serde_json::from_value(value).map_err(|e| anyhow!("decoding profile response: {e}"))
+        use crate::operations::profiles::env::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            profile: profile.to_string(),
+            name: name.to_string(),
+        })
+        .await
     }
 
-    /// Every registered setting and its effective value (`GET /api/settings`).
+    /// Every registered setting and its effective value (`settings.get`).
     pub async fn list_settings(&self) -> Result<SettingsEnvelope> {
-        self.get_typed("/api/settings").await
+        use crate::operations::settings::get;
+        self.invoke::<get::Get>(&get::Input {}).await
     }
 
     /// Apply setting changes: a `null` value clears a key back to its default
@@ -1425,45 +1548,81 @@ impl Client {
 
     // -- Watches ------------------------------------------------------
 
-    /// List every watch (`GET /api/watches`).
+    /// List every watch (`watches.list`).
     pub async fn list_watches(&self) -> Result<Vec<WatchView>> {
-        self.get_typed("/api/watches").await
+        use crate::operations::watches::list;
+        self.invoke::<list::List>(&list::Input {}).await
     }
 
-    /// Get one watch by id or name (`GET /api/watches/{key}`).
+    /// Get one watch by id or name (`watches.get`).
     pub async fn get_watch(&self, key: &str) -> Result<WatchView> {
-        self.get_typed(&format!("/api/watches/{}", Self::seg(key)))
-            .await
-    }
-
-    /// Register a watch (`POST /api/watches`).
-    pub async fn create_watch(&self, req: &CreateWatchReq) -> Result<WatchView> {
-        self.send_typed(Method::POST, "/api/watches", Some(req))
-            .await
-    }
-
-    /// Patch a watch (`PATCH /api/watches/{key}`).
-    pub async fn patch_watch(&self, key: &str, req: &PatchWatchReq) -> Result<WatchView> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/watches/{}", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::watches::get;
+        self.invoke::<get::Get>(&get::Input {
+            key: key.to_string(),
+        })
         .await
     }
 
-    /// Delete a watch (`DELETE /api/watches/{key}`).
+    /// Register a watch (`watches.create`).
+    pub async fn create_watch(&self, req: &CreateWatchReq) -> Result<WatchView> {
+        use crate::operations::watches::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: req.name.clone(),
+            trigger: req.trigger.clone(),
+            scope: req.scope.clone(),
+            program: req.program.clone(),
+            params: req.params.clone(),
+            capabilities: req.capabilities.clone(),
+            profile: req.profile.clone(),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            cooldown_secs: req.cooldown_secs,
+            enabled: req.enabled,
+        })
+        .await
+    }
+
+    /// Patch a watch (`watches.update`).
+    pub async fn patch_watch(&self, key: &str, req: &PatchWatchReq) -> Result<WatchView> {
+        use crate::operations::watches::update;
+        self.invoke::<update::Update>(&update::Input {
+            key: key.to_string(),
+            enabled: req.enabled,
+            trigger: req.trigger.clone(),
+            scope: req.scope.clone(),
+            program: req.program.clone(),
+            params: req.params.clone(),
+            capabilities: req.capabilities.clone(),
+            profile: req.profile.clone(),
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            cooldown_secs: req.cooldown_secs,
+        })
+        .await
+    }
+
+    /// Delete a watch (`watches.delete`).
     pub async fn delete_watch(&self, key: &str) -> Result<Value> {
-        self.delete(&format!("/api/watches/{}", Self::seg(key)))
-            .await
+        use crate::operations::watches::delete;
+        let result = self
+            .invoke::<delete::Delete>(&delete::Input {
+                key: key.to_string(),
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     /// Fire a round now and return the raw `{run_id, outcome, summary}`
-    /// (`POST /api/watches/{key}/run`).
+    /// (`watches.run`).
     pub async fn run_watch(&self, key: &str, req: &RunWatchReq) -> Result<Value> {
-        let body = serde_json::to_value(req)?;
-        self.post(&format!("/api/watches/{}/run", Self::seg(key)), body)
-            .await
+        use crate::operations::watches::run;
+        let result = self
+            .invoke::<run::Run>(&run::Input {
+                key: key.to_string(),
+                dry_run: req.dry_run,
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     // -- API tokens -------------------------------------------------------
@@ -1472,47 +1631,134 @@ impl Client {
         &self,
         req: &AutomationTokenReq,
     ) -> Result<AutomationTokenView> {
-        self.send_typed(Method::POST, "/api/auth/automation-token", Some(req))
-            .await
+        use crate::operations::auth::automation_token;
+        self.invoke::<automation_token::AutomationToken>(&automation_token::Input {
+            subject: req.subject.clone(),
+            profiles: req.profiles.clone(),
+            ttl_secs: req.ttl_secs,
+        })
+        .await
     }
 
     pub async fn list_federations(&self) -> Result<Vec<FederationView>> {
-        self.get_typed("/api/auth/federations").await
+        use crate::operations::auth::federations::list;
+        self.invoke::<list::List>(&list::Input {}).await
     }
 
     pub async fn add_federation(&self, req: &FederationReq) -> Result<FederationView> {
-        self.send_typed(Method::POST, "/api/auth/federations", Some(req))
-            .await
+        use crate::operations::auth::federations::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: Some(req.name.clone()),
+            provider: req.provider.clone(),
+            issuer: req.issuer.clone(),
+            audience: req.audience.clone(),
+            subject: req.subject.clone(),
+            service_account: req.service_account.clone(),
+            service_tag: req.service_tag.clone(),
+            repository_id: req.repository_id.clone(),
+            workflow_ref: req.workflow_ref.clone(),
+            event_name: req.event_name.clone(),
+            ref_pattern: req.ref_pattern.clone(),
+            profiles: req.profiles.clone(),
+        })
+        .await
     }
 
     pub async fn remove_federation(&self, id: &str) -> Result<Value> {
-        self.delete(&format!("/api/auth/federations/{}", Self::seg(id)))
-            .await
+        use crate::operations::auth::federations::remove;
+        let result = self
+            .invoke::<remove::Remove>(&remove::Input { id: id.to_string() })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     pub async fn reconcile_deployment(&self, req: &DeploymentReq) -> Result<DeploymentView> {
-        self.send_typed(Method::POST, "/api/deployment/reconcile", Some(req))
-            .await
+        use crate::operations::deployment::reconcile;
+        self.invoke::<reconcile::Reconcile>(&reconcile::Input {
+            settings: req.settings.clone(),
+            profiles: req.profiles.clone(),
+            federations: req.federations.clone(),
+            prune: req.prune,
+        })
+        .await
     }
 
     pub async fn create_run(&self, req: &RunReq) -> Result<RunView> {
-        self.send_typed(Method::POST, "/api/runs", Some(req)).await
+        use crate::operations::runs::create;
+        self.invoke::<create::Create>(&create::Input {
+            profile: req.profile.clone(),
+            idempotency_key: req.idempotency_key.clone(),
+            source: req.source.clone(),
+            watch_id: req.watch_id.clone(),
+            channel: req.channel.clone(),
+            slack: req.slack.clone(),
+            session: req.session.clone(),
+        })
+        .await
     }
 
-    /// List the user-managed API tokens (`GET /api/auth/tokens`).
+    /// List the user-managed API tokens (`auth.tokens.list`).
     pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {
-        self.get_typed("/api/auth/tokens").await
+        use crate::operations::auth::tokens::list;
+        self.invoke::<list::List>(&list::Input {}).await
     }
 
     /// Mint a new API token, returning the one-time plaintext
-    /// (`POST /api/auth/tokens`).
+    /// (`auth.tokens.create`).
     pub async fn create_token(&self, req: &CreateTokenReq) -> Result<CreatedTokenView> {
-        self.send_typed(Method::POST, "/api/auth/tokens", Some(req))
-            .await
+        use crate::operations::auth::tokens::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: req.name.clone(),
+            expires_in_days: req.expires_in_days,
+        })
+        .await
     }
 
-    /// Revoke an API token by id (`DELETE /api/auth/tokens/{id}`).
+    /// Revoke an API token by id (`auth.tokens.revoke`).
     pub async fn revoke_token(&self, id: &str) -> Result<Value> {
-        self.delete(&format!("/api/auth/tokens/{id}")).await
+        use crate::operations::auth::tokens::revoke;
+        let result = self
+            .invoke::<revoke::Revoke>(&revoke::Input { id: id.to_string() })
+            .await?;
+        Ok(serde_json::to_value(result)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Client;
+
+    /// The client and the registry must derive the same route for every
+    /// operation, or a typed call reaches a path the server does not serve.
+    ///
+    /// This is the check that was missing when `invoke_value` percent-encoded id
+    /// segments: 27 of the 153 operations have an underscore in their id, and
+    /// every one of them was silently unreachable through this client.
+    #[test]
+    fn the_client_derives_the_same_path_as_the_registry() {
+        let mut checked = 0;
+        for operation in crate::operations::operations() {
+            assert_eq!(
+                Client::operation_path(operation.id),
+                operation.path(),
+                "client and registry disagree about {}'s route",
+                operation.id
+            );
+            checked += 1;
+        }
+        assert!(checked > 100, "only {checked} operations checked");
+    }
+
+    /// And specifically: nothing in a derived path is percent-encoded.
+    #[test]
+    fn no_operation_path_is_escaped() {
+        for operation in crate::operations::operations() {
+            let path = Client::operation_path(operation.id);
+            assert!(
+                !path.contains('%'),
+                "{} derives an escaped path {path}",
+                operation.id
+            );
+        }
     }
 }

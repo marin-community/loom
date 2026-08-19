@@ -10,7 +10,7 @@ import {
   watch,
   nextTick,
 } from 'vue';
-import { get, sendMessage } from '../api';
+import { getSession, invokeOperation, sendMessage } from '../api';
 import type { IrisLog, IrisBlock, Session } from '../types';
 import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
@@ -47,7 +47,7 @@ watch(
 );
 async function refreshSession() {
   try {
-    live.value = (await get(`/sessions/${id.value}`)) as Session;
+    live.value = await getSession(id.value);
   } catch {
     /* keep the last-known state; the next edge (or the parent) recovers */
   }
@@ -96,7 +96,9 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     pinned.value = true;
   }
   try {
-    const data = (await get(`/sessions/${id.value}/conversation`)) as IrisLog;
+    const data = (await invokeOperation('sessions.conversation', {
+      session: id.value,
+    })) as IrisLog;
     if (seq !== loadSeq) return;
     log.value = data;
     state.value = data && data.messages.length ? 'ready' : 'empty';

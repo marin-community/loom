@@ -4,7 +4,7 @@ use super::prelude::*;
 /// permissions, and MCP server processes — without launching a session.
 #[operation(
     id = "profiles.effective",
-    actor = Admin,
+    actor = User,
     scope = Global,
     risk = Read,
     grants = [],

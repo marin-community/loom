@@ -40,7 +40,10 @@ fn only_json_operations_expose_mcp_tools() {
         .filter(|operation| operation.mcp.is_some() && !operation.io.is_json())
         .map(|operation| (operation.id, operation.io.as_str()))
         .collect();
-    assert!(leaked.is_empty(), "non-JSON operations with MCP tools: {leaked:?}");
+    assert!(
+        leaked.is_empty(),
+        "non-JSON operations with MCP tools: {leaked:?}"
+    );
 }
 
 /// Invariant 3: the MCP catalogue and the registry are the same set.
@@ -75,7 +78,13 @@ fn mcp_catalogue_is_a_bijection_with_the_registry() {
 fn routes_round_trip() {
     for operation in operations::operations() {
         let resolved = operations::operation_for_request(operation.method(), &operation.path())
-            .unwrap_or_else(|| panic!("{} does not resolve from {}", operation.id, operation.path()));
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} does not resolve from {}",
+                    operation.id,
+                    operation.path()
+                )
+            });
         assert_eq!(resolved.id, operation.id);
     }
 }
@@ -157,7 +166,10 @@ fn cli_projections_are_well_formed() {
         );
         let path = cli.path.to_vec();
         if let Some(previous) = seen.insert(path.clone(), operation.id) {
-            panic!("CLI path {path:?} is claimed by both {previous} and {}", operation.id);
+            panic!(
+                "CLI path {path:?} is claimed by both {previous} and {}",
+                operation.id
+            );
         }
     }
 }
@@ -183,12 +195,16 @@ fn one_declaration_produces_every_projection() {
     let matches = command
         .try_get_matches_from(["list", "--all", "--mine"])
         .expect("the advertised flags must parse");
-    assert!(<issues::list::Input as Operands>::from_matches(&matches)
-        .unwrap()
-        .all);
-    assert!(<issues::list::View as ViewFlags>::from_matches(&matches)
-        .unwrap()
-        .mine);
+    assert!(
+        <issues::list::Input as Operands>::from_matches(&matches)
+            .unwrap()
+            .all
+    );
+    assert!(
+        <issues::list::View as ViewFlags>::from_matches(&matches)
+            .unwrap()
+            .mine
+    );
 }
 
 /// The convention itself, checked: an operation's id is its path on disk.
@@ -325,12 +341,22 @@ fn session_only_operations_are_pinned() {
     );
 }
 
-/// Operations served off the generic dispatcher are pinned.
+/// Operations *not* served off the generic JSON dispatcher are pinned.
 ///
-/// `io = Session` is the escape hatch for the two things a JSON response cannot
-/// do — establish and clear an HttpOnly session cookie. An escape hatch nobody
-/// counts is how the previous registry accumulated operations that were declared
-/// in one place and served in another, so this counts them.
+/// Each of these needs a hand-written handler, so each is a place the
+/// declaration and the implementation can drift. That is a cost worth counting,
+/// not a category worth hiding: `io` names *why* the handler is custom, and the
+/// three reasons are the whole list.
+///
+/// * `session` — the response must carry a `Set-Cookie`, which the dispatcher
+///   cannot emit. Served beside the auth routes.
+/// * `stream` — the response is an SSE body.
+/// * `duplex` — the response is a websocket upgrade.
+///
+/// The streams and websockets used to be unregistered on the theory that a GET
+/// stream cannot sit at a derived path. It can: `?session=…` is a URL, an operand
+/// is an operand regardless of encoding, and `loom::web::streams` mounts all
+/// eight off these declarations.
 #[test]
 fn transport_specific_operations_are_pinned() {
     let special: BTreeMap<&str, &str> = operations::operations()
@@ -338,9 +364,17 @@ fn transport_specific_operations_are_pinned() {
         .map(|operation| (operation.id, operation.io.as_str()))
         .collect();
     let expected: BTreeMap<&str, &str> = [
+        ("auth.federate", "session"),
         ("auth.login", "session"),
         ("auth.logout", "session"),
-        ("auth.federate", "session"),
+        ("events.stream", "stream"),
+        ("logs.stream", "stream"),
+        ("session_layout.events", "stream"),
+        ("sessions.chat.stream", "stream"),
+        ("sessions.events.stream", "stream"),
+        ("sessions.shells.terminal", "duplex"),
+        ("sessions.terminal", "duplex"),
+        ("shell.terminal", "duplex"),
     ]
     .into_iter()
     .collect();
@@ -349,4 +383,39 @@ fn transport_specific_operations_are_pinned() {
         "the set of operations NOT served by the generic dispatcher changed. \
          Every addition is an operation that has to be kept in sync by hand."
     );
+}
+
+/// A `Stream` or `Duplex` operation takes its operands from the query string,
+/// which axum deserializes before any dispatcher default-filling could run. So
+/// every one of its operands must be optional on the wire — otherwise the
+/// declared route 400s on a caller that named nothing, including exactly the
+/// request a session credential makes when it means "my own session".
+///
+/// `io = Session` is exempt: it is a POST with a JSON body, and its response is
+/// special only in carrying a `Set-Cookie`.
+///
+/// Checked here as a property of the *declaration* (the server-side counterpart,
+/// which runs the real `Query` extractor, lives in `loom::web::streams`).
+#[test]
+fn streaming_operations_declare_no_required_operand() {
+    for operation in operations::operations() {
+        if !matches!(operation.io.as_str(), "stream" | "duplex") {
+            continue;
+        }
+        let schema = (operation.schema)();
+        let required = schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .map(|values| values.len())
+            .unwrap_or(0);
+        assert_eq!(
+            required,
+            0,
+            "{} is io={} and declares required operands {:?}; a query string \
+             cannot be relied on to carry them",
+            operation.id,
+            operation.io.as_str(),
+            schema.get("required")
+        );
+    }
 }

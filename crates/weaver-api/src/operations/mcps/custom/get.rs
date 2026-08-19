@@ -4,7 +4,7 @@ use super::prelude::*;
 /// validation state.
 #[operation(
     id = "mcps.custom.get",
-    actor = Admin,
+    actor = User,
     scope = Global,
     risk = Read,
     grants = [],

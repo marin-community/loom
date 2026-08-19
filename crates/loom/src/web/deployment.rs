@@ -1,10 +1,8 @@
 use std::collections::BTreeSet;
 
-use axum::{extract::State, http::StatusCode, Extension, Json};
 use weaver_api::operations::deployment::reconcile;
 use weaver_api::{DeploymentReq, DeploymentView};
 
-use crate::auth::Principal;
 use crate::config;
 
 use super::operations::{register, Bound, OperationContext};

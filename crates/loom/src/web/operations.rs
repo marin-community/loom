@@ -50,7 +50,6 @@ pub(super) struct Bound {
     invoke: Invoker,
 }
 
-
 /// Bind a descriptor to its implementation.
 ///
 /// The type parameters do the checking: `O::Input` and `O::Output` are the
@@ -93,7 +92,33 @@ where
     }
 }
 
-
+/// Resolve context and authorize a non-JSON operation.
+///
+/// [`register`] cannot serve a `Stream` or `Duplex` operation: axum needs the
+/// concrete response type, and an SSE body or a websocket upgrade is not a
+/// `Serialize`. What those operations must *not* skip is the decision — so this
+/// is the same context fill and the same [`authorize`] the JSON dispatcher runs,
+/// factored out and called by the handlers in [`super::streams`].
+///
+/// `input` is taken by `&mut` because context resolution is half the point: a
+/// session credential naming no session gets its own, exactly as over JSON.
+pub(super) async fn authorize_declared<O>(
+    state: &AppState,
+    principal: &Principal,
+    input: &mut O::Input,
+) -> ApiResult<()>
+where
+    O: Operation,
+    O::Input: Scoped,
+{
+    let context = OperationContext::new(state.clone(), principal.clone());
+    if !<O::Input as Operands>::CONTEXT.is_empty() {
+        if let Some(values) = session_context(&context).await? {
+            input.fill_context(&values);
+        }
+    }
+    authorize(&context, O::SPEC, input.scope_ref()).await
+}
 
 /// The context a session credential implies.
 ///
@@ -293,6 +318,7 @@ pub(super) fn registry() -> Vec<Bound> {
     bound.extend(super::session_layout::bound_operations());
     bound.extend(super::sessions::bound_operations());
     bound.extend(super::settings::bound_operations());
+    bound.extend(super::streams::bound_operations());
     bound.extend(super::watches::bound_operations());
     bound.sort_by_key(|entry| entry.operation.id);
     bound

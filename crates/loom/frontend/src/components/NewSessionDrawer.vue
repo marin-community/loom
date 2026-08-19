@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router';
 import {
   ApiError,
   cloneProfile,
-  get,
+  invokeOperation,
   listAgents,
   listProfiles,
   listRepos,
@@ -293,7 +293,7 @@ async function loadBranches() {
   branchesError.value = '';
   if (!path) return;
   try {
-    const res = (await get(`/repos/branches?cwd=${encodeURIComponent(path)}`)) as RepoBranch[];
+    const res = (await invokeOperation('repos.branches', { cwd: path })) as RepoBranch[];
     if (reqId === branchesReqId) branches.value = res;
   } catch (e) {
     if (reqId === branchesReqId) branchesError.value = (e as Error).message;
@@ -427,7 +427,7 @@ async function refreshLaunchData() {
   resolving.value = false;
   try {
     const [recent, managed, metadata, templates] = await Promise.all([
-      get('/repos/recent').catch(() => recentRepos.value) as Promise<RecentRepo[]>,
+      invokeOperation('repos.recent', {}).catch(() => recentRepos.value) as Promise<RecentRepo[]>,
       listRepos().catch(() => managedRepos.value),
       listAgents(),
       listProfiles(),
@@ -649,6 +649,12 @@ async function create() {
         })),
       );
     }
+    // GAP: `sessions.launch`'s `title` field is required (no default), but
+    // this form allows submitting with only a `goal` (see `createBlockReason`
+    // above — title OR goal, not both required) and the legacy route derives
+    // a title server-side when it's blank. Migrating would either send an
+    // empty title or force synthesizing one client-side, both a behavior
+    // change, so this stays on the legacy route.
     const session = (await post('/sessions', body)) as Session;
     resetForm();
     emit('created');

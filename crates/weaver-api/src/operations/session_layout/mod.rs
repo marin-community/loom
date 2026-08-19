@@ -15,6 +15,7 @@ use super::OperationBundle;
 
 pub(super) use super::prelude;
 
+pub mod events;
 pub mod get;
 pub mod groups;
 pub mod r#move;
@@ -29,6 +30,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     <r#move::Move as Operation>::SPEC,
     <reorder::Reorder as Operation>::SPEC,
     <restore::Restore as Operation>::SPEC,
+    <events::Events as Operation>::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

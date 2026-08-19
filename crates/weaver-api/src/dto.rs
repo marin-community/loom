@@ -3184,6 +3184,13 @@ pub struct RepoEnvView {
     pub env: Vec<RepoEnvVarView>,
 }
 
+/// Result of `shell.restart`: the operator shell's process was replaced, so its
+/// working directory and environment are whatever a fresh login gets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ShellRestartResult {
+    pub restarted: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Agents
 //

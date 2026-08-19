@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import AgentTerminal from './AgentTerminal.vue';
 import KeyHint from './KeyHint.vue';
-import { get, del } from '../api';
+import { del, invokeOperation } from '../api';
 
 // The session's terminal area: an inner tab strip over the always-mounted agent
 // terminal plus zero or more worktree **debug shells**.
@@ -34,7 +34,9 @@ const noShells = computed(() => props.shellsOnly && shells.value.length === 0);
 
 async function loadShells() {
   try {
-    const idxs = (await get(`/sessions/${props.id}/shells`)) as number[];
+    const idxs = (await invokeOperation('sessions.shells.list', {
+      session: props.id,
+    })) as number[];
     // A keyboard command can add the first shell while this mount probe is in
     // flight. Merge rediscovered supervisors with those local tabs so a late
     // empty response never erases the shell the user just opened.
@@ -62,6 +64,8 @@ async function closeShell(idx: number) {
   if (active.value === idx) active.value = props.shellsOnly ? (shells.value[0] ?? -1) : 'agent';
   // Kill the backend supervisor so a worktree shell never lingers after its tab
   // is gone (archive also sweeps these; closing is the explicit "I'm done").
+  // UNMAPPED: no operation closes a debug shell (only `sessions.shells.list`
+  // is registered).
   try {
     await del(`/sessions/${props.id}/shell/${idx}`);
   } catch {
@@ -130,7 +134,7 @@ onMounted(loadShells);
            tabs never drops the PTY; unmounted only when the tab is closed. -->
       <section v-for="idx in shells" v-show="active === idx" :key="idx" class="h-full">
         <AgentTerminal
-          :ws-path="`/api/sessions/${props.id}/shell/${idx}/terminal`"
+          :ws-path="`/api/sessions/shells/terminal?session=${encodeURIComponent(props.id)}&index=${idx}`"
           class="h-full"
         />
       </section>

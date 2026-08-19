@@ -1,12 +1,21 @@
 //! The parallel-surface ledger.
 //!
-//! Every `.route(...)` the server mounts by hand must be accounted for: either
-//! it is a transport that the operation DSL genuinely does not model (a stream,
-//! a websocket, a proxy, an unauthenticated probe), or it is a legacy route that
-//! an operation has superseded and that has not been deleted yet.
+//! Every `.route(...)` the server mounts by hand falls in exactly one of three
+//! buckets, and each bucket means something different:
+//!
+//! * [`TRANSPORT_ROUTES`] — genuinely not an operation. A reverse proxy, an
+//!   unauthenticated probe, an HMAC-authenticated webhook, an OAuth redirect.
+//!   Adding a line here is a decision, not a deferral.
+//! * [`SUPERSEDED_ROUTES`] — an operation already serves this data at
+//!   `POST /api/<id>`; the route is still mounted only because something still
+//!   calls it. This number has to reach zero.
+//! * [`UNREGISTERED_ROUTES`] — no operation serves this yet. This is the
+//!   registry being *incomplete*, which is a different and worse thing than
+//!   being duplicated, and it is why the two are counted separately instead of
+//!   both being called "legacy".
 //!
 //! The previous registry had no such ledger, which is how it ended up declaring
-//! operations whose routes the server had stopped serving. Here the list is
+//! operations whose routes the server had stopped serving. Here the lists are
 //! written down, so "we still have two surfaces" is a number that has to go to
 //! zero rather than an impression.
 
@@ -17,20 +26,19 @@ use std::collections::BTreeSet;
 /// Adding a line here is a decision that the operation DSL cannot express this
 /// endpoint. It is not a place to park work.
 const TRANSPORT_ROUTES: &[(&str, &str)] = &[
-    // Server-sent event streams. `Operands` projects to a JSON body; a GET
-    // stream needs its arguments in the URL, and these routes carry a path
-    // parameter, so their real route cannot equal a derived operation path.
-    ("/events", "SSE: global event mux"),
-    ("/logs/stream", "SSE: log tail"),
-    ("/session-layout/events", "SSE: layout changes"),
-    ("/sessions/{id}/events", "SSE: one session's events"),
-    ("/sessions/{id}/chat/stream", "SSE: assistant token stream"),
-    // Websockets.
-    ("/sessions/{id}/terminal", "websocket: session terminal"),
-    ("/shell/terminal", "websocket: standalone shell"),
-    // Reverse proxy to the embedded editor.
+    // Streams and websockets used to be listed here, on the theory that a GET
+    // stream needs its arguments in the URL and so could not sit at a derived
+    // path. That was wrong twice over: an operand is an operand regardless of
+    // encoding, and `?session=…` is a URL. All eight are registered operations
+    // now with `io = Stream` / `io = Duplex`, mounted by `web::streams` at the
+    // paths their ids derive — see `hand_mounted_on_purpose` below.
+    //
+    // Reverse proxy to the embedded editor. This one really is not an operation:
+    // it forwards an arbitrary sub-path to code-server and streams whatever
+    // comes back.
     ("/sessions/{id}/ide", "proxy: code-server"),
     ("/sessions/{id}/ide/", "proxy: code-server"),
+    ("/sessions/{id}/ide/{*rest}", "proxy: code-server"),
     // Unauthenticated infrastructure probes: no principal, no JSON contract.
     ("/health", "probe"),
     ("/health/live", "probe"),
@@ -43,8 +51,10 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
     ("/auth/github/login", "oauth redirect"),
     ("/auth/github/callback", "oauth redirect"),
     // The three `io = Session` operations. They ARE registered and appear in the
-    // surface; they are mounted here because their response must carry a
-    // Set-Cookie, which the generic dispatcher cannot emit.
+    // surface; they are mounted by hand because their response must carry a
+    // Set-Cookie, which the generic dispatcher cannot emit. They are listed here
+    // *and* excluded from the duplicate check below, because their real path and
+    // their derived path are the same string.
     ("/auth/login", "io = Session"),
     ("/auth/logout", "io = Session"),
     ("/auth/federate", "io = Session"),
@@ -65,7 +75,6 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
 /// here fails [`no_route_is_unaccounted_for`]. The number that has to reach zero
 /// is 77.
 const SUPERSEDED_ROUTES: &[&str] = &[
-    "/agent/oneshot",
     "/agents",
     "/agents/custom",
     "/auth/automation-token",
@@ -83,12 +92,9 @@ const SUPERSEDED_ROUTES: &[&str] = &[
     "/branches/{id}/status",
     "/channels",
     "/channels/{id}",
-    "/channels/{id}/bindings",
-    "/diagnostics",
     "/env",
     "/issues",
     "/issues/{id}",
-    "/logs",
     "/mcps",
     "/profiles",
     "/profiles/{name}/clone",
@@ -135,27 +141,191 @@ const SUPERSEDED_ROUTES: &[&str] = &[
     "/sessions/{id}/tags",
     "/sessions/{id}/url",
     "/settings",
-    "/shell/restart",
-    "/slack/status",
-    "/status",
     "/tasks",
     "/watches",
     "/watches/{id}/run",
     "/watches/{id}/runs",
+    // Exposed by fixing the route scan: rustfmt had wrapped these onto their own
+    // lines, so a third of the surface was invisible to this ledger.
+    "/agents/custom/{name}",
+    "/auth/federations",
+    "/auth/github-token",
+    "/auth/github/config",
+    "/auth/users/{username}/role",
+    "/branches/{id}/artifacts/{name}",
+    "/branches/{id}/artifacts/{name}/threads",
+    "/branches/{id}/artifacts/{name}/threads/{tid}/comments",
+    "/branches/{id}/artifacts/{name}/threads/{tid}/resolve",
+    "/branches/{id}/events",
+    "/branches/{id}/tags/{key}",
+    "/channels/{id}/messages",
+    "/channels/{id}/read-marker",
+    "/channels/{id}/subscription",
+    "/env/{name}",
+    "/mcps/custom",
+    "/mcps/custom/{*identity}",
+    "/profiles/{name}",
+    "/profiles/{profile}/env/{name}",
+    "/repos/env/{name}",
+    "/sessions",
+    "/sessions/{id}/artifacts/{name}",
+    "/sessions/{id}/artifacts/{name}/threads",
+    "/sessions/{id}/artifacts/{name}/threads/{tid}/comments",
+    "/sessions/{id}/artifacts/{name}/threads/{tid}/resolve",
+    "/sessions/{id}/shell/{idx}",
+    "/sessions/{id}/tags/{key}",
+    "/watches/{id}",
 ];
 
+/// Routes with no operation behind them at all.
+///
+/// Distinct from [`SUPERSEDED_ROUTES`] on purpose. A superseded route is
+/// *duplicated* work — an operation already serves that data and the URL is
+/// waiting on its last caller. A route here is *missing* work: the registry does
+/// not describe this part of the API, so it has no schema, no CLI, no MCP
+/// projection, and no declared actor policy. The rule the registry exists to
+/// enforce is "anything that reaches the API is registered", and every line
+/// below is a place that is not yet true.
+///
+/// This list became visible only when the route scan above was fixed. Before
+/// that it read as zero, which is the most expensive kind of wrong number.
+/// A caveat this list cannot express: it is keyed by path, while an operation is
+/// keyed by method *and* path. Two routes are therefore in [`SUPERSEDED_ROUTES`]
+/// with one method still unregistered — `PATCH /issues/{id}` (there is no
+/// `issues.update`; close/reopen return a bulk shape) and
+/// `GET /sessions/{id}/github/access` (grant and revoke are operations, the read
+/// is not). Both are named here so the gap is written down somewhere.
+const UNREGISTERED_ROUTES: &[(&str, &str)] = &[
+    ("/agent/oneshot", "agents: one-shot ACP prompt"),
+    (
+        "/branches/{id}/artifacts/{name}/url",
+        "artifacts: share link",
+    ),
+    ("/channels/{id}/bindings", "channels: external bindings"),
+    ("/diagnostics", "diagnostics snapshot"),
+    (
+        "/logs",
+        "server log snapshot (logs.stream is the live half)",
+    ),
+    ("/preferences", "operator UI preferences"),
+    ("/reviews/{id}", "reviews: read / update / discard"),
+    (
+        "/reviews/{id}/comments/{comment_id}",
+        "reviews: edit comment",
+    ),
+    (
+        "/reviews/{id}/comments/{comment_id}/resolve",
+        "reviews: resolve comment",
+    ),
+    ("/reviews/{id}/retarget-current", "reviews: retarget"),
+    ("/session-layout/defaults", "layout: placement default"),
+    (
+        "/session-layout/defaults/{kind}/{value}",
+        "layout: clear placement default",
+    ),
+    (
+        "/session-layout/groups/{id}",
+        "layout: update / delete group",
+    ),
+    (
+        "/session-layout/groups/{id}/preference",
+        "layout: group preference",
+    ),
+    (
+        "/session-layout/spaces/{id}",
+        "layout: update / delete space",
+    ),
+    (
+        "/sessions/{id}",
+        "sessions: patch / delete (GET is sessions.get)",
+    ),
+    (
+        "/sessions/{id}/artifacts/{name}/raw",
+        "artifacts: image bytes",
+    ),
+    (
+        "/sessions/{id}/config/{config_id}",
+        "sessions: agent config option",
+    ),
+    (
+        "/sessions/{id}/conversation/blocks/{message}/{block}",
+        "sessions: one conversation block",
+    ),
+    (
+        "/sessions/{id}/github",
+        "sessions: PR link refresh / set / clear",
+    ),
+    ("/sessions/{id}/github/labels", "sessions: add PR labels"),
+    (
+        "/sessions/{id}/handoff/resolve",
+        "sessions: preview a handoff",
+    ),
+    (
+        "/sessions/{id}/permissions/{request_id}",
+        "sessions: answer a live ACP permission prompt",
+    ),
+    (
+        "/sessions/{id}/prompt",
+        "sessions: queue / retract a prompt",
+    ),
+    ("/sessions/{id}/resumption-cue", "sessions: resumption cue"),
+    (
+        "/sessions/{id}/reviews",
+        "reviews: list / create for a session",
+    ),
+    (
+        "/sessions/{id}/scratch",
+        "sessions: scratch upload (multipart)",
+    ),
+    (
+        "/sessions/{id}/title-generation",
+        "sessions: title generation toggle",
+    ),
+    (
+        "/sessions/{id}/title/regenerate",
+        "sessions: regenerate title",
+    ),
+    ("/slack/status", "slack: connection status"),
+    ("/status", "server status"),
+];
+
+/// Every path `web/mod.rs` mounts by hand.
+///
+/// Scanned across the whole source rather than line by line: rustfmt wraps a
+/// long `.route(` onto its own line, and a line-oriented scan therefore saw only
+/// 105 of the 160 routes — a third of the surface was invisible to the ledger
+/// below, including two websockets and an unregistered DELETE.
 fn mounted_routes() -> BTreeSet<String> {
     let source = include_str!("../src/web/mod.rs");
     let mut routes = BTreeSet::new();
-    for line in source.lines() {
-        let Some(rest) = line.split_once(".route(\"") else {
+    for (index, _) in source.match_indices(".route(") {
+        let rest = &source[index + ".route(".len()..];
+        let Some(open) = rest.find('"') else { continue };
+        // Only a literal that *is* the first argument counts; anything else
+        // before the quote means this is not a `.route("path", …)` call.
+        if !rest[..open].chars().all(char::is_whitespace) {
             continue;
-        };
-        if let Some((path, _)) = rest.1.split_once('"') {
+        }
+        if let Some((path, _)) = rest[open + 1..].split_once('"') {
             routes.insert(path.to_string());
         }
     }
     routes
+}
+
+/// The scan above is load-bearing, so it is checked against a known shape.
+#[test]
+fn the_route_scan_sees_wrapped_route_calls() {
+    let routes = mounted_routes();
+    assert!(
+        routes.contains("/sessions/{id}/shell/{idx}"),
+        "the route scan missed a `.route(` whose path literal is on the next line"
+    );
+    assert!(
+        routes.len() > 120,
+        "only {} routes found; the scan is probably broken",
+        routes.len()
+    );
 }
 
 fn operation_routes() -> BTreeSet<String> {
@@ -178,6 +348,7 @@ fn no_route_is_unaccounted_for() {
     let operations = operation_routes();
 
     let superseded: BTreeSet<&str> = SUPERSEDED_ROUTES.iter().copied().collect();
+    let unregistered: BTreeSet<&str> = UNREGISTERED_ROUTES.iter().map(|(path, _)| *path).collect();
     let mounted = mounted_routes();
 
     let unaccounted: Vec<String> = mounted
@@ -185,14 +356,16 @@ fn no_route_is_unaccounted_for() {
         .filter(|route| !transport.contains(route.as_str()))
         .filter(|route| !operations.contains(*route))
         .filter(|route| !superseded.contains(route.as_str()))
+        .filter(|route| !unregistered.contains(route.as_str()))
         .cloned()
         .collect();
 
     assert!(
         unaccounted.is_empty(),
-        "{} hand-mounted routes are neither an operation, a declared transport, nor a\n\
-         known superseded route. Each is either a new parallel surface (register it)\n\
-         or a legacy route that belongs in SUPERSEDED_ROUTES with the rest:\n{}",
+        "{} hand-mounted routes are in none of the three buckets. Each is either an\n\
+         operation waiting to be declared (UNREGISTERED_ROUTES), a route an\n\
+         operation already serves (SUPERSEDED_ROUTES), or something the DSL cannot\n\
+         express (TRANSPORT_ROUTES):\n{}",
         unaccounted.len(),
         unaccounted
             .iter()
@@ -207,11 +380,29 @@ fn no_route_is_unaccounted_for() {
     let retired: Vec<&str> = SUPERSEDED_ROUTES
         .iter()
         .copied()
+        .chain(UNREGISTERED_ROUTES.iter().map(|(path, _)| *path))
         .filter(|route| !mounted.contains(*route))
         .collect();
     assert!(
         retired.is_empty(),
-        "these routes are no longer mounted — delete them from SUPERSEDED_ROUTES: {retired:?}"
+        "these routes are no longer mounted — delete them from the ledger: {retired:?}"
+    );
+
+    // A route cannot be both superseded and unregistered; that would mean the
+    // ledger disagrees with itself about whether an operation exists.
+    let both: Vec<&str> = superseded.intersection(&unregistered).copied().collect();
+    assert!(both.is_empty(), "routes in two buckets at once: {both:?}");
+
+    // And an operation must not be listed as unregistered.
+    let contradicted: Vec<&str> = unregistered
+        .iter()
+        .copied()
+        .filter(|route| operations.contains(*route))
+        .collect();
+    assert!(
+        contradicted.is_empty(),
+        "UNREGISTERED_ROUTES names routes an operation already serves — move them \
+         to SUPERSEDED_ROUTES: {contradicted:?}"
     );
 }
 

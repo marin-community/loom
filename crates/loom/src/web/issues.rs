@@ -8,11 +8,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::issues as issue_operations;
 use weaver_api::{
-    IssueAction, IssueActionProblem as IssueActionProblemView, IssueActionsResult, IssueTagInput,
-    IssueView, PatchIssueReq,
+    IssueAction, IssueActionProblem as IssueActionProblemView, IssueActionsResult, IssueView,
+    PatchIssueReq,
 };
 use weaver_core::branch as branch_mod;
-use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
+use weaver_core::issue::{BulkIssueAction, Issue};
 
 use crate::db::Db;
 use crate::events;
@@ -81,7 +81,6 @@ pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<Is
     }
     Ok(out)
 }
-
 
 /// Every issue across every repo — the loom dashboard's cross-repo issue board.
 pub(super) async fn list_all_issues(

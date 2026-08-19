@@ -28,7 +28,10 @@ pub enum Kind {
 
 impl Kind {
     pub fn is_optional(self) -> bool {
-        matches!(self, Kind::OptInt | Kind::OptStr | Kind::OptBool | Kind::Bool)
+        matches!(
+            self,
+            Kind::OptInt | Kind::OptStr | Kind::OptBool | Kind::Bool
+        )
     }
 
     pub fn is_multi(self) -> bool {
@@ -215,7 +218,9 @@ fn classify(ty: &Type) -> Kind {
     match outer.as_str() {
         "bool" => Kind::Bool,
         "String" | "str" => Kind::Str,
-        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize" => Kind::Int,
+        "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "usize" | "isize" => {
+            Kind::Int
+        }
         "Option" => match inner(segment) {
             Some(Kind::Int) => Kind::OptInt,
             Some(Kind::Str) => Kind::OptStr,

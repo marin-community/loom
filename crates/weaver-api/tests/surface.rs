@@ -46,12 +46,7 @@ fn render() -> String {
                     .unwrap_or_else(|| "-".to_string())
             )
             .expect("write to string");
-            write!(
-                &mut line,
-                " grants=[{}]",
-                operation.grants.join(",")
-            )
-            .expect("write to string");
+            write!(&mut line, " grants=[{}]", operation.grants.join(",")).expect("write to string");
             line
         })
         .collect();

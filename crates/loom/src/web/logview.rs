@@ -12,6 +12,7 @@ use axum::{Extension, Json};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use weaver_api::operations::logs as log_operations;
 use weaver_api::operations::tasks as task_operations;
 use weaver_api::TaskView;
 
@@ -78,13 +79,15 @@ pub(super) async fn logs_snapshot(
     Ok(Json(lines))
 }
 
-/// `GET /api/logs/stream` — server log lines as they are emitted (SSE). The
-/// browser authenticates with the `loom_session` cookie (EventSource can't set
-/// headers), exactly like the session-events stream.
+/// The `logs.stream` operation — server log lines as they are emitted (SSE).
+/// The browser authenticates with the `loom_session` cookie (EventSource can't
+/// set headers), exactly like the session-events stream.
 pub(super) async fn logs_stream(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Query(input): Query<log_operations::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
+    super::streams::authorized::<log_operations::stream::Stream>(&st, &principal, input).await?;
     let redactor = log_redactor(&st.db, &principal).await?;
     let stream = BroadcastStream::new(logs::buffer().subscribe()).filter_map(move |result| {
         // A lagged subscriber yields Err; skip the gap (the client can re-snapshot).

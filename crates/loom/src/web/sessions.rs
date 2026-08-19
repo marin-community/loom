@@ -1777,11 +1777,16 @@ pub(super) async fn search_session_history(
     Ok(Json(page))
 }
 
+/// The `sessions.events.stream` operation — one session's event feed as it
+/// happens. The durable half is `sessions.events.list`.
 pub(super) async fn events_sse(
     State(st): State<AppState>,
-    Path(key): Path<String>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<ops::events::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    let branch = require_branch(&st.db, &key).await?;
+    let input =
+        super::streams::authorized::<ops::events::stream::Stream>(&st, &principal, input).await?;
+    let branch = require_branch(&st.db, &input.session).await?;
     let id = branch.id;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(move |result| {
         let event = result.ok()?;
@@ -2051,13 +2056,16 @@ pub(super) async fn get_session_chat(
 
 /// The live SSE tail of the conversation — `block` / `delta` / `tool` / `turn`
 /// events (see [`crate::acp`]), plus `resync` when the bounded broadcast drops
-/// frames. A client fetches `/chat` first, then applies this tail. When no task
-/// is running the stream stays open but silent (keep-alive).
+/// frames. A client reads `sessions.chat` first, then applies this tail. When no
+/// task is running the stream stays open but silent (keep-alive).
 pub(super) async fn chat_stream(
     State(st): State<AppState>,
-    Path(key): Path<String>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<ops::chat::stream::Input>,
 ) -> ApiResult<impl IntoResponse> {
-    let (session, _) = require_session(&st.db, &key).await?;
+    let input =
+        super::streams::authorized::<ops::chat::stream::Stream>(&st, &principal, input).await?;
+    let (session, _) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
     let boxed: Pin<Box<dyn Stream<Item = Result<sse::Event, Infallible>> + Send>> =
         match st.acp.get(&session.id) {
@@ -2438,6 +2446,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::url::Url, _, _>(op_url),
         register::<ops::ide_info::IdeInfo, _, _>(op_ide_info),
         register::<ops::shells::list::List, _, _>(op_shells_list),
+        register::<ops::shells::delete::Delete, _, _>(op_shells_delete),
     ];
     bound.extend(super::session_summary::bound_operations());
     bound.extend(super::changes::bound_operations());
@@ -3223,5 +3232,18 @@ async fn op_shells_list(
     input: ops::shells::list::Input,
 ) -> ApiResult<Vec<u32>> {
     let (session, _) = require_session(&context.state.db, &input.session).await?;
+    Ok(crate::shell::list_debug(&session.id).await)
+}
+
+/// `sessions.shells.delete` — ported from [`delete_session_shell`]. Idempotent:
+/// a missing shell is a no-op. Returns the indices still live, so the tab strip
+/// refreshes without a second call — the legacy route returned `{closed: true}`,
+/// which told a caller nothing it did not already know.
+async fn op_shells_delete(
+    context: OperationContext,
+    input: ops::shells::delete::Input,
+) -> ApiResult<Vec<u32>> {
+    let (session, _) = require_session(&context.state.db, &input.session).await?;
+    crate::shell::kill_debug(&session.id, input.index).await;
     Ok(crate::shell::list_debug(&session.id).await)
 }

@@ -37,6 +37,7 @@ pub mod shells;
 pub mod status;
 pub mod summary;
 pub mod tags;
+pub mod terminal;
 pub mod url;
 
 static OPERATIONS: &[&OperationSpec] = &[
@@ -71,7 +72,15 @@ static OPERATIONS: &[&OperationSpec] = &[
     <url::Url as Operation>::SPEC,
     <ide_info::IdeInfo as Operation>::SPEC,
     <shells::list::List as Operation>::SPEC,
+    <shells::delete::Delete as Operation>::SPEC,
     <scratch::limits::Limits as Operation>::SPEC,
+    // Non-JSON: SSE feeds and terminal websockets. Registered exactly like the
+    // rest — only the response encoding differs, so a custom handler in
+    // `loom::web::streams` serves them off these same declarations.
+    <events::stream::Stream as Operation>::SPEC,
+    <chat::stream::Stream as Operation>::SPEC,
+    <terminal::Terminal as Operation>::SPEC,
+    <shells::terminal::Terminal as Operation>::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

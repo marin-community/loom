@@ -308,7 +308,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
 
     const STREAM_MARKER: &str = "user-stream-redaction-check-1e52";
     let stream_response = http
-        .get(url(&ts, "/api/events?topics=logs"))
+        .get(url(&ts, "/api/events/stream?topics=logs"))
         .bearer_auth(&user_token)
         .send()
         .await

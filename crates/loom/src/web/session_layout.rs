@@ -17,7 +17,9 @@ use weaver_api::{
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
-use weaver_api::operations::session_layout::{get, groups, r#move, reorder, restore, spaces};
+use weaver_api::operations::session_layout::{
+    events, get, groups, r#move, reorder, restore, spaces,
+};
 
 use crate::auth::Principal;
 use crate::session_layout::{self, MutationError};
@@ -206,14 +208,18 @@ pub(super) async fn delete_session_placement_default(
     mutation_response(&st, &principal.username, result).await
 }
 
-/// Fleet-global layout tail. The browser still performs a normal GET after an
-/// event; the event is only invalidation, so reconnects and dropped messages
-/// cannot corrupt local selection/disclosure state.
+/// The `session_layout.events` operation — a fleet-global layout tail. The
+/// browser still performs a normal read after an event; the event is only
+/// invalidation, so reconnects and dropped messages cannot corrupt local
+/// selection/disclosure state.
 pub(super) async fn session_layout_events(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Query(input): Query<events::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    require_human(&principal)?;
+    // `actor = User` on the declaration is the same rule `require_human` was:
+    // the layout is the signed-in operator's own dashboard state.
+    super::streams::authorized::<events::Events>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
         if event.kind != "session_layout" {
@@ -231,8 +237,8 @@ pub(super) async fn session_layout_events(
 // Operation registry — `session_layout.*`, bound onto
 // `weaver_api::operations::session_layout`. These are the operation-typed
 // twins of six of the legacy routes above (every mutation but the per-item
-// PATCH/DELETE and default-selector routes, and `session-layout/events`,
-// which is a stream and stays out of the generic dispatcher entirely). Every
+// PATCH/DELETE and default-selector routes; `session_layout.events` is
+// registered too, but as `io = Stream`, so `web::streams` serves it). Every
 // mutation still funnels through `mutation_response`/`mutation_result`, so
 // the optimistic-concurrency conflict shape — refetch the current layout and
 // hand it back alongside the 409 — is identical between the legacy routes and

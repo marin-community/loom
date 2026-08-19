@@ -7,7 +7,7 @@ import AcpConversation from './AcpConversation.vue';
 
 // The Conversation surface picks its data source by the session's execution
 // backend. An ACP session (`protocol='acp'`) renders from the live chat journal
-// (`/chat` + `/chat/stream`); a terminal session keeps the iris scrape path
+// (`sessions.chat` + `sessions.chat.stream`); a terminal session keeps the iris scrape path
 // (`/conversation`) untouched. One prop, one seam — everything backend-specific
 // lives in the two child components.
 const props = withDefaults(defineProps<{ session: Session; localCommands?: AcpCommand[] }>(), {

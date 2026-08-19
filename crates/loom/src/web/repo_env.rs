@@ -85,11 +85,6 @@ pub(super) async fn delete_repo_env(
 /// `POST /api/shell/restart` — reset the operator scratch shell, killing the
 /// current supervisor and spawning a fresh one. Handy after editing operator env
 /// vars (the new shell picks them up) or to clear a wedged session.
-pub(super) async fn restart_shell(State(st): State<AppState>) -> ApiResult<Json<Value>> {
-    crate::shell::restart(&st).await?;
-    Ok(Json(json!({ "restarted": true })))
-}
-
 // ---------------------------------------------------------------------------
 // Operation registry — `repos.env.*`, bound onto
 // `weaver_api::operations::repos::env`. Folded into `repos::bound_operations()`

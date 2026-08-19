@@ -148,7 +148,10 @@ pub(super) async fn update_custom_mcp_operation(
     update_custom_mcp_core(&context.state, req).await
 }
 
-async fn delete_custom_mcp_core(st: &AppState, identity: String) -> ApiResult<CustomMcpDeleteResult> {
+async fn delete_custom_mcp_core(
+    st: &AppState,
+    identity: String,
+) -> ApiResult<CustomMcpDeleteResult> {
     let _resolver = st.launch_gate.acquire_resolver().await;
     let removed = crate::custom_mcp::remove(&st.db, &identity)
         .await

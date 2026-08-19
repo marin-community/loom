@@ -399,7 +399,7 @@ export interface AutomationRun {
 // ── ACP conversation surface ────────────────────────────────────────────────
 // The chat journal + live SSE tail an `acp` session's Conversation renders from.
 // These hand-mirror loom's `chat.rs` / `acp/mod.rs` serde shapes: the block
-// contract (`GET /sessions/{id}/chat`) and the `/chat/stream` SSE events.
+// contract (`sessions.chat`) and the `sessions.chat.stream` SSE events.
 
 export interface AcpCost {
   amount: number;
@@ -578,7 +578,7 @@ export interface HandoffPayload {
   through_seq?: number | null;
 }
 
-// -- `/chat/stream` SSE events --
+// -- `sessions.chat.stream` SSE events --
 /** `block` — a whole journaled block (upsert by `(turn, seq)`). Same shape as a
  *  snapshot block; a resolved `permission_request` re-emits its own block. */
 export type SseBlock = ChatBlock;

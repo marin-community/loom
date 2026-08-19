@@ -38,16 +38,19 @@ pub mod auth;
 pub mod branches;
 pub mod channels;
 pub mod deployment;
+pub mod events;
 pub mod issues;
+pub mod logs;
 pub mod mcps;
-pub mod profiles;
 pub mod permissions;
+pub mod profiles;
 pub mod repos;
 pub mod reviews;
 pub mod runs;
 pub mod session_layout;
 pub mod sessions;
 pub mod settings;
+pub mod shell;
 pub mod tasks;
 pub mod watches;
 
@@ -61,11 +64,28 @@ pub struct OperationBundle {
 
 pub type OperationBundleFactory = fn() -> OperationBundle;
 
-pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[issues::bundle, artifacts::bundle, channels::bundle, sessions::bundle, permissions::bundle,
-    watches::bundle, runs::bundle, tasks::bundle,
-    settings::bundle, profiles::bundle, deployment::bundle, mcps::bundle, auth::bundle,
-    agents::bundle, branches::bundle, repos::bundle,
-    reviews::bundle, session_layout::bundle,
+pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[
+    issues::bundle,
+    artifacts::bundle,
+    channels::bundle,
+    sessions::bundle,
+    permissions::bundle,
+    watches::bundle,
+    runs::bundle,
+    tasks::bundle,
+    settings::bundle,
+    profiles::bundle,
+    deployment::bundle,
+    mcps::bundle,
+    auth::bundle,
+    agents::bundle,
+    branches::bundle,
+    repos::bundle,
+    reviews::bundle,
+    session_layout::bundle,
+    events::bundle,
+    logs::bundle,
+    shell::bundle,
 ];
 
 pub fn operation_bundles() -> impl Iterator<Item = OperationBundle> {
@@ -152,7 +172,12 @@ impl From<&OperationSpec> for OperationView {
             cli: spec.cli.map(|cli| cli.invocation()),
             cli_aliases: spec
                 .cli
-                .map(|cli| cli.aliases.iter().map(|alias| (*alias).to_string()).collect())
+                .map(|cli| {
+                    cli.aliases
+                        .iter()
+                        .map(|alias| (*alias).to_string())
+                        .collect()
+                })
                 .unwrap_or_default(),
             mcp: spec.mcp.map(|mcp| McpProjectionView {
                 server: mcp.server.to_string(),

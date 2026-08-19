@@ -1,5 +1,10 @@
 use super::prelude::*;
 
+// `sessions.chat.stream` is the live half of this operation and lives in
+// `chat/stream.rs`, so the id keeps naming the file.
+pub(super) use super::prelude;
+pub mod stream;
+
 /// The journaled ACP conversation plus the agent-owned composer metadata,
 /// paged newest-first.
 #[operation(
