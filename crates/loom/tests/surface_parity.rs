@@ -123,3 +123,32 @@ fn every_declared_transport_is_mounted() {
         "declared transports that are no longer mounted: {missing:?}"
     );
 }
+
+/// How every CLI-projecting operation is actually reached.
+///
+/// Two paths exist on purpose: a hand-written command formats output worth
+/// formatting, and the generic dispatcher makes a newly declared operation
+/// reachable with no second edit. What must not happen is an operation that
+/// advertises `loom foo bar` and is reachable by neither — which is exactly what
+/// the previous surface shipped, three times over.
+///
+/// This prints the split rather than asserting a ratio; the number that must be
+/// zero is the unreachable one.
+#[test]
+fn every_cli_operation_is_reachable() {
+    let bound: std::collections::BTreeSet<&str> = loom::cli::bindings()
+        .iter()
+        .map(|binding| binding.operation.id)
+        .collect();
+
+    let unreachable: Vec<&str> = weaver_api::operations::operations()
+        .filter(|operation| operation.cli.is_some())
+        .map(|operation| operation.id)
+        .filter(|id| !bound.contains(id))
+        .collect();
+
+    assert!(
+        unreachable.is_empty(),
+        "operations advertise a CLI invocation that nothing serves: {unreachable:?}"
+    );
+}

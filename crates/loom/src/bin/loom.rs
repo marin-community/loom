@@ -226,7 +226,58 @@ enum RegisteredCliCommand {
 #[allow(clippy::large_enum_variant)]
 enum Cmd {
     Registered(RegisteredCliCommand),
+    /// An operation reached through the generic registry dispatcher.
+    ///
+    /// No per-command code: the clap surface, the request, and the printing all
+    /// come from the operation's own declaration.
+    Operation(loom::cli::CliBinding, ArgMatches),
     Host(HostCmd),
+}
+
+/// Registry bindings whose command name no hand-written command already claims.
+///
+/// Both kinds coexist deliberately. A hand-written command exists because its
+/// output is worth formatting by hand; the generic dispatcher exists so that
+/// declaring an operation makes it reachable immediately, with no second edit.
+/// `operations_reachable_from_the_command_line` counts the split, so the
+/// hand-written set can shrink without anyone losing track of what is left.
+fn generic_bindings() -> Vec<loom::cli::CliBinding> {
+    loom::cli::bindings()
+        .into_iter()
+        .into_iter()
+        .filter(|binding| {
+            // Skip only when the hand-written surface already offers this exact
+            // invocation. A group it shares (`loom issues`) is merged into, not
+            // duplicated — clap panics on a duplicate subcommand name — so the
+            // test is the whole path, not just its head.
+            binding
+                .operation
+                .cli
+                .is_some_and(|cli| !host_tree_offers(cli.path))
+        })
+        .collect()
+}
+
+/// Whether the hand-written command tree already answers to `path`.
+///
+/// Deliberately builds the hand-written tree only. Asking `Cli::command()` would
+/// recurse: that builds the full tree, which consults `generic_bindings()`,
+/// which asks this.
+fn host_tree_offers(path: &[&str]) -> bool {
+    let root = HostCmd::augment_subcommands(hand_written_subcommands(Command::new("loom")));
+    let mut node = Some(&root);
+    for segment in path {
+        node = node.and_then(|current| {
+            current.get_subcommands().find(|candidate| {
+                candidate.get_name() == *segment
+                    || candidate.get_all_aliases().any(|alias| alias == *segment)
+            })
+        });
+        if node.is_none() {
+            return false;
+        }
+    }
+    true
 }
 
 type ParseCliCommand = fn(&ArgMatches) -> clap::error::Result<RegisteredCliCommand>;
@@ -502,6 +553,10 @@ impl FromArgMatches for Cmd {
                 return (factory.parse)(command_matches).map(Self::Registered);
             }
         }
+        let bindings = generic_bindings();
+        if let Some((binding, operation_matches)) = loom::cli::resolve(&bindings, matches) {
+            return Ok(Self::Operation(*binding, operation_matches));
+        }
         HostCmd::from_arg_matches(matches).map(Self::Host)
     }
 
@@ -512,12 +567,20 @@ impl FromArgMatches for Cmd {
 }
 
 impl Subcommand for Cmd {
+    // Registry-derived commands go on LAST, once both hand-written sets are in
+    // place. They merge into a group that already exists; adding them earlier
+    // built a second `settings` beside the host one, which clap rejects when the
+    // tree is finally assembled.
     fn augment_subcommands(command: Command) -> Command {
-        HostCmd::augment_subcommands(augment_registered_subcommands(command))
+        augment_registered_subcommands(HostCmd::augment_subcommands(hand_written_subcommands(
+            command,
+        )))
     }
 
     fn augment_subcommands_for_update(command: Command) -> Command {
-        HostCmd::augment_subcommands_for_update(augment_registered_subcommands(command))
+        augment_registered_subcommands(HostCmd::augment_subcommands_for_update(
+            hand_written_subcommands(command),
+        ))
     }
 
     fn has_subcommand(name: &str) -> bool {
@@ -525,7 +588,13 @@ impl Subcommand for Cmd {
     }
 }
 
-fn augment_registered_subcommands(mut command: Command) -> Command {
+/// Merge the registry-derived commands into an already-assembled tree.
+fn augment_registered_subcommands(command: Command) -> Command {
+    loom::cli::augment(command, &generic_bindings())
+}
+
+/// The hand-written registered commands, without anything registry-derived.
+fn hand_written_subcommands(mut command: Command) -> Command {
     for commands in CLI_COMMAND_GROUPS {
         for factory in *commands {
             let mut registered = (factory.build)();
@@ -1646,6 +1715,92 @@ struct LaunchOpts {
     mode: Option<String>,
 }
 
+#[cfg(test)]
+mod cli_tree_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// The real command tree assembles.
+    ///
+    /// clap validates duplicate subcommand names in a debug assertion that only
+    /// fires when the tree is actually built, so nothing short of building it
+    /// catches a collision between a registry-derived command and a
+    /// hand-written one. The parity tests over `bindings()` cannot: they never
+    /// see the host commands.
+    #[test]
+    fn the_command_tree_builds_without_collisions() {
+        Cli::command().debug_assert();
+    }
+
+    /// Every advertised invocation exists in the tree the binary really uses.
+    ///
+    /// This is the invariant the previous registry could not state, and the one
+    /// it violated: a descriptor said `cli: Some("loom issues list")` beside a
+    /// clap enum whose variant was `Ls`, and three advertised commands did not
+    /// exist at all. Checking bindings against the registry is not enough —
+    /// both can agree while the binary offers a different word.
+    ///
+    /// It covers hand-written commands too, deliberately. An operation served by
+    /// a bespoke command still has to be reachable by the name it advertises.
+    #[test]
+    fn every_advertised_invocation_exists_in_the_real_tree() {
+        let command = Cli::command();
+        let mut drift = Vec::new();
+        for operation in weaver_api::operations::operations() {
+            let Some(cli) = operation.cli else { continue };
+            let mut node = Some(&command);
+            for segment in cli.path {
+                node = node.and_then(|current| {
+                    current.get_subcommands().find(|candidate| {
+                        candidate.get_name() == *segment
+                            || candidate.get_all_aliases().any(|alias| alias == *segment)
+                    })
+                });
+                if node.is_none() {
+                    drift.push(format!(
+                        "  {} advertises `{}` — `{segment}` is not there",
+                        operation.id,
+                        cli.invocation()
+                    ));
+                    break;
+                }
+            }
+        }
+        assert!(
+            drift.is_empty(),
+            "{} operation(s) advertise a command line the binary does not offer:\n{}",
+            drift.len(),
+            drift.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_generic_binding_is_reachable_in_the_real_tree() {
+        let command = Cli::command();
+        for binding in generic_bindings() {
+            let Some(cli) = binding.operation.cli else {
+                continue;
+            };
+            let mut node = &command;
+            for segment in cli.path {
+                node = node
+                    .get_subcommands()
+                    .find(|candidate| {
+                        candidate.get_name() == *segment
+                            || candidate.get_all_aliases().any(|alias| alias == *segment)
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{} advertises `{}` but `{segment}` is not in the built tree",
+                            binding.operation.id,
+                            cli.invocation()
+                        )
+                    });
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -1659,6 +1814,14 @@ async fn run() -> Result<()> {
     client::set_context_override(context.as_deref())?;
     match cmd {
         Cmd::Registered(command) => run_registered_cli(command).await,
+        Cmd::Operation(binding, matches) => {
+            configure_agent_client()?;
+            let rendered = (binding.run)(&matches).await?;
+            if !rendered.is_empty() {
+                println!("{}", rendered.trim_end());
+            }
+            Ok(())
+        }
         Cmd::Host(command) => run_host_cli(command).await,
     }
 }

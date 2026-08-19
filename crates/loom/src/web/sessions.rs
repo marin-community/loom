@@ -22,12 +22,16 @@ use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, config, custom_agents, db, events, git, github, repo};
+use base64::Engine as _;
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    BranchView, CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, PatchSessionReq,
-    ResumptionCueView, SearchSessionsOptions, SendReq, SessionCreatorFilter,
-    SessionInterruptResult, SessionPreviewResult, SessionSearchAttention, SessionSearchStatus,
-    SessionSendResult, SessionSummaryView, SessionView, SetTagsReq, SetTitleGenerationReq, TagReq,
+    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq, EnsureResumptionCueReq,
+    HandoffReq, HistoryPageView, PatchSessionReq, ResolvedLaunchView, ResumptionCueView,
+    SearchSessionsOptions, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
+    SessionFilesView, SessionIdeInfoView, SessionInterruptResult, SessionModeResult,
+    SessionPreviewResult, SessionRawFileView, SessionSearchAttention, SessionSearchStatus,
+    SessionSendResult, SessionSummaryView, SessionUrlView, SessionView, SetTagsReq,
+    SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -2409,6 +2413,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::list::List, _, _>(op_list),
         register::<ops::get::Get, _, _>(op_get),
         register::<ops::launch::Launch, _, _>(op_launch),
+        register::<ops::launches::resolve::Resolve, _, _>(op_launches_resolve),
         register::<ops::send::Send, _, _>(op_send),
         register::<ops::interrupt::Interrupt, _, _>(op_interrupt),
         register::<ops::preview::Preview, _, _>(op_preview),
@@ -2421,8 +2426,22 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::tags::list::List, _, _>(op_tags_list),
         register::<ops::tags::set::Set, _, _>(op_tags_set),
         register::<ops::tags::delete::Delete, _, _>(op_tags_delete),
+        register::<ops::adopt::Adopt, _, _>(op_adopt),
+        register::<ops::archive::Archive, _, _>(op_archive),
+        register::<ops::recover::Recover, _, _>(op_recover),
+        register::<ops::handoff::Handoff, _, _>(op_handoff),
+        register::<ops::chat::Chat, _, _>(op_chat),
+        register::<ops::conversation::Conversation, _, _>(op_conversation),
+        register::<ops::files::Files, _, _>(op_files),
+        register::<ops::mode::Mode, _, _>(op_mode),
+        register::<ops::raw::Raw, _, _>(op_raw),
+        register::<ops::url::Url, _, _>(op_url),
+        register::<ops::ide_info::IdeInfo, _, _>(op_ide_info),
+        register::<ops::shells::list::List, _, _>(op_shells_list),
     ];
     bound.extend(super::session_summary::bound_operations());
+    bound.extend(super::changes::bound_operations());
+    bound.extend(super::scratch::bound_operations());
     bound
 }
 
@@ -2845,4 +2864,364 @@ async fn op_tags_delete(
         .await?
         .ok_or_else(|| AppError::not_found("branch"))?;
     super::branch_view(&st.db, &branch).await
+}
+
+/// `sessions.launches.resolve` — ported from
+/// [`crate::web::launches::resolve_session_launch`], resolved from typed input
+/// rather than a raw JSON body.
+async fn op_launches_resolve(
+    context: OperationContext,
+    input: ops::launches::resolve::Input,
+) -> ApiResult<ResolvedLaunchView> {
+    let st = &context.state;
+    let profile_name = match input.selection.profile.trim() {
+        "" => crate::profile::DEFAULT_PROFILE,
+        name => name,
+    };
+    let _profile_permit = st.launch_gate.acquire_profile(profile_name).await;
+    let _resolver_permit = st.launch_gate.acquire_resolver().await;
+    Ok(super::launches::resolve_launch(
+        st,
+        &input.selection,
+        &crate::launch::ResolveOptions::default(),
+    )
+    .await?
+    .view)
+}
+
+/// `sessions.adopt` — ported from [`adopt_session`].
+async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    adopt(st, &session, &branch).await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.archive` — ported from [`archive_session`] and
+/// [`archive_launch_attempt`], folded into one typed result rather than the
+/// old handler's ad hoc JSON object.
+async fn op_archive(
+    context: OperationContext,
+    input: ops::archive::Input,
+) -> ApiResult<SessionArchiveResult> {
+    let st = &context.state;
+    let (session, branch) = match require_session(&st.db, &input.session).await {
+        Ok(found) => found,
+        Err(error) if error.is_not_found() => {
+            return op_archive_launch_attempt(st, &input.session).await;
+        }
+        Err(error) => return Err(error),
+    };
+    let warnings = archive(st, &session, &branch).await.map_err(|error| {
+        AppError::internal(
+            format!(
+                "Could not finish archiving session {}. Its branch and conversation are safe; retry in a moment.",
+                session.id
+            ),
+            error,
+        )
+    })?;
+    Ok(SessionArchiveResult {
+        archived: true,
+        kind: "session".to_string(),
+        branch: branch.branch,
+        warnings,
+    })
+}
+
+/// The `sessions.archive` counterpart of [`archive_launch_attempt`]: same
+/// escape hatch for a reservation that never became a session, wired to this
+/// operation's own result type.
+async fn op_archive_launch_attempt(
+    st: &AppState,
+    session_id: &str,
+) -> ApiResult<SessionArchiveResult> {
+    if crate::runs::list_for_session(&st.db, session_id)
+        .await?
+        .is_empty()
+    {
+        return Err(AppError::not_found("session"));
+    }
+    crate::runs::cancel_for_session_with_summary(
+        &st.db,
+        session_id,
+        "launch attempt archived by user",
+    )
+    .await?;
+    let warnings = crate::session_manager::teardown_reserved_runtime(session_id).await;
+    st.ide.kill(session_id);
+    crate::auth::revoke_session_tokens(&st.db, session_id)
+        .await
+        .ok();
+    Ok(SessionArchiveResult {
+        archived: true,
+        kind: "launch_attempt".to_string(),
+        branch: session_id.to_string(),
+        warnings,
+    })
+}
+
+/// `sessions.recover` — ported from [`recover_session`].
+async fn op_recover(
+    context: OperationContext,
+    input: ops::recover::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    if session.status == "archived" {
+        recover(st, &session, &branch).await?;
+    } else {
+        crate::lifecycle::recover_acp_runtime(st, &session).await?;
+    }
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.handoff` — ported from [`handoff_session`].
+async fn op_handoff(
+    context: OperationContext,
+    input: ops::handoff::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (initial_session, _) = require_session(&st.db, &input.session).await?;
+    let req = HandoffReq {
+        agent: input.agent,
+        model: input.model,
+        effort: input.effort,
+        mode: input.mode,
+        selection: input.selection,
+        expected_profile_revision: input.expected_profile_revision,
+        expected_resolver_revision: input.expected_resolver_revision,
+    };
+    let (session, branch) = crate::handoff::handoff_session(st, initial_session, req)
+        .await
+        .map_err(map_handoff_error)?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.chat` — ported from [`get_session_chat`].
+async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResult<SessionChatView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    let before = match (input.before_turn, input.before_seq) {
+        (Some(turn), Some(seq)) => Some((turn, seq)),
+        (None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "before_turn and before_seq must be supplied together",
+            ))
+        }
+    };
+    let (blocks, has_more) =
+        crate::chat::list_page(&st.db, &session.id, before, CHAT_PAGE_SIZE).await?;
+    let older_cursor = if has_more {
+        blocks.first().map(|block| ChatCursorView {
+            turn: block.turn,
+            seq: block.seq,
+        })
+    } else {
+        None
+    };
+    let metadata = match st.acp.get(&session.id) {
+        Some(handle) => handle.metadata(),
+        None => match session_mod::get_acp_metadata(&st.db, &session.id).await? {
+            Some(raw) => serde_json::from_str(&raw)?,
+            None => crate::acp::AcpMetadata::default(),
+        },
+    };
+    let pending_prompt = session
+        .pending_prompt
+        .as_deref()
+        .filter(|pending| !pending.trim().is_empty())
+        .map(str::to_string);
+    Ok(SessionChatView {
+        blocks: blocks
+            .into_iter()
+            .map(|block| ChatBlockView {
+                turn: block.turn,
+                seq: block.seq,
+                kind: block.kind,
+                payload: block.payload,
+                created_at: block.created_at,
+            })
+            .collect(),
+        older_cursor,
+        live_turn: session_mod::acp_inflight_turn(&session),
+        effective_mode: effective_turn_mode(&session),
+        pending_prompt,
+        metadata: AcpMetadataView {
+            commands: metadata.commands,
+            config_options: metadata.config_options,
+            modes: metadata.modes,
+            steering_supported: metadata.steering_supported,
+        },
+    })
+}
+
+/// `sessions.conversation` — ported from [`conversation_session`]. Eliding
+/// oversized tool payloads still runs on the blocking pool since it walks and
+/// re-stringifies every block; the JSON encoding itself now happens in the
+/// dispatcher rather than alongside it, since a registered operation returns a
+/// typed value rather than a hand-built `Response`.
+async fn op_conversation(
+    context: OperationContext,
+    input: ops::conversation::Input,
+) -> ApiResult<weaver_core::transcript::iris::Log> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let mut log = crate::chatlog::conversation(&st.db, &session, &branch)
+        .await
+        .ok_or_else(|| AppError::not_found("conversation"))?;
+    let session_id = session.id.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::chatlog::elide_tool_payloads(&mut log, &session_id);
+        log
+    })
+    .await
+    .map_err(|error| AppError::internal("conversation processing failed", error))
+}
+
+/// `sessions.files` — ported from [`list_session_files`].
+async fn op_files(
+    context: OperationContext,
+    input: ops::files::Input,
+) -> ApiResult<SessionFilesView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    let out = tokio::process::Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(&session.work_dir)
+        .output()
+        .await
+        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if !out.status.success() {
+        return Err(AppError::new(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "git ls-files failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        ));
+    }
+    let needle = input.q.trim().to_ascii_lowercase();
+    let mut files: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|raw| !raw.is_empty())
+        .filter_map(|raw| String::from_utf8(raw.to_vec()).ok())
+        .filter(|path| needle.is_empty() || path.to_ascii_lowercase().contains(&needle))
+        .collect();
+    files.sort_by_key(|path| {
+        let lower = path.to_ascii_lowercase();
+        let name = lower.rsplit('/').next().unwrap_or(&lower);
+        (
+            !lower.starts_with(&needle),
+            !name.starts_with(&needle),
+            path.len(),
+            lower,
+        )
+    });
+    files.truncate(40);
+    Ok(SessionFilesView { files })
+}
+
+/// `sessions.mode` — ported from [`set_mode`].
+async fn op_mode(
+    context: OperationContext,
+    input: ops::mode::Input,
+) -> ApiResult<SessionModeResult> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    if session.policy_restricted && input.mode_id != "default" {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "restricted sessions cannot change permission mode",
+        ));
+    }
+    let handle = require_acp_task(st, &session)?;
+    let by = author_or_manual(input.by.as_deref());
+    handle
+        .set_mode(input.mode_id.clone(), Some(by.clone()))
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "nudge",
+        json!({ "by": by, "mode": input.mode_id }),
+    )
+    .await
+    .ok();
+    Ok(SessionModeResult {
+        mode_id: input.mode_id,
+    })
+}
+
+/// `sessions.raw` — ported from [`raw_session`]. JSON cannot carry raw bytes,
+/// so the wire body carries base64 rather than the REST route's octet stream.
+async fn op_raw(
+    context: OperationContext,
+    input: ops::raw::Input,
+) -> ApiResult<SessionRawFileView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    let work_dir = PathBuf::from(&session.work_dir);
+    let rel = rel_path(&input.path)?;
+    let bytes = match tokio::fs::read(work_dir.join(&rel)).await {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AppError::not_found("file"))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(SessionRawFileView {
+        content_type: content_type_for(&rel).to_string(),
+        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    })
+}
+
+/// `sessions.url` — ported from [`session_url_route`]. The registered
+/// operation runs without the caller's `Host` header (the dispatcher hands
+/// handlers typed input, not a request), so this can only resolve the
+/// configured `auth.base_url` or the address the server is bound to — not a
+/// browser's own Host the way the REST route it mirrors can.
+async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<SessionUrlView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    let base = super::auth::public_base(st, &header::HeaderMap::new()).await;
+    Ok(SessionUrlView {
+        url: crate::links::session_url(&base, &session.id),
+    })
+}
+
+/// `sessions.ide_info` — ported from [`crate::ide::info`]. `IdeInfo`'s fields
+/// are private to `loom-editor`, so the response is round-tripped through JSON
+/// into this bundle's own DTO rather than constructed field-by-field.
+async fn op_ide_info(
+    context: OperationContext,
+    _input: ops::ide_info::Input,
+) -> ApiResult<SessionIdeInfoView> {
+    let editor = context.state.editor_state();
+    let info = crate::ide::info(axum::extract::State(editor)).await.0;
+    let value = serde_json::to_value(info)?;
+    Ok(serde_json::from_value(value)?)
+}
+
+/// `sessions.shells.list` — ported from [`list_session_shells`].
+async fn op_shells_list(
+    context: OperationContext,
+    input: ops::shells::list::Input,
+) -> ApiResult<Vec<u32>> {
+    let (session, _) = require_session(&context.state.db, &input.session).await?;
+    Ok(crate::shell::list_debug(&session.id).await)
 }

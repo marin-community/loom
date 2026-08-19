@@ -1,0 +1,29 @@
+use super::prelude::*;
+
+/// The session's agent conversation as a normalized iris log — the live
+/// transcript when present, else the capture archived alongside it. Oversized
+/// tool payloads are elided to a preview pointing at the full-content route.
+#[operation(
+    id = "sessions.conversation",
+    actor = SessionSelf,
+    scope = Session,
+    risk = Read,
+    grants = ["loom/sessions/read@v1"],
+    cli = "sessions conversation",
+)]
+pub struct Conversation;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+pub struct Input {
+    /// A visible session id. Omit for this session.
+    #[operand(context)]
+    pub session: String,
+}
+
+pub type Output = weaver_core::transcript::iris::Log;
+
+impl Scoped for Input {
+    fn scope_ref(&self) -> ScopeRef<'_> {
+        ScopeRef::Session(&self.session)
+    }
+}

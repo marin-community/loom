@@ -226,3 +226,125 @@ pub(super) async fn session_layout_events(
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
+
+// ---------------------------------------------------------------------------
+// Operation registry — `session_layout.*`, bound onto
+// `weaver_api::operations::session_layout`. These are the operation-typed
+// twins of six of the legacy routes above (every mutation but the per-item
+// PATCH/DELETE and default-selector routes, and `session-layout/events`,
+// which is a stream and stays out of the generic dispatcher entirely). Every
+// mutation still funnels through `mutation_response`/`mutation_result`, so
+// the optimistic-concurrency conflict shape — refetch the current layout and
+// hand it back alongside the 409 — is identical between the legacy routes and
+// these operations. The legacy routes stay live and untouched until the
+// coordinated route deletion pass.
+// ---------------------------------------------------------------------------
+
+/// The operation-typed twin of [`mutation_response`], returning the bare
+/// output `register` expects instead of a `Json` wrapper.
+async fn mutation_result(
+    st: &AppState,
+    username: &str,
+    result: Result<SessionLayoutView, MutationError>,
+) -> ApiResult<SessionLayoutView> {
+    mutation_response(st, username, result)
+        .await
+        .map(|Json(layout)| layout)
+}
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<get::Get, _, _>(get_operation),
+        register::<spaces::create::Create, _, _>(spaces_create_operation),
+        register::<groups::create::Create, _, _>(groups_create_operation),
+        register::<r#move::Move, _, _>(move_operation),
+        register::<reorder::Reorder, _, _>(reorder_operation),
+        register::<restore::Restore, _, _>(restore_operation),
+    ]
+}
+
+/// `session_layout.get` — the twin of [`get_session_layout`].
+async fn get_operation(context: OperationContext, _input: get::Input) -> ApiResult<get::Output> {
+    Ok(session_layout::get_layout(&context.state.db, &context.principal.username).await?)
+}
+
+/// `session_layout.spaces.create` — the twin of [`create_session_space`].
+async fn spaces_create_operation(
+    context: OperationContext,
+    input: spaces::create::Input,
+) -> ApiResult<spaces::create::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = CreateSessionSpaceReq {
+        name: input.name,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::create_space(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.groups.create` — the twin of [`create_session_group`].
+async fn groups_create_operation(
+    context: OperationContext,
+    input: groups::create::Input,
+) -> ApiResult<groups::create::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = CreateSessionGroupReq {
+        space_id: input.space_id,
+        name: input.name,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::create_group(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.move` — the twin of [`move_session_layout`].
+async fn move_operation(
+    context: OperationContext,
+    input: r#move::Input,
+) -> ApiResult<r#move::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = MoveSessionsReq {
+        session_ids: input.session_ids,
+        destination_group_id: input.destination_group_id,
+        before_session_id: input.before_session_id,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::move_sessions(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.reorder` — the twin of [`reorder_session_layout`].
+async fn reorder_operation(
+    context: OperationContext,
+    input: reorder::Input,
+) -> ApiResult<reorder::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = ReorderSessionLayoutReq {
+        kind: input.kind,
+        id: input.id,
+        before_id: input.before_id,
+        destination_space_id: input.destination_space_id,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::reorder(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.restore` — the twin of [`restore_session_layout`].
+async fn restore_operation(
+    context: OperationContext,
+    input: restore::Input,
+) -> ApiResult<restore::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = RestoreSessionGroupsReq {
+        groups: input.groups,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::restore_groups(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}

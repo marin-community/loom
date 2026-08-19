@@ -8,8 +8,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use weaver_api::operations::sessions as ops;
 use weaver_api::ScratchLimitsView;
 
+use super::operations::{register, Bound, OperationContext};
 use super::require_session;
 use super::{ApiResult, AppError, AppState};
 
@@ -29,12 +31,35 @@ pub(super) fn map_scratch_error(error: crate::scratch::ScratchError) -> AppError
 }
 
 pub(super) async fn scratch_limits() -> Json<ScratchLimitsView> {
-    Json(ScratchLimitsView {
+    Json(scratch_limits_view())
+}
+
+fn scratch_limits_view() -> ScratchLimitsView {
+    ScratchLimitsView {
         max_files: crate::scratch::MAX_SCRATCH_FILES,
         max_file_bytes: crate::scratch::MAX_SCRATCH_FILE_BYTES,
         max_total_bytes: crate::scratch::MAX_SCRATCH_TOTAL_BYTES,
         max_name_bytes: crate::scratch::MAX_SCRATCH_NAME_BYTES,
-    })
+    }
+}
+
+/// The `sessions.scratch.limits` operation binding, folded into the
+/// `sessions` bundle by [`super::sessions::bound_operations`].
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<ops::scratch::limits::Limits, _, _>(
+        op_scratch_limits,
+    )]
+}
+
+/// `sessions.scratch.limits` — ported from [`scratch_limits`]. `actor = User`:
+/// see the operation's doc comment for why — `grant_allows` in
+/// `crates/loom/src/web/auth.rs` never lets a `Grant::Session` credential
+/// reach the legacy `GET /scratch/limits` route this mirrors.
+async fn op_scratch_limits(
+    _context: OperationContext,
+    _input: ops::scratch::limits::Input,
+) -> ApiResult<ScratchLimitsView> {
+    Ok(scratch_limits_view())
 }
 
 pub(super) async fn list_scratch(

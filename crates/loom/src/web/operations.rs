@@ -197,7 +197,9 @@ pub(super) fn registry() -> Vec<Bound> {
     bound.extend(super::permission_requests::bound_operations());
     bound.extend(super::profiles::bound_operations());
     bound.extend(super::repos::bound_operations());
+    bound.extend(super::reviews::bound_operations());
     bound.extend(super::self_context::bound_operations());
+    bound.extend(super::session_layout::bound_operations());
     bound.extend(super::sessions::bound_operations());
     bound.extend(super::settings::bound_operations());
     bound.extend(super::watches::bound_operations());

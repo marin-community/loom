@@ -3446,6 +3446,110 @@ pub struct RemoveUserResult {
     pub username: String,
 }
 
+// -- Session sub-resources ----------------------------------------------------
+
+/// Result of `sessions.archive`. `kind` is `"session"` for a real session or
+/// `"launch_attempt"` when the id named a reservation that never became one
+/// (its reserved runtime is torn down and the automation row kept as history).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionArchiveResult {
+    pub archived: bool,
+    pub kind: String,
+    pub branch: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Result of `sessions.mode`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionModeResult {
+    pub mode_id: String,
+}
+
+/// Result of `sessions.url`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionUrlView {
+    pub url: String,
+}
+
+/// Result of `sessions.files`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionFilesView {
+    pub files: Vec<String>,
+}
+
+/// Result of `sessions.raw`: a worktree file's bytes, base64-encoded because
+/// JSON cannot carry raw binary, plus the content type guessed from its
+/// extension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionRawFileView {
+    pub content_type: String,
+    pub content_base64: String,
+}
+
+/// Result of `sessions.ide_info`: whether the embedded editor is enabled and
+/// runnable on this host.
+#[derive(
+    Debug, Clone, Default, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
+pub struct SessionIdeInfoView {
+    pub enabled: bool,
+    pub available: bool,
+    pub idle_timeout_secs: i64,
+}
+
+/// One journaled ACP chat block, as `sessions.chat` exposes it. `payload` is
+/// passed through as JSON; the client renders it by `kind`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChatBlockView {
+    pub turn: i64,
+    pub seq: i64,
+    pub kind: String,
+    pub payload: Value,
+    pub created_at: String,
+}
+
+/// The paging cursor `sessions.chat` returns when older blocks remain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ChatCursorView {
+    pub turn: i64,
+    pub seq: i64,
+}
+
+/// Agent-owned controls for the conversation composer, mirrored from the live
+/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON: an
+/// extensible protocol surface loom forwards rather than narrows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AcpMetadataView {
+    #[serde(default)]
+    pub commands: Vec<Value>,
+    #[serde(default)]
+    pub config_options: Vec<Value>,
+    #[serde(default)]
+    pub modes: Vec<Value>,
+    #[serde(default)]
+    pub steering_supported: bool,
+}
+
+/// Result of `sessions.chat`: a page of the journal plus the composer state
+/// needed to render it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionChatView {
+    pub blocks: Vec<ChatBlockView>,
+    #[serde(default)]
+    pub older_cursor: Option<ChatCursorView>,
+    /// The turn currently in flight, if any (ACP only).
+    #[serde(default)]
+    pub live_turn: Option<i64>,
+    /// The permission posture captured when the in-flight turn started; may
+    /// differ from a live `current_mode` selection, which applies next turn.
+    #[serde(default)]
+    pub effective_mode: Option<String>,
+    #[serde(default)]
+    pub pending_prompt: Option<String>,
+    pub metadata: AcpMetadataView,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

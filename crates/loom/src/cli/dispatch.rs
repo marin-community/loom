@@ -7,7 +7,6 @@
 //! whose variant was `Ls`, and shipped three advertised commands that did not
 //! exist.
 
-use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
 use clap::{ArgMatches, Command};
@@ -81,68 +80,68 @@ async fn resolve_context(client: &Client) -> Result<ContextValues> {
 
 /// Assemble the registered command tree.
 ///
-/// Groups nest by the declared command path, so `issues tag set` produces
-/// `issues` -> `tag` -> `set` without anyone writing a nested clap enum.
+/// Merges into whatever is already there. A group the host already defines
+/// (`loom issues`, `loom settings`) keeps its hand-written subcommands and gains
+/// the declared ones it was missing — which is how `loom issues list` comes to
+/// exist beside the hand-written `ls`, instead of the registry advertising a
+/// command nobody implemented.
 pub fn augment(root: Command, bindings: &[CliBinding]) -> Command {
-    // Every node of the command tree, keyed by its path. The empty path holds
-    // flat top-level commands such as `loom summary`.
-    let mut nodes: BTreeMap<Vec<&'static str>, Command> = BTreeMap::new();
-
-    let attach = |nodes: &mut BTreeMap<Vec<&'static str>, Command>,
-                  path: &Vec<&'static str>,
-                  child: Command| {
-        let name = path.last().copied().unwrap_or("loom");
-        let entry = nodes
-            .entry(path.clone())
-            .or_insert_with(|| Command::new(name));
-        // clap builders are owned, so swap the node out to consume it.
-        let taken = std::mem::replace(entry, Command::new(name));
-        *entry = taken.subcommand(child);
-    };
-
+    let mut root = root;
     for binding in bindings {
         let Some(cli) = binding.operation.cli else {
             continue;
         };
-        let mut leaf = Command::new(cli.leaf()).about(binding.operation.summary);
-        for alias in cli.aliases {
-            leaf = leaf.visible_alias(*alias);
-        }
-        leaf = (binding.augment)(leaf);
-
-        let group = cli.group().to_vec();
-        for depth in 1..group.len() {
-            let ancestor = group[..depth].to_vec();
-            let name = ancestor.last().copied().unwrap_or("loom");
-            nodes.entry(ancestor).or_insert_with(|| Command::new(name));
-        }
-        attach(&mut nodes, &group, leaf);
-    }
-
-    // Fold deepest-first so a child is complete before its parent consumes it.
-    let mut paths: Vec<_> = nodes.keys().cloned().collect();
-    paths.sort_by_key(|path| std::cmp::Reverse(path.len()));
-
-    let mut root = root;
-    for path in paths {
-        let Some(command) = nodes.remove(&path) else {
-            continue;
-        };
-        match path.len() {
-            // Flat commands: splice straight onto the root.
-            0 => {
-                for sub in command.get_subcommands().cloned().collect::<Vec<_>>() {
-                    root = root.subcommand(sub);
-                }
-            }
-            1 => root = root.subcommand(command),
-            _ => {
-                let parent = path[..path.len() - 1].to_vec();
-                attach(&mut nodes, &parent, command);
-            }
-        }
+        root = insert(root, cli.group(), *binding);
     }
     root
+}
+
+/// Descend to `path` and add the binding's leaf there.
+///
+/// The leaf is built at the insertion point rather than beforehand, because
+/// whether its name and aliases are free depends on what is already in that
+/// group — and clap treats a duplicate name *or* alias as a bug and panics.
+fn insert(command: Command, path: &[&'static str], binding: CliBinding) -> Command {
+    let Some((head, rest)) = path.split_first() else {
+        return place(command, binding);
+    };
+    if command
+        .get_subcommands()
+        .any(|existing| existing.get_name() == *head)
+    {
+        command.mut_subcommand(*head, |sub| insert(sub, rest, binding))
+    } else {
+        command.subcommand(insert(Command::new(*head), rest, binding))
+    }
+}
+
+/// Add one leaf to the group it belongs in, yielding to what is already there.
+///
+/// A hand-written command that already answers to this name wins: it exists
+/// because someone wanted its output formatted by hand, and this must not
+/// shadow it. Aliases are filtered the same way — `issues.list` advertises the
+/// alias `ls`, which the hand-written `issues` command already uses.
+fn place(command: Command, binding: CliBinding) -> Command {
+    let Some(cli) = binding.operation.cli else {
+        return command;
+    };
+    let taken: Vec<String> = command
+        .get_subcommands()
+        .flat_map(|existing| {
+            std::iter::once(existing.get_name().to_string())
+                .chain(existing.get_all_aliases().map(str::to_string))
+        })
+        .collect();
+    if taken.iter().any(|name| name == cli.leaf()) {
+        return command;
+    }
+    let mut leaf = Command::new(cli.leaf()).about(binding.operation.summary);
+    for alias in cli.aliases {
+        if !taken.iter().any(|name| name == alias) {
+            leaf = leaf.visible_alias(*alias);
+        }
+    }
+    command.subcommand((binding.augment)(leaf))
 }
 
 /// Resolve parsed matches to the binding they named, walking the command path.
