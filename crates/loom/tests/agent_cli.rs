@@ -19,6 +19,10 @@ use serial_test::serial;
 use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
 
+#[path = "support/schema.rs"]
+mod support_schema;
+use support_schema::seed_migrated_db;
+
 /// Path to the freshly-built `weaver` binary the test will drive.
 fn loom_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_loom"))
@@ -40,6 +44,7 @@ impl Env {
     async fn start() -> Self {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
+        seed_migrated_db();
         // `seed_owner` no longer defaults to a real login — this suite's
         // requests (the `weaver` CLI, over loopback) need a seeded owner to
         // resolve to.

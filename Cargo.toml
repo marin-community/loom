@@ -36,3 +36,12 @@ opt-level = "z"
 
 [profile.release.package."*"]
 opt-level = 3
+
+# SQLite is the one dependency whose *unoptimized* build shows up in test wall
+# clock: the suites open and migrate hundreds of throwaway databases, and at the
+# dev profile's `opt-level = 0` the C engine spends about twice as long doing it
+# (measured: a pooled open of an already-migrated database, 76ms -> 42ms; ~30s
+# per `cargo test --workspace`). Compiling this one leaf C crate optimized costs
+# ~20s, paid once per dependency-cache generation rather than once per run.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 2
