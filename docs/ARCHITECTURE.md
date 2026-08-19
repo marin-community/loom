@@ -907,9 +907,19 @@ helper and a `gh` wrapper because those clients do not speak Loom's session API.
 They are transport adapters, not policy owners: every fresh, resumed, warm, or
 handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the launching user's write-only PAT stored in Loom Account
-settings, `broker` requests the session's short-lived App installation token,
-and `disabled` rejects direct GitHub CLI access. The adapters fail closed when
-the reserved mode is absent. The `gh` wrapper translates the selected mode into
+settings, `broker` requests a short-lived App installation token, and
+`disabled` rejects direct GitHub CLI access. The adapters fail closed when
+the reserved mode is absent.
+
+A `broker` token is minted **per repository**. An App installation covers one
+owner, so a session holding access under two owners has no single token that
+spans them. `credential.useHttpPath` is enabled for github.com, so git names the
+repository in every helper request and the helper forwards it as
+`loom github-token --repository owner/name`; the `gh` wrapper resolves the same
+from `GH_REPO` or the checkout's origin. The server refuses a repository the
+session has no access to, so naming one narrows the token and never widens it.
+Omitting the repository falls back to the session's whole set, which the App can
+mint only while it stays single-owner. The `gh` wrapper translates the selected mode into
 the stock CLI's native authentication contract for each invocation.
 Adapter registration stays in the image's system Git config: linked worktrees
 share repository-local config, agents may clone additional repositories, and

@@ -255,7 +255,22 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
       echo "Loom-managed GitHub auth is missing its session credential" >&2
       exit 1
     fi
-    token="$(/usr/local/bin/loom github-token)" || exit $?
+    # git writes the request as key=value lines on stdin. `credential.useHttpPath`
+    # is enabled for github.com below, so `path` carries `owner/repo`; ask for a
+    # token scoped to exactly that repository. An App installation token covers
+    # one owner, so a session whose access spans owners has no single token.
+    repository=
+    while IFS= read -r line; do
+      case "$line" in
+        path=*) repository="${line#path=}" ;;
+      esac
+    done
+    repository="${repository%.git}"
+    if [ -n "$repository" ]; then
+      token="$(/usr/local/bin/loom github-token --repository "$repository")" || exit $?
+    else
+      token="$(/usr/local/bin/loom github-token)" || exit $?
+    fi
     ;;
   direct)
     # Loom sets direct only after injecting the launching user's Account token.
@@ -289,7 +304,22 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
       echo "Loom-managed GitHub auth is missing its session credential" >&2
       exit 1
     fi
-    GH_TOKEN="$(/usr/local/bin/loom github-token)" || exit $?
+    # Same per-repository scoping as the git helper. gh names its target with
+    # GH_REPO or the checkout's origin; without either, fall back to the
+    # session's whole set, which the App can mint while it stays single-owner.
+    repository="${GH_REPO:-}"
+    if [ -z "$repository" ]; then
+      origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+      origin="${origin%.git}"
+      case "$origin" in
+        *github.com[:/]*) repository="${origin##*github.com[:/]}" ;;
+      esac
+    fi
+    if [ -n "$repository" ]; then
+      GH_TOKEN="$(/usr/local/bin/loom github-token --repository "$repository")" || exit $?
+    else
+      GH_TOKEN="$(/usr/local/bin/loom github-token)" || exit $?
+    fi
     export GH_TOKEN
     unset GITHUB_TOKEN
     ;;
@@ -318,6 +348,9 @@ exec /usr/bin/gh "$@"
 SH
 chmod +x /usr/local/bin/gh
 git config --system credential.https://github.com.helper ghtoken
+# Without this git omits `path` from the helper request, leaving the broker
+# unable to tell which repository a push is for.
+git config --system credential.https://github.com.useHttpPath true
 git config --system url.https://github.com/.insteadOf git@github.com:
 git config --system url.https://github.com/.insteadOf ssh://git@github.com/
 EOF

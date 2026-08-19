@@ -266,7 +266,7 @@ pub(super) async fn create_permission_request_operation(
         .iter()
         .find(|pattern| crate::runtime::pattern_allows(std::slice::from_ref(pattern), &repository))
     {
-        match validate_github_write(&st, &session, &repository).await {
+        match validate_github_write(&st, &repository).await {
             Ok(()) => {
                 return apply_policy_grant(&st, &session, &branch.id, request, pattern).await;
             }
@@ -345,7 +345,7 @@ pub(super) async fn decide_permission_request(
     let reason = req.reason.trim();
     let changed = match decision.as_str() {
         "approve" => {
-            validate_github_write(&st, &session, &request.repository).await?;
+            validate_github_write(&st, &request.repository).await?;
             permission_requests::approve_github(&st.db, &id, &principal.username, reason).await?
         }
         "deny" => permission_requests::deny(&st.db, &id, &principal.username, reason).await?,

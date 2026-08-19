@@ -6,7 +6,7 @@
 //! the repository nor the credential is caller-controlled.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Extension, Json,
 };
@@ -32,9 +32,20 @@ fn principal_owns_session(principal: &Principal, id: &str) -> bool {
     matches!(&principal.grant, Grant::Session { session_id, .. } if session_id == id)
 }
 
+/// Which repository the caller wants a credential for. An App installation
+/// token covers exactly one owner, so a session whose access spans owners has
+/// no single token — it asks per repository instead.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct GithubTokenQuery {
+    #[serde(default)]
+    repository: Option<String>,
+}
+
 pub(super) async fn github_token(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<GithubTokenQuery>,
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<GithubTokenView>> {
     if !principal_owns_session(&principal, &id) {
@@ -61,9 +72,32 @@ pub(super) async fn github_token(
             "session profile has no GitHub repository credential",
         ));
     }
+    // Named repository: the narrowest useful scope, and the only form that
+    // works once a session's access spans more than one owner. Unnamed keeps
+    // the whole set, which the App can mint only while it stays single-owner.
+    let scope = match query
+        .repository
+        .as_deref()
+        .map(str::trim)
+        .filter(|repository| !repository.is_empty())
+    {
+        Some(requested) => {
+            let slug = crate::repo::parse_slug(requested)
+                .map_err(AppError::bad_request)?
+                .slug();
+            if !repositories.iter().any(|candidate| candidate == &slug) {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    format!("session has no GitHub access to {slug}"),
+                ));
+            }
+            vec![slug]
+        }
+        None => repositories,
+    };
     let app = super::configured_github_app(&st).await?;
     let token = app
-        .token_for_repositories(&repositories)
+        .token_for_repositories(&scope)
         .await
         .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(Json(GithubTokenView { token }))
