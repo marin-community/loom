@@ -1971,8 +1971,42 @@ async fn update_permission_resource(
     }
 }
 
+/// Why a server must not start here, if it must not.
+///
+/// A Loom session reaches its host loom over the API. A server started inside
+/// one opens the host's database and supervisor sockets a second time, giving
+/// the machine two monitors, two Slack clients, and two sets of lifecycle
+/// operations on the same rows. The failure is worse than duplication: an
+/// operation owned by the session's own process dies the instant it tears that
+/// session's supervisor down, stranding the transition it had already published
+/// and locking the session out of archive and adopt.
+///
+/// An explicit `WEAVER_HOME` is the documented way to exercise loom by hand, so
+/// that stays open — it is a different database and a different socket
+/// directory.
+fn nested_server_refusal(
+    session_id: Option<&str>,
+    weaver_home_is_explicit: bool,
+) -> Option<String> {
+    let session_id = session_id.filter(|id| !id.is_empty())?;
+    if weaver_home_is_explicit {
+        return None;
+    }
+    Some(format!(
+        "refusing to start: this is Loom session {session_id}, which already has a loom to talk to. A second server on the shared home would race the host's monitor, Slack client, and session teardown. Run `WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0` for an isolated instance."
+    ))
+}
+
 /// Dispatch the `loom server <verb>` daemon-lifecycle subcommands.
 async fn run_server(cmd: ServerCmd) -> Result<()> {
+    if matches!(cmd, ServerCmd::Run { .. } | ServerCmd::Start) {
+        if let Some(refusal) = nested_server_refusal(
+            std::env::var("LOOM_SESSION_ID").ok().as_deref(),
+            std::env::var_os("WEAVER_HOME").is_some(),
+        ) {
+            bail!("{refusal}");
+        }
+    }
     match cmd {
         ServerCmd::Run { addr } => {
             init_tracing();
@@ -5672,6 +5706,26 @@ fn capabilities_summary(o: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_session_may_not_start_a_server_on_the_shared_home() {
+        assert_eq!(
+            nested_server_refusal(Some("bej3oxrv"), false).unwrap(),
+            "refusing to start: this is Loom session bej3oxrv, which already has a loom to talk to. A second server on the shared home would race the host's monitor, Slack client, and session teardown. Run `WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0` for an isolated instance."
+        );
+    }
+
+    #[test]
+    fn an_explicit_weaver_home_keeps_hand_testing_available() {
+        assert!(nested_server_refusal(Some("bej3oxrv"), true).is_none());
+    }
+
+    #[test]
+    fn the_host_server_is_not_a_session() {
+        assert!(nested_server_refusal(None, false).is_none());
+        assert!(nested_server_refusal(Some(""), false).is_none());
+    }
+
     use super::*;
 
     #[test]

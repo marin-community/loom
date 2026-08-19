@@ -62,7 +62,8 @@ wipes them. So unless the user explicitly asks:
 - **Don't** start your own `loom server run` or `loom sessions launch` against the default
   `~/.weaver`, kill the user's runtime supervisors, or run broad process cleanup
   (`pkill -f tapestry`, `pkill -f weaver`). Each wipes the user's agents at a
-  stroke.
+  stroke. A server started from inside a session on the shared home now refuses
+  outright — set `WEAVER_HOME` for an isolated one.
 - **If a task seems to need a live loom, ask first.**
 
 To exercise loom behaviour, extend the test suites — they isolate via a temp
