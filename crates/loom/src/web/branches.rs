@@ -86,8 +86,7 @@ async fn slack_connection_status_view(
         }
     };
 
-    // What the supervisor is actually doing, as opposed to what a fresh
-    // credential probe suggests it could do.
+    // What the supervisor is actually doing right now.
     let health = crate::slack::health();
     let socket = slack_operations::connection_status::SlackSocketView {
         state: socket_state_str(health.state).to_string(),
@@ -128,23 +127,17 @@ async fn slack_connection_status_operation(
 
 // ---------------------------------------------------------------------------
 // Operation registry — `branches.*`, bound onto
-// `weaver_api::operations::branches`. Each handler below is the twin of a
-// legacy axum handler above: same domain calls, same event/mirror
-// side-effects, resolved from an operation's typed `Input` instead of a
-// path/query/body triple. Authorization (actor policy, grants, and
-// `require_branch_access` for the `Branch`-scoped ones) now happens once,
-// centrally, in `web/operations.rs` — none of it is re-checked here. The
-// legacy routes above stay live and untouched until the coordinated route
-// deletion pass.
+// `weaver_api::operations::branches`. Authorization (actor policy, grants,
+// and `require_branch_access` for the `Branch`-scoped ones) happens once,
+// centrally, in `web/operations.rs` — none of it is re-checked here.
 //
 // `branches.events.list` reimplements [`branch_events`]'s one line
-// (`events::history`, capped at 200 rows) rather than calling it, because
-// that handler lives in `web/sessions.rs`, owned by another agent while this
-// port is in flight; `events::history` is itself the shared logic, already
+// (`events::history`, capped at 200 rows) instead of calling it, because that
+// handler lives in `web/sessions.rs`; `events::history` is the shared logic,
 // used the same way by [`create_branch_event`] below and by
 // `sessions.events.list`. `branches.issues.list` similarly calls
-// `super::issues::issue_views` — the `pub(super)` mapping helper
-// `list_branch_issues` (in `web/issues.rs`) already shares — rather than
+// `super::issues::issue_views`, the `pub(super)` mapping helper
+// `list_branch_issues` (in `web/issues.rs`) also shares, instead of
 // duplicating its projection.
 // ---------------------------------------------------------------------------
 

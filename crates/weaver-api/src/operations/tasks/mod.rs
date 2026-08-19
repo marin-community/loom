@@ -3,10 +3,6 @@
 //! watch one being handled after its `200` was already returned. Backed by
 //! `loom_watch::tasks`'s in-memory ring buffer: an observability aid, not a
 //! job queue.
-//!
-//! Previously excluded from the registry as "fleet automation"; it was always
-//! human-only diagnostics (`crates/loom/src/web/logview.rs`), so it registers
-//! as `actor = User`, not omitted.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

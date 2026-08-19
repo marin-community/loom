@@ -5,10 +5,8 @@ use super::prelude::*;
 /// cancels any live turn and starts the message as a normal prompt. Every
 /// send records a `nudge` event on the branch (the audit rule).
 ///
-/// The legacy body accepted a caller-supplied `by`. This operation does not:
-/// provenance is derived from the credential, the same way
-/// `issues.tags.set` derives its `by` rather than trusting whatever a caller
-/// names itself — `manual` for a human operator, `agent` otherwise.
+/// Provenance is derived from the credential: `manual` for a human operator,
+/// `agent` otherwise.
 #[operation(
     id = "sessions.prompt.create",
     actor = SessionSelf,

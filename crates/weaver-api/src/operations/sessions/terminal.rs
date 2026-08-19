@@ -2,10 +2,9 @@ use super::prelude::*;
 
 /// Attach to a session's agent terminal over a websocket.
 ///
-/// `io = Duplex`: the response is a protocol upgrade, so a custom handler
-/// serves it. Registering it anyway is the point — the actor policy, the
-/// resource scope, and the operand it takes are declared here instead of being
-/// implied by a route string and a middleware allowlist.
+/// `io = Duplex` because the response is a protocol upgrade served by a custom
+/// handler. Registering it here declares the actor policy, resource scope, and
+/// operands explicitly.
 ///
 /// `risk = Write` because this is a real PTY: whoever holds it types as the
 /// agent's user.

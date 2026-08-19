@@ -5,10 +5,6 @@
 //! mutation is keyed off the calling human's own username and every write
 //! carries an `expected_revision` optimistic-concurrency guard, since more
 //! than one open dashboard tab can race to reorganize the same layout.
-//!
-//! One file per operation. Adding `session_layout.spaces.update` means adding
-//! its file here and its handler in the mirrored server tree — no clap
-//! variant, no client wrapper, no MCP schema, no capability set.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

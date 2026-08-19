@@ -2,10 +2,7 @@ use super::prelude::*;
 
 /// Register a watch.
 ///
-/// Operator-only: a `User` grant is explicitly refused every mutating
-/// `/watches` route (`user_grant_allows` in `crates/loom/src/web/auth.rs`), so
-/// only `Admin` may create one — this is fleet configuration, not a per-branch
-/// action a signed-in user takes on their own behalf.
+/// Admin only. Watches are fleet-wide configuration.
 #[operation(
     id = "watches.create",
     actor = Admin,

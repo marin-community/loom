@@ -327,8 +327,8 @@ Everything else is derived from that:
 `register::<O>(handler)` in `crates/loom/src/web/` binds the declaration to its
 implementation; the type parameters are the check, so a handler cannot accept or
 return something the declaration does not promise. Startup asserts the two sets
-are equal, so a descriptor nothing serves is a boot failure rather than a 404
-found in production.
+are equal, so a descriptor with no handler fails the build before it ever
+reaches production.
 
 `#[operand(context)]` marks a field the *dispatcher* supplies — `session`,
 `branch`, `repo_root`. It is stripped from the caller-facing schema and filled
@@ -349,9 +349,9 @@ than a reason to leave the registry:
 | `Upload` | POST | hand-written, because the *request* body is the payload's raw bytes |
 | `Download` | GET | hand-written, because the response is raw bytes plus a content type |
 
-A `Stream`, `Duplex` or `Download` operation takes its operands from the query string
-(`GET /api/sessions/terminal?session=abc`) rather than from path segments,
-precisely so that its real route equals its derived one. Its handler lives in
+A `Stream`, `Duplex` or `Download` operation takes its operands from the query
+string (`GET /api/sessions/terminal?session=abc`), so its real route equals its
+derived one. Its handler lives in
 [`crates/loom/src/web/encodings.rs`](../crates/loom/src/web/encodings.rs) and calls
 the same `authorize` the JSON dispatcher does — a custom encoding does not mean
 custom authority.
@@ -362,9 +362,8 @@ stands in for.
 
 ### What is not an operation
 
-Nineteen paths, and they are enumerated in
-[`crates/loom/tests/surface_parity.rs`](../crates/loom/tests/surface_parity.rs)
-with a reason each rather than left to judgement:
+Nineteen paths, each with a documented reason, enumerated in
+[`crates/loom/tests/surface_parity.rs`](../crates/loom/tests/surface_parity.rs):
 
 * the reverse proxy to the embedded editor, which forwards an arbitrary sub-path
   into a container and streams back whatever comes out;
@@ -376,58 +375,50 @@ with a reason each rather than left to judgement:
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
-That list is the whole hand-mounted surface. It used to be one of three: the
-other two held routes an operation already superseded (115 of them, kept alive by
-callers that had not moved) and routes no operation served at all, which is the
-registry being *incomplete* — no schema, no CLI, no MCP projection, no declared
-actor policy for a piece of live API. Both are now empty, so the ledger asserts a
-property instead of counting a debt: a `.route(` in `web/mod.rs` that is not a
-declared transport fails the test, in either direction — an undeclared route, or
-a declared transport nobody mounts.
+That list is the entire hand-mounted surface. `surface_parity.rs` asserts this
+as an invariant: a `.route(` in `web/mod.rs` that is not a declared transport
+fails the test in either direction — an undeclared route, or a declared
+transport nobody mounts.
 
-Getting there took eleven operations that did not exist yet (`issues.update`,
-`issues.board`, `sessions.summary.list`, `sessions.tags.replace`,
-`sessions.github.access.list`, `channels.archive`, `artifacts.raw`, and the
-`sessions.scratch.*` trio), one new `Io` variant (`Download`, the mirror of
-`Upload`: a GET that answers bytes and a content type), and widening four
-declarations that had been narrower than the routes they replaced.
+Reaching it took eleven new operations — `issues.update`, `issues.board`,
+`sessions.summary.list`, `sessions.tags.replace`, `sessions.github.access.list`,
+`channels.archive`, `artifacts.raw`, and the `sessions.scratch.*` trio — plus one
+new `Io` variant, `Download`, the mirror of `Upload`: a GET that answers bytes
+and a content type. Four existing declarations were widened to match the full
+behavior of the routes they now serve.
 
 ### The authority model has one half now
 
 `grant_allows` in [`crates/loom/src/web/auth.rs`](../crates/loom/src/web/auth.rs)
-decides *raw paths*. It used to be a parallel authority model running in addition
-to the registry, and both of its failure modes happened:
+decides seven raw paths: the IDE proxy and registry discovery. Everything else is
+`actor` on the declaration plus `authorize()` at the dispatcher — one decision,
+reached identically by REST, the CLI and MCP, so an adapter cannot widen
+authority by choosing a different door.
 
-* a newly declared operation was refused until someone also added its URL to the
-  list, which is what 403'd `permissions.requests.create` for the very session it
-  was declared for;
-* an entry naming a deleted route stayed a standing pre-authorization for
-  whatever got mounted at that path next.
+Keeping this list short matters. A path-based authority model running alongside
+the registry fails two ways: a newly declared operation is refused until someone
+adds its URL to the list (this once 403'd `permissions.requests.create` for the
+very session it was declared for), and an entry naming a deleted route stands as
+a pre-authorization for whatever gets mounted at that path next.
+`no_grant_allows_path_is_unmounted` checks for the second failure regardless of
+how short the list is.
 
-With the routes gone it decides seven paths: the IDE proxy and registry
-discovery. Everything else is `actor` on the declaration plus `authorize()` at
-the dispatcher — one decision, reached identically by REST, the CLI and MCP, so
-an adapter cannot widen authority by choosing a different door.
-`no_grant_allows_path_is_unmounted` still scans it, because the pre-authorization
-failure mode does not care how short the list is.
+Two resource checks live in the code that has the id to check:
 
-Two resource checks the path allowlist had been making, invisibly, moved into the
-code that has the id to check:
-
-* a session credential reaches only channels in its own tree — now
+* a session credential reaches only channels in its own tree, enforced by
   `require_channel` in `web/channels.rs`, called by every channel operation.
-  `scope = Branch` cannot state this: `branch` is a context operand, so it always
-  names the caller's own branch and the scope check passes whatever `channel` was
-  requested. `every_channel_operation_checks_reachability` counts the calls
-  against the operations that need them.
-* a session credential reaches only its own session tree, its own repository, and
-  its own tree's branches — `web/scope.rs`, driven by `Scoped` on typed input
-  rather than by URL segments.
+  `scope = Branch` cannot state this rule: `branch` is a context operand that
+  always names the caller's own branch, so the scope check passes regardless of
+  which `channel` was requested. `every_channel_operation_checks_reachability`
+  counts the calls against the operations that need them.
+* a session credential reaches only its own session tree, its own repository,
+  and its own tree's branches, enforced in `web/scope.rs` and driven by `Scoped`
+  on typed input.
 
-One capability narrowed on purpose: an automation credential reaches no raw path
-and only `actor = Internal` operations, which is `runs.create`. The allowlist
-also let it `GET /sessions/{id}` for sessions it had created; nothing used that,
-and `Internal` is what an automation credential is for.
+One capability is narrower now: an automation credential reaches no raw path,
+only `actor = Internal` operations — `runs.create` alone. Nothing used its old
+ability to `GET /sessions/{id}` for sessions it had created, which is what made
+the narrowing safe; `Internal` is what an automation credential is for.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -711,13 +702,13 @@ and keeps the last message. Last write wins, so an explicit declaration
 overrides the hook-inferred default. The general `loom sessions tags` group
 writes any key the same way, over the
 `branches.tags.set` / `branches.tags.delete` operations; the session-scoped
-`sessions.tags.set` / `sessions.tags.delete` serve the UI. There is no bulk-tag
-operation: a watch reconciling its complete author-scoped set (the
-`weaver_loom` Python client's `set_tags`) lists the branch's current tags and
-issues one `sessions.tags.set` or `sessions.tags.delete` call per key that
-changed. That is no longer one atomic transaction, so a stale round can in
-principle race a concurrent actor's key the way the retired bulk-tag route
-couldn't. The builtin
+`sessions.tags.set` / `sessions.tags.delete` serve the UI. `sessions.tags.replace`
+atomically replaces one author's complete tag set in a single transaction; the
+typed Rust client's `set_tags` uses it. The `weaver_loom` Python client's
+`set_tags` still reconciles a watch's complete author-scoped set by listing the
+branch's current tags and issuing one `sessions.tags.set` or
+`sessions.tags.delete` call per changed key, so a concurrent writer can
+interleave with those calls in a way `sessions.tags.replace` would prevent. The builtin
 status watch, when a session goes idle (the agent's finished-turn hook), asks the
 judge model for the set of tags the session warrants and reconciles its own
 typed marks to that set — never mirroring the agent's own `attention`. When the

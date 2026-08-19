@@ -60,8 +60,7 @@ async fn personal_github_token_is_self_service_and_write_only() {
     );
 
     // `auth.github_token.remove` is an ordinary operation and replies 200 with
-    // the typed status view (matching the post-removal `get`), not the legacy
-    // route's 204 No Content.
+    // the typed status view (matching the post-removal `get`).
     let deleted = http
         .post(&remove_endpoint)
         .json(&json!({}))
@@ -122,7 +121,7 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let token_id = created["id"].as_str().unwrap().to_string();
 
     // `auth.set_password` is an ordinary operation and replies 200 with the
-    // caller's `UserView`, not the legacy route's 204 No Content.
+    // caller's `UserView`.
     let r = http
         .post(url(&ts, "/api/auth/set_password"))
         .json(&json!({ "new_password": "correct horse" }))
@@ -221,7 +220,7 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // 5. Revoking the token invalidates it immediately. `auth.tokens.revoke`
-    // replies 200 with the typed result instead of the legacy route's 204.
+    // replies 200 with the typed result.
     let r = http
         .post(url(&ts, "/api/auth/tokens/revoke"))
         .bearer_auth(&token)
@@ -373,8 +372,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert!(stream_body.contains(STREAM_MARKER), "{stream_body}");
     assert!(!stream_body.contains(LOG_SECRET), "{stream_body}");
 
-    // Every one of these was a bare `GET` on a legacy route; each is now a
-    // `User`-reachable operation read via `POST` with an empty body.
+    // These are `User`-reachable operations read via `POST` with an empty body.
     for (path, body) in [
         ("/api/sessions/list", json!({})),
         ("/api/agents/list", json!({})),
@@ -779,7 +777,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .unwrap();
     assert_eq!(child_channel.status(), StatusCode::OK);
     // `channels.create` is an ordinary operation and replies 200 with the
-    // typed `ChannelView`, not the legacy route's 201 Created.
+    // typed `ChannelView`.
     let custom = http
         .post(url(&ts, "/api/channels/create"))
         .bearer_auth(&token)
@@ -1022,6 +1020,6 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     assert_eq!(child.creator_kind, "session");
     assert_eq!(
         child.parent_branch_id, None,
-        "legacy branch ancestry remains repository-scoped"
+        "branch ancestry is repository-scoped"
     );
 }

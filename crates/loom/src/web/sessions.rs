@@ -1113,12 +1113,10 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 // handler in `github_access.rs`, beside the repository-access helpers it reads
 // through. `sessions.context` also lives in a sibling file
 // (`self_context.rs`), but `registry()` (`web/operations.rs`, coordinator-owned)
-// already wires `self_context::bound_operations()` in on its own — it predates
-// `context` moving into this bundle and still treats it as independent — so it
-// is deliberately NOT re-added here; doing so would register `sessions.context`
-// twice and panic the router on startup. Every other handler lives here,
-// beside the legacy axum handler it was ported from (which stays mounted —
-// see `web/mod.rs` — until the coordinator removes it in one pass).
+// already wires `self_context::bound_operations()` in on its own and treats
+// it as independent, so it is deliberately NOT re-added here; doing so would
+// register `sessions.context` twice and panic the router on startup. Every
+// other handler for the bundle lives here.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -1242,18 +1240,7 @@ async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<
     session_view(&context.state.db, &session, &branch).await
 }
 
-/// `sessions.launch` — the operation's `Input` mirrors `CreateReq` field for
-/// field, so every launch the old REST route accepted (including a
-/// `class`/`protocol`/`mode` override) remains expressible; nothing is
-/// silently left at `CreateReq::default()`.
-///
-/// The old handler's inline rejection of `Grant::Automation` is dropped: this
-/// operation declares `actor = SessionSelf`, so `authorize()` now refuses an
-/// automation credential before this handler ever runs. Likewise, the old
-/// handler overwrote `req.parent_branch` from the principal for a
-/// `Grant::Session` caller — `parent_branch` is `#[operand(context = "branch")]`
-/// here, so the dispatcher has already resolved it the same way (the caller's
-/// own branch, or unset for a human/admin launch) before this handler sees it.
+/// `sessions.launch`.
 async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiResult<SessionView> {
     let st = context.state;
     let req = CreateReq {
@@ -1401,9 +1388,7 @@ async fn op_preview(
     Ok(SessionPreviewResult { screen })
 }
 
-/// `sessions.events.list` — the route this replaces was also mounted at
-/// `GET /sessions/{id}/log` and already resolved the session key via
-/// `require_branch`; this operation is scoped to the session directly.
+/// `sessions.events.list`.
 async fn op_events_list(
     context: OperationContext,
     input: ops::events::list::Input,
@@ -1572,8 +1557,7 @@ async fn op_tags_list(
     super::branch_view(&context.state.db, &branch).await
 }
 
-/// `sessions.tags.set` — returns `BranchView` (the operation's declared
-/// `Output`) rather than the full `SessionView` the old handler returned.
+/// `sessions.tags.set`.
 async fn op_tags_set(
     context: OperationContext,
     input: ops::tags::set::Input,
@@ -1614,8 +1598,7 @@ async fn op_tags_set(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.tags.delete` — returns `BranchView` rather than the old
-/// handler's `SessionView`.
+/// `sessions.tags.delete`.
 async fn op_tags_delete(
     context: OperationContext,
     input: ops::tags::delete::Input,
@@ -1633,8 +1616,7 @@ async fn op_tags_delete(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.launches.resolve` — the route this replaces took a raw JSON
-/// body; this operation resolves from typed input instead.
+/// `sessions.launches.resolve`.
 async fn op_launches_resolve(
     context: OperationContext,
     input: ops::launches::resolve::Input,
@@ -1664,8 +1646,7 @@ async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiRes
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.archive` — folds the session and launch-attempt archive paths
-/// into one typed result rather than the old handlers' ad hoc JSON object.
+/// `sessions.archive`.
 async fn op_archive(
     context: OperationContext,
     input: ops::archive::Input,
@@ -1830,11 +1811,7 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
     })
 }
 
-/// `sessions.conversation` — eliding oversized tool payloads still runs on
-/// the blocking pool since it walks and re-stringifies every block; the JSON
-/// encoding itself now happens in the dispatcher rather than alongside it,
-/// since a registered operation returns a typed value rather than a
-/// hand-built `Response`.
+/// `sessions.conversation`.
 async fn op_conversation(
     context: OperationContext,
     input: ops::conversation::Input,
@@ -1967,11 +1944,7 @@ pub(super) async fn raw_session_bytes(
         .into_response())
 }
 
-/// `sessions.url` — the registered operation runs without the caller's
-/// `Host` header (the dispatcher hands handlers typed input, not a request),
-/// so this can only resolve the configured `auth.base_url` or the address the
-/// server is bound to — not a browser's own Host the way the old REST route
-/// could.
+/// `sessions.url`.
 async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<SessionUrlView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -1981,9 +1954,7 @@ async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<
     })
 }
 
-/// `sessions.ide_info` — ported from [`crate::ide::info`]. `IdeInfo`'s fields
-/// are private to `loom-editor`, so the response is round-tripped through JSON
-/// into this bundle's own DTO rather than constructed field-by-field.
+/// `sessions.ide_info`.
 async fn op_ide_info(
     context: OperationContext,
     _input: ops::ide_info::Input,
@@ -2005,8 +1976,7 @@ async fn op_shells_list(
 
 /// `sessions.shells.delete` — idempotent: a missing shell is a no-op.
 /// Returns the indices still live, so the tab strip refreshes without a
-/// second call — the legacy route returned `{closed: true}`, which told a
-/// caller nothing it did not already know.
+/// second call.
 async fn op_shells_delete(
     context: OperationContext,
     input: ops::shells::delete::Input,
@@ -2016,11 +1986,7 @@ async fn op_shells_delete(
     Ok(crate::shell::list_debug(&session.id).await)
 }
 
-/// `sessions.update` — the legacy body's `park`/`sort_order` compatibility
-/// fields (always rejected with a fixed error) are not part of this
-/// operation's input at all: they existed only so an old frontend payload
-/// failed loudly instead of being silently ignored, and a caller of this
-/// operation never sends them.
+/// `sessions.update`.
 async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiResult<SessionView> {
     let st = &context.state;
     let (initial_session, _) = require_session(&st.db, &input.session).await?;
@@ -2398,11 +2364,7 @@ async fn op_resumption_cue_ensure(
     Ok(crate::metadata_assist::ensure_cue(&st.db, &st.acp, &session, &branch, input.force).await?)
 }
 
-/// `sessions.permissions.answer` — the route this replaces checked
-/// `principal.is_human()` inline; that check is now `actor = User` on the
-/// operation's declaration, and the inline check is deleted rather than
-/// ported, matching `auth::automation_token_op`'s treatment of its own former
-/// `is_admin` check.
+/// `sessions.permissions.answer`.
 async fn op_permissions_answer(
     context: OperationContext,
     input: ops::permissions::answer::Input,

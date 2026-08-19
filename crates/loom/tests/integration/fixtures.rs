@@ -59,9 +59,8 @@ fn kill_supervisors_in(sock_dir: &Path) {
 }
 
 /// Seed the command-less `shell` custom agent the suites launch no-op sessions
-/// with. `shell` is no longer a builtin; a custom agent with no `launch` command
-/// execs a bare login shell (hookless → `running` at once), which is exactly the
-/// cheap session the tests want.
+/// with. A custom agent with no `launch` command execs a bare login shell
+/// (hookless → `running` at once), which is exactly the cheap session the tests want.
 pub async fn seed_shell_agent(db: &loom::db::Db) {
     loom::custom_agents::set(
         db,
@@ -225,8 +224,8 @@ impl TestServer {
         // Never let the outer loom session's scoped bearer leak into this
         // isolated server or CLI subprocesses spawned by a test.
         std::env::remove_var("LOOM_TOKEN");
-        // `seed_owner` no longer defaults to a real login — the suite's requests
-        // ride loopback trust, which needs a seeded owner to resolve to.
+        // The suite's requests ride loopback trust, which needs a seeded owner to
+        // resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let repo = tempfile::tempdir().unwrap();
@@ -273,10 +272,9 @@ impl TestServer {
         )
         .await
         .unwrap();
-        // The suites launch cheap no-op sessions with `"agent": "shell"`. `shell`
-        // is no longer a builtin, so seed it as a command-less custom agent: it
-        // execs a bare login shell and is hookless (so it comes up `running`
-        // immediately, never stuck `launching`).
+        // The suites launch cheap no-op sessions with `"agent": "shell"`. Seed it
+        // as a command-less custom agent: it execs a bare login shell and is
+        // hookless (so it comes up `running` immediately, never stuck `launching`).
         seed_shell_agent(&state.db).await;
         // Keep a handle to the editor manager and a full state clone before
         // `state` moves into serve, so a test can register a stub upstream on the
@@ -294,10 +292,9 @@ impl TestServer {
         // unauthenticated client deliberately instead of inheriting ambient
         // credentials through `client::default()`.
         let client = Client::new(format!("http://{addr}"));
-        // Wait for readiness, and *assert* it. This loop used to break silently
-        // when the server never came up, so a router that panicked on startup
-        // surfaced as "cannot reach loom" from whatever request each test made
-        // first — 185 identical failures, none naming the cause.
+        // Wait for readiness and assert it. This ensures the server is ready
+        // before proceeding; a server that panics on startup will fail here with
+        // a clear error message.
         let mut ready = false;
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {

@@ -19,8 +19,8 @@ pub struct Input {
     pub name: String,
     /// Select an immutable past revision instead of the latest.
     pub rev: Option<i64>,
-    /// Read the repository-shared artifact of this name rather than
-    /// resolving this branch's own copy first.
+    /// When true, read the repository-shared artifact. By default, resolve
+    /// this branch's own copy first.
     #[operand(default = false)]
     pub repo: bool,
     /// Resolved from the calling session; not something a caller supplies.

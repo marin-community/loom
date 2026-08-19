@@ -19,19 +19,19 @@
 //! Two consequences worth stating, because getting either wrong is how the
 //! previous surface drifted:
 //!
-//! * **The route is derived, not written.** [`mount`] walks the registry and
-//!   mounts every non-JSON operation at `spec.path()`. That is why a session
-//!   stream takes `?session=…` rather than a path segment: an operand is an
+//! * **The route is derived from the registry.** [`mount`] walks the registry and
+//!   mounts every non-JSON operation at `spec.path()`. A session stream takes
+//!   `?session=…` as a query parameter, not a path segment: an operand is an
 //!   operand regardless of encoding, and a path parameter would make the real
-//!   route unequal to the declared one. It is also why every operand of an
-//!   operation mounted here is optional on the wire — the query string is
-//!   extracted before any default-filling could run.
-//! * **Authorization is the dispatcher's, not the handler's.** Every handler
-//!   calls [`super::operations::authorize_declared`], which is the same context
-//!   fill and the same `authorize` the JSON dispatcher runs. Actor policy alone
-//!   is also checked upstream in [`super::auth::grant_allows`]; what only this
-//!   call supplies is the `Scoped` resource check, so a stream cannot quietly
-//!   skip the rule that a session credential reaches only its own session tree.
+//!   route unequal to the declared one. Every operand of an operation mounted
+//!   here is optional on the wire — the query string is extracted before any
+//!   default-filling could run.
+//! * **Authorization runs through the dispatcher.** Every handler calls
+//!   [`super::operations::authorize_declared`], which is the same context fill
+//!   and the same `authorize` the JSON dispatcher runs. Actor policy is also
+//!   checked upstream in [`super::auth::grant_allows`]; this call adds the
+//!   `Scoped` resource check, ensuring a session credential reaches only its
+//!   own session tree.
 
 use axum::body::Bytes;
 use axum::extract::ws::WebSocketUpgrade;

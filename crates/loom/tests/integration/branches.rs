@@ -52,8 +52,6 @@ async fn branch_issues_and_repo_board() {
     let created = client
         .post(
             "/api/issues/create",
-            // The operation's Input is flat: the old nested `request` envelope
-            // was a property of the route, not of the operation.
             json!({ "branch": branch_id, "title": "fix it", "body": "details" }),
         )
         .await
@@ -90,8 +88,6 @@ async fn branch_issues_and_repo_board() {
     let backlog = client
         .post(
             "/api/issues/list",
-            // `?scope=backlog` became the `backlog` operand — a filter on one
-            // collection rather than a second operation.
             json!({ "repo_root": repo_root, "backlog": true, "all": false }),
         )
         .await
@@ -217,8 +213,7 @@ async fn cross_repo_board_and_issue_tags() {
     assert!(cleared.tags.is_empty(), "clearing removes the label");
 
     // Lifecycle operations take a set of ids and apply atomically. The single
-    // -id case is just the one-element set, so the scalar convenience wrappers
-    // this replaces no longer have to exist to be kept in sync.
+    // -id case is just the one-element set.
     let close = |ids: Vec<i64>| {
         let input = close::Input {
             ids,
@@ -326,7 +321,7 @@ async fn triage_axis_marks_a_session() {
         .unwrap();
     // `sessions.tags.set` answers with the branch directly (unlike
     // `sessions.get`'s `SessionView`, there is no outer `branch` wrapper), so
-    // this reads `marked["tags"]` rather than the `branch_tag()` helper.
+    // this reads `marked["tags"]` directly.
     let triage = marked["tags"]
         .as_array()
         .unwrap()

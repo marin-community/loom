@@ -1,8 +1,9 @@
 use super::prelude::*;
 
 /// Add labels to the pull request currently associated with a session.
-/// Watch programs use this Loom-owned API instead of receiving a GitHub
-/// credential and invoking `gh` themselves.
+///
+/// Provides a Loom-owned interface for watch programs to add labels without
+/// needing direct GitHub credentials.
 #[operation(
     id = "sessions.github.labels.add",
     actor = SessionSelf,

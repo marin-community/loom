@@ -1,37 +1,34 @@
 //! axum REST API + SSE. The Vue SPA is the primary consumer.
 //!
-//! ## The router is derived, not written
+//! ## The router is derived from declarations
 //!
 //! Almost every endpoint here is a **registered operation**: it is declared
 //! once in `weaver_api::operations`, and its route, method, input schema,
 //! actor policy, CLI projection and MCP tool all fall out of that one
 //! declaration. The path is mechanical — `issues.list` is
 //! `POST /api/issues/list`, `sessions.shells.terminal` is
-//! `GET /api/sessions/shells/terminal` — so there is no route table to keep in
-//! sync with anything.
+//! `GET /api/sessions/shells/terminal` — with no separate route table to
+//! maintain.
 //!
 //! Two functions build the surface:
 //!
-//! * `operations::mount` mounts every operation whose response is JSON — the
-//!   overwhelming majority — on one dispatcher. Arguments arrive as a JSON body
-//!   matching the operation's `Input`; there are no path parameters and no query
-//!   strings, because an operand is a field rather than a URL position. The
-//!   three `io = Session` operations go through the same dispatcher: their body
-//!   is JSON too and only the `Set-Cookie` header differs, which is why they are
-//!   mounted beside the auth routes rather than here.
-//! * `encodings::mount` mounts every `io = Stream | Duplex` operation. Same
-//!   declarations, same authorization; these need their own handlers only
-//!   because axum wants a concrete SSE or websocket-upgrade response type.
-//!   Their operands arrive in the query string, which is the one place the
-//!   encoding shows through.
+//! * `operations::mount` serves every operation whose response is JSON — the
+//!   overwhelming majority — through one dispatcher. Arguments arrive as a JSON
+//!   body matching the operation's `Input`; operands are fields, not URL
+//!   parameters or query strings. The three `io = Session` operations route
+//!   through the same dispatcher: their body is JSON, differing only in the
+//!   `Set-Cookie` header, which is why they mount beside the auth routes.
+//! * `encodings::mount` serves every `io = Stream | Duplex` operation with
+//!   custom handlers — axum requires concrete SSE or websocket-upgrade response
+//!   types. Operands arrive in the query string, which is the sole place where
+//!   encoding affects the wire format.
 //!
-//! What is left is mounted by hand, and `crates/loom/tests/surface_parity.rs`
-//! is the ledger that says which and why: transport that is not an operation
-//! (the code-server proxy, liveness probes, the GitHub webhook, OAuth
-//! redirects), routes an operation has superseded but whose last caller has
-//! not moved, and — the list that is supposed to reach zero — routes with no
-//! operation behind them at all. That test fails if this file grows a route
-//! the ledger does not name, in either direction.
+//! The remainder mounts by hand, tracked by `crates/loom/tests/surface_parity.rs`:
+//! what is listed there comprises transport that is not operation-backed
+//! (the code-server proxy, liveness probes, the GitHub webhook, OAuth redirects),
+//! routes that operations have superseded but whose callers have not yet migrated,
+//! and routes with no operation at all. The test enforces that this file and the
+//! ledger remain synchronized.
 //!
 //! Response encoding is the only thing an operation's declaration varies about
 //! its transport; see `docs/ARCHITECTURE.md` for the projection table.
@@ -728,10 +725,9 @@ fn registered_api_router() -> Router<AppState> {
     // The non-JSON half of the same registry: SSE feeds and terminal
     // websockets, mounted at their derived paths off the same declarations.
     let router = encodings::mount(router);
-    // The IDE proxy: the one hand-mounted thing on the authenticated surface
-    // that is not an operation and is not going to become one. It forwards an
-    // arbitrary sub-path into a container and streams back whatever comes out —
-    // there is no request shape to declare and no response to encode.
+    // The IDE proxy: the one hand-mounted endpoint on the authenticated surface.
+    // It forwards an arbitrary sub-path into a container and streams back
+    // whatever comes out — it has no operation declaration and will not get one.
     router
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
         .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))

@@ -18,10 +18,7 @@ use super::{ApiResult, AppError};
 // `weaver_api::operations::repos::env`. Folded into `repos::bound_operations()`
 // (see `repos.rs`) rather than exported to the coordinator's `registry()`
 // directly, since `repos.env.*` is part of the `repos` bundle even though its
-// handlers live in this sibling file. Values stay write-only here exactly as
-// the legacy routes above never returned them: [`RepoEnvView`] carries only
-// [`RepoEnvVarView`] (name + timestamp) — the declared `Output` for all three
-// operations — never the stored value.
+// handlers live in this sibling file.
 // ---------------------------------------------------------------------------
 
 async fn repo_env_view(db: &Db, repo_root: &str) -> ApiResult<RepoEnvView> {

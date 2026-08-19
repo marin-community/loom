@@ -15,10 +15,7 @@ pub struct Launch;
 pub struct Input {
     /// One-line task label for the new session.
     ///
-    /// Optional because a launch that claims an issue derives its title from
-    /// that issue (`title_provenance = "derived"`), and a launch against a
-    /// managed repo can fall back to the branch name. Declaring it required
-    /// would make the operation stricter than the act it describes.
+    /// Optional: derived from a claimed issue or managed repo branch name if omitted.
     #[operand(positional)]
     pub title: Option<String>,
     /// Detailed goal for the new session; defaults to the task label.
@@ -58,11 +55,8 @@ pub struct Input {
     #[operand(context = "branch")]
     pub parent_branch: Option<String>,
 
-    // The fields below are what `loom sessions launch` actually sends. An
-    // earlier draft of this contract omitted them, which would have quietly
-    // downgraded every launch to profile defaults and dropped the staleness
-    // guards — a launch is the operation where getting the configuration wrong
-    // is least visible and most expensive.
+    // The fields below are required for the CLI to properly control launch
+    // behavior and prevent silent configuration changes from being missed.
     /// Explicit branch name instead of a generated one.
     pub name: Option<String>,
     /// Attach to a branch that already exists rather than creating one.

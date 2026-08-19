@@ -1,9 +1,9 @@
 //! The registry's public surface, checked in as a reviewable text file.
 //!
 //! Every operation, its route, its CLI invocation, its MCP tool, who may call
-//! it, and what it requires — one line each, sorted. A reviewer reads the diff
-//! of `surface.txt` rather than 130 declarations, and any change to what Loom
-//! exposes shows up there whether or not the author mentioned it.
+//! it, and what it requires — one line each, sorted. Checking in the surface
+//! file makes API changes visible in diffs; any change to what Loom exposes
+//! appears explicitly.
 //!
 //! Regenerate deliberately: `UPDATE_SURFACE=1 cargo test -p weaver-api --test surface`
 

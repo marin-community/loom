@@ -17,8 +17,8 @@ fn registry_validates() {
 
 /// Invariant 4 (the half of it that is a security property).
 ///
-/// "An agent cannot approve its own permission request" used to be an *absence*
-/// — you verified it by failing to find a tool. Now it is a checked property.
+/// An agent cannot approve its own permission request, enforced by requiring
+/// the operation to be agent-reachable.
 #[test]
 fn only_agent_reachable_operations_expose_mcp_tools() {
     let leaked: Vec<_> = operations::operations()
@@ -71,9 +71,7 @@ fn mcp_catalogue_is_a_bijection_with_the_registry() {
     }
 }
 
-/// Routes are derived from identity, so every operation resolves from its own
-/// route. The old registry declared a route *and* computed one, and they
-/// disagreed for every generated operation.
+/// Routes are derived from identity, so every operation must resolve from its own route.
 #[test]
 fn routes_round_trip() {
     for operation in operations::operations() {
@@ -101,9 +99,7 @@ fn routes_are_unique() {
     }
 }
 
-/// Context fields are dispatcher-supplied and must never appear in the schema a
-/// caller reads. This is the fix for the old `args` / `Input` split, where the
-/// MCP schema and the REST body described different shapes.
+/// Context fields are dispatcher-supplied and must never appear in the schema a caller reads.
 #[test]
 fn context_fields_are_never_caller_supplied() {
     for operation in operations::operations() {
@@ -232,9 +228,8 @@ fn every_operation_lives_in_the_file_its_id_names() {
 
 /// The other direction: no operation file is orphaned.
 ///
-/// A file under `operations/` that declares no registered operation is either a
-/// bundle `mod.rs`, or it is dead code that still compiles — which is how the
-/// previous registry ended up advertising three CLI commands that did not exist.
+/// Every file under `operations/` must declare a registered operation, be a
+/// bundle `mod.rs`, or be the `registry.rs` vocabulary module.
 #[test]
 fn every_operation_file_declares_a_registered_operation() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operations");
@@ -272,12 +267,10 @@ fn every_operation_file_declares_a_registered_operation() {
     );
 }
 
-/// The unauthenticated surface, pinned.
+/// The unauthenticated surface, pinned by explicit declaration.
 ///
-/// An operation reachable without a credential is the highest-consequence thing
-/// this registry can declare, so the set is written out here rather than merely
-/// validated by shape. Adding one is a deliberate edit to a test whose name says
-/// what it is guarding.
+/// Operations reachable without a credential are the highest-consequence thing
+/// this registry can declare. Adding one requires a deliberate edit to this test.
 #[test]
 fn anonymous_operations_are_pinned() {
     let anonymous: BTreeSet<&str> = operations::operations()
@@ -356,11 +349,10 @@ fn session_only_operations_are_pinned() {
 /// * `download` — the *response* body is raw bytes with a guessed content type,
 ///   because the caller is a browser fetching a URL rather than posting JSON.
 ///
-/// Every one of these is still a registered operation with a derived route, a
-/// declared actor, and the dispatcher's own `authorize`. The streams used to be
-/// unregistered on the theory that a GET cannot sit at a derived path. It can:
-/// `?session=…` is a URL, an operand is an operand regardless of encoding, and
-/// `loom::web::encodings` mounts all of these off these declarations.
+/// Every one of these is a registered operation with a derived route,
+/// a declared actor, and authorization. Operands arrive in the query string
+/// for operations without a JSON body, and `loom::web::encodings` mounts all
+/// of these off the declarations in this registry.
 #[test]
 fn transport_specific_operations_are_pinned() {
     let special: BTreeMap<&str, &str> = operations::operations()

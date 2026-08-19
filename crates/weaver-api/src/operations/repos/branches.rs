@@ -3,9 +3,7 @@ use super::prelude::*;
 /// List the local git branches of a repo checkout, and which has a worktree.
 ///
 /// `cwd` is a server-local filesystem path (any git checkout the server
-/// process can read), not a managed-repo slug — this is a launch-flow
-/// convenience for browsing an operator's own checkout, which is also why it
-/// stays `actor = User` rather than agent-reachable.
+/// process can read), not a managed-repo slug.
 #[operation(
     id = "repos.branches",
     actor = User,

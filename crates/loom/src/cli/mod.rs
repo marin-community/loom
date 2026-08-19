@@ -14,7 +14,7 @@ use weaver_api::operations::*;
 /// Every registered operation's command-line binding.
 ///
 /// One line per operation. A registered operation missing from this list fails
-/// the parity test rather than silently vanishing from the CLI.
+/// the parity test.
 pub fn bindings() -> Vec<CliBinding> {
     vec![
         bind::<agents::custom::create::Create>(),

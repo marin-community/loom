@@ -17,8 +17,8 @@ pub struct Input {
     /// The artifact's name.
     #[operand(positional)]
     pub name: String,
-    /// Delete the repository-shared artifact instead of this branch's own
-    /// copy.
+    /// When true, delete the repository-shared artifact. By default, delete
+    /// this branch's own copy.
     #[operand(default = false)]
     pub repo: bool,
     /// Resolved from the calling session; not something a caller supplies.

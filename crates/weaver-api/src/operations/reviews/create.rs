@@ -3,17 +3,11 @@ use super::prelude::*;
 /// Create or reuse a draft review over a session's artifact or its
 /// change-set, seeding it against the currently-visible subject version.
 ///
-/// Operator-only, same reasoning as `reviews.comments.create` — a review's
-/// draft belongs to the human operator who starts it, so a session
-/// credential (even the reviewed session's own) may not start one. See
-/// `require_operator`, reached through `create_for`, in
-/// `crates/loom/src/web/reviews.rs`.
+/// Operator-only: a review's draft belongs to the human operator who starts it,
+/// so a session credential may not start one.
 ///
-/// `session` names the session whose artifact or change-set is under
-/// review, not the caller's own — the caller here is always a human
-/// operator, who has no session of their own to default to. It is therefore
-/// an ordinary operand rather than `#[operand(context)]`, the same shape
-/// `permissions.github.grant`/`.revoke` use for the same reason.
+/// `session` names the session whose artifact or change-set is under review,
+/// not the caller's own.
 #[operation(
     id = "reviews.create",
     actor = User,

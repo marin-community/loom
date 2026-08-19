@@ -807,10 +807,14 @@ mod tests {
     /// module doc comment for why.
     ///
     /// Re-pinned again for two new operations joining an existing grant:
-    /// `channels.archive` widened `loom/channels/write@v1` (and its legacy twin
-    /// `mcp/channel/write@v1`) by one tool, and `issues.update` widened
-    /// `loom/issues/write@v1` the same way — both previously reachable only
-    /// through a hand-mounted route the operation registry did not describe.
+    /// `channels.archive` widened `loom/channels/write@v1` (and its
+    /// `mcp/channel/write@v1` twin) by one tool, and `issues.update` widened
+    /// `loom/issues/write@v1` the same way.
+    ///
+    /// Re-pinned again after rewriting the doc comments on `artifacts.*`,
+    /// `issues.*`, and `channels.*` operation structs for clarity — those doc
+    /// comments are the MCP tool description, so the digest moved with the
+    /// text. No schema or behavior changed.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -835,7 +839,7 @@ mod tests {
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:70a9d1aa505d6f313b2150ac5dbc77513ec6bfd9fe7d6bcd57c64e754cf4d142",
+                "sha256:e5c39878972998e9eb49045d427551a8b42e5b3ace07256361b886acdf4eeb89",
             ),
             (
                 "mcp/channel/read@v1",
@@ -843,31 +847,31 @@ mod tests {
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:37ff3131f75c304cb3c5a1c5b36aa36396ecb629098eb27bb629fd99f85d414f",
+                "sha256:8756837d85513740e473c948a38fdc8a615a9ca7018e5602cc3a1f82d8413bde",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:95b92113ee60960aabcab1f1566f76029240cd0f13c6d1160a7a638005c42055",
+                "sha256:0a335a3b93cf6137d7604fa744bcb2219799e31ee1375bf3e26488dcca7a1d9a",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:f446a8e165480e7915e6d1985f004803da25413aa100e9a80b91a2446b8c4015",
+                "sha256:271e8dba6b496899ee0f6a64c54bf1189439a466e30588bb30326021ed27fc0e",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:5ce4b6aa0ac62f4340654a2281c7d6cd65c68ee3272915941540708370fccd89",
+                "sha256:06c5c612abcb6bc9c17c2f543276619bcc006423b6a11c1379405b76775a7179",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:5142a22e9a4b7151648891edbdce7a322baded4b146378d9d580176f69f4aeae",
+                "sha256:9f2196b01619665f8550a75c1feda9d38de7c468fdbfafa4eb69507fda67e947",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:aa2ae1a0151900570e4cb8a1f9ecb1e1f5db101ea839a528c5cff0c14ad617a6",
+                "sha256:bc4524487cd476c3883a035740ceb5a747efd0645e2f89b10a86370f1002b627",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:1915faae327f4b1f34356e5330067b416ebf318c44b8e2fdb762e84dbcc7ed9c",
+                "sha256:3d523c1c205981a58712426e1413250163ec4b68d8e162c4ba55e7ca58851c74",
             ),
             (
                 "loom/sessions/read@v1",

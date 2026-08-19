@@ -2,17 +2,14 @@ use super::prelude::*;
 
 /// Atomically replace one author's complete tag set on a session.
 ///
-/// The watch-safe counterpart to `sessions.tags.set`: rows still authored by
-/// `by` are replaced in one transaction, so a stale round cannot delete a key
-/// another actor took over after its fleet snapshot was taken. Doing this as a
-/// diff of per-key calls is not the same operation — it loses exactly the
-/// atomicity the watches depend on, which is why this is declared rather than
-/// left to the caller to approximate.
+/// All rows authored by `by` are replaced in a single transaction, ensuring
+/// that a stale update cannot delete a key another actor took over after the
+/// fleet snapshot. This atomic guarantee is required for the watch system to
+/// avoid race conditions.
 ///
-/// `clear` names exact `(key, value)` pairs to drop as part of the same
-/// transaction, so a real status can replace a lifecycle mark such as
-/// `idle: idle` without the caller issuing a key-only delete that would also
-/// remove someone else's newer value.
+/// `clear` names exact `(key, value)` pairs to drop in the same transaction,
+/// so a real status can replace a lifecycle mark (e.g., `idle: idle`) without
+/// removing someone else's newer value.
 #[operation(
     id = "sessions.tags.replace",
     actor = SessionSelf,

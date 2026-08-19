@@ -96,12 +96,8 @@ pub(crate) async fn require_branch_access(
     }
 }
 
-/// A session credential may reach its own session and its descendants.
-///
-/// The descendant rule is not new: `/sessions/{id}` under a session credential
-/// has always been checked with the same recursive walk, so that a parent can
-/// drive the children it launched. What is new is where it lives — one check,
-/// against the session the operation's typed input names.
+/// A session credential may reach its own session and its descendants,
+/// so that a parent can drive the children it launched.
 pub(crate) async fn require_session_access(
     st: &AppState,
     principal: &Principal,

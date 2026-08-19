@@ -11,8 +11,8 @@ use syn::{Attribute, Expr, Field, Ident, Lit, LitStr, Meta, Type};
 /// How a field's Rust type projects onto a command line.
 ///
 /// Anything the CLI cannot express as a flag or positional lands in `Json`,
-/// which is deliberately explicit: an operand whose shape is a nested struct or
-/// a tagged union has to say so, rather than silently degrading to a string.
+/// which is deliberately explicit: operands with complex shapes must declare
+/// themselves.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Bool,
@@ -94,7 +94,7 @@ pub struct Operand {
     pub long: Option<String>,
     pub short: Option<char>,
     pub skip_cli: bool,
-    /// CLI-only: take this string as a file path (or stdin) rather than inline.
+    /// CLI-only: interpret this string as a file path or stdin.
     pub from_file: bool,
     /// The declared field type, used to type-annotate the wire default so a
     /// bare `None` or `BTreeMap::new()` still infers.
@@ -205,8 +205,8 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
 
 /// Classify a field's type by its surface tokens.
 ///
-/// Deliberately syntactic: a proc macro cannot resolve aliases, so anything not
-/// recognised becomes `Json` and must be handled explicitly rather than guessed.
+/// Deliberately syntactic: a proc macro cannot resolve aliases. Unrecognized
+/// types become `Json` and require explicit handling.
 fn classify(ty: &Type) -> Kind {
     let Type::Path(path) = ty else {
         return Kind::Json;
@@ -224,9 +224,8 @@ fn classify(ty: &Type) -> Kind {
         "Option" => match inner(segment) {
             Some(Kind::Int) => Kind::OptInt,
             Some(Kind::Str) => Kind::OptStr,
-            // A tri-state, not a flag: `--submit` means true, `--submit=false`
-            // means false, and omitting it leaves the server's default. A plain
-            // `SetTrue` flag cannot express the third case.
+            // A tri-state option: `--submit` enables it, `--submit=false`
+            // disables it, and omitting it uses the server's default.
             Some(Kind::Bool) => Kind::OptBool,
             _ => Kind::Json,
         },

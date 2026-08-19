@@ -1409,11 +1409,9 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
         .unwrap();
     assert_eq!(queued["queued"], true);
 
-    // Reproduce a failed queue-consumption write. The production incident was a
-    // `NOT NULL constraint failed: sessions.pending_prompt` — the clearing write
-    // now stores '' rather than NULL, so this injects the same class of failure
-    // on the real clearing update. The invariant is that a failed consume must
-    // keep loom from dispatching.
+    // Reproduce a failed queue-consumption write. Inject a failure on the
+    // clearing update to verify the invariant: a failed consume must keep loom
+    // from dispatching.
     sqlx::query(
         "CREATE TRIGGER reject_queue_consume
          BEFORE UPDATE OF pending_prompt ON sessions
@@ -1463,9 +1461,7 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
     );
 }
 
-/// Adapter-specific private steering must not bypass the durable queue. The
-/// incident behind this regression had codex-acp acknowledge and display two
-/// steers that Codex never added to its conversation history.
+/// Adapter-specific private steering must not bypass the durable queue.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn advertised_private_steering_still_uses_the_durable_queue() {

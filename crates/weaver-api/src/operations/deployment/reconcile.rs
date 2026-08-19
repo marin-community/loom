@@ -2,11 +2,10 @@ use std::collections::BTreeMap;
 
 use super::prelude::*;
 
-/// Reconcile the runtime resources declared by a deployment stack: registered
-/// settings, named launch profiles and their write-only environment, and
-/// workload federation mappings. This is the API-first boundary Pulumi's
-/// startup generation calls through the local Loom CLI; the manifest carries
-/// references and policy, never secret values.
+/// Reconcile the runtime resources declared by a deployment stack: settings,
+/// launch profiles, and federation mappings.
+///
+/// The manifest carries references and policy, never secret values.
 #[operation(
     id = "deployment.reconcile",
     actor = Admin,

@@ -71,8 +71,8 @@ async fn apply_settings_changes(
 
 /// A setting value as a caller writes it, reduced to the string it is stored as.
 ///
-/// `None` (a JSON `null`) clears the key. An array or an object is not a setting
-/// value and is refused by key rather than stringified into nonsense.
+/// `None` (a JSON `null`) clears the key. Composite values (arrays or objects)
+/// are rejected by key, avoiding the nonsense of stringifying them.
 fn setting_value(raw: Option<Value>) -> Result<Option<String>, &'static str> {
     match raw {
         None | Some(Value::Null) => Ok(None),
@@ -299,11 +299,8 @@ mod tests {
 
     /// A caller writes the value it means, not a pre-stringified one.
     ///
-    /// This is the contract `settings.patch` broke when it declared its operand
-    /// `Option<String>`: `{"auth.trust_loopback": false}` — the exact body the
-    /// settings pane sends for a toggle — became a deserialization error, while
-    /// the route it replaced had always coerced it. Both `settings.patch` and
-    /// `preferences.patch` reduce through here, so the coercion is stated once.
+    /// A toggle like `{"auth.trust_loopback": false}` must coerce to the stored
+    /// string. Both `settings.patch` and `preferences.patch` reduce through here.
     #[test]
     fn json_scalars_reduce_to_the_string_a_setting_stores() {
         assert_eq!(setting_value(Some(json!("dark"))), Ok(Some("dark".into())));
@@ -318,9 +315,9 @@ mod tests {
         assert_eq!(setting_value(None), Ok(None));
     }
 
-    /// An array or an object is not a setting value. Refusing it by key beats
-    /// stringifying it into something that would fail validation later with a
-    /// worse message — or worse, pass.
+    /// Composite values (arrays or objects) are rejected by key, avoiding the
+    /// nonsense of stringifying them into something that would fail validation
+    /// later — or worse, silently pass.
     #[test]
     fn a_composite_is_refused_rather_than_stringified() {
         assert!(setting_value(Some(json!([1, 2]))).is_err());

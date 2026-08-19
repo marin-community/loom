@@ -39,10 +39,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `sessions.scratch.limits`. `actor = User`: see the operation's doc
-/// comment for why — `grant_allows` in `crates/loom/src/web/auth.rs` never
-/// let a `Grant::Session` credential reach the `GET /scratch/limits` route
-/// this replaced.
+/// `sessions.scratch.limits`. `actor = User`: limits are server-wide
+/// configuration, not session-scoped.
 async fn op_scratch_limits(
     _context: OperationContext,
     _input: ops::scratch::limits::Input,
@@ -50,9 +48,7 @@ async fn op_scratch_limits(
     Ok(scratch_limits_view())
 }
 
-/// `sessions.scratch.list`. The route this replaces hand-rolled the same two
-/// fields as anonymous JSON; this returns the `ScratchFileView` that shape
-/// has become.
+/// `sessions.scratch.list`.
 async fn op_scratch_list(
     context: OperationContext,
     input: ops::scratch::list::Input,
@@ -100,9 +96,7 @@ pub(super) async fn write_scratch_bytes(
     })
 }
 
-/// `sessions.scratch.delete`. The route this replaces returned 204; that
-/// becomes a result body here, and the name reported back is the one the
-/// store resolved and removed, not the raw operand.
+/// `sessions.scratch.delete`.
 async fn op_scratch_delete(
     context: OperationContext,
     input: ops::scratch::delete::Input,

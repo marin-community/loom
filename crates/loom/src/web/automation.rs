@@ -60,12 +60,9 @@ pub(super) async fn federate(
 
 /// The requesting identity for `runs.create`, `actor = Internal`:
 /// `authorize()` has already refused anything but `Grant::Admin` or
-/// `Grant::Automation` by the time this runs (`Grant::User`/`Grant::Session`
-/// cannot reach here). The old handler this replaces also let a plain
-/// `Grant::User` act as itself, naming any profile — a widening this
-/// declaration deliberately drops; see the port report. The automation
-/// grant's own profile allowlist is per-token business state, not something
-/// the central actor/scope check can see, so it stays.
+/// `Grant::Automation` by the time this runs. The automation grant's own
+/// profile allowlist is per-token business state, not something the central
+/// actor/scope check can see, so it stays here.
 fn run_identity(
     principal: &Principal,
     requested_profile: &str,
@@ -84,9 +81,8 @@ fn run_identity(
             }
             Ok((subject.clone(), profiles.clone()))
         }
-        // `actor = Internal` should have refused these before we got here, but a
-        // policy is not a proof: an actor widened by mistake would turn an
-        // `unreachable!` into a panic reachable from the network.
+        // `actor = Internal` should refuse these before we got here, but defend against
+        // misconfiguration by returning an error rather than panicking.
         Grant::Anonymous | Grant::User | Grant::Session { .. } => Err(AppError::new(
             StatusCode::FORBIDDEN,
             "creating an automation run requires an admin or automation credential",
@@ -469,12 +465,9 @@ async fn create_run_core(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy routes: `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`.
-//
-// These are the URLs external automation (a Grafana webhook, a GitHub Actions
-// workflow) and the dashboard already point at. They delegate to the same core
-// the `runs.*` operations use, so there is one implementation behind two doors,
-// and they retire when those callers move to `/api/runs/create` and friends.
+// Operation registry — `runs.*`, bound onto `weaver_api::operations::runs`.
+// External automation (a Grafana webhook, a GitHub Actions workflow) and the
+// dashboard reach these through `/api/runs/create` and friends.
 // ---------------------------------------------------------------------------
 
 /// `runs.create`. `actor = Internal` means `authorize()` has already
@@ -499,11 +492,9 @@ pub(super) async fn create_run(
 }
 
 /// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`
-/// ever reach this handler (`Grant::Automation` and `Grant::Session` are
-/// refused by `authorize()` before the body runs). The old handler this
-/// replaces additionally let `Grant::Automation` list runs filtered to its
-/// own subject — that path is gone now that `Grant::Automation` cannot reach
-/// an `actor = User` operation at all; see the port report.
+/// ever reach this handler; `authorize()` refuses `Grant::Automation` and
+/// `Grant::Session` before the body runs. An automation credential cannot
+/// list even its own runs through this operation.
 pub(super) async fn list_runs(
     context: OperationContext,
     _input: run_operations::list::Input,
@@ -515,9 +506,8 @@ pub(super) async fn list_runs(
         .collect())
 }
 
-/// `runs.get`, same reasoning as `runs.list`: only `Grant::Admin`/
-/// `Grant::User` reach here, so the old handler's `Grant::Automation`
-/// subject-match check is unreachable and dropped.
+/// `runs.get`, same constraint as `runs.list`: only `Grant::Admin`/
+/// `Grant::User` reach here.
 pub(super) async fn get_run(
     context: OperationContext,
     input: run_operations::get::Input,

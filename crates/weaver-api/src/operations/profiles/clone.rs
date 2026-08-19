@@ -36,8 +36,7 @@ pub struct Input {
     /// remain server-owned and atomic either way.
     #[operand(json, default = None)]
     pub template: Option<ProfileReq>,
-    /// Copy the source's write-only environment. Legacy shorthand for
-    /// `environment.inherit`; ignored when `environment` is present.
+    /// Copy the source's write-only environment; ignored when `environment` is present.
     #[operand(default = false)]
     pub copy_environment: bool,
     /// Explicit write-only environment composition for the clone.

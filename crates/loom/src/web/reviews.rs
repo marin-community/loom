@@ -513,18 +513,10 @@ async fn submitted_draft_conflict(st: &AppState, item: &review::Review) -> AppEr
 
 // ---------------------------------------------------------------------------
 // Operation registry — `reviews.*`, bound onto `weaver_api::operations::reviews`.
-// These are the operation-typed twins of every legacy route in this file:
-// `get_review`, `update_review`, `discard_review`, `update_review_comment`,
-// `delete_review_comment`, `resolve_review_comment`,
-// `retarget_review_to_current`, `list_session_reviews`,
-// `create_session_review`, `add_review_comment`, `submit_review`, and
-// `retry_review_delivery`. The ownership/business-state checks those handlers
-// perform (`creator_review`, `submitted_operator_review`, the draft/submitted
-// status guards) stay — per the porting rules, those are checks about which
-// review this credential may act on, not about the credential's authority in
-// general, so they are not something `register`'s central `authorize()` can
-// express. The legacy routes stay live and untouched until the coordinated
-// route deletion pass.
+// The ownership/business-state checks (`creator_review`, `submitted_operator_review`,
+// the draft/submitted status guards) are checks about which review this credential
+// may act on, not about the credential's authority in general, so they are not
+// something `register`'s central `authorize()` can express.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {

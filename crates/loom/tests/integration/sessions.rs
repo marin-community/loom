@@ -1133,9 +1133,8 @@ async fn automation_class_hidden_from_the_default_listing() {
     );
 
     // `automation` is what decides whether the class is visible, and it is an
-    // operand rather than a per-route default — which is the point: the same
-    // question used to be answered differently by `GET /api/sessions` and by
-    // `search_sessions`, and neither caller could see which one it had.
+    // operand rather than a per-route default. This ensures consistent behavior
+    // across all queries for this visibility.
     let hidden = client
         .post("/api/sessions/list", json!({ "automation": false }))
         .await
@@ -1169,8 +1168,7 @@ async fn automation_class_hidden_from_the_default_listing() {
 }
 
 /// Archiving a session frees its branch slot: a fresh session can attach to the
-/// same branch via `existing_branch`, where the archived tenant used to make the
-/// create 409 as busy. The branch key then resolves to the live tenant.
+/// same branch via `existing_branch`. The branch key then resolves to the live tenant.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn archive_frees_the_branch_for_a_new_session() {

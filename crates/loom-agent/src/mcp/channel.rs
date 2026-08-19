@@ -10,9 +10,7 @@
 //! see `channels.messages.list` and `channels.wait` in
 //! `crates/loom/src/web/channels.rs`.
 //!
-//! `list`/`get` used to fetch each channel's delivery bindings with a second
-//! call and merge them in by hand; `ChannelView::bindings` carries that now,
-//! so the plain operation response already has it.
+//! `list`/`get` responses include delivery bindings via `ChannelView::bindings`.
 
 use std::sync::OnceLock;
 
@@ -32,10 +30,8 @@ const TOOL_NAMES: [&str; 8] = [
     "subscribe",
 ];
 
-// Existing pinned sessions keep their exact identities during the CLI/MCP
-// migration: `mcp/channel/*@v1` predates the `loom/channels/*@v1` grant names
-// and has no registry counterpart to derive from, so it stays hand-authored
-// rather than `derive_capability_sets`.
+// Existing pinned sessions keep their exact identities. The `mcp/channel/*@v1`
+// capability sets are hand-authored because no operation's grants field names them.
 const LEGACY_READ_TOOLS: &[&str] = &["list", "get", "read", "wait"];
 const LEGACY_WRITE_TOOLS: &[&str] = &["send", "ack", "open", "subscribe"];
 const LEGACY_CAPABILITY_SETS: &[CapabilitySet] = &[
@@ -67,11 +63,10 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-/// Capability sets, derived from the registry rather than hand-maintained:
-/// every `channels.*` operation whose MCP projection targets this server
-/// contributes its tool to the set named by its grant. The legacy
-/// `mcp/channel/*@v1` names are not derivable this way — no operation's
-/// `grants` names them — so they stay a hand-authored addition.
+/// Capability sets are derived from the registry: every `channels.*` operation
+/// whose MCP projection targets this server contributes its tool to the set named
+/// by its grant. The `mcp/channel/*@v1` names are hand-authored because no
+/// operation's grants field names them.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {

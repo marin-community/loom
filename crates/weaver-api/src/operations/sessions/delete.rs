@@ -2,8 +2,8 @@ use super::prelude::*;
 
 /// Fully remove a session: tear down its terminal/worktree and, unless
 /// `keep_branch` is set, the branch and its commits too. The session row and
-/// run history are removed as well. The irreversible counterpart of
-/// `sessions.archive`, which keeps all of it.
+/// run history are removed as well. This is irreversible; see `sessions.archive`
+/// to keep session data.
 #[operation(
     id = "sessions.delete",
     actor = SessionSelf,

@@ -1,14 +1,6 @@
 use super::prelude::*;
 
-/// List recent durable events on a branch (newest activity first, capped).
-///
-/// `GET /branches/{id}/events` looks like it should be a live tail, but its
-/// handler (`branch_events` in `crates/loom/src/web/sessions.rs`, also
-/// aliased at `GET /sessions/{id}/log`) returns a plain bounded
-/// `Vec<Event>` — the last 200 rows — not an SSE stream. The live feed is
-/// `sessions.events.stream` (`io = Stream`), keyed by session rather than
-/// branch. So this stays `io = Json`, matching the already-registered
-/// `sessions.events.list`, which wraps the same handler keyed by session.
+/// List recent durable events on a branch (newest first, last 200 entries).
 #[operation(
     id = "branches.events.list",
     actor = SessionSelf,

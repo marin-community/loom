@@ -2,12 +2,10 @@ use super::prelude::*;
 
 /// Every work item across every repository — the dashboard's board.
 ///
-/// A different read from [`super::list`], not a wider one: `issues.list` is
-/// `scope = Repository` and answers "what is happening in this repo", which is
-/// the question an agent asks. This one is `scope = Global` and answers "what is
-/// happening anywhere", which is the question the board asks, and it is why the
-/// two are separate operations rather than one with an optional `repo_root` —
-/// a scope that changes with the input is a scope nothing can check.
+/// This operation uses `scope = Global`, while `issues.list` uses
+/// `scope = Repository`. A scope that changes with input cannot be checked
+/// by the authorization system, so these are separate operations rather than
+/// one with an optional parameter.
 #[operation(
     id = "issues.board",
     actor = SessionSelf,

@@ -16,11 +16,9 @@ use super::{ApiResult, AppError};
 
 // ---------------------------------------------------------------------------
 // Operation registry — `agents.*`, bound onto `weaver_api::operations::agents`.
-// Each handler below is the twin of a legacy axum handler above. Authorization
-// (`agents.list` is `actor = SessionSelf`; the `custom.*` mutations are
-// `actor = Admin`) now happens once, centrally, in `web/operations.rs`. The
-// legacy routes above stay live and untouched until the coordinated route
-// deletion pass.
+// Authorization (`agents.list` is `actor = SessionSelf`; the `custom.*`
+// mutations are `actor = Admin`) happens once, centrally, in
+// `web/operations.rs`.
 // ---------------------------------------------------------------------------
 
 fn agent_choice_view(c: crate::agent::AgentChoice) -> AgentChoiceView {

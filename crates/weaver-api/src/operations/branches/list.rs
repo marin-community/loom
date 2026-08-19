@@ -1,11 +1,6 @@
 use super::prelude::*;
 
-/// List every branch loom is tracking.
-///
-/// Unfiltered and fleet-wide, like `sessions.list`: `grant_allows` in
-/// `crates/loom/src/web/auth.rs` has always let a session credential read
-/// bare `GET /branches`, so this stays `scope = Global` rather than
-/// restricting the caller to its own branch.
+/// List every branch loom is tracking (fleet-wide, unfiltered).
 #[operation(
     id = "branches.list",
     actor = SessionSelf,

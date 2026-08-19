@@ -65,10 +65,8 @@ pub(super) async fn validate_github_write(
     Ok(())
 }
 
-/// `sessions.github.access.list`. Its `require_human` call is dropped rather
-/// than moved: the declaration's `actor = User` is that same rule, and
-/// `authorize()` turns a session or automation credential away before this
-/// handler runs. Two copies of one rule is one copy too many.
+/// `sessions.github.access.list`. The `actor = User` declaration on the
+/// operation already enforces the human-only restriction centrally.
 pub(super) async fn list_github_access_operation(
     context: OperationContext,
     input: session_operations::github::access::list::Input,
@@ -190,9 +188,7 @@ mod tests {
         }
     }
 
-    /// The rule the deleted `require_human` used to hold, asserted where it now
-    /// lives. `actor = User` is not documentation: `authorize()` reads it, so a
-    /// session credential is turned away before any handler in this file runs.
+    /// `actor = User` on each operation ensures only humans can reach this code.
     #[test]
     fn only_humans_can_change_github_access() {
         for id in [

@@ -133,9 +133,8 @@ fn file_stamps(files: &[PathBuf]) -> Vec<FileStamp> {
 }
 
 /// Locate and parse a terminal transcript on the blocking pool, memoizing both
-/// positive and negative results briefly. Session/status SSE bursts used to
-/// launch several identical full `~/.codex` walks and parses at once; holding
-/// the small process-local cache lock makes that work single-flight.
+/// positive and negative results briefly. Holding the process-local cache lock
+/// makes concurrent identical walks single-flight.
 fn cached_terminal_conversation(session: &Session) -> Option<transcript::Log> {
     let cache = TRANSCRIPT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
@@ -226,10 +225,8 @@ fn clip(s: &str, max: usize) -> &str {
 pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
     for (m, message) in log.messages.iter_mut().enumerate() {
         for (b, block) in message.blocks.iter_mut().enumerate() {
-            // The pointer names the operation and its operands rather than a URL:
-            // `sessions.conversation.block` is reachable by whichever surface the
-            // reader already holds — the API, `loom`, or an MCP tool — and a URL
-            // would have been true for exactly one of them.
+            // The pointer names the operation and operands, reachable across all
+            // surfaces the reader might hold: the API, `loom`, or an MCP tool.
             let full =
                 format!("sessions.conversation.block session={session_id} message={m} block={b}");
             match block {
@@ -300,13 +297,11 @@ pub async fn conversation(db: &Db, session: &Session, branch: &Branch) -> Option
     serde_json::from_str(&raw).ok()
 }
 
-/// Map an ACP session's chat journal ([`crate::chat`]) to an iris [`Log`]: the
-/// same block model, flattened into the agent-agnostic transcript the archive
-/// export and the Conversation viewer speak. `user_message` → User/Text,
-/// `agent_message` → Assistant/Text, `thought` → Assistant/Thinking, `tool_call`
-/// → Assistant ToolUse+ToolResult; the ACP-only kinds (`plan`, `permission_
-/// request`, `mode_change`, `usage`, `handoff`) flatten to Context notes; `turn_end` is a
-/// boundary marker with no conversational content, so it is dropped. `None` when
+/// Map an ACP session's chat journal ([`crate::chat`]) to an iris [`Log`].
+/// Blocks map as: `user_message` → User/Text, `agent_message` → Assistant/Text,
+/// `thought` → Assistant/Thinking, `tool_call` → Assistant ToolUse+ToolResult.
+/// ACP-only kinds (`plan`, `permission_request`, `mode_change`, `usage`,
+/// `handoff`) flatten to Context notes. `turn_end` is dropped. Returns `None` if
 /// the journal is empty.
 pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
     let blocks = crate::chat::list(db, &session.id).await.ok()?;
@@ -375,7 +370,7 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                     vec![Block::text(context_note(&b.kind, p))],
                 ));
             }
-            // turn_end: a boundary, not content.
+            // turn_end: a boundary marker.
             _ => {}
         }
     }
@@ -475,8 +470,8 @@ pub async fn capture(
     session: &Session,
     branch: &Branch,
 ) -> (Option<PathBuf>, Vec<String>) {
-    // An ACP session's transcript is loom's own chat journal, not an agent JSONL:
-    // map it to iris and write the same `chat.json`/`chat.md` pair.
+    // An ACP session's transcript is loom's own chat journal; map it to iris
+    // and write the same `chat.json`/`chat.md` pair.
     if session.protocol == "acp" {
         return capture_acp(db, session, branch).await;
     }
@@ -650,7 +645,7 @@ mod tests {
 
     #[test]
     fn clip_never_splits_a_utf8_character() {
-        // A 4-byte emoji straddling the cut must be dropped whole, not halved.
+        // A 4-byte emoji straddling the cut must be dropped whole.
         let s = format!("{}🎉tail", "a".repeat(TOOL_PREVIEW_BYTES - 2));
         let out = clip(&s, TOOL_PREVIEW_BYTES);
         assert_eq!(out.len(), TOOL_PREVIEW_BYTES - 2);

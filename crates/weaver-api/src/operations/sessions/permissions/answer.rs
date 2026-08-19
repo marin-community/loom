@@ -3,10 +3,7 @@ use super::prelude::*;
 /// Answer a pending in-flight ACP permission prompt by its chosen option:
 /// 404 for an unknown request id, 409 when it was already resolved.
 ///
-/// Human-only. The legacy handler opened with an explicit
-/// `principal.is_human()` refusal — an agent's own permission prompt cannot
-/// be resolved by another agent credential, only by an operator — which
-/// `actor = User` now expresses as a declaration instead of an inline check.
+/// Human-only. Agents cannot resolve their own permission prompts.
 #[operation(
     id = "sessions.permissions.answer",
     actor = User,

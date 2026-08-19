@@ -3,23 +3,15 @@
 //! The single tool here is the registered `sessions.context` operation
 //! (`mcp = "loom_context::get"`) — `tools/list` is
 //! `weaver_api::mcp_tools_ordered` and `tools/call` is
-//! `super::dispatch::call_tool`. The old hand-rolled "accepts no arguments"
-//! check is gone: the operation's `Input` has no caller-supplied fields, so
-//! the generic dispatcher's schema-driven merge already leaves nothing for an
-//! extra argument to do.
+//! `super::dispatch::call_tool`. The schema-driven argument merge handles all
+//! required shape; no extra validation is needed.
 //!
-//! Capability sets stay hand-authored rather than
-//! `super::dispatch::derive_capability_sets`: `sessions.context`'s own
-//! `grants` names `loom/sessions/read@v1` — it is part of the same read
-//! grant as `loom_session`'s tools, just served from a different MCP process
-//! — so deriving from it here would mint a *second*, incomplete
-//! `loom/sessions/read@v1` set (only `get`, missing `summary`/`history`/etc.)
-//! under `context`'s own adapter. `expand_tool_set` resolves a set name
-//! against the *first* adapter that recognizes it
-//! (`crate::mcp::expand_tool_sets`), so that collision would silently steal
-//! the name from `session`'s real set for any caller that lists adapters in
-//! this order — this adapter keeps its own distinct `loom/context/read@v1`
-//! identity instead.
+//! Capability sets are hand-authored to avoid a name collision. The
+//! `sessions.context` operation claims the same `loom/sessions/read@v1` grant
+//! as `loom_session`'s read tools, but serves from a different MCP process. If
+//! this adapter derived its sets, `expand_tool_set` would return the first match
+//! and silently hide the real read set. Instead, this adapter keeps a distinct
+//! `loom/context/read@v1` identity.
 
 use serde_json::Value;
 

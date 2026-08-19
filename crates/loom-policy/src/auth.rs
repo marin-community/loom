@@ -94,10 +94,9 @@ pub enum Grant {
     User,
     /// No credential was presented.
     ///
-    /// Only operations declaring `actor = Anonymous` accept this — currently
-    /// exactly `auth.login` and `auth.federate`, pinned by a test. It exists so
-    /// that "runs before a principal exists" is a value the same authorization
-    /// function can reason about, rather than a route mounted outside it.
+    /// Only operations declaring `actor = Anonymous` accept this. This allows
+    /// "runs before a principal exists" to be reasoned about in the same
+    /// authorization function instead of mounted outside it.
     Anonymous,
     Automation {
         subject: String,
@@ -1056,11 +1055,9 @@ async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     crate::config::get(db, key).await.unwrap_or_default()
 }
 
-/// The configured OAuth client id (env-or-settings), or an empty string when
-/// unset. The public half of the sign-in credential — shown in the settings UI.
-/// Resolved the same way as [`github_oauth`] so the two never disagree (a deploy
-/// that sets `LOOM_GITHUB_CLIENT_ID` in its env reports the live id, not a
-/// blank, even though nothing was written to the settings table).
+/// The configured OAuth client id (env-or-settings), or empty when unset.
+/// The public half of the sign-in credential shown in the settings UI.
+/// Resolved the same way as [`github_oauth`] so the two stay in sync.
 pub async fn oauth_client_id(db: &Db) -> String {
     env_or_setting(db, "LOOM_GITHUB_CLIENT_ID", GH_CLIENT_ID_KEY).await
 }
@@ -1265,15 +1262,13 @@ mod tests {
         let hash = hash_password("hunter2").unwrap();
         assert!(verify_password("hunter2", &hash));
         assert!(!verify_password("hunter3", &hash));
-        // A garbage stored hash fails closed rather than panicking.
+        // A garbage stored hash fails closed.
         assert!(!verify_password("hunter2", "not-a-hash"));
     }
 
-    /// `db::connect_in_memory`, with `LOOM_OWNER_GITHUB` set for the duration of
-    /// the call so `seed_owner` seeds `owner` — since it no longer defaults to
-    /// a real login (fail-closed on an unset env var), every test below that
-    /// relies on a pre-seeded owner sets one explicitly. The caller must be
-    /// `#[serial]`: the env var is process-global.
+    /// `db::connect_in_memory`, with `LOOM_OWNER_GITHUB` set so `seed_owner`
+    /// plants an owner. Every test that relies on a pre-seeded owner must set
+    /// one explicitly. The caller must be `#[serial]`: the env var is global.
     async fn connect_in_memory_with_owner(owner: &str) -> Db {
         std::env::set_var("LOOM_OWNER_GITHUB", owner);
         let db = db::connect_in_memory().await.unwrap();
@@ -1485,7 +1480,7 @@ mod tests {
     async fn expired_token_does_not_resolve() {
         let db = connect_in_memory_with_owner("rjpower").await;
         let (plain, info) = create_token(&db, "rjpower", "old", Some(30)).await.unwrap();
-        // Fresh token resolves; backdate its expiry and it no longer does.
+        // Fresh token resolves; once expired, it doesn't.
         assert!(lookup_token(&db, &plain).await.unwrap().is_some());
         sqlx::query("UPDATE api_tokens SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?")
             .bind(&info.id)

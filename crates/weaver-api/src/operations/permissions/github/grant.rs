@@ -1,6 +1,5 @@
-//! Previously excluded from the registry as "operator-only". Granting
-//! repository access without a prior request is a human decision — `actor =
-//! User`, no `mcp` projection — not a reason to leave it out of the registry.
+//! Granting repository access without a prior request is a human decision,
+//! expressed through `actor = User`.
 
 use super::prelude::*;
 

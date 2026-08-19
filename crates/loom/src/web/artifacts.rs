@@ -209,23 +209,14 @@ pub(super) async fn raw_artifact_bytes(st: &AppState, input: &raw::Input) -> Api
 }
 
 // ---------------------------------------------------------------------------
-// Branch-scoped artifacts — the twin of the session-scoped routes above, for
-// a `loom artifacts` target with no live session. `PUT` here creates the
-// artifact if absent (the session-scoped `PUT` requires it to already exist,
-// since that route is a *user edit* of something the dashboard is already
-// showing); `author` defaults to `agent`, the CLI's writer.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Operation registry — `artifacts.*` and `artifacts.threads.*`, bound onto
-// `weaver_api::operations::artifacts`. These are the branch-scoped twins
-// above, ported: an operation's `branch` field is resolved the same way `key`
-// is on the routes (branch id, branch name, or an active session's branch),
-// and authorization now happens once, centrally, in `web/operations.rs`. The
-// legacy routes above stay live and untouched until the coordinated route
-// deletion pass. Thread operations duplicate the small mapping/resolution
-// helpers in `web/discussion.rs` rather than reach into that sibling module's
-// private items; the domain calls (`weaver_core::discussion`) are the same.
+// `weaver_api::operations::artifacts`. `branch` resolves to a branch id, a
+// branch name, or an active session's branch, and authorization happens once,
+// centrally, in `web/operations.rs`. `write` creates the artifact if absent.
+// `author` is derived from the credential: `user` for a human, `agent` for a
+// session. Thread operations duplicate the small mapping/resolution helpers in
+// `web/discussion.rs` instead of reaching into that sibling module's private
+// items; the domain calls (`weaver_core::discussion`) are the same.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -268,18 +259,14 @@ async fn get_operation(context: OperationContext, input: get::Input) -> ApiResul
     artifact_view(&st.db, &branch.repo_root, &a, input.rev).await
 }
 
-/// `artifacts.write` — one operation replacing the session-scoped and
-/// branch-scoped routes that used to differ in who they said wrote a revision.
+/// `artifacts.write` — unified operation for session-scoped and branch-scoped writes.
 ///
 /// `content` is an ordinary string field on the wire (see `write.rs`); the
 /// `#[operand(from_file)]` attribute is a CLI-only convenience over the same
 /// JSON body and has no effect here.
 ///
-/// Authorship is derived from the credential, never from the body. The two old
-/// routes disagreed: the session-scoped one hard-coded `"user"`, while the
-/// branch-scoped one took `author` from the request, so any caller could claim
-/// to be anyone. Reading it off the principal makes the attribution true by
-/// construction and removes a field a caller could lie in.
+/// Authorship is derived from the credential, never from the body. This makes
+/// attribution true by construction and removes a field a caller could lie in.
 async fn write_operation(
     context: OperationContext,
     input: write::Input,
@@ -291,9 +278,8 @@ async fn write_operation(
     } else {
         artifact::get(&st.db, &branch.repo_root, &branch.id, &input.name).await?
     };
-    // Optimistic-concurrency guard, same as the legacy branch-scoped route:
-    // this is business state ("this write raced another"), not authority, so
-    // it stays here rather than moving into `authorize()`.
+    // Optimistic-concurrency guard: this checks business state (a concurrent write),
+    // which authorize() has no way to express.
     if let Some(base_rev) = input.base_rev {
         let latest = existing.as_ref().map_or(0, |a| a.rev);
         if base_rev != latest {
@@ -403,10 +389,8 @@ async fn delete_operation(
     })
 }
 
-/// `artifacts.history` — no legacy route served this; the version list was
-/// only ever embedded in [`ArtifactView`] (see `artifact_view`). This ports
-/// the same `artifact::history` mapping standalone, for a caller that wants
-/// versions without re-fetching the latest content too.
+/// `artifacts.history` — standalone version list query for a caller that wants
+/// versions without re-fetching the latest content.
 async fn history_operation(
     context: OperationContext,
     input: history::Input,
@@ -490,16 +474,12 @@ async fn threads_list_operation(
     Ok(threads.iter().map(thread_dto).collect())
 }
 
-/// `artifacts.threads.comment` — one operation over what used to be two
-/// routes, opening a thread (`New`) and replying to one (`Reply`).
-/// Author is `"agent"`, matching the branch-scoped routes it replaced (the
-/// session-scoped ones hardcoded `"user"` for the dashboard's own edits,
-/// which is not what this session-actor, MCP-reachable operation is). Output
-/// is the full [`ThreadDto`] for both targets — `add_branch_thread_comment`
-/// used to return just the new [`CommentDto`], but the declared `Output` for
-/// `artifacts.threads.comment` is `ThreadDto`, so the reply path re-fetches
-/// the thread after appending, the same as the new-thread path already
-/// returns.
+/// `artifacts.threads.comment` — open a thread (`New`) or reply to one
+/// (`Reply`) in a single operation. Author is always `"agent"`: this is a
+/// session-actor, MCP-reachable operation, not the dashboard's own edits.
+/// Output is the full [`ThreadDto`] for both targets, so the reply path
+/// re-fetches the thread after appending, matching what the new-thread path
+/// already returns.
 async fn threads_comment_operation(
     context: OperationContext,
     input: threads::comment::Input,
@@ -557,11 +537,9 @@ async fn threads_comment_operation(
     Ok(thread_dto(&thread))
 }
 
-/// `artifacts.threads.resolve`.
-/// The route it replaced returned `{"resolved": true}`; the declared `Output` for
-/// `artifacts.threads.resolve` is `ThreadDto`, so this re-fetches the thread
-/// after resolving and returns it in full (a superset of the old body, not a
-/// dropped field).
+/// `artifacts.threads.resolve`. Output is the full [`ThreadDto`], so this
+/// re-fetches the thread after resolving rather than returning a bare
+/// acknowledgement.
 async fn threads_resolve_operation(
     context: OperationContext,
     input: threads::resolve::Input,
@@ -588,10 +566,10 @@ async fn threads_resolve_operation(
     Ok(thread_dto(&resolved))
 }
 
-/// `artifacts.url`. The dispatcher hands handlers typed input, not a
-/// request, so — same as `sessions.url` — this can only resolve the
-/// configured `auth.base_url` or the address the server is bound to, not a
-/// browser's own Host the way the route it replaces could.
+/// `artifacts.url`. The dispatcher hands handlers typed input rather than a
+/// raw request, so — same as `sessions.url` — this resolves the URL from the
+/// configured `auth.base_url` or the address the server is bound to; it has
+/// no way to read a browser's own Host header.
 async fn url_operation(context: OperationContext, input: url::Input) -> ApiResult<SessionUrlView> {
     let st = context.state;
     // Resolve first so a bad key 404s rather than minting a link to nothing,
@@ -610,9 +588,7 @@ mod tests {
     use crate::auth::{AuthVia, Grant, Principal};
     use crate::db::Db;
 
-    /// A session credential, because `artifacts.write` derives the revision's
-    /// author from it rather than from a body field — the legacy branch route
-    /// took `author` from the request, so any caller could claim to be anyone.
+    /// A session credential — authorship is derived from it, not from a body field.
     fn session_context(state: AppState, branch_id: &str) -> OperationContext {
         OperationContext::new(
             state,

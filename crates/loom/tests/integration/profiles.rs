@@ -413,9 +413,6 @@ print("custom tests passed")
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert!(response.text().await.unwrap().contains("pinned by profile"));
 
-    // The legacy DELETE routes replied 204 No Content; `profiles.delete` and
-    // `mcps.custom.delete` are ordinary operations and reply 200 with the
-    // typed delete result instead.
     let response = reqwest::Client::new()
         .post(format!("http://{}/api/profiles/delete", ts.addr))
         .json(&json!({ "name": "custom-tools" }))
@@ -427,6 +424,8 @@ print("custom tests passed")
     assert_eq!(deleted["deleted"], true);
     assert_eq!(deleted["name"], "custom-tools");
 
+    // `profiles.delete` and `mcps.custom.delete` are ordinary operations and
+    // reply 200 with the typed delete result.
     let response = reqwest::Client::new()
         .post(format!("http://{}/api/mcps/custom/delete", ts.addr))
         .json(&json!({ "identity": "/ops/status" }))

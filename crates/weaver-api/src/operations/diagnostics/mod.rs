@@ -2,13 +2,10 @@
 //! Diagnostics) and build/process identity, for a human operator's debug
 //! panel.
 //!
-//! Deliberately its own bundle rather than folding into `logs`: that bundle
-//! is the log *text* itself (a snapshot and a live tail of the same lines);
-//! this one is structured system state — session/profile counts, automation
-//! run health, migration versions, build identity — a different shape of
-//! data with no lines to redact. Both back the same Settings → Diagnostics
-//! page, but grouping by what the data *is* keeps each bundle's operation
-//! list legible rather than merging everything the page happens to render.
+//! Structured system state (session/profile counts, automation run health,
+//! migration versions, build identity) — distinct from the `logs` bundle,
+//! which is the log text itself. Both back the same Settings → Diagnostics
+//! page.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

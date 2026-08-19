@@ -2,9 +2,8 @@ use super::prelude::*;
 
 /// Update a branch's title, goal, or current-state description.
 ///
-/// A rename requires `expected_title`/`expected_title_provenance` — the label
-/// the caller last observed — so a concurrent rename is rejected with a 409
-/// instead of silently overwritten.
+/// Title updates require `expected_title` and `expected_title_provenance`
+/// to detect and reject concurrent renames.
 #[operation(
     id = "branches.update",
     actor = SessionSelf,
@@ -18,15 +17,12 @@ pub struct Update;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
     pub title: Option<String>,
-    /// Required with `title`: the task label the caller observed.
+    /// Required with `title`.
     pub expected_title: Option<String>,
-    /// Required with `title`: the provenance the caller observed alongside
-    /// `expected_title`.
+    /// Required with `title`.
     pub expected_title_provenance: Option<String>,
     pub goal: Option<String>,
-    /// The agent's current-state message — the prose shown beside the
-    /// attention level. Prefer `branches.status.set` to update this alongside
-    /// the level in one call.
+    /// The agent's current-state message.
     pub description: Option<String>,
     /// Resolved from the calling session; not something a caller supplies.
     #[operand(context)]

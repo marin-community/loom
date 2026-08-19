@@ -6,9 +6,7 @@
 //! `register` call without a descriptor does not compile.
 //!
 //! Authorization happens here, once, from typed input — actor, grants, and the
-//! resource named by [`Scoped`]. The registry this replaces evaluated authority
-//! twice on two different models, the second of which matched a URL string that
-//! the operation's handler no longer served.
+//! resource named by [`Scoped`].
 
 use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 
@@ -160,11 +158,6 @@ fn apply_defaults<I: Operands>(spec: &'static OperationSpec, input: Value) -> Va
 }
 
 /// Apply the declared `#[operand(default = ...)]` values.
-///
-/// These used to reach only clap, so `POST /api/deployment/reconcile` answered a
-/// request that omitted `prune` with `missing field `prune`` — a default that
-/// existed on the command line and nowhere else. `wire_defaults()` is built from
-/// the same expression, so the two cannot disagree.
 fn with_operand_defaults<I: Operands>(mut input: Value) -> Value {
     let Some(object) = input.as_object_mut() else {
         return input;
@@ -410,11 +403,6 @@ pub(super) async fn list_operations() -> Json<Vec<OperationView>> {
 }
 
 /// One operation's descriptor, by id.
-///
-/// This used to be routed through the `permissions.explain` handler, which meant
-/// a discovery endpoint carried a permission check for a resource it never read.
-/// The descriptor is public information — it is what `/api/operations` already
-/// returns in bulk — so it is served directly.
 pub(super) async fn get_operation(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> ApiResult<Json<OperationView>> {
@@ -442,9 +430,6 @@ mod tests {
     fn routes_come_from_identity() {
         let list = weaver_api::operation("issues.list").unwrap();
         assert_eq!(list.path(), "/api/issues/list");
-        // The defect this replaces: the descriptor declared `GET
-        // /api/repos/issues`, a route the server had already stopped serving,
-        // and authorization still keyed off that string.
         assert_eq!(list.method(), "POST");
     }
 }

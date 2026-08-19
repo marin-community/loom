@@ -4,11 +4,11 @@
 //! declaration is written in and the traits the derives target; the projections
 //! onto REST, CLI, and MCP read every fact they need from here.
 //!
-//! The invariant that makes the registry worth having: an entry cannot describe
-//! an operation it does not also define. `OperationSpec` carries no free-form
-//! route, argument list, or command string — the schema and the clap surface are
-//! function pointers into the operation's own `Input` type, so there is nothing
-//! to keep in agreement by hand.
+//! The invariant that makes the registry worth having: every operation
+//! description has a corresponding implementation. `OperationSpec` derives its
+//! route, argument list, and command string from the operation's own `Input` type
+//! through function pointers, eliminating any hand-maintained alignment between
+//! the declaration and the implementation.
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -36,12 +36,9 @@ pub enum ActorPolicy {
     /// Reachable with no credential at all.
     ///
     /// This is how you log in: `auth.login` must run before a principal exists.
-    /// Declaring it makes the unauthenticated surface enumerable — previously it
-    /// was a path prefix (`/auth/...`) matched in middleware, so the answer to
-    /// "what can an anonymous caller reach?" lived in a string comparison rather
-    /// than anywhere you could read or test. `anonymous_operations_are_pinned`
-    /// asserts the exact set, so widening it requires editing a test that says
-    /// so in as many words.
+    /// Declaring it makes the unauthenticated surface enumerable and testable.
+    /// `anonymous_operations_are_pinned` asserts the exact set, so widening it
+    /// requires a deliberate test edit.
     Anonymous,
 }
 
@@ -111,10 +108,9 @@ impl OperationScope {
 
 /// How an operation's response is encoded.
 ///
-/// This is the *only* axis on which a registered operation may be special. It
-/// is a field rather than an escape hatch so that streaming and upload
-/// endpoints keep their descriptor, their typed input, and their authorization,
-/// and cannot become the dumping ground the old `HttpBinding::Custom` was.
+/// This is the *only* axis on which a registered operation may be special.
+/// Streaming and upload endpoints keep their descriptor, typed input, and
+/// authorization instead of becoming unchecked special cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Io {
@@ -124,37 +120,24 @@ pub enum Io {
     Stream,
     /// Bidirectional websocket (terminals, the IDE proxy).
     Duplex,
-    /// Raw request body: multipart or octet-stream, streamed rather than
-    /// wrapped in JSON.
+    /// Raw request body: multipart or octet-stream.
     ///
-    /// This describes the *wire*, not how a CLI gathers an argument. An
-    /// operation whose content is a JSON string stays `Json` even when the CLI
-    /// lets you name a file for it — that is `#[operand(from_file)]`, a
-    /// client-side affordance. Getting this backwards silently deletes an MCP
-    /// tool, because a non-JSON operation may not have one.
+    /// `Io` describes the wire encoding, not the CLI interface. A JSON string
+    /// stays `Json` even if the CLI allows naming a file for it (`from_file`).
+    /// Non-JSON operations cannot expose MCP tools.
     Upload,
     /// Raw response body: bytes plus a guessed content type.
     ///
-    /// The mirror image of `Upload`, and it exists for the same reason: a
-    /// browser reaches these through an `<img src>` or a download link, which is
-    /// a `GET` for bytes and cannot be a JSON POST. Operands arrive in the query
-    /// string, exactly as a stream's do.
-    ///
-    /// Like every other non-JSON encoding this is about the *wire*. An operation
-    /// that answers with base64 inside a JSON envelope stays `Json`.
+    /// For browser fetches through `<img src>` or download links.
+    /// Operands arrive in the query string. Like all encodings, this describes
+    /// the wire; an operation answering with base64 inside JSON stays `Json`.
     Download,
     /// JSON body plus a browser session-cookie effect.
     ///
-    /// Logging in and out are ordinary operations in every respect a caller can
-    /// see — they have schemas, they appear in the surface, they are authorized
-    /// the same way — but their *response* has to carry a `Set-Cookie` an
-    /// HttpOnly session depends on, and a JSON body cannot express that. So they
-    /// are served by a transport-specific route mounted at the same derived path
-    /// rather than by the generic dispatcher.
-    ///
-    /// The point of naming it is that "this operation is not on the generic
-    /// path" becomes a declared fact with a test behind it, instead of a route
-    /// someone forgot to migrate.
+    /// Login and logout operations respond with `Set-Cookie` for HttpOnly
+    /// sessions. A custom handler carries the response with this header;
+    /// the generic dispatcher cannot emit it. Naming this makes the exception
+    /// explicit and testable.
     Session,
 }
 
@@ -215,10 +198,9 @@ pub enum ContextSource {
     Branch,
     /// The branch's human name, e.g. `weaver/loom-fix-thing`.
     ///
-    /// Distinct from [`ContextSource::Branch`] because they are not
-    /// interchangeable and confusing them is silent: a field annotated `branch`
-    /// that is compared against a name simply never matches. `issues.backlog`
-    /// stores the name for provenance while `issues.create` keys off the id.
+    /// Used when provenance or user-facing references require the name.
+    /// Distinct from [`ContextSource::Branch`] (the id): `issues.backlog` uses
+    /// the name for provenance; `issues.create` uses the id.
     BranchName,
     Session,
 }
@@ -242,8 +224,7 @@ pub struct ContextField {
 
 /// The resolved session context a dispatcher fills context fields from.
 ///
-/// Fetched once per invocation. This is what removes the extra `self_context()`
-/// round-trip every MCP tool used to make inside its own `project_input`.
+/// Fetched once per invocation, avoiding redundant context lookups in each operation.
 #[derive(Debug, Clone, Default)]
 pub struct ContextValues {
     pub repo_root: String,
@@ -275,10 +256,8 @@ pub trait Operands: Serialize + DeserializeOwned + Sized {
 
     /// The declared defaults, as JSON, for fields a caller may omit.
     ///
-    /// `#[operand(default = ...)]` used to reach only clap, so a REST caller
-    /// that omitted a defaulted field got `missing field `prune`` — a default
-    /// that did not exist on the wire it was declared for. This is built from
-    /// the same expression the command line uses, so the two cannot diverge.
+    /// Built from the same expression the command line uses, ensuring REST and
+    /// CLI defaults are identical.
     fn wire_defaults() -> Value {
         Value::Object(Default::default())
     }
@@ -333,9 +312,8 @@ pub struct OperationSpec {
 impl OperationSpec {
     /// The canonical REST route, derived from the identity.
     ///
-    /// `issues.tags.set` is always `POST /api/issues/tags/set`. Because it is
-    /// computed rather than declared, `loom help` and `GET /api/operations` can
-    /// no longer report different endpoints for the same operation.
+    /// `issues.tags.set` is always `POST /api/issues/tags/set`. Computed from
+    /// identity, not declared, so all surfaces report the same endpoint.
     pub fn path(&self) -> String {
         format!("/api/{}", self.id.replace('.', "/"))
     }
@@ -379,10 +357,8 @@ pub trait Render: Operation {
     ///
     /// The default is the operation's own JSON, which is honest and complete for
     /// the long tail of administrative commands. Bundles a human reads all day —
-    /// `issues list`, `sessions list` — override it. The point of the default is
-    /// that adding an operation never requires writing a renderer before the
-    /// command works, which is how the old surface ended up advertising commands
-    /// that did not exist.
+    /// `issues list`, `sessions list` — override it. The default ensures that
+    /// adding an operation works immediately without a custom renderer.
     fn text(output: &Self::Output, _view: &Self::View) -> String {
         serde_json::to_string_pretty(output)
             .unwrap_or_else(|error| format!("could not render result: {error}"))

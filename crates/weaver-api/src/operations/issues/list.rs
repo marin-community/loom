@@ -30,11 +30,6 @@ pub struct Input {
     #[operand(default = false)]
     pub all: bool,
     /// List only unclaimed backlog items — those no branch has picked up.
-    ///
-    /// Preserves what the old route spelled `?scope=backlog`. It is a filter on
-    /// one collection rather than a second operation, which is why there is no
-    /// `issues.backlog.list` to go with `issues.backlog.create`: creating an
-    /// unclaimed item really is a different act, listing them is not.
     #[operand(default = false)]
     pub backlog: bool,
 }

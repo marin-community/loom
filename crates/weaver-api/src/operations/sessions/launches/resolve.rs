@@ -6,10 +6,8 @@ use super::prelude::*;
 /// preflight; not exposed as its own CLI verb since callers reach it through
 /// that preview instead.
 ///
-/// Read-only: `crates/loom/src/web/auth.rs`'s `grant_allows` already lets a
-/// `Grant::Session` credential reach the legacy route this mirrors, on the
-/// reasoning that a session already entitled to delegate a child launch gains
-/// no new surface by previewing the template it would launch with.
+/// Read-only. A session authorized to delegate a child launch may preview
+/// the template it would launch with.
 #[operation(
     id = "sessions.launches.resolve",
     actor = SessionSelf,

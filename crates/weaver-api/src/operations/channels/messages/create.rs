@@ -1,8 +1,8 @@
 use super::prelude::*;
 
-/// Append and deliver a durable channel message. Retrying with the same
-/// `idempotency_key` reuses the existing item rather than repeating a
-/// successful delivery.
+/// Append and deliver a durable channel message.
+///
+/// Idempotent on `idempotency_key`.
 #[operation(
     id = "channels.messages.create",
     actor = SessionSelf,

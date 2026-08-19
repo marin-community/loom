@@ -22,12 +22,9 @@ use super::{ApiResult, AppError, AppState};
 //
 // Every handler here has a `*_operation` counterpart registered below —
 // including `agent_oneshot` (`POST /agent/oneshot`), which is `agents.oneshot`
-// rather than a `watches.*` id, since it is a general one-shot ACP primitive
-// watch programs happen to be the first caller of, not watch-specific state.
-// The legacy axum handler under its original name stays in place (and now
-// delegates to a shared `*_core` function) because `web/mod.rs`'s routes
-// still call it by that name and route deletion is a separate, coordinated
-// pass.
+// instead of a `watches.*` id, since it is a general one-shot ACP primitive
+// that watch programs happen to be the first caller of, not watch-specific
+// state.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<watches_operations::list::List, _, _>(list_watches_operation),
@@ -360,7 +357,7 @@ pub(super) async fn run_watch_operation(
 /// Run a one-shot ACP prompt and return its text — the judgement primitive
 /// watch programs call. Best-effort by contract: an absent or failing runtime
 /// returns `None` rather than an error, so callers degrade to their
-/// deterministic fallback. Shared by the legacy handler and `agents.oneshot`.
+/// deterministic fallback. Used by `agents.oneshot` and watch execution.
 async fn agent_oneshot_core(
     st: &AppState,
     prompt: &str,

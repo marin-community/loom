@@ -2,11 +2,9 @@ use super::prelude::*;
 
 /// The fleet index: one compact row per visible session.
 ///
-/// The reduced projection every index and poll loop reads. Full session context
-/// stays on `sessions.get` and is fetched only when a row is opened, which is
-/// why this is its own operation rather than a flag on `sessions.list`: they
-/// return different types, and the whole point of the reduction is that the
-/// caller cannot accidentally pay for the larger one.
+/// A reduced projection to keep responses compact. Full session context is
+/// available separately via `sessions.get` to avoid accidentally fetching
+/// the large projection when the compact view is all that is needed.
 #[operation(
     id = "sessions.summary.list",
     actor = User,

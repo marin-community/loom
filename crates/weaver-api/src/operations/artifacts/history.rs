@@ -17,8 +17,8 @@ pub struct Input {
     /// The artifact's name.
     #[operand(positional)]
     pub name: String,
-    /// List the repository-shared artifact's history instead of this
-    /// branch's own copy.
+    /// When true, list the repository-shared artifact's history. By default,
+    /// list this branch's own copy.
     #[operand(default = false)]
     pub repo: bool,
     /// Resolved from the calling session; not something a caller supplies.

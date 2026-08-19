@@ -2,10 +2,9 @@ use super::prelude::*;
 
 /// Attach to one of a session's worktree debug shells over a websocket.
 ///
-/// Unlike [`super::super::terminal::Terminal`] the target is a plain login
-/// shell *in the session's worktree*, not the agent, and it is spawned on first
-/// attach — which is why this is `risk = ExternalWrite`: it runs arbitrary
-/// commands as the operator inside the session's checkout.
+/// The target is a plain login shell in the session's worktree, spawned on first
+/// attach. This is `risk = ExternalWrite` because it runs arbitrary commands as
+/// the operator inside the session's checkout.
 #[operation(
     id = "sessions.shells.terminal",
     actor = SessionSelf,

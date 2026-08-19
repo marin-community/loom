@@ -1,5 +1,5 @@
-//! Previously excluded from the registry as "operator-only". See `grant` for
-//! why `actor = User` (a field) replaces omission as the mechanism.
+//! Revoke explicit GitHub repository access from a live session. Like `grant`,
+//! this is expressed through `actor = User`.
 
 use super::prelude::*;
 

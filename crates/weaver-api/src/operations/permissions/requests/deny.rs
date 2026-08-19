@@ -1,6 +1,3 @@
-//! Previously excluded from the registry as "human-only". See `approve` for
-//! why `actor = User` (a field) replaces omission as the mechanism.
-
 use super::prelude::*;
 
 /// Deny a pending external-access request.

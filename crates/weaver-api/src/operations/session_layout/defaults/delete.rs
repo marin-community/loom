@@ -3,10 +3,6 @@ use super::prelude::*;
 /// Clear a placement default, so newly created sessions matching this
 /// selector fall through to a broader default (or the fallback origin `*`,
 /// which cannot itself be removed).
-///
-/// The legacy `{kind}/{value}` route names two ordinary path parameters —
-/// neither is the caller's own session, branch, or repo — so both are plain
-/// operands rather than `#[operand(context)]`.
 #[operation(
     id = "session_layout.defaults.delete",
     actor = User,
@@ -23,8 +19,8 @@ pub struct Input {
     pub selector_kind: SessionPlacementSelectorKind,
     pub selector_value: String,
     /// Optimistic-concurrency guard: the layout revision this call was
-    /// composed against. A stale caller is rejected rather than silently
-    /// clobbering a concurrent edit from another dashboard tab.
+    /// composed against. Stale calls are rejected to prevent concurrent
+    /// edit conflicts.
     pub expected_revision: i64,
 }
 

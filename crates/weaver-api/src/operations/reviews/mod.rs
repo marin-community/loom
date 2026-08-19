@@ -1,18 +1,7 @@
 //! Creator-private draft feedback that, once submitted, becomes a durable
 //! review delivered into the reviewed session's own conversation.
 //!
-//! `reviews.list` and `reviews.create` are keyed on a session — the legacy
-//! route is `GET`/`POST /sessions/{id}/reviews`, since a review always begins
-//! from one session's artifact or change-set — so `session` is their
-//! `#[operand(context)]` operand where the actor policy allows it
-//! (`reviews.list`; `reviews.create` is operator-only and names its target
-//! session as an ordinary operand instead, see that file). They still live in
-//! this bundle rather than under `sessions.*`: every other operation here
-//! acts on a review that already exists, by its own id, and one id prefix per
-//! resource keeps the whole thing in one file tree instead of splitting it
-//! across two. One file per operation. Adding a new one means adding its file
-//! here and its handler in the mirrored server tree — no clap variant, no
-//! client wrapper, no MCP schema, no capability set, unless asked for.
+//! One file per operation.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

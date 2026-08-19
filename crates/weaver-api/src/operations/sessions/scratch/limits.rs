@@ -1,11 +1,6 @@
 use super::prelude::*;
 
 /// Shared upload limits for launch-time and live-session Scratch attachments.
-///
-/// `actor = User`: the legacy route this replaces is reachable only by a human
-/// or admin credential today — `grant_allows` (`crates/loom/src/web/auth.rs`)
-/// allows any `GET` for `Grant::User` but has no case admitting `Grant::Session`
-/// to this path, unlike the `/sessions/{id}/...` family it sits beside.
 #[operation(
     id = "sessions.scratch.limits",
     actor = User,

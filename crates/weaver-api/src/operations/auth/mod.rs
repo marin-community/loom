@@ -1,28 +1,17 @@
 //! Identity, credentials, and fleet-wide access administration.
 //!
-//! Previously excluded from the registry entirely: the old design treated
-//! "administrative" as a reason to leave a route out rather than a fact to
-//! record on it. Every operation here is `actor = User` (a human managing
-//! their own identity — signing in, minting a personal token, setting a
-//! password) or `actor = Admin` (fleet administration — approving operators,
-//! configuring GitHub sign-in, registering federation mappings, minting
-//! automation tokens), except `auth.federate`, which is `actor = Anonymous`
-//! because its caller is a CI system exchanging a workload-identity token,
-//! never a human and never an agent session. Because an MCP projection is
-//! rejected on any operation that is not `SessionSelf` (see
-//! `validate_operation_registry`), none of this surface can acquire an MCP
-//! tool by accident — the human-only, operator-only, and automation-only
-//! boundaries are enforced properties of these declarations, not an absence.
+//! Operations use `actor = User` for identity self-management (sign-in,
+//! token creation, password changes), `actor = Admin` for fleet administration
+//! (user approval, GitHub sign-in configuration, federation mappings, automation
+//! tokens), and `actor = Anonymous` for `auth.federate` (CI systems exchanging
+//! workload-identity tokens).
 //!
-//! `GET /auth/github/login` and `GET /auth/github/callback` are deliberately
-//! NOT registered here: they are browser redirects (a 302 plus a `Set-Cookie`
-//! header, never a JSON body), so they have no `Io` this registry can
-//! describe, and nothing but an `<a href>` ever calls them. `loom login` /
-//! `loom logout` (the CLI) and `loom context` (local client contexts) are
-//! Tier C — see `auth.login`'s doc comment — and stay hand-written.
+//! Browser OAuth endpoints (`GET /auth/github/login`, `GET /auth/github/callback`)
+//! are not registered here: they return redirects, not JSON, and are never called
+//! programmatically.
 //!
-//! One file per operation, exactly like `issues`. Dotted ids become
-//! subdirectories: `auth.users.create` lives at `auth/users/create.rs`.
+//! One file per operation. Dotted ids become subdirectories:
+//! `auth.users.create` lives at `auth/users/create.rs`.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

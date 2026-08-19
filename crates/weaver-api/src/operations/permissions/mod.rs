@@ -1,15 +1,4 @@
 //! Access discovery and human-approved external credential expansion.
-//!
-//! One file per operation, exactly like `issues`. The old registry treated
-//! `permissions.requests.approve`, `permissions.requests.deny`,
-//! `permissions.github.grant`, and `permissions.github.revoke` as "human-only"
-//! or "operator-only" by leaving them out of the dispatchable registry
-//! entirely. Here they are full operations whose `actor` is `User`: who may
-//! call an operation is a field, not a reason to omit it. Because an MCP
-//! projection is rejected on any operation that is not `SessionSelf` (see
-//! `validate_operation_registry`), "an agent cannot approve its own
-//! permission request" is an enforced property of these declarations rather
-//! than an absence.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

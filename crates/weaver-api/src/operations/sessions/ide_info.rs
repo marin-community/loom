@@ -1,8 +1,9 @@
 use super::prelude::*;
 
 /// Whether the embedded editor (code-server) is enabled and runnable on this
-/// host, so a client can decide whether to offer it. This is host-level
-/// configuration, not session state — no session needs to be named.
+/// host, so a client can decide whether to offer it.
+///
+/// Host-level configuration; no session needs to be named.
 #[operation(
     id = "sessions.ide_info",
     actor = SessionSelf,

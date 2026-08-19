@@ -2,9 +2,8 @@ use super::prelude::*;
 
 /// Subscribe to one session's live event feed.
 ///
-/// The durable counterpart is [`super::list`]; this is the same feed as it
-/// happens. The session is an ordinary operand rather than a path segment,
-/// which is what lets a stream live at its derived route like everything else.
+/// Session is provided as an operand (not a path segment) to follow the standard
+/// route pattern.
 ///
 /// `io = Stream` changes exactly one thing: the response encoding, so a custom
 /// handler serves it instead of the JSON dispatcher. The actor policy, the

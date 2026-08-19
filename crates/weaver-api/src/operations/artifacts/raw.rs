@@ -2,11 +2,10 @@ use super::prelude::*;
 
 /// An image artifact's decoded bytes, for an `<img src>`.
 ///
-/// `io = Download` because the caller here is the browser's image loader: it
-/// issues a `GET` and expects `image/png`, which no JSON envelope can be. The
-/// same content is reachable as JSON through [`super::get`] — that is not
-/// duplication but the two encodings of one artifact, and the declaration is
-/// what says so.
+/// `io = Download` because the browser's image loader issues a `GET` and
+/// expects `image/png` — a bare binary payload, not a JSON envelope.
+/// [`super::get`] provides the same artifact as JSON; the two operations offer
+/// different encodings of the same data.
 #[operation(
     id = "artifacts.raw",
     actor = SessionSelf,

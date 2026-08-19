@@ -17,12 +17,8 @@ pub struct Input {
     /// The artifact's name.
     #[operand(positional)]
     pub name: String,
-    /// List only unresolved threads.
-    ///
-    /// Phrased as a narrowing flag because the default must stay "everything" —
-    /// that is what the route returned before, and it is what the dashboard
-    /// renders (resolved threads appear collapsed, not hidden). An `all` flag
-    /// defaulting to false would have quietly dropped them.
+    /// When true, list only unresolved threads. By default, include all threads.
+    /// Resolved threads appear collapsed in the dashboard, not hidden.
     #[operand(default = false)]
     pub open_only: bool,
     /// Resolved from the calling session; not something a caller supplies.

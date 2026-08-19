@@ -212,12 +212,6 @@ mod tests {
 
     use super::validate_arguments;
 
-    // `github_token` used to gate itself with a local `principal_owns_session`
-    // check (Grant::Session only, no Admin/User path at all). That check is now
-    // `permissions.github.token`'s declared `scope = Session`, enforced once for
-    // every operation by `crate::web::scope::require_session_access` — not
-    // duplicated here.
-
     #[test]
     fn only_the_fixed_mcp_tools_map_to_permissions() {
         assert_eq!(

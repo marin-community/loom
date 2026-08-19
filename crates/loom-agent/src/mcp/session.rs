@@ -58,8 +58,8 @@ const CAPABILITY_SETS: &[CapabilitySet] = &[
         description: "Update this session's durable status projection and status stream.",
         tools: WRITE_TOOLS,
     },
-    // Existing pinned sessions keep their exact identities during the CLI/MCP
-    // migration. New profile resolution receives the canonical Loom bundles.
+    // Existing pinned sessions keep their exact identities. New profiles use
+    // the canonical Loom sets.
     CapabilitySet {
         name: "mcp/session/read@v1",
         group: "session",

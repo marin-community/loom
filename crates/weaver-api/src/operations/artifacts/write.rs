@@ -2,11 +2,9 @@ use super::prelude::*;
 
 /// Create an artifact or append a guarded revision.
 ///
-/// An ordinary JSON operation: `content` is a string on the wire, which is what
-/// the `loom_artifact::write` tool has always accepted. The CLI additionally
-/// lets you name a file (or pipe stdin) for that string — see
-/// `#[operand(from_file)]` — but that is a convenience of the command line, not
-/// a different transport.
+/// The API accepts `content` as a JSON string. The CLI tool supports reading
+/// from a file or stdin via `#[operand(from_file)]` for convenience, but this
+/// is a client-side transformation — the wire format remains a JSON string.
 #[operation(
     id = "artifacts.write",
     actor = SessionSelf,
@@ -32,10 +30,9 @@ pub struct Input {
     pub title: Option<String>,
     /// Content kind, e.g. `markdown` or `image`.
     ///
-    /// Optional so that omitting it *keeps the artifact's current kind*. A plain
-    /// `String` defaulting to `"markdown"` cannot express that: every update
-    /// that did not restate the kind would silently reset a `plan` or `image`
-    /// artifact to markdown.
+    /// When omitted, the artifact keeps its current kind. This must be optional
+    /// because a default value would silently change existing `plan` or `image`
+    /// artifacts to markdown on every update that omits this field.
     pub kind: Option<String>,
     /// Optimistic-concurrency guard: `0` guards creation; a later revision
     /// number rejects a stale edit instead of silently overwriting it.

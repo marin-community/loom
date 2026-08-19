@@ -1,10 +1,9 @@
 //! Session lifecycle, status projection, and normalized history.
 //!
-//! One file per operation, mirroring the `issues` bundle. `self.get` keeps its
-//! historical id — a caller-facing bootstrap read — but lives in this bundle;
-//! its module is named `context` rather than `self` because `self` cannot
-//! be a module name, and it carries an explicit `bundle = "sessions"` so the
-//! id's own `self` prefix does not get inferred as its bundle.
+//! One file per operation, mirroring the `issues` bundle. The bootstrap read
+//! operation (`self.get`) lives in this bundle; its module is named `context`
+//! rather than `self` because `self` is reserved, and it includes an explicit
+//! `bundle = "sessions"` declaration to prevent the id prefix from being inferred.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

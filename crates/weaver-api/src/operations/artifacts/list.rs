@@ -14,8 +14,8 @@ pub struct List;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
-    /// List every artifact in the repository, not just this branch's own
-    /// plus the repository-shared ones.
+    /// When true, list every artifact in the repository. By default, list
+    /// only this branch's own artifacts and the repository-shared ones.
     #[operand(default = false)]
     pub repo: bool,
     /// Resolved from the calling session; not something a caller supplies.

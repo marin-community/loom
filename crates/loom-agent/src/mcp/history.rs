@@ -1,22 +1,12 @@
 //! Built-in session self-history MCP adapter.
 //!
-//! `history` and `search` are the registered `sessions.history.list` and
-//! `sessions.history.search` operations, reached under this adapter's legacy
-//! tool names by routing `tools/call` to `super::dispatch::call_tool` against
-//! the `loom_session` server rather than this adapter's own `loom_history`
-//! name — no operation declares an `loom_history::*` MCP projection, since
-//! this adapter predates the `sessions` bundle and was folded into it rather
-//! than duplicated. That dispatch call is what replaces the hand-rolled
-//! session-id/token lookup and argument parsing this file used to do; the
-//! session selector is still refused (see the test below), now because
-//! `session` is a `#[operand(context)]` field the schema never advertises
-//! rather than because this file checks for it.
+//! `history` and `search` route to `sessions.history.*` operations under the
+//! `loom_session` server because no operation declares an `loom_history::*`
+//! projection. The session selector is still refused because `session` is a
+//! context field that the schema never advertises.
 //!
-//! The tool surface stays hand-written: `sessions.history.*`'s
-//! registry-derived schema (shared with `loom_session::history`/`::search`)
-//! does not carry the `limit`/`kinds`/`q` bounds this adapter has always
-//! advertised, and loosening what a session pinned to `mcp/history/self@v1`
-//! sees is not part of this port.
+//! The tool surface is hand-written because `sessions.history.*`'s registry
+//! schema lacks the `limit`/`kinds`/`q` bounds this capability set advertises.
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};

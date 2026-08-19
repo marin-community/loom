@@ -279,11 +279,8 @@ pub fn all_session_capabilities() -> Vec<String> {
     grants
 }
 
-/// Translate legacy `mcp/*@v1` capability names into registry grants.
-///
-/// Compatibility shim: sessions launched before the registry owned the
-/// capability vocabulary still carry transport-shaped names. Delete once no live
-/// session does.
+/// Translate `mcp/*@v1` capability names to registry grants for backward
+/// compatibility with sessions carrying legacy transport-shaped names.
 pub fn session_capabilities_from_mcp<'a>(
     restricted: bool,
     capability_sets: impl IntoIterator<Item = &'a str>,
@@ -322,9 +319,8 @@ pub fn session_capabilities_from_mcp<'a>(
 
 /// Enforce the registry's structural invariants.
 ///
-/// Runs at server startup as well as in tests. The registry this replaces
-/// validated only that CLI strings were *unique*, never that they parsed — which
-/// is how it shipped three advertised commands that did not exist.
+/// Runs at server startup as well as in tests. Validates that operations are
+/// unique, consistent, and properly configured.
 pub fn validate_operation_registry() -> Result<(), String> {
     let mut bundle_names = std::collections::BTreeSet::new();
     let mut ids = std::collections::BTreeSet::new();

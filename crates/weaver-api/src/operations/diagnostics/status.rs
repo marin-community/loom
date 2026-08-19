@@ -2,12 +2,6 @@ use super::prelude::*;
 
 /// Build and process identity for a human operator's debug panel: which
 /// version and image are running, and since when.
-///
-/// `actor = User`: the legacy `GET /status` handler took no principal at all
-/// (any authenticated caller could read it), and `grant_allows` has never
-/// admitted a session credential to `/status` — no `Grant::Session` arm
-/// matches it — so `User` (which also covers `Admin`) is the exact set the
-/// route already allowed.
 #[operation(
     id = "diagnostics.status",
     actor = User,

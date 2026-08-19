@@ -1,25 +1,14 @@
-//! The parallel-surface ledger.
+//! The transport ledger.
 //!
-//! This file used to sort the server's hand-mounted routes into three buckets:
-//! transports the operation DSL cannot express, routes an operation had already
-//! superseded, and routes no operation served at all. The middle bucket was the
-//! debt — 115 URLs whose data was already reachable at `POST /api/<id>`, kept
-//! alive by callers that had not moved — and the third was worse, because a
-//! route with no operation is a piece of API the registry does not describe:
-//! no schema, no CLI, no MCP projection, no declared actor policy.
+//! [`TRANSPORT_ROUTES`] lists every hand-mounted route as a decision, not a
+//! gap: nineteen paths the operation DSL cannot express, each with the reason
+//! written next to it. A route in `web/mod.rs` with no operation behind it —
+//! no schema, no CLI, no MCP projection, no declared actor policy — is a
+//! second API surface, and this file has no bucket for "temporarily allowed."
 //!
-//! Both are gone. Every caller moved (the browser, the CLI, the typed client,
-//! the Python client, the integration and Playwright suites), the eleven
-//! operations the last routes needed were declared, and the routes were deleted.
-//! What remains is [`TRANSPORT_ROUTES`]: nineteen paths that are *not*
-//! operations on purpose, each with the reason written next to it.
-//!
-//! So the ledger's job changed. It is no longer a debt counter that has to reach
-//! zero — it is the assertion that the count stays zero. A new `.route(` in
-//! `web/mod.rs` that is not a declared transport fails
-//! [`no_route_is_unaccounted_for`], which is the whole point: the way to add an
-//! endpoint is to declare an operation, and the way to add a transport is to
-//! defend it here in writing.
+//! A new `.route(` in `web/mod.rs` that is not on this list fails
+//! [`no_route_is_unaccounted_for`]. The way to add an endpoint is to declare
+//! an operation; the way to add a transport is to defend it here in writing.
 
 use std::collections::BTreeSet;
 
@@ -28,12 +17,11 @@ use std::collections::BTreeSet;
 /// Adding a line here is a decision that the operation DSL cannot express this
 /// endpoint. It is not a place to park work.
 const TRANSPORT_ROUTES: &[(&str, &str)] = &[
-    // Streams and websockets used to be listed here, on the theory that a GET
-    // stream needs its arguments in the URL and so could not sit at a derived
-    // path. That was wrong twice over: an operand is an operand regardless of
-    // encoding, and `?session=…` is a URL. All eight are registered operations
-    // now with `io = Stream` / `io = Duplex`, mounted by `web::encodings` at the
-    // paths their ids derive — see `hand_mounted_on_purpose` below.
+    // Streams and websockets are not here: they are registered operations with
+    // `io = Stream` / `io = Duplex`, mounted by `web::encodings` at the paths
+    // their ids derive — see `hand_mounted_on_purpose` below. An operand takes
+    // its value from the query string regardless of encoding, so a GET stream
+    // needs no special-cased path.
     //
     // Reverse proxy to the embedded editor. This one really is not an operation:
     // it forwards an arbitrary sub-path to code-server and streams whatever
@@ -70,10 +58,9 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
 
 /// Every path `web/mod.rs` mounts by hand.
 ///
-/// Scanned across the whole source rather than line by line: rustfmt wraps a
-/// long `.route(` onto its own line, and a line-oriented scan therefore saw only
-/// 105 of the 160 routes that existed then — a third of the surface invisible to
-/// the ledger below, including two websockets and an unregistered DELETE.
+/// Scans the whole source rather than line by line, because rustfmt wraps a
+/// long `.route(` onto its own line. A line-oriented scan missed a third of the
+/// surface this way, including two websockets and an unregistered DELETE.
 fn mounted_routes() -> BTreeSet<String> {
     let source = include_str!("../src/web/mod.rs");
     let mut routes = BTreeSet::new();
@@ -224,11 +211,10 @@ fn every_declared_transport_is_mounted() {
 /// Two paths exist on purpose: a hand-written command formats output worth
 /// formatting, and the generic dispatcher makes a newly declared operation
 /// reachable with no second edit. What must not happen is an operation that
-/// advertises `loom foo bar` and is reachable by neither — which is exactly what
-/// the previous surface shipped, three times over.
+/// advertises `loom foo bar` and is reachable by neither.
 ///
-/// This prints the split rather than asserting a ratio; the number that must be
-/// zero is the unreachable one.
+/// The number that must be zero is the unreachable count; this prints the full
+/// split for visibility, not just that count.
 #[test]
 fn every_cli_operation_is_reachable() {
     let bound: std::collections::BTreeSet<&str> = loom::cli::bindings()
@@ -250,21 +236,16 @@ fn every_cli_operation_is_reachable() {
 
 /// Every literal path in `grant_allows` is a route the server still mounts.
 ///
-/// `grant_allows` decides *raw paths*, and it now decides only the seven that
-/// are not operations. The check survives the collapse because the failure mode
-/// it catches has nothing to do with how long the list is: a path literal there
-/// whose route no longer exists is a standing **pre-authorization** for whatever
-/// gets mounted at that path next, readable by every session credential in the
-/// fleet before anyone decides it should be. Three entries had gone stale that
-/// way — `/settings` and `/profiles` after their routes became operations, and
+/// `grant_allows` decides seven raw paths — the ones that are not operations —
+/// and this check does not care how short that list is: a path literal whose
+/// route no longer exists is a standing **pre-authorization** for whatever gets
+/// mounted at that path next, readable by every session credential in the
+/// fleet before anyone decides it should be. Three entries had gone stale this
+/// way: `/settings` and `/profiles` after their routes became operations, and
 /// `/repos/issues`, unmounted since #309.
 ///
-/// Its twin, `no_user_denylist_path_is_unmounted`, is gone with the list it
-/// checked: every path `user_grant_allows` denied to a non-admin human is now an
-/// operation carrying `actor = Admin`, which is the same rule stated once.
-///
-/// Scanned rather than enumerated, for the same reason the route ledger is: a
-/// hand-kept copy of this list is the thing that goes stale.
+/// Scanned rather than enumerated: a hand-kept copy of this list is itself the
+/// kind of thing that goes stale.
 #[test]
 fn no_grant_allows_path_is_unmounted() {
     check_path_literals_are_mounted(
@@ -282,8 +263,9 @@ fn no_grant_allows_path_is_unmounted() {
 /// the scope check passes whatever channel was named. The real check is
 /// `require_channel` inside `web/channels.rs`, and it was missing from
 /// `channels.get` and `channels.wait`: they read the store directly, so a
-/// session token could read a sibling session's channel. The legacy path
-/// allowlist had been doing that check, invisibly, until the routes went away.
+/// session token could read a sibling session's channel. The path allowlist
+/// had been making that check invisibly, until the routes it checked were
+/// deleted.
 ///
 /// Counted rather than inspected per-handler: a new channel operation that takes
 /// a `channel` operand and forgets the call moves one side of this equality.

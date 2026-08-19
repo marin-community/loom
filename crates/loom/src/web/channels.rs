@@ -292,10 +292,9 @@ async fn require_channel(
 /// the channel is the session channel of the session itself or one of its
 /// descendants.
 ///
-/// This used to be a path-prefix rule in [`super::auth::grant_allows`], matched
-/// against `/channels/{id}` before any handler ran. It has to be here now: the
-/// operation paths carry no channel id, so nothing upstream of the handler knows
-/// which channel a request is about.
+/// Enforces the rule `scope = Branch` cannot express: operation paths carry no
+/// channel id, so nothing upstream of the handler knows which channel a
+/// request is about. This function is that check.
 async fn channel_belongs_to_session_tree(st: &AppState, ancestor: &str, channel_id: &str) -> bool {
     let row = sqlx::query(
         "SELECT c.session_id,
@@ -336,12 +335,10 @@ fn validate_text(name: &str, value: &str, min: usize, max: usize) -> ApiResult<(
 // ---------------------------------------------------------------------------
 // Operation registry bindings
 //
-// The handlers above stay put — their `.route(...)` lines in `web/mod.rs`
-// still serve them and that file is off-limits during this port — but every
-// operation also gets a typed handler here, registered below. Authorization
-// (actor policy, grants, and branch scope from `Scoped`) happens once in
-// `register`/`authorize`; a manual check only remains where it polices
-// something the declared `Branch` scope cannot see, such as which *session*
+// Every channel operation is handled via the typed registry bindings registered
+// below. Authorization (actor policy, grants, and branch scope from `Scoped`)
+// happens once in `register`/`authorize`; a manual check only remains where it
+// polices something the declared `Branch` scope cannot see, such as which *session*
 // a caller may act as a proxy for.
 // ---------------------------------------------------------------------------
 

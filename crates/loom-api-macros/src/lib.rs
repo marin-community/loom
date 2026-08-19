@@ -31,7 +31,7 @@ pub fn derive_operands(input: TokenStream) -> TokenStream {
 ///
 /// View flags never cross the wire. They exist so `--mine` and `--repo` can go
 /// on keeping their CLI affordance without being mistaken for operation
-/// arguments, which is what let the old registry's `args` drift from `Input`.
+/// arguments.
 #[proc_macro_derive(View, attributes(operand))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -93,9 +93,8 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let clap_args = args.iter().copied().map(field::clap_arg);
     let builders = operands.iter().map(field::from_matches);
 
-    // Context fields are stripped from the derived schema rather than skipped at
-    // the serde layer: the field still travels on the wire, it just is not
-    // something a caller may supply.
+    // Context fields are stripped from the derived schema: the field travels
+    // on the wire but callers cannot supply it.
     let context_names = operands
         .iter()
         .filter(|operand| operand.context.is_some())

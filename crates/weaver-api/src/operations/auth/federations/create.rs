@@ -20,7 +20,7 @@ pub struct Create;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
     /// Stable operator-owned identity used for idempotent reconciliation.
-    /// Omitted legacy calls derive one from the identity fields below.
+    /// When omitted, one is derived from the identity fields below.
     pub name: Option<String>,
     #[operand(default = String::from("github"))]
     pub provider: String,

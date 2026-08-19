@@ -2,10 +2,8 @@ use super::prelude::*;
 
 /// Open a custom durable channel.
 ///
-/// `scope = Repository`: a custom channel belongs to a repository, and a human
-/// opening one from the dashboard holds a repo root and no branch. A session
-/// gets its `repo_root` filled from context and is additionally recorded as the
-/// opening branch, which is what `branch` carries — provenance, not scope.
+/// Scoped to a repository (humans launching from the dashboard specify no branch).
+/// A session's opening branch is recorded for provenance, not scope.
 #[operation(
     id = "channels.create",
     actor = SessionSelf,

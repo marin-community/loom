@@ -262,9 +262,8 @@ pub struct SessionView {
     /// Branch id of the session that **launched** this one — the parent in the
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
-    /// Exact immutable session id of the launcher. New rows always stamp this;
-    /// `parent_id` remains as a legacy branch-ancestry fallback for rows created
-    /// before exact session lineage was recorded.
+    /// Exact immutable session id of the launcher. New rows always stamp this.
+    /// `parent_id` is retained for backward compatibility with older sessions.
     #[serde(default)]
     pub parent_session_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
@@ -958,8 +957,8 @@ pub struct CloneProfileReq {
     pub template: Option<ProfileReq>,
     #[serde(default)]
     pub copy_environment: bool,
-    /// Editable write-only environment composition. Omission preserves the
-    /// legacy `copy_environment` behavior.
+    /// Editable write-only environment composition. Omission uses the
+    /// `copy_environment` field for backward compatibility.
     #[serde(default)]
     pub environment: Option<CloneProfileEnvironmentReq>,
 }
@@ -1280,7 +1279,7 @@ pub struct DeploymentReq {
     pub profiles: Vec<DeploymentProfileReq>,
     #[serde(default)]
     pub federations: Vec<FederationReq>,
-    /// Remove previously deployment-managed resources omitted from this request.
+    /// Remove deployment-managed resources not in this request.
     #[serde(default)]
     pub prune: bool,
 }
@@ -2529,13 +2528,13 @@ pub struct CreateReq {
     pub expected_resolver_revision: Option<String>,
 }
 
-/// Body for `POST /api/sessions/{id}/handoff`: canonical `selection` requires
+/// Body for `POST /api/sessions/{id}/handoff`. Canonical `selection` requires
 /// both revisions from `/handoff/resolve` and stamps the target template.
-/// Flattened input is legacy runtime-only compatibility and preserves the
+/// Flattened fields remain for backward compatibility, preserving the
 /// session's stamped profile/policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HandoffReq {
-    /// Legacy flattened runtime selector. Canonical clients use `selection`.
+    /// Flattened runtime selector for backward compatibility. Canonical clients use `selection`.
     #[serde(default)]
     pub agent: String,
     /// Blank/absent uses the target runtime's default.
@@ -2707,8 +2706,7 @@ pub struct SetSessionPlacementDefaultReq {
 
 /// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`
 /// is the path segment; this carries the rest. For a loud key (`attention` |
-/// `triage`) `value` is `attention` | `blocked` — to return to calm, `DELETE`
-/// the tag rather than setting an `ok` value.
+/// `triage`) `value` is `attention` | `blocked`. To return to calm, `DELETE` the tag.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagReq {
     pub value: String,
@@ -2787,9 +2785,8 @@ impl SendReq {
 pub struct SessionSendResult {
     pub sent: bool,
     pub submitted: bool,
-    /// Whether the prompt was queued behind an active turn rather than
-    /// started immediately. Set only for an ACP session; `null` for a
-    /// terminal session, which has no queue.
+    /// Whether the prompt was queued behind an active turn. Set only for an ACP
+    /// session; `null` for a terminal session, which has no queue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queued: Option<bool>,
     /// The turn the prompt belongs to. Set only for an ACP session; `null`
@@ -3163,8 +3160,7 @@ pub struct WatchRunResult {
 // Mirrors of `loom-forge::repo`'s `ManagedRepo`/`RecentRepo` and the
 // `crates/loom/src/web/repos.rs` / `repo_env.rs` ad hoc response shapes.
 // weaver-api depends only on weaver-core, not on loom-forge or loom-store, so
-// these are fresh wire types rather than re-exports of the server's domain
-// structs.
+// these types are defined here rather than imported.
 // ---------------------------------------------------------------------------
 
 /// A repo registered in the managed store (the slug → (remote, path) mapping
@@ -3466,22 +3462,21 @@ pub struct GithubTokenStatusView {
     pub updated_at: Option<String>,
 }
 
-/// Result of `auth.tokens.revoke` — the token no longer authenticates.
+/// Result of `auth.tokens.revoke`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RevokeTokenResult {
     pub revoked: bool,
     pub id: String,
 }
 
-/// Result of `auth.federations.remove` — the mapping no longer mints
-/// automation tokens.
+/// Result of `auth.federations.remove`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoveFederationResult {
     pub removed: bool,
     pub id: String,
 }
 
-/// Result of `auth.users.remove` — the operator can no longer sign in.
+/// Result of `auth.users.remove`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoveUserResult {
     pub removed: bool,
@@ -3559,8 +3554,8 @@ pub struct ChatCursorView {
 }
 
 /// Agent-owned controls for the conversation composer, mirrored from the live
-/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON: an
-/// extensible protocol surface loom forwards rather than narrows.
+/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON to
+/// preserve the extensible protocol surface.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpMetadataView {
     #[serde(default)]

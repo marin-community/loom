@@ -169,15 +169,8 @@ impl Client {
     }
 
     /// An operation id's route, derived exactly as `OperationSpec::path` derives
-    /// it.
-    ///
-    /// Not percent-encoded, and that is the point: this used to run each dotted
-    /// segment through [`Self::seg`], which escapes `NON_ALPHANUMERIC` and so
-    /// turned every id containing an underscore into a path the server does not
-    /// serve — `channels.read_marker.set` was requested as
-    /// `/api/channels/read%5Fmarker/set` and came back 405. An operation id
-    /// cannot contain a slash: it is `[a-z0-9_]` joined by dots, which is why
-    /// the derivation is a plain substitution on both sides.
+    /// it. Derived as a plain substitution: dots become slashes, no percent-encoding.
+    /// An operation id is `[a-z0-9_]` joined by dots and cannot contain a slash.
     fn operation_path(id: &str) -> String {
         format!("/api/{}", id.replace('.', "/"))
     }
@@ -253,9 +246,8 @@ impl Client {
 
     /// Approve or deny a pending permission request.
     ///
-    /// The decision used to be a field in the body of one route; it is now the
-    /// choice of operation, which is what lets `permissions.requests.approve`
-    /// carry `risk = ExternalWrite` while `deny` is an ordinary write.
+    /// Approving carries `risk = ExternalWrite`; denying is an ordinary write.
+    /// The choice of operation determines the risk level.
     pub async fn decide_permission_request(
         &self,
         request_id: &str,
@@ -594,10 +586,7 @@ impl Client {
 
     /// Patch a session's lifecycle / branch fields (`sessions.update`).
     ///
-    /// `PatchSessionReq`'s `park`/`sort_order` are dropped: they existed only so
-    /// the legacy route could reject a layout client that had not moved to the
-    /// revisioned session-layout operations, and `sessions.update` has no
-    /// operand for either.
+    /// `PatchSessionReq`'s `park`/`sort_order` are not forwarded to the operation.
     pub async fn patch_session(&self, key: &str, req: &PatchSessionReq) -> Result<SessionView> {
         use crate::operations::sessions::update;
         self.invoke::<update::Update>(&update::Input {
@@ -678,8 +667,8 @@ impl Client {
     }
 
     /// Set (upsert) a tag on a session (`sessions.tags.set`). For a loud key
-    /// (`attention` | `triage`) `value` is `attention` | `blocked`; use
-    /// [`Client::clear_tag`] to return to calm rather than setting an `ok` value.
+    /// (`attention` | `triage`) `value` is `attention` | `blocked`.
+    /// Use [`Client::clear_tag`] to return to calm.
     ///
     /// The operation answers with the branch projection it wrote, so the session
     /// view this method promises is re-read afterwards.
@@ -706,10 +695,8 @@ impl Client {
     /// Atomically replace every tag authored by `by` on a session. Exact
     /// `(key, value)` entries in `clear` are removed in the same transaction.
     ///
-    /// `sessions.tags.replace`. Per-key `set`/`delete` calls are not a
-    /// substitute: they would drop both the atomicity and the "remove what this
-    /// author set and no longer wants" half that the status watch depends on,
-    /// which is why the bulk form is its own declared operation.
+    /// `sessions.tags.replace`. Per-key `set`/`delete` calls lose atomicity and
+    /// the ability to explicitly remove tags, both required by the status watch.
     pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
         use crate::operations::sessions::tags::replace;
         self.invoke::<replace::Replace>(&replace::Input {
@@ -1014,9 +1001,8 @@ impl Client {
 
     // -- Branch-scoped artifacts ---------------------------------------------
     //
-    // The `artifacts.*` operations are addressed by branch, not by session:
-    // what the `loom artifacts` CLI needs, since it may target a branch with no
-    // active session.
+    // The `artifacts.*` operations are addressed by branch, enabling the
+    // `loom artifacts` CLI to target a branch with no active session.
 
     /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
     /// every artifact in the repo regardless of scope (`artifacts.list`).
@@ -1073,9 +1059,8 @@ impl Client {
     }
 
     /// The dashboard deep-link for a branch artifact, resolved server-side
-    /// (`artifacts.url`) so it carries the externally-visible origin
-    /// (`auth.base_url`, else the request Host) rather than the loopback/wildcard
-    /// address the agent dials — a `0.0.0.0` link is useless to whoever reads it.
+    /// (`artifacts.url`) using the externally-visible origin (`auth.base_url` or
+    /// request Host), not the loopback address the agent dials.
     /// See `loom session url` for the same pattern.
     pub async fn branch_artifact_url(&self, key: &str, name: &str) -> Result<String> {
         use crate::operations::artifacts::url;
@@ -1089,8 +1074,7 @@ impl Client {
     }
 
     /// Delete an artifact and its whole revision history. `repo: true` targets
-    /// the repo-shared row of this name rather than the branch-scoped one
-    /// (`artifacts.delete`).
+    /// the repo-shared row; `false` targets the branch-scoped one (`artifacts.delete`).
     pub async fn delete_branch_artifact(&self, key: &str, name: &str, repo: bool) -> Result<Value> {
         use crate::operations::artifacts::delete;
         let result = self

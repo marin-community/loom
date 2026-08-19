@@ -662,16 +662,12 @@ async fn forward_trigger_to_session(
 
 // ---------------------------------------------------------------------------
 // Operation registry — `repos.*`, bound onto `weaver_api::operations::repos`.
-// Each handler below is the twin of a legacy axum handler above: same domain
-// calls, resolved from an operation's typed `Input` instead of a query/body.
-// Authorization (`actor = User`, `scope = Global`) now happens once,
-// centrally, in `web/operations.rs`. The legacy routes above stay live and
-// untouched until the coordinated route deletion pass.
+// Authorization (`actor = User`, `scope = Global`) happens once, centrally,
+// in `web/operations.rs`.
 //
-// `repos.env.*` binds handlers that live in `repo_env.rs` (the legacy
-// `/api/repos/env*` routes are there too) — its `bound_operations()` is
-// folded into this bundle's, since the coordinator only calls
-// `repos::bound_operations()`.
+// `repos.env.*` binds handlers that live in `repo_env.rs`; its
+// `bound_operations()` is folded into this bundle's, since the coordinator
+// only calls `repos::bound_operations()`.
 // ---------------------------------------------------------------------------
 
 fn repo_view(r: repo::ManagedRepo) -> RepoView {

@@ -34,9 +34,9 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-/// Capability sets, derived from the registry rather than hand-maintained:
-/// every `permissions.*` operation whose MCP projection targets this server
-/// contributes its tool to the set named by its grant.
+/// Capability sets are derived from the registry: every `permissions.*` operation
+/// whose MCP projection targets this server contributes its tool to the set named
+/// by its grant.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {

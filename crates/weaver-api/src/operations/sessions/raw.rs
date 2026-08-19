@@ -3,11 +3,8 @@ use super::prelude::*;
 /// Raw bytes of a worktree file, with a guessed content type — for inline
 /// image previews and downloads. Always reads the working tree, never a git ref.
 ///
-/// `io = Download`: the caller is the browser fetching a resource by URL, and it
-/// wants the bytes rather than a base64 envelope. This used to answer JSON so
-/// that the generic dispatcher could serve it, which meant the route the file
-/// browser actually used stayed hand-mounted and unregistered — the encoding
-/// belonged in the declaration, not in a second route.
+/// `io = Download` because the browser fetches this resource directly and needs
+/// raw bytes rather than a JSON envelope.
 #[operation(
     id = "sessions.raw",
     actor = SessionSelf,

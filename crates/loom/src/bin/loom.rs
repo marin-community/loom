@@ -150,12 +150,10 @@ enum HostCmd {
     /// Guided one-time credential setup.
     ///
     /// `loom setup` with no subcommand runs the **interactive walkthrough**: it
-    /// establishes a bootstrap operator (so the daemon can start and someone can
-    /// sign in), then optionally the GitHub App and the agent secrets — one
-    /// command to get a fresh instance ready. Re-running it is safe: each step
-    /// pre-fills its default from the existing config, so it updates in place
-    /// rather than starting over. The subcommands below run an individual step
-    /// directly.
+    /// establishes a bootstrap operator, then optionally the GitHub App and
+    /// agent secrets — one command to get a fresh instance ready. Re-running it
+    /// is safe: each step pre-fills its default from the existing config. The
+    /// subcommands below run an individual step directly.
     ///
     /// `loom setup github-app` registers the GitHub App loom uses (the
     /// webhook receiver + REST identity from `docs/github-trigger.md`, which
@@ -246,9 +244,8 @@ fn generic_bindings() -> Vec<loom::cli::CliBinding> {
         .into_iter()
         .filter(|binding| {
             // Skip only when the hand-written surface already offers this exact
-            // invocation. A group it shares (`loom issues`) is merged into, not
-            // duplicated — clap panics on a duplicate subcommand name — so the
-            // test is the whole path, not just its head.
+            // invocation. Groups merge; clap panics on duplicates. Test the
+            // whole path, not just its head.
             binding
                 .operation
                 .cli
@@ -566,10 +563,8 @@ impl FromArgMatches for Cmd {
 }
 
 impl Subcommand for Cmd {
-    // Registry-derived commands go on LAST, once both hand-written sets are in
-    // place. They merge into a group that already exists; adding them earlier
-    // built a second `settings` beside the host one, which clap rejects when the
-    // tree is finally assembled.
+    // Registry-derived commands merge into existing groups last. Earlier
+    // placement would create duplicates that clap rejects.
     fn augment_subcommands(command: Command) -> Command {
         augment_registered_subcommands(HostCmd::augment_subcommands(hand_written_subcommands(
             command,
@@ -1274,12 +1269,11 @@ struct ConfigPathOpts {
 /// every field from `loom.toml` *or* a same-named env var (env wins) — set
 /// one to override a single invocation without editing the file.
 ///
-/// `set` is a different contract — the runtime `settings` table
-/// (`weaver_core::config::REGISTRY`, the same one the settings pane writes
-/// over HTTP) rather than `loom.toml` — written straight to the daemon's
-/// sqlite database with no server needed. This is what
+/// `set` writes directly to the runtime `settings` table
+/// (`weaver_core::config::REGISTRY`), bypassing `loom.toml`. Written to the
+/// daemon's sqlite database with no server needed. This is what
 /// `deploy/standalone/docker-compose.yml`'s `loom-init` uses to seed the
-/// security-relevant auth settings before loom itself starts listening.
+/// security-relevant auth settings before loom starts listening.
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Render `loom.toml` as a dotenv file (e.g. `deploy/standalone/.env`).
@@ -1377,7 +1371,7 @@ enum ClientContextCmd {
 
 #[derive(Args)]
 struct FederationAddArgs {
-    /// Stable mapping name. Omitted legacy calls derive one from identity fields.
+    /// Stable mapping name. When omitted, one is derived from identity fields.
     name: Option<String>,
     #[arg(long, default_value = "github")]
     provider: String,
@@ -1564,7 +1558,7 @@ struct ProfileAddOpts {
     /// Apply Loom's restricted automation security posture.
     #[arg(long)]
     restricted: bool,
-    /// Provider runtime permission rules (legacy; prefer --mcp).
+    /// Provider runtime permission rules (deprecated; use --mcp).
     #[arg(
         long = "runtime-permission",
         visible_alias = "allowed-tool",
@@ -1672,8 +1666,8 @@ struct LaunchOpts {
     #[arg(long)]
     repo: Option<String>,
     /// Branch to fork the new worktree from. Defaults to a freshly-fetched
-    /// `origin/<default branch>` (the repo's mainline), so new work starts from
-    /// the latest upstream rather than the launching checkout.
+    /// `origin/<default branch>` (the repo's mainline). New work starts from the
+    /// latest upstream.
     #[arg(long)]
     base: Option<String>,
     /// One-line title shown on the dashboard. Defaults to a title derived from
@@ -1688,8 +1682,7 @@ struct LaunchOpts {
     /// from it and moves it out of the repo backlog.
     #[arg(long)]
     claim: Option<i64>,
-    /// Resume an existing branch rather than creating a new one. Mutually
-    /// exclusive with `--name`.
+    /// Resume an existing branch. Mutually exclusive with `--name`.
     #[arg(long)]
     branch: Option<String>,
     /// Model selector accepted by the selected agent. Omit to use the selected
@@ -1730,8 +1723,6 @@ mod cli_tree_tests {
     }
 
     /// Every advertised invocation exists in the tree the binary really uses.
-    ///
-    /// This is the invariant the previous registry could not state, and the one
     /// it violated: a descriptor said `cli: Some("loom issues list")` beside a
     /// clap enum whose variant was `Ls`, and three advertised commands did not
     /// exist at all. Checking bindings against the registry is not enough —
@@ -3679,8 +3670,7 @@ async fn existing_app(db: &Db) -> Option<ExistingApp> {
 }
 
 /// Present the update / re-install menu for an already-configured App. Returns
-/// `true` when the operator chose to create a brand-new App (the caller should
-/// fall through to the manifest flow, replacing the old one); `false` when the
+/// `true` when the operator chose to create a brand-new App; `false` when the
 /// existing App was handled here (a page opened, or left untouched).
 async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
     println!(
@@ -3810,9 +3800,8 @@ async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // own confirming account (`conv.owner.login`, used below when this is `None`)
     // is the org itself for an org install, which isn't a usable
     // `LOOM_OWNER_GITHUB` — a fresh database with no owner seeded locks everyone
-    // out (see `db::seed_owner`). Resolved before opening the callback listener
-    // so a misconfigured run fails fast rather than after the operator has
-    // already gone through the browser confirmation.
+    // out (see `db::seed_owner`). Resolve before opening the callback listener
+    // so configuration errors fail before the browser confirmation.
     let org_owner: Option<String> = match (
         &org,
         opts.owner

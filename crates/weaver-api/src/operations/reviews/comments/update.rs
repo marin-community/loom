@@ -3,12 +3,9 @@ use super::prelude::*;
 /// Edit a draft review comment's text, or replace its anchor.
 ///
 /// Replacing the anchor requires `subject_version`, `anchor_kind`, and
-/// `anchor` together — a partial anchor replacement is rejected, same as the
-/// legacy handler.
+/// `anchor` together — a partial anchor replacement is rejected.
 ///
-/// Operator-only, same reasoning as `reviews.comments.create`. Rejected once
-/// the review has left `draft` status. See `creator_review` in
-/// `crates/loom/src/web/reviews.rs`.
+/// Operator-only. Rejected once the review has left `draft` status.
 #[operation(
     id = "reviews.comments.update",
     actor = User,

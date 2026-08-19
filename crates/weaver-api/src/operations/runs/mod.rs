@@ -1,18 +1,11 @@
 //! Automation-triggered runs — GitHub Actions, ops scripts, and Grafana
 //! alerts dispatching a session through a federated automation credential.
 //!
-//! Distinct from a watch's own round history (`watches.runs`): a
-//! `weaver_core::runs::Run` here is one delivery attempt through
+//! A `weaver_core::runs::Run` is one delivery attempt through
 //! `POST /api/auth/automation-token`-minted credentials, tracked for
-//! idempotent redelivery and operator observability — not a watch program's
-//! judgement round. Previously excluded from the registry as "fleet
-//! automation"; `runs.create` is the one operation actually gated to the
-//! runtime (`actor = Internal`), while the read side is an ordinary operator
+//! idempotent redelivery and operator observability. `runs.create` is gated
+//! to the runtime (`actor = Internal`), while the read side is an operator
 //! diagnostic surface (`actor = User`).
-//!
-//! One file per operation. Adding `runs.cancel` means adding its file here
-//! and its handler in the mirrored server tree — no clap variant, no client
-//! wrapper, no MCP schema, no capability set.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

@@ -21,8 +21,7 @@ pub struct Input {
     /// The tag key.
     #[operand(positional)]
     pub key: String,
-    /// The tag value. Clear a tag with `issues tag delete` rather than setting
-    /// an empty value.
+    /// The tag value. Use `issues tag delete` to clear a tag.
     #[operand(positional)]
     pub value: String,
     /// One-line reason accompanying the tag.

@@ -1,8 +1,8 @@
 use super::prelude::*;
 
 /// Update a session's branch-level fields (title, goal, description) and its
-/// durable status. The attention *level* is set through the tags operations
-/// (`sessions.tags.set`/`sessions.tags.delete`), not here.
+/// durable status. Attention level is managed via tags operations
+/// (`sessions.tags.set`/`sessions.tags.delete`).
 #[operation(
     id = "sessions.update",
     actor = SessionSelf,
@@ -14,13 +14,12 @@ pub struct Update;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
-    /// New durable status (the fleet lifecycle marker, not the attention
-    /// tag).
+    /// New durable status (the fleet lifecycle marker).
     pub status: Option<String>,
     /// New task label for the branch.
     pub title: Option<String>,
-    /// Required with `title`: the label the caller last observed, so a stale
-    /// edit is rejected rather than silently overwriting a concurrent rename.
+    /// Required with `title`: the label the caller last observed. Used to detect
+    /// and reject concurrent updates by comparing with the current value.
     pub expected_title: Option<String>,
     /// Required with `title`: the provenance (`user` or `agent`) the caller
     /// last observed.

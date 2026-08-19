@@ -54,8 +54,7 @@ where
             Box::pin(async move {
                 let (mut input, view) = parsed?;
                 let client = crate::agent_cli::client();
-                // Context is resolved once, here — not inside each command, and
-                // not by an extra round-trip per MCP tool as the old adapters did.
+                // Context is resolved once here, avoiding per-command round-trips.
                 if !<O::Input as Operands>::CONTEXT.is_empty() {
                     let context = resolve_context(&client).await?;
                     input.fill_context(&context);
@@ -97,9 +96,9 @@ pub fn augment(root: Command, bindings: &[CliBinding]) -> Command {
 
 /// Descend to `path` and add the binding's leaf there.
 ///
-/// The leaf is built at the insertion point rather than beforehand, because
-/// whether its name and aliases are free depends on what is already in that
-/// group — and clap treats a duplicate name *or* alias as a bug and panics.
+/// The leaf is built at the insertion point so we can check whether its name
+/// and aliases are free in the group — clap treats a duplicate name or alias
+/// as a bug and panics.
 fn insert(command: Command, path: &[&'static str], binding: CliBinding) -> Command {
     let Some((head, rest)) = path.split_first() else {
         return place(command, binding);
@@ -149,8 +148,8 @@ pub fn resolve<'a>(
     matches: &ArgMatches,
 ) -> Option<(&'a CliBinding, ArgMatches)> {
     for binding in bindings {
-        // A registered operation with no CLI projection simply is not reachable
-        // from the command line; skip it rather than abandoning the search.
+        // A registered operation with no CLI projection is not reachable
+        // from the command line; skip it.
         let Some(cli) = binding.operation.cli else {
             continue;
         };
@@ -176,8 +175,8 @@ pub fn resolve<'a>(
 mod tests {
     use super::*;
 
-    /// The invariant that the previous design could not state: every advertised
-    /// invocation is accepted by the parser, because they are the same value.
+    /// Every advertised invocation is accepted by the parser, because they are
+    /// the same value.
     #[test]
     fn every_advertised_invocation_parses() {
         let bindings = crate::cli::bindings();

@@ -81,9 +81,8 @@ where
                 let merged = merge_defaults(arguments, defaults);
                 let mut input: O::Input = serde_json::from_value(merged)
                     .map_err(|error| anyhow!("invalid arguments for {}: {error}", O::SPEC.id))?;
-                // Fetched once by the caller of `call` and handed down here —
-                // not an extra `self_context()` round-trip per tool, as the old
-                // per-adapter `project_input` functions each made their own.
+                // Context is fetched once by the caller and handed down to all
+                // operations in a single request.
                 if !<O::Input as Operands>::CONTEXT.is_empty() {
                     input.fill_context(&context);
                 }
@@ -186,13 +185,11 @@ pub(crate) fn bindings() -> Vec<McpBinding> {
 /// its binding. The single entry point a ported adapter's `tools/call` calls
 /// into — everything above this line is generic over the operation's types,
 /// and everything below it is registry lookups, not per-tool code.
-/// Resolve the tool, *then* connect.
 ///
-/// A call naming a tool that does not exist should say so, whatever else is
-/// wrong with the environment. The hand-written adapters have always checked in
-/// this order; the registry-driven ones lost it when they moved onto this
-/// dispatcher and started building their client first — so `loom_context::not_a_tool`
-/// reported a missing `LOOM_TOKEN` instead of an unknown tool.
+/// Resolves the tool before connecting: a call naming a tool that does not
+/// exist should say so, whatever else is wrong with the environment. Building
+/// the client first hides that — `loom_context::not_a_tool` once reported a
+/// missing `LOOM_TOKEN` instead of an unknown tool.
 pub(crate) async fn call_adapter_tool(
     adapter: &str,
     server: &str,
@@ -245,12 +242,10 @@ async fn resolve_context(client: &Client) -> Result<ContextValues> {
 
 /// Group one MCP server's registered operations by the grants they name.
 ///
-/// This is what replaces a hand-written `CapabilitySet` list: a set's tools
-/// come from every operation whose `mcp.server` matches and whose `grants`
-/// names it, so adding an operation to a grant widens the set automatically
-/// rather than needing a matching edit here. Only the human-facing
-/// description is still authored, via `describe` — the registry has no prose
-/// field to derive it from.
+/// A set's tools come from every operation whose `mcp.server` matches and whose
+/// `grants` names it. Adding an operation to a grant automatically widens the set.
+/// Descriptions are hand-authored via the `describe` callback because the
+/// registry carries no prose field.
 pub(crate) fn derive_capability_sets(
     server: &'static str,
     group: &'static str,
@@ -284,8 +279,7 @@ pub(crate) fn derive_capability_sets(
 }
 
 /// Whether `rule` (a Claude permission rule, `mcp__<server>__<tool>`) names one
-/// of `server`'s registered MCP tools — derived from the registry rather than a
-/// hand-maintained tool-name array.
+/// of `server`'s registered MCP tools. Derived from the registry.
 pub(crate) fn is_permission_rule(server: &str, rule: &str) -> bool {
     rule.strip_prefix("mcp__")
         .and_then(|suffix| suffix.split_once("__"))

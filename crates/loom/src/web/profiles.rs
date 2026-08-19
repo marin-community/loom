@@ -35,8 +35,7 @@ pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
     }
 }
 
-/// The twin of [`input`], from `profiles.create`'s own typed fields rather
-/// than the shared [`ProfileReq`] the legacy route deserializes.
+/// Build profile input from `profiles.create`'s typed fields.
 fn profile_input_from_create(
     input: profiles_operations::create::Input,
     name: String,
@@ -270,10 +269,7 @@ pub(super) async fn update_profile_operation(
     view(st, item).await
 }
 
-/// `profiles.clone`. `source` and `name` are separate positional fields on
-/// the operation, where the route this replaced split them as a URL path
-/// segment plus a body field; [`CloneProfileReq`] is otherwise the same
-/// frozen shape both take.
+/// `profiles.clone`.
 pub(super) async fn clone_profile_operation(
     context: OperationContext,
     input: profiles_operations::clone::Input,

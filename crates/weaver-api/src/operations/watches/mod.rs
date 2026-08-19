@@ -2,11 +2,7 @@
 //!
 //! The operator + authoring surface over `weaver_core::watch`: register a
 //! watch, arm/disarm it, fire a round on demand, and inspect its round
-//! history. Previously excluded from the registry entirely as "fleet
-//! automation" — every route here already required a human `User` or `Admin`
-//! credential (see `crates/loom/src/web/auth.rs`'s `user_grant_allows`, which
-//! refuses a plain `User` grant on every mutating `/watches` route); the
-//! registry now says so as a field instead of by omission.
+//! history.
 //!
 //! One file per operation. Adding `watches.clone` means adding its file here
 //! and its handler in the mirrored server tree — no clap variant, no client

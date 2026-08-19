@@ -1,23 +1,10 @@
 use super::prelude::*;
 
-/// List a session's reviews for one subject — an artifact, or its
-/// change-set — merging live durable reviews with legacy artifact-thread
-/// reviews for backward compatibility.
+/// List a session's reviews for one subject — an artifact or its change-set.
 ///
-/// The frontend's `listArtifactReviews` and `listChangesReviews` are both
-/// this one legacy route (`GET /sessions/{id}/reviews`), discriminated by
-/// `subject_kind`/`subject_key`, not two separate routes — so one operation
-/// with a discriminating operand pair models it honestly instead of
-/// splitting it in two.
-///
-/// Reachable by the reviewed session's own credential as well as a human
-/// operator: `list_for` in `crates/loom/src/web/reviews.rs` narrows draft
-/// visibility by `principal.is_human()` rather than rejecting a session
-/// credential outright (a session may see submitted feedback on its own
-/// work, never another operator's private draft), and the legacy path
-/// allowlist in `web/auth.rs` (`Grant::Session` arm, the
-/// `segments.first() == Some(&"sessions")` rule) already lets a session
-/// reach its own `/sessions/{id}/reviews`.
+/// Reachable by both the reviewed session's own credential and a human
+/// operator: sessions may see submitted feedback on their own work, but not
+/// draft reviews from other operators.
 #[operation(
     id = "reviews.list",
     actor = SessionSelf,

@@ -34,8 +34,7 @@ pub struct Input {
     /// Include automation-class sessions.
     ///
     /// Defaults to including them, which is what a fleet listing means by
-    /// "every session". `loom ps` passes `false` to keep its historical
-    /// interactive-only inventory.
+    /// "every session". `loom ps` passes `false` for an interactive-only inventory.
     #[operand(default = true)]
     pub automation: bool,
     /// Include engine-managed warm sessions.

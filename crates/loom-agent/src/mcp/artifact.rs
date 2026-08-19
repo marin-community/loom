@@ -3,18 +3,11 @@
 //! Every tool here is a registered `artifacts.*` operation, and `tools/list`
 //! is `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`. `delete`,
 //! `history`, `threads`, `comment`, and `resolve` route straight through
-//! `super::dispatch::call_tool` — there is no `project_input` left for them to
-//! maintain (`threads`'s `open_only` flag and `comment`'s tagged
-//! `New`/`Reply` target are exactly what the schema already advertised; the
-//! old hand code here still read a stale `all` flag and flat
-//! `thread_id`/`quote` arguments that predated it).
+//! `super::dispatch::call_tool`. The schema carries all the shape these tools need.
 //!
-//! `list`, `get`, and `write` stay hand-written for one reason: they resolve
-//! each artifact's dashboard `url` with a second REST call
-//! (`Client::branch_artifact_url`) and merge it into the response.
-//! `ArtifactMeta`/`ArtifactView` carry no `url` field the way
-//! `ChannelView::bindings` now carries channel bindings, so routing these
-//! three through the plain operation would silently drop that link.
+//! `list`, `get`, and `write` are hand-written because they resolve each artifact's
+//! dashboard `url` with a second REST call (`Client::branch_artifact_url`) and merge
+//! it into the response. The generic operation response lacks this `url` field.
 
 use std::sync::OnceLock;
 
@@ -63,9 +56,9 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-/// Capability sets, derived from the registry rather than hand-maintained:
-/// every `artifacts.*` operation whose MCP projection targets this server
-/// contributes its tool to the set named by its grant.
+/// Capability sets are derived from the registry: every `artifacts.*` operation
+/// whose MCP projection targets this server contributes its tool to the set named
+/// by its grant.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {

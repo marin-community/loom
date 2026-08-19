@@ -71,18 +71,12 @@ pub(super) async fn session_layout_events(
 
 // ---------------------------------------------------------------------------
 // Operation registry — `session_layout.*`, bound onto
-// `weaver_api::operations::session_layout`. These are the operation-typed
-// twins of every route above, including the per-item PATCH/DELETE and
-// default-selector routes (`session_layout.events` is registered too, but as
-// `io = Stream`, so `web::encodings` serves it). Every revision-guarded
-// mutation still funnels through `mutation_response`/`mutation_result`, so
-// the optimistic-concurrency conflict shape — refetch the current layout and
-// hand it back alongside the 409 — is identical between the legacy routes and
-// these operations. `session_layout.groups.preference.set` is the one
-// exception, and was already an exception in the legacy handler: a collapse
-// toggle carries no `expected_revision`, so there is nothing to conflict on.
-// The legacy routes stay live and untouched until the coordinated route
-// deletion pass.
+// `weaver_api::operations::session_layout`. Every revision-guarded mutation
+// funnels through `mutation_response`/`mutation_result`, so the
+// optimistic-concurrency conflict shape — refetch the current layout and
+// hand it back alongside the 409 — is consistent. `session_layout.groups.preference.set`
+// is the one exception: a collapse toggle carries no `expected_revision`,
+// so there is nothing to conflict on.
 // ---------------------------------------------------------------------------
 
 /// The operation-typed twin of [`mutation_response`], returning the bare
@@ -211,10 +205,9 @@ async fn groups_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.preference.set`. Unlike the rest of this bundle it
-/// does not go through `mutation_result`: the route this replaces never did
-/// either, because a collapse toggle carries no `expected_revision` to
-/// conflict on.
+/// `session_layout.groups.preference.set`. Unlike the rest of this bundle,
+/// this does not go through `mutation_result` because a collapse toggle
+/// carries no `expected_revision` to conflict on.
 async fn groups_preference_set_operation(
     context: OperationContext,
     input: groups::preference::set::Input,

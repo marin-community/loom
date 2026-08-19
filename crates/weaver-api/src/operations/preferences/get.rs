@@ -1,12 +1,7 @@
 use super::prelude::*;
 
-/// This operator's personal UI preference overrides (terminal theme, font,
+/// Get this operator's personal UI preference overrides (terminal theme, font,
 /// font size), each layered over its effective inherited value.
-///
-/// `actor = User`: `grant_allows` has never admitted a session credential to
-/// `/preferences` (no `Grant::Session` arm matches it, and it is absent from
-/// the fixed list of bare paths a session may `GET`), so `User` — which also
-/// covers `Admin` — is the exact set the legacy route already allowed.
 #[operation(
     id = "preferences.get",
     actor = User,

@@ -162,10 +162,7 @@ async fn reconcile_deployment_core(st: &AppState, req: DeploymentReq) -> ApiResu
 
 /// `deployment.reconcile`.
 ///
-/// There is no hand-written twin: the legacy `POST /deployment/reconcile` had
-/// the same path, method and body as this operation's derived route, so the two
-/// collided in the router. Central `authorize()` (`actor = Admin`) replaces its
-/// inline `principal.is_admin()` check.
+/// Central `authorize()` (`actor = Admin`) replaces the inline `principal.is_admin()` check.
 pub(super) async fn reconcile_deployment_operation(
     context: OperationContext,
     input: reconcile::Input,

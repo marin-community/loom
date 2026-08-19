@@ -22,8 +22,8 @@ pub struct Input {
     /// For a group, move it into this space; omitted keeps its current space.
     pub destination_space_id: Option<String>,
     /// Optimistic-concurrency guard: the layout revision this call was
-    /// composed against. A stale caller is rejected rather than silently
-    /// clobbering a concurrent edit from another dashboard tab.
+    /// composed against. Stale calls are rejected to prevent concurrent
+    /// edit conflicts.
     pub expected_revision: i64,
 }
 

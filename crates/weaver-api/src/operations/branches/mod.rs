@@ -1,20 +1,10 @@
 //! Branches — the per-worktree unit of work a session is attached to.
 //!
-//! `GET /api/branches` and its siblings were previously unregistered
-//! entirely. A branch is what a session (and its `LOOM_TOKEN` credential) is
-//! bound to, so almost everything here is `actor = SessionSelf` scoped to
-//! exactly the caller's own branch — see `require_branch_access` in
-//! `crates/loom/src/web/scope.rs`, which lets a session credential reach only
-//! the branch it is bound to (by id or name) while a `User`/`Admin` principal
-//! may address any branch. `branches.list` is the one exception: it is a
-//! fleet-wide, unfiltered read a session credential has always been able to
-//! reach (`grant_allows` in `crates/loom/src/web/auth.rs` lists bare
-//! `/branches` beside `/sessions` and `/issues`), mirroring `sessions.list`'s
-//! own `scope = Global`.
+//! Most operations are `actor = SessionSelf` scoped to the caller's own branch.
+//! `branches.list` is fleet-wide (`scope = Global`).
 //!
-//! One file per operation, mirroring `issues`. Adding `branches.archive`
-//! means adding `archive.rs` here and its handler in the mirrored server tree
-//! — no clap variant, no client wrapper, no MCP schema, no capability set.
+//! One file per operation. Adding a new operation means adding a file here
+//! and its handler in the corresponding server tree.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;

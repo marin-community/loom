@@ -19,7 +19,7 @@ pub struct Handoff;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
-    /// Legacy flattened runtime selector. Canonical clients use `selection`.
+    /// Runtime selector (deprecated; use `selection` instead).
     #[operand(default = String::new())]
     pub agent: String,
     /// Blank/absent uses the target runtime's default.

@@ -3,11 +3,6 @@ use super::prelude::*;
 /// Slack integration status: which credentials are set, whether `auth.test`
 /// resolves a live bot identity, the configured access boundary, and the
 /// Socket Mode supervisor's live health.
-///
-/// `actor = User`: the legacy `GET /slack/status` route takes no path
-/// parameter and `grant_allows` has never admitted a session credential to it
-/// (no `Grant::Session` arm matches `/slack/status`), so `User` is the exact
-/// set the route already allowed.
 #[operation(
     id = "slack.connection_status",
     actor = User,

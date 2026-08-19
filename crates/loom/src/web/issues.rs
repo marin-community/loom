@@ -99,10 +99,8 @@ async fn collect_issue_board(
     issue_views(&st.db, issues).await
 }
 
-/// `issues.board`. The route this replaces ran no repo-access check and
-/// neither does this: `scope = Global` names no repository to check against,
-/// so a session credential that may read work items sees the whole board,
-/// exactly as it did through `GET /issues`.
+/// `issues.board`. `scope = Global` names no repository to check against,
+/// so a session credential that may read work items sees the whole board.
 pub(super) async fn issue_board_operation(
     context: OperationContext,
     input: issue_operations::board::Input,
@@ -235,10 +233,9 @@ pub(super) async fn get_issue_operation(
 
 /// Apply an edit to one already-loaded issue and return the refreshed view.
 ///
-/// Shared by `issues.update` and the `PATCH /issues/{id}` route it replaces.
-/// Each field is its own statement because each is independently optional, and
-/// the status change runs first so an invalid one aborts before any of the
-/// other edits land.
+/// Used by `issues.update`. Each field is its own statement because each is
+/// independently optional, and the status change runs first so an invalid one
+/// aborts before any of the other edits land.
 async fn apply_issue_edits(
     st: &AppState,
     existing: &Issue,
@@ -298,11 +295,8 @@ async fn apply_issue_edits(
     issue_view(&st.db, issue).await
 }
 
-/// `issues.update`. The body's `claimed_branch: Option<Option<String>>` is
-/// now an `unclaim: bool`: `null` was the only value the route this replaces
-/// accepted — an `Option<Option<String>>` whose only legal inhabitant was
-/// `Some(None)` — so the 400 it raised for a non-empty branch name has
-/// nothing left to reject.
+/// `issues.update`. The `unclaim: bool` field can only clear a claim,
+/// not assign one, since claims are made by launching against an issue.
 pub(super) async fn update_issue_operation(
     context: OperationContext,
     input: issue_operations::update::Input,

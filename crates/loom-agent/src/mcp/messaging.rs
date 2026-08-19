@@ -4,20 +4,13 @@
 //! (`mcp = "loom_messaging::slack_reply"`) and routes straight through
 //! `super::dispatch::call_tool`.
 //!
-//! `status_update` stays hand-written rather than aliasing
-//! `loom_session::status_set`: `super::dispatch::call_tool`'s allow-list
-//! check (`super::runtime_tool_allowed`) is keyed by the *tool name it is
-//! given* against this process's own `LOOM_MCP_ALLOWED_TOOLS` — which, for a
-//! `loom_messaging` subprocess, only ever lists `status_update`/`slack_reply`
-//! (see `server_configs` in `mod.rs`, which derives each adapter's allow-list
-//! from that adapter's own `tools()`). Calling it with the *renamed*
-//! `status_set` would check for a name the allow-list never contains, so a
-//! session with scoped MCP permissions would have every `status_update` call
-//! rejected as "not allowed by this session" even when it plainly is. Both
-//! schemas stay hand-written too: `status_update` has no registered
-//! `loom_messaging::*` projection to borrow one from, and `slack_reply`'s
-//! hand-written `thread` shape and wording are what sessions pinned to
-//! `mcp/messaging/status@v1`/`mcp/slack/message@v1` already see.
+//! `status_update` is hand-written because the allow-list check
+//! (`super::runtime_tool_allowed`) is keyed by the tool name it receives against
+//! `LOOM_MCP_ALLOWED_TOOLS`. Aliasing to `loom_session::status_set` would check
+//! for a name the allow-list never contains, causing a scoped session to reject
+//! the call. Both schemas are hand-written: `status_update` has no registered
+//! `loom_messaging::*` projection, and `slack_reply`'s `thread` shape and wording
+//! preserve what sessions pinned to `mcp/messaging/status@v1`/`mcp/slack/message@v1` see.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

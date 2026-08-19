@@ -9,11 +9,7 @@ use super::operations::{register, Bound, OperationContext};
 use super::{require_session, ApiResult};
 
 /// The bound `sessions.context` operation.
-///
-/// `sessions.context` was `self.get` until recently; its handler keeps living
-/// here (renamed `context_get`) because `self` cannot name a Rust module, but
-/// the id, route, CLI (`loom context`), and MCP (`loom_context::get`)
-/// projections are all independent of that.
+/// (The handler is `context_get` because `self` cannot name a Rust module.)
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![register::<
         weaver_api::operations::sessions::context::Get,
@@ -45,11 +41,9 @@ fn self_context_view(base: &str, session: &Session, branch: &Branch) -> SelfCont
         repo_root: branch.repo_root.clone(),
         channel_id: session.id.clone(),
         session_url: crate::links::session_url(base, &session.id),
-        // The links carry no ids any more, and that is the point: each names an
-        // operation whose one operand is this caller's own context, so a session
-        // credential POSTing `{}` to it gets its own channel, its own artifacts,
-        // its own session. The old per-id URLs were the same three reads spelled
-        // as routes that no longer exist.
+        // Each link names an operation whose one operand is this caller's own
+        // context, so a session credential POSTing `{}` to it gets its own channel,
+        // its own artifacts, its own session.
         links: SelfContextLinks {
             channel: channels::get::Get::SPEC.path().to_string(),
             artifacts: artifacts::list::List::SPEC.path().to_string(),

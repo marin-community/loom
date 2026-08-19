@@ -97,20 +97,9 @@ pub(super) async fn branch_belongs_to_session_tree(
 /// `Scoped` input names. So this function's whole job is the *handful* of
 /// authenticated routes that are not operations.
 ///
-/// It used to be much more than that: a parallel authority model keyed off URL
-/// shapes, running *in addition* to the registry. Two consequences, both of
-/// which happened. A newly declared operation was refused until someone also
-/// added its URL to a list here — that is what 403'd
-/// `permissions.requests.create` for the session it was declared for. And an
-/// entry naming a route that no longer existed stayed a standing
-/// pre-authorization for whatever got mounted at that path next.
-///
-/// What was left when the routes went away is the IDE proxy (a raw byte proxy
-/// into a container, not an operation and never going to be one) and the
-/// registry's own self-description. The resource check for the proxy is still
-/// real, so it is still here — but it is now the only one, and it is checked
-/// against the session id in the path because that proxy has no typed input to
-/// check instead.
+/// The IDE proxy is a raw byte proxy into a container; it is never going to be
+/// an operation, and has no typed input, so it needs a resource check here
+/// against the session id in the path.
 pub(super) async fn grant_allows(
     st: &AppState,
     principal: &Principal,
@@ -135,9 +124,7 @@ pub(super) async fn grant_allows(
         Grant::Admin => true,
         Grant::User => discovery || super::is_ide_proxy_path(path),
         // An automation credential exists to report runs, which is exactly what
-        // `runs.create`'s `actor = Internal` admits it to. It reaches no raw
-        // path at all — narrower than the allowlist this replaces, which let it
-        // GET any session it had created.
+        // `runs.create`'s `actor = Internal` admits it to. It reaches no raw path at all.
         Grant::Automation { .. } => false,
         Grant::Session { session_id, .. } => {
             if discovery {
@@ -174,8 +161,6 @@ pub(super) fn operation_grant_allows(
     }
     match &principal.grant {
         Grant::Anonymous => false,
-        // `SessionOnly` returns session credential material, so an operator may
-        // not stand in for the session the way `SessionSelf` allows.
         Grant::Admin => operation.actor != weaver_api::ActorPolicy::SessionOnly,
         Grant::User => matches!(
             operation.actor,
@@ -275,9 +260,7 @@ pub(super) async fn require_auth(
             next.run(req).await
         }
         // No credential. An operation that declares `actor = Anonymous` is
-        // reachable anyway — that declaration is what opens the door, and
-        // `authorize()` still runs, against `Grant::Anonymous`. Everything else
-        // is refused here as before.
+        // reachable anyway — that declaration is what opens the door.
         None => {
             let anonymous_target =
                 weaver_api::operation_for_request(req.method().as_str(), req.uri().path())
@@ -545,7 +528,7 @@ fn user_role_input(role: UserRole) -> auth::UserRole {
 async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
     // Both the OAuth client id and the App identity are resolved env-or-settings
     // (via `auth`/`github_app`), so an env-configured deploy reports its live
-    // values instead of blanks read from an empty settings table.
+    // values even when the settings table is empty.
     let app_id = crate::github_app::app_id(&st.db)
         .await
         .map(|id| id.to_string())
@@ -570,19 +553,12 @@ async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
 // doc comment on each below. Every other operation in the bundle is bound.
 // ===========================================================================
 
-/// `auth.me` — who the caller is. Unlike the legacy `GET /api/auth/me` above
-/// (which this leaves untouched), this operation is only ever reached once
-/// `require_auth` has already resolved a [`Principal`] — the registry's
-/// `actor = User` bars an anonymous caller before the handler runs — so it
-/// always answers `authenticated: true`. The "is anyone logged in yet" check
-/// the SPA needs before that point stays served by the legacy route.
-/// `auth.me` — who the caller is + which sign-in methods to offer.
+/// `auth.me` — who the caller is, and which sign-in methods to offer.
 ///
-/// Declared `actor = Anonymous`, so an unauthenticated caller arrives here with
-/// a synthesized anonymous principal rather than a 401, and gets
-/// `authenticated: false`. That is what the login screen reads. This replaces
-/// the hand-written public `GET /api/auth/me`, which served the same two cases
-/// from a second handler on a second router.
+/// Declared `actor = Anonymous`, so an unauthenticated caller arrives with a
+/// synthesized anonymous principal instead of a 401, and gets
+/// `authenticated: false`. The login screen reads that flag to decide whether
+/// to prompt for sign-in.
 async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView> {
     let methods = auth_methods(&context.state).await;
     let p = context.principal;
@@ -607,9 +583,8 @@ async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView
 }
 
 /// `auth.automation_token` — mint a short-lived automation credential for
-/// another subject. `actor = Admin` on the descriptor now does what the old
-/// handler's `principal.is_admin()` check did by hand; that inline check is
-/// deleted rather than ported.
+/// another subject. `actor = Admin` on the descriptor is the admin check;
+/// nothing in the handler body checks it again.
 async fn automation_token_op(
     context: OperationContext,
     input: automation_token::Input,
@@ -627,8 +602,8 @@ async fn automation_token_op(
 
 /// `auth.set_password` — set/change the caller's own password. There is no
 /// `username` in the input at all: the operation can only ever touch
-/// `context.principal`'s own account, which is the ownership guarantee the
-/// old handler enforced by construction (it never took a `username` either).
+/// `context.principal`'s own account, an ownership guarantee enforced by
+/// construction rather than a runtime check.
 async fn set_password_op(
     context: OperationContext,
     input: set_password::Input,
@@ -695,8 +670,7 @@ async fn create_token_op(
 /// `auth.tokens.revoke` — revoke one of the caller's own tokens.
 /// `auth::revoke_token`'s query is `WHERE id = ? AND username = ?`: a caller
 /// cannot name another user's token id and revoke it, because no row matches.
-/// That ownership check lives in the query, not a separate `if`, and is
-/// preserved unchanged here (see point 4 in the report).
+/// The ownership check lives in the query itself, not a separate `if`.
 async fn revoke_token_op(
     context: OperationContext,
     input: tokens::revoke::Input,
@@ -720,12 +694,11 @@ async fn list_federations_op(
     Ok(crate::automation::federation_list(&context.state.db).await?)
 }
 
-/// Best-effort name when the caller omits one, per the operation's own doc
-/// comment: "Omitted legacy calls derive one from the identity fields below."
-/// `crate::automation::federation_add` upserts on `name` and requires it to
-/// pass `crate::profile::validate_name` (starts with a letter; then letters,
-/// digits, `-`, `_`; at most 64 bytes), so the chosen identity field is
-/// slugified into that shape rather than passed through raw.
+/// Best-effort name when the caller omits one, derived from the identity
+/// fields below. `crate::automation::federation_add` upserts on `name` and
+/// requires it to pass `crate::profile::validate_name` (starts with a letter;
+/// then letters, digits, `-`, `_`; at most 64 bytes), so the chosen identity
+/// field is slugified into that shape before use.
 fn derive_federation_name(input: &federations::create::Input) -> String {
     let seed = match input.provider.trim().to_ascii_lowercase().as_str() {
         "google" => input
@@ -851,9 +824,8 @@ async fn add_user_op(
 
 /// `auth.users.set_role` — change an operator's role. Admin-only via
 /// `actor = Admin`; any admin may change any user's role, including their
-/// own, matching the old handler (which took no principal at all). The
-/// "don't demote the last administrator" business rule lives inside
-/// `auth::set_user_role` and is preserved unchanged.
+/// own. The "don't demote the last administrator" business rule lives inside
+/// `auth::set_user_role`.
 async fn set_user_role_op(
     context: OperationContext,
     input: users::set_role::Input,
@@ -873,9 +845,9 @@ async fn set_user_role_op(
 }
 
 /// `auth.users.remove` — remove an approved operator. The "you cannot remove
-/// yourself" check is business state (self-removal would strand the acting
-/// admin, or worse, be used to strand others), not an authority check
-/// `authorize()` could express, so it is kept exactly as before (point 4).
+/// yourself" check guards business state — self-removal could strand the
+/// last admin — which `authorize()` has no way to express, so the handler
+/// checks it directly.
 async fn remove_user_op(
     context: OperationContext,
     input: users::remove::Input,
@@ -939,8 +911,7 @@ async fn remove_github_token_op(
 }
 
 /// `auth.github_config.get` — the GitHub sign-in / App setup (secret
-/// withheld). Reuses the same `github_config_view` the legacy handler above
-/// builds its response from.
+/// withheld).
 async fn get_github_config_op(
     context: OperationContext,
     _input: github_config::get::Input,

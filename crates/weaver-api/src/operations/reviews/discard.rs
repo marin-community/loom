@@ -2,9 +2,8 @@ use super::prelude::*;
 
 /// Permanently discard a draft review.
 ///
-/// Operator-only, and limited to the review's own creator — same reasoning
-/// as `reviews.comments.create`. Rejected once the review has left `draft`
-/// status. See `creator_review` in `crates/loom/src/web/reviews.rs`.
+/// Operator-only, limited to the review's own creator. Rejected once the
+/// review has left `draft` status.
 #[operation(
     id = "reviews.discard",
     actor = User,
@@ -23,8 +22,6 @@ pub struct Input {
     pub expected_revision: i64,
 }
 
-/// The legacy route's exact response shape — a discard confirmation and
-/// nothing else, per the porting rule against widening a response.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Output {
     pub discarded: bool,

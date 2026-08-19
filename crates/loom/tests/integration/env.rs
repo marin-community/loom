@@ -1,9 +1,7 @@
 //! Operator-managed agent env vars over HTTP: the `settings.env.*` operations
 //! and their name validation.
 //!
-//! These return the refreshed list directly. The legacy routes wrapped it in an
-//! `{env: [...]}` envelope, which carried no information the caller did not
-//! already have.
+//! These return the refreshed list directly.
 
 use serde_json::json;
 use serial_test::serial;
