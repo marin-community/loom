@@ -332,13 +332,6 @@ print("custom tests passed")
         effective["mcp_servers"][0]["args"],
         json!(["mcp", "serve-custom", "/ops/status"])
     );
-    let probe = ts
-        .client
-        .post("/api/profiles/custom-tools/probe", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(probe["ok"], true);
-
     let source_v2 = source.replace("Return a value.", "Return a pinned value.");
     let edited = ts
         .client
@@ -396,13 +389,6 @@ print("custom tests passed")
         .unwrap();
     assert_eq!(disabled["identity"], "/ops/status");
     assert_eq!(disabled["revision"], 3);
-    let probe = ts
-        .client
-        .post("/api/profiles/custom-tools/probe", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(probe["ok"], false);
-    assert!(probe["errors"][0].as_str().unwrap().contains("is disabled"));
 
     let response = reqwest::Client::new()
         .delete(format!("http://{}/api/mcps/custom/ops/status", ts.addr))
@@ -466,9 +452,14 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     )
     .await
     .unwrap();
+    // `permissions.github.token` is the operation that serves this now. It is
+    // declared `actor = SessionOnly` — no human may stand in for a session to
+    // fetch its credential — and a *restricted* session is refused on top of
+    // that, which is what this asserts.
     let token_response = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions/{id}/github/token", ts.addr))
+        .post(format!("http://{}/api/permissions/github/token", ts.addr))
         .bearer_auth(session_token)
+        .json(&json!({ "session": id }))
         .send()
         .await
         .unwrap();
@@ -556,8 +547,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let response = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 7, "body": "clean body" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 7, "body": "clean body" } }),
         )
         .await
         .unwrap();
@@ -567,8 +558,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let second_response = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_view"),
-            json!({ "arguments": { "number": 7 } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_view", "arguments": { "number": 7 } }),
         )
         .await
         .unwrap();
@@ -579,8 +570,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 8, "body": "wrong issue" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 8, "body": "wrong issue" } }),
         )
         .await
         .is_err());
@@ -593,8 +584,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 7, "body": "no longer allowed" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 7, "body": "no longer allowed" } }),
         )
         .await
         .is_err());

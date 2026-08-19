@@ -1013,18 +1013,21 @@ fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
         )
 }
 
-pub fn router(state: AppState) -> Router {
+/// The unauthenticated route table.
+///
+/// Split out from [`router`] so the whole surface can be built — and therefore
+/// checked for overlapping routes — without a database. See the tests below.
+fn public_api_router() -> Router<AppState> {
     // Public surface: the liveness probe and the login flow itself. No
     // middleware — these must work for an unauthenticated caller, since they are
     // how one *becomes* authenticated.
-    let public = Router::new()
+    Router::new()
         // `/health` remains the compatibility liveness probe. `/health/live`
         // names it explicitly; readiness checks DB + migration state.
         .route("/health", get(liveness))
         .route("/health/live", get(liveness))
         .route("/ready", get(readiness))
         .route("/health/ready", get(readiness))
-        .route("/auth/me", get(auth_me))
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
         .route("/auth/github/login", get(github_login))
@@ -1033,11 +1036,18 @@ pub fn router(state: AppState) -> Router {
         // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
         // authenticated cryptographically by the HMAC signature it carries, not
         // by a loom principal. The handler is the untrusted-input boundary.
-        .route("/github/webhook", post(github_webhook));
+        .route("/github/webhook", post(github_webhook))
+}
 
+/// The authenticated route table: every registered operation plus the
+/// hand-written routes that are not operations yet.
+///
+/// Takes no state for the same reason [`public_api_router`] does not — building
+/// it is how route overlaps are detected, and that must not need a database.
+fn protected_api_router() -> Router<AppState> {
     // Everything else requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
-    let protected = registered_api_router()
+    registered_api_router()
         // Every live stream the browser wants, folded onto one connection so a
         // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
         // routes below remain the single-stream API.
@@ -1068,7 +1078,6 @@ pub fn router(state: AppState) -> Router {
             "/preferences",
             get(get_preferences).patch(patch_preferences),
         )
-        .route("/deployment/reconcile", post(reconcile_deployment))
         .route("/mcps", get(list_mcps))
         .route(
             "/mcps/custom",
@@ -1082,7 +1091,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/profiles", get(list_profiles).post(create_profile))
         .route("/profiles/{name}/effective", get(effective_profile))
-        .route("/profiles/{name}/probe", post(probe_profile))
         .route("/profiles/{name}/clone", post(clone_profile))
         .route(
             "/profiles/{name}",
@@ -1112,6 +1120,12 @@ pub fn router(state: AppState) -> Router {
         .route("/tasks", get(tasks_snapshot))
         .route("/diagnostics", get(diagnostics))
         // Watches — periodic / triggered watch programs over the fleet.
+        // Automation run ingest. `runs.create` / `runs.list` / `runs.get` are the
+        // registered operations, but these are the URLs external systems (a
+        // Grafana webhook, say) already point at, so they stay mounted until
+        // those callers move — like every other legacy route in this file.
+        .route("/runs", get(list_runs_route).post(create_run_route))
+        .route("/runs/{id}", get(get_run_route))
         .route("/watches", get(list_watches).post(create_watch))
         // The static segment wins over the `{id}` capture below, so a program
         // named "programs" can't shadow this listing.
@@ -1152,6 +1166,10 @@ pub fn router(state: AppState) -> Router {
             "/auth/github/config",
             get(get_github_config).put(put_github_config),
         )
+}
+
+pub fn router(state: AppState) -> Router {
+    let protected = protected_api_router()
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -1159,7 +1177,7 @@ pub fn router(state: AppState) -> Router {
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
-    let api = public
+    let api = public_api_router()
         .merge(protected)
         // ETag/304 short-circuit for cacheable GETs — applied across the whole
         // API surface (public + protected) before the state is sealed in.
@@ -1244,5 +1262,28 @@ mod tests {
         assert!(!is_ide_proxy_path("/sessions/abc"));
         assert!(!is_ide_proxy_path("/sessions"));
         assert!(!is_ide_proxy_path("/repos/issues"));
+    }
+}
+
+#[cfg(test)]
+mod route_table_tests {
+    /// The whole route table builds.
+    ///
+    /// axum panics at `.route()` when two handlers claim the same method and
+    /// path, so *constructing* the router is the check — and it covers every
+    /// overlap, not just the ones a source-scanning ledger can see.
+    ///
+    /// This is not hypothetical. `POST /deployment/reconcile` was mounted by
+    /// hand *and* derived from the `deployment.reconcile` operation. Nothing
+    /// caught it: the surface ledger counted a hand-mounted route that equals an
+    /// operation's route as "accounted for", which is exactly backwards. The
+    /// panic happened inside each integration test's server task, so all 185 of
+    /// them failed with "cannot reach loom" and none of them said why.
+    #[test]
+    fn the_route_table_has_no_overlapping_routes() {
+        let _ = super::public_api_router();
+        let _ = super::protected_api_router();
+        // The merge is where a public route can collide with a protected one.
+        let _ = super::public_api_router().merge(super::protected_api_router());
     }
 }

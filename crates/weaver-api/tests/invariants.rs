@@ -268,7 +268,11 @@ fn anonymous_operations_are_pinned() {
         .filter(|operation| operation.actor == weaver_api::operations::ActorPolicy::Anonymous)
         .map(|operation| operation.id)
         .collect();
-    let expected: BTreeSet<&str> = ["auth.login", "auth.federate"].into_iter().collect();
+    // All three are what a browser needs *before* it has a credential: discover
+    // the sign-in methods (`auth.me`), then use one of them.
+    let expected: BTreeSet<&str> = ["auth.login", "auth.federate", "auth.me"]
+        .into_iter()
+        .collect();
     assert_eq!(
         anonymous, expected,
         "the set of operations reachable WITHOUT ANY CREDENTIAL changed. \

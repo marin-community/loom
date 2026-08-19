@@ -513,6 +513,64 @@ async fn create_run_core(
     launch_run(st, req, subject, profiles, run, LaunchFailure::Final).await
 }
 
+// ---------------------------------------------------------------------------
+// Legacy routes: `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`.
+//
+// These are the URLs external automation (a Grafana webhook, a GitHub Actions
+// workflow) and the dashboard already point at. They delegate to the same core
+// the `runs.*` operations use, so there is one implementation behind two doors,
+// and they retire when those callers move to `/api/runs/create` and friends.
+// ---------------------------------------------------------------------------
+
+pub(super) async fn create_run_route(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<RunReq>,
+) -> ApiResult<Json<RunView>> {
+    let profile = req.profile.trim().to_string();
+    let (subject, profiles) = run_identity(&principal, &profile)?;
+    Ok(Json(
+        create_run_core(&st, &principal, req, subject, profiles).await?,
+    ))
+}
+
+/// Unlike `runs.list` (`actor = User`), this route keeps the behaviour an
+/// automation credential relies on: it lists that subject's own runs.
+pub(super) async fn list_runs_route(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<Vec<RunView>>> {
+    let subject = match &principal.grant {
+        Grant::Admin | Grant::User => None,
+        Grant::Automation { subject, .. } => Some(subject.as_str()),
+        Grant::Session { .. } | Grant::Anonymous => {
+            return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))
+        }
+    };
+    Ok(Json(
+        crate::runs::list_for(&st.db, subject)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
+}
+
+pub(super) async fn get_run_route(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<RunView>> {
+    let run = crate::runs::get(&st.db, &id)
+        .await?
+        .ok_or_else(|| AppError::not_found("automation run"))?;
+    if matches!(&principal.grant, Grant::Automation { subject, .. } if subject != &run.actor_subject)
+    {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
+    }
+    Ok(Json(run.into()))
+}
+
 /// `runs.create`. `actor = Internal` means `authorize()` has already
 /// narrowed the reachable grants to `Admin`/`Automation` before this runs
 /// (see `run_identity`).

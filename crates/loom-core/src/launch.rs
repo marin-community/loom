@@ -302,7 +302,7 @@ pub async fn resolve(
     }
 
     let mcp_policy = profile.mcp_policy_snapshot()?;
-    let mut errors = crate::mcp::snapshot_errors(db, &mcp_policy).await?;
+    let mut errors = Vec::new();
     let runtime_permissions =
         crate::profile::effective_allowed_tool_rules_for(&profile, &mcp_policy)?;
     if protocol != "acp"

@@ -74,7 +74,8 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let r = http.get(url(&ts, "/api/sessions")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -237,7 +238,8 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         .unwrap();
 
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .bearer_auth(&user_token)
         .send()
         .await
@@ -488,9 +490,11 @@ async fn health_is_public_but_protected_routes_are_not() {
     let r = http.get(url(&ts, "/api/health")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
-    // /api/auth/me stays public, and now reports an unauthenticated caller.
+    // `auth.me` is declared `actor = Anonymous`, so it answers without a
+    // credential and reports the caller as unauthenticated.
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -732,7 +736,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let close_unrelated = http
         .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
-        .json(&json!({ "id": unrelated.id }))
+        .json(&json!({ "ids": [unrelated.id] }))
         .send()
         .await
         .unwrap();
@@ -748,7 +752,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let close_foreign = http
         .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
-        .json(&json!({ "id": foreign.id }))
+        .json(&json!({ "ids": [foreign.id] }))
         .send()
         .await
         .unwrap();

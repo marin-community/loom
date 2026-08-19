@@ -99,7 +99,6 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<profiles::env::set::Set>(),
         bind::<profiles::get::Get>(),
         bind::<profiles::list::List>(),
-        bind::<profiles::probe::Probe>(),
         bind::<profiles::update::Update>(),
         bind::<repos::branches::List>(),
         bind::<repos::env::delete::Delete>(),

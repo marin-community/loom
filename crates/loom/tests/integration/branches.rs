@@ -52,10 +52,9 @@ async fn branch_issues_and_repo_board() {
     let created = client
         .post(
             "/api/issues/create",
-            json!({
-                "branch": branch_id,
-                "request": { "title": "fix it", "body": "details" }
-            }),
+            // The operation's Input is flat: the old nested `request` envelope
+            // was a property of the route, not of the operation.
+            json!({ "branch": branch_id, "title": "fix it", "body": "details" }),
         )
         .await
         .unwrap();
@@ -83,7 +82,7 @@ async fn branch_issues_and_repo_board() {
     let board = client
         .post(
             "/api/issues/list",
-            json!({ "repo_root": repo_root, "scope": "repo", "all": false }),
+            json!({ "repo_root": repo_root, "all": false }),
         )
         .await
         .unwrap();
@@ -91,7 +90,9 @@ async fn branch_issues_and_repo_board() {
     let backlog = client
         .post(
             "/api/issues/list",
-            json!({ "repo_root": repo_root, "scope": "backlog", "all": false }),
+            // `?scope=backlog` became the `backlog` operand — a filter on one
+            // collection rather than a second operation.
+            json!({ "repo_root": repo_root, "backlog": true, "all": false }),
         )
         .await
         .unwrap();
@@ -107,7 +108,7 @@ async fn branch_issues_and_repo_board() {
     let board = client
         .post(
             "/api/issues/list",
-            json!({ "repo_root": repo_root, "scope": "repo", "all": true }),
+            json!({ "repo_root": repo_root, "all": true }),
         )
         .await
         .unwrap();
@@ -147,7 +148,7 @@ async fn cross_repo_board_and_issue_tags() {
     let created = client
         .post(
             "/api/issues/create",
-            json!({ "branch": branch_id, "request": { "title": "label me" } }),
+            json!({ "branch": branch_id, "title": "label me" }),
         )
         .await
         .unwrap();

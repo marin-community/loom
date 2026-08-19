@@ -5,9 +5,17 @@ use super::prelude::*;
 /// Previously excluded from the registry as an "administrative" endpoint even
 /// though it is the opposite: every signed-in identity, and the login screen
 /// itself, reads its own state through this operation.
+///
+/// `Anonymous` because the login screen calls it *before* there is a
+/// credential, to discover which sign-in methods to offer. That is not a
+/// widening: the hand-written `GET /api/auth/me` this replaces was already
+/// mounted on the public router and already answered without one. The response
+/// carries the caller's own identity and two booleans saying whether password
+/// and GitHub sign-in are configured — nothing an unauthenticated caller could
+/// not learn by looking at the login page.
 #[operation(
     id = "auth.me",
-    actor = User,
+    actor = Anonymous,
     scope = Global,
     risk = Read,
     grants = [],

@@ -261,6 +261,16 @@ pub trait Operands: Serialize + DeserializeOwned + Sized {
 
     /// Fill dispatcher-supplied fields that the caller left unset.
     fn fill_context(&mut self, context: &ContextValues);
+
+    /// The declared defaults, as JSON, for fields a caller may omit.
+    ///
+    /// `#[operand(default = ...)]` used to reach only clap, so a REST caller
+    /// that omitted a defaulted field got `missing field `prune`` — a default
+    /// that did not exist on the wire it was declared for. This is built from
+    /// the same expression the command line uses, so the two cannot diverge.
+    fn wire_defaults() -> Value {
+        Value::Object(Default::default())
+    }
 }
 
 /// CLI-only flags. Never serialized, never sent.

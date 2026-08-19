@@ -24,6 +24,8 @@ use tokio_tungstenite::tungstenite::Message;
 use weaver_core::config as core_config;
 use weaver_core::events::EventBus;
 
+use crate::support::tapestry_bin;
+
 /// Run `program args` in `dir`, asserting it succeeds.
 pub fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -32,26 +34,6 @@ pub fn sh(dir: &Path, program: &str, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
     assert!(status.success(), "{program} {args:?} failed");
-}
-
-/// The `tapestry` supervisor binary built alongside this test binary. The
-/// integration test runner lives at `target/<profile>/deps/<bin>`; the sibling
-/// `tapestry` binary is two levels up at `target/<profile>/tapestry`. loom's
-/// `backend` reads `WEAVER_TAPESTRY_BIN` to launch it (so it does not try to
-/// re-exec the test harness as a supervisor).
-fn tapestry_bin() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    let bin = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target dir")
-        .join("tapestry");
-    assert!(
-        bin.exists(),
-        "tapestry binary missing at {} — run via `cargo test --workspace` (or `cargo build -p tapestry` first)",
-        bin.display()
-    );
-    bin
 }
 
 /// Best-effort teardown: kill every supervisor whose socket lives under this
@@ -128,12 +110,71 @@ pub struct TestServer {
     pub state: AppState,
     repo: TempDir,
     _home: TempDir,
+    /// Fails the test loudly on a deadlock instead of hanging the suite.
+    _watchdog: Watchdog,
 }
 
 enum GithubFixture {
     Production,
     Gateway(std::sync::Arc<dyn loom::github_trigger::GithubApi>),
     ConfiguredApp,
+}
+
+
+/// Per-test timeout.
+///
+/// libtest has no such thing: a test that deadlocks blocks the whole suite
+/// until CI kills the job, and the output names no test at all. Every test here
+/// boots a `TestServer`, so hanging the watchdog off its lifetime covers all of
+/// them without touching a single test body.
+///
+/// On expiry the process aborts — a test thread cannot be unwound from
+/// outside — after printing the test's name, which libtest sets as the thread
+/// name. Override the budget with `LOOM_TEST_TIMEOUT_SECS=0` to disable it when
+/// stepping through a test under a debugger.
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watchdog {
+    fn start() -> Self {
+        let seconds = std::env::var("LOOM_TEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if seconds == 0 {
+            return Self { done };
+        }
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed test>")
+            .to_string();
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            eprintln!(
+                "\n\n=== TEST TIMEOUT ===\n\
+                 `{test}` exceeded {seconds}s and is presumed deadlocked.\n\
+                 Aborting so the suite reports this test rather than hanging.\n\
+                 Raise or disable the budget with LOOM_TEST_TIMEOUT_SECS.\n"
+            );
+            std::process::abort();
+        });
+        Self { done }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Drop for TestServer {
@@ -174,6 +215,8 @@ impl TestServer {
     }
 
     async fn start_inner(github: GithubFixture, initialize_repo: bool) -> Self {
+        // Armed before any I/O, so a hang during setup is caught too.
+        let watchdog = Watchdog::start();
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
         // at the sibling supervisor binary.
@@ -252,18 +295,30 @@ impl TestServer {
         // unauthenticated client deliberately instead of inheriting ambient
         // credentials through `client::default()`.
         let client = Client::new(format!("http://{addr}"));
+        // Wait for readiness, and *assert* it. This loop used to break silently
+        // when the server never came up, so a router that panicked on startup
+        // surfaced as "cannot reach loom" from whatever request each test made
+        // first — 185 identical failures, none naming the cause.
+        let mut ready = false;
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
+                ready = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        assert!(
+            ready,
+            "the test server never answered /api/health on {addr} — it panicked while \
+             starting. Its panic was printed above, from a task named `tokio-rt-worker`."
+        );
 
         Self {
             client,
             addr,
             ide,
             state: state_clone,
+            _watchdog: watchdog,
             repo,
             _home: home,
         }

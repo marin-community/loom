@@ -93,6 +93,9 @@ pub struct Operand {
     pub skip_cli: bool,
     /// CLI-only: take this string as a file path (or stdin) rather than inline.
     pub from_file: bool,
+    /// The declared field type, used to type-annotate the wire default so a
+    /// bare `None` or `BTreeMap::new()` still infers.
+    pub ty: syn::Type,
 }
 
 impl Operand {
@@ -133,6 +136,7 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
         short: None,
         skip_cli: false,
         from_file: false,
+        ty: field.ty.clone(),
         name,
         ident,
     };

@@ -738,7 +738,7 @@ async fn session_records_its_creating_principal() {
     // Who the harness authenticates as — the resolved principal for these calls.
     // Asserting against this (rather than a hardcoded name) proves attribution is
     // read from the Principal, not pinned to one user.
-    let me = client.get("/api/auth/me").await.unwrap();
+    let me = client.post("/api/auth/me", json!({})).await.unwrap();
     let who = me["username"].as_str().unwrap().to_string();
     assert!(!who.is_empty(), "the loopback caller resolves to a user");
 

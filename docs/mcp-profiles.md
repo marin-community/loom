@@ -120,7 +120,6 @@ loom mcp show mcp/github/comment@v1
 loom mcp add /engineering/search/docs --file server.py --tests test_mcp.py
 loom profile add ops --agent codex --mcp github,messaging
 loom profile show ops --effective
-loom profile probe ops
 ```
 
 Settings exposes the same registry and resolved profile views. API and CLI reads

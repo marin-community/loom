@@ -82,34 +82,6 @@ pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<Is
     Ok(out)
 }
 
-fn initial_issue_tags(tags: Vec<IssueTagInput>) -> ApiResult<Vec<NewIssueTag>> {
-    let mut seen = std::collections::HashSet::new();
-    tags.into_iter()
-        .map(|tag| {
-            let key = tag.key.trim();
-            let value = tag.value.trim();
-            if key.is_empty() {
-                return Err(AppError::bad_request("tag key is required"));
-            }
-            if value.is_empty() {
-                return Err(AppError::bad_request(format!(
-                    "invalid value for '{key}' — must be non-empty"
-                )));
-            }
-            if !seen.insert(key.to_string()) {
-                return Err(AppError::bad_request(format!(
-                    "duplicate initial tag key '{key}'"
-                )));
-            }
-            Ok(NewIssueTag {
-                key: key.to_string(),
-                value: value.to_string(),
-                note: tag.note.trim().to_string(),
-                set_by: author_or_manual(tag.by.as_deref()),
-            })
-        })
-        .collect()
-}
 
 /// Every issue across every repo — the loom dashboard's cross-repo issue board.
 pub(super) async fn list_all_issues(
@@ -252,6 +224,12 @@ pub(super) async fn get_issue_operation(
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
+    // The declared scope is `Repository(repo_root)`, but this operation is
+    // addressed by *issue id* — so the repository that matters is the issue's,
+    // not the one the caller named. Checking only the latter would let a session
+    // read another repository's work item by asking for it with its own
+    // `repo_root`. `issues.actions` already checks the same way.
+    require_repo_access(&st, &context.principal, &issue.repo_root).await?;
     let mut view = issue_view(&st.db, issue).await?;
     // Best-effort live snapshot of the linked GitHub thread, so `loom issues
     // get` surfaces "closed / re-titled while you worked". Single-issue reads

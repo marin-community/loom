@@ -23,16 +23,15 @@ use crate::dto::{
     ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
     HistoryPageView, IssueView, McpRegistryView,
     MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
-    PermissionRequestView, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
-    ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
-    ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
-    RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
-    SendReq, SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
-    SetChannelSubscriptionReq, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq,
-    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
-    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq, WatchView,
+    PermissionRequestView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
+    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
+    RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
+    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView, SendReq,
+    SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
+    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
+    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
+    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
+    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -243,20 +242,34 @@ impl Client {
 
 
 
+    /// Approve or deny a pending permission request.
+    ///
+    /// The decision used to be a field in the body of one route; it is now the
+    /// choice of operation, which is what lets `permissions.requests.approve`
+    /// carry `risk = ExternalWrite` while `deny` is an ordinary write.
     pub async fn decide_permission_request(
         &self,
         request_id: &str,
         request: &DecidePermissionRequestReq,
     ) -> Result<PermissionRequestView> {
-        self.send_typed(
-            Method::POST,
-            &format!(
-                "/api/permission-requests/{}/decision",
-                Self::seg(request_id)
-            ),
-            Some(request),
-        )
-        .await
+        use crate::operations::permissions::requests::{approve, deny};
+        match request.decision.trim() {
+            "approve" => {
+                self.invoke::<approve::Approve>(&approve::Input {
+                    request: request_id.to_string(),
+                    reason: request.reason.clone(),
+                })
+                .await
+            }
+            "deny" => {
+                self.invoke::<deny::Deny>(&deny::Input {
+                    request: request_id.to_string(),
+                    reason: request.reason.clone(),
+                })
+                .await
+            }
+            other => Err(anyhow!("unknown permission decision `{other}`")),
+        }
     }
 
     /// List active non-automation sessions (`GET /api/sessions`).
@@ -1303,15 +1316,6 @@ impl Client {
     pub async fn effective_profile(&self, name: &str) -> Result<EffectiveProfileView> {
         self.get_typed(&format!("/api/profiles/{}/effective", Self::seg(name)))
             .await
-    }
-
-    pub async fn probe_profile(&self, name: &str) -> Result<ProfileProbeView> {
-        self.send_typed::<(), _>(
-            Method::POST,
-            &format!("/api/profiles/{}/probe", Self::seg(name)),
-            None,
-        )
-        .await
     }
 
     pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {

@@ -56,6 +56,94 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
     ("/openapi.json", "discovery"),
 ];
 
+/// Legacy routes an operation has superseded, still mounted for the browser.
+///
+/// Every one of these has a registered operation serving the same data at
+/// `POST /api/<id>`; what keeps them alive is `crates/loom/frontend`, which still
+/// calls them. This list is a ratchet, not a parking space: a route that is no
+/// longer mounted must be deleted from it, and a hand-mounted route that is not
+/// here fails [`no_route_is_unaccounted_for`]. The number that has to reach zero
+/// is 77.
+const SUPERSEDED_ROUTES: &[&str] = &[
+    "/agent/oneshot",
+    "/agents",
+    "/agents/custom",
+    "/auth/automation-token",
+    "/auth/federations/{id}",
+    "/auth/password",
+    "/auth/tokens",
+    "/auth/tokens/{id}",
+    "/auth/users",
+    "/auth/users/{username}",
+    "/branches",
+    "/branches/{id}",
+    "/branches/{id}/artifacts",
+    "/branches/{id}/issues",
+    "/branches/{id}/slack/reply",
+    "/branches/{id}/status",
+    "/channels",
+    "/channels/{id}",
+    "/channels/{id}/bindings",
+    "/diagnostics",
+    "/env",
+    "/issues",
+    "/issues/{id}",
+    "/logs",
+    "/mcps",
+    "/profiles",
+    "/profiles/{name}/clone",
+    "/profiles/{name}/effective",
+    "/repos",
+    "/repos/env",
+    "/reviews/{id}/comments",
+    "/reviews/{id}/retry-delivery",
+    "/reviews/{id}/submit",
+    "/runs",
+    "/runs/{id}",
+    "/scratch/limits",
+    "/self",
+    "/session-launches/resolve",
+    "/session-layout",
+    "/session-layout/groups",
+    "/session-layout/moves",
+    "/session-layout/reorder",
+    "/session-layout/restores",
+    "/session-layout/spaces",
+    "/sessions/search",
+    "/sessions/summary",
+    "/sessions/{id}/adopt",
+    "/sessions/{id}/archive",
+    "/sessions/{id}/artifacts",
+    "/sessions/{id}/changes",
+    "/sessions/{id}/chat",
+    "/sessions/{id}/conversation",
+    "/sessions/{id}/files",
+    "/sessions/{id}/github/access",
+    "/sessions/{id}/handoff",
+    "/sessions/{id}/history",
+    "/sessions/{id}/history/search",
+    "/sessions/{id}/ide-info",
+    "/sessions/{id}/interrupt",
+    "/sessions/{id}/log",
+    "/sessions/{id}/mode",
+    "/sessions/{id}/preview",
+    "/sessions/{id}/raw",
+    "/sessions/{id}/recover",
+    "/sessions/{id}/send",
+    "/sessions/{id}/shells",
+    "/sessions/{id}/summary",
+    "/sessions/{id}/tags",
+    "/sessions/{id}/url",
+    "/settings",
+    "/shell/restart",
+    "/slack/status",
+    "/status",
+    "/tasks",
+    "/watches",
+    "/watches/{id}/run",
+    "/watches/{id}/runs",
+];
+
 fn mounted_routes() -> BTreeSet<String> {
     let source = include_str!("../src/web/mod.rs");
     let mut routes = BTreeSet::new();
@@ -89,19 +177,96 @@ fn no_route_is_unaccounted_for() {
     let transport: BTreeSet<&str> = TRANSPORT_ROUTES.iter().map(|(path, _)| *path).collect();
     let operations = operation_routes();
 
-    let unaccounted: Vec<String> = mounted_routes()
-        .into_iter()
+    let superseded: BTreeSet<&str> = SUPERSEDED_ROUTES.iter().copied().collect();
+    let mounted = mounted_routes();
+
+    let unaccounted: Vec<String> = mounted
+        .iter()
         .filter(|route| !transport.contains(route.as_str()))
-        .filter(|route| !operations.contains(route))
+        .filter(|route| !operations.contains(*route))
+        .filter(|route| !superseded.contains(route.as_str()))
+        .cloned()
         .collect();
 
     assert!(
         unaccounted.is_empty(),
-        "{} hand-mounted routes are neither an operation nor a declared transport.\n\
-         Each is either a legacy route an operation has superseded (delete it) or an\n\
-         API with no operation yet (register it):\n{}",
+        "{} hand-mounted routes are neither an operation, a declared transport, nor a\n\
+         known superseded route. Each is either a new parallel surface (register it)\n\
+         or a legacy route that belongs in SUPERSEDED_ROUTES with the rest:\n{}",
         unaccounted.len(),
         unaccounted
+            .iter()
+            .map(|route| format!("  {route}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // The ratchet: a superseded route that is gone must leave this list, so the
+    // count is always the real remaining debt rather than a historical high-water
+    // mark.
+    let retired: Vec<&str> = SUPERSEDED_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !mounted.contains(*route))
+        .collect();
+    assert!(
+        retired.is_empty(),
+        "these routes are no longer mounted — delete them from SUPERSEDED_ROUTES: {retired:?}"
+    );
+}
+
+/// A hand-mounted route may not duplicate an operation's own route.
+///
+/// The ledger above treats "this route equals an operation's route" as
+/// *accounted for*, which is exactly backwards when the route is still mounted
+/// by hand: the operation dispatcher already serves that path, so the second
+/// mount is either dead code shadowed by the first, or — when the methods match
+/// — an axum panic at startup. `POST /deployment/reconcile` was the latter, and
+/// it took down every integration test with a message about none of this.
+///
+/// The `io = Session` operations are the deliberate exception: they are mounted
+/// by hand *instead of* by the dispatcher, because their response must carry a
+/// Set-Cookie.
+#[test]
+fn no_hand_mounted_route_duplicates_an_operation() {
+    let hand_mounted_on_purpose: BTreeSet<String> = weaver_api::operations::operations()
+        .filter(|operation| !operation.io.is_json())
+        .map(|operation| {
+            operation
+                .path()
+                .strip_prefix("/api")
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+
+    // Superseded GET routes the browser still calls. Each has an operation that
+    // serves the same data at `POST /api/<id>`, and each disappears when its
+    // frontend call site moves. They are pinned by name rather than tolerated by
+    // rule, so a *new* duplicate still fails this test.
+    let pending_frontend_migration: BTreeSet<&str> = [
+        "/repos/branches",
+        "/repos/recent",
+        "/repos/revisions/validate",
+        "/watches/programs",
+    ]
+    .into_iter()
+    .collect();
+
+    let operations = operation_routes();
+    let duplicates: Vec<String> = mounted_routes()
+        .into_iter()
+        .filter(|route| operations.contains(route))
+        .filter(|route| !hand_mounted_on_purpose.contains(route))
+        .filter(|route| !pending_frontend_migration.contains(route.as_str()))
+        .collect();
+
+    assert!(
+        duplicates.is_empty(),
+        "{} routes are mounted by hand AND derived from an operation. Delete the \n\
+         hand-written route; the operation already serves that path:\n{}",
+        duplicates.len(),
+        duplicates
             .iter()
             .map(|route| format!("  {route}"))
             .collect::<Vec<_>>()

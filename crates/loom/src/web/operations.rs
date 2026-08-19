@@ -15,7 +15,8 @@ use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
 use axum::{extract::State, http::StatusCode, Extension, Json, Router};
 use serde_json::Value;
 use weaver_api::operations::{
-    ActorPolicy, ApiMetaView, Operation, OperationSpec, OperationView, ScopeRef, Scoped,
+    ActorPolicy, ApiMetaView, ContextValues, Operands, Operation, OperationSpec, OperationView,
+    ScopeRef, Scoped,
 };
 
 use crate::auth::Principal;
@@ -49,11 +50,6 @@ pub(super) struct Bound {
     invoke: Invoker,
 }
 
-impl Bound {
-    pub(super) fn view(&self) -> OperationView {
-        OperationView::from(self.operation)
-    }
-}
 
 /// Bind a descriptor to its implementation.
 ///
@@ -70,11 +66,23 @@ where
     Bound {
         operation: O::SPEC,
         invoke: Arc::new(move |context, input| {
-            let decoded = serde_json::from_value::<O::Input>(input);
+            let decoded =
+                serde_json::from_value::<O::Input>(apply_defaults::<O::Input>(O::SPEC, input));
             Box::pin(async move {
-                let input = decoded.map_err(|error| {
+                let mut input = decoded.map_err(|error| {
                     AppError::bad_request(format!("invalid arguments for {}: {error}", O::SPEC.id))
                 })?;
+                // Context is dispatcher-supplied, and over REST *this* is the
+                // dispatcher. The CLI and MCP resolve it client-side; a session
+                // calling the API directly had no way to, and was refused by its
+                // own scope check for omitting a field it is not shown.
+                // `fill_context` only fills what is empty, so an explicit value
+                // still wins — and still faces the scope check below.
+                if !<O::Input as Operands>::CONTEXT.is_empty() {
+                    if let Some(values) = session_context(&context).await? {
+                        input.fill_context(&values);
+                    }
+                }
                 authorize(&context, O::SPEC, input.scope_ref()).await?;
                 let output = handler(context, input).await?;
                 serde_json::to_value(output).map_err(|error| {
@@ -83,6 +91,89 @@ where
             })
         }),
     }
+}
+
+
+
+/// The context a session credential implies.
+///
+/// A session token names its own session and branch, and the branch names the
+/// repository — so none of it has to be taken on the caller's word. Any other
+/// credential gets `None`: an operator has no implicit repository, and guessing
+/// one for them would silently scope a query they wrote deliberately.
+async fn session_context(context: &OperationContext) -> ApiResult<Option<ContextValues>> {
+    let crate::auth::Grant::Session {
+        session_id,
+        branch_id,
+        ..
+    } = &context.principal.grant
+    else {
+        return Ok(None);
+    };
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT repo_root, branch FROM branches WHERE id = ?")
+            .bind(branch_id)
+            .fetch_optional(&context.state.db)
+            .await?;
+    let (repo_root, branch_name) = row.unwrap_or_default();
+    Ok(Some(ContextValues {
+        repo_root,
+        branch: branch_id.clone(),
+        branch_name,
+        session: session_id.clone(),
+    }))
+}
+
+/// Fill in what a caller may legitimately omit, before decoding.
+///
+/// Two kinds of field: the operand defaults an operation declares, and the
+/// context fields the dispatcher owns. Neither is something a caller must send,
+/// and `serde` rejects a missing field regardless — so both are supplied here,
+/// once, for every transport that reaches this dispatcher.
+fn apply_defaults<I: Operands>(spec: &'static OperationSpec, input: Value) -> Value {
+    with_context_defaults(spec, with_operand_defaults::<I>(input))
+}
+
+/// Apply the declared `#[operand(default = ...)]` values.
+///
+/// These used to reach only clap, so `POST /api/deployment/reconcile` answered a
+/// request that omitted `prune` with `missing field `prune`` — a default that
+/// existed on the command line and nowhere else. `wire_defaults()` is built from
+/// the same expression, so the two cannot disagree.
+fn with_operand_defaults<I: Operands>(mut input: Value) -> Value {
+    let Some(object) = input.as_object_mut() else {
+        return input;
+    };
+    if let Value::Object(defaults) = I::wire_defaults() {
+        for (name, value) in defaults {
+            object.entry(name).or_insert(value);
+        }
+    }
+    input
+}
+
+/// Supply the context fields a caller was never told about.
+///
+/// Context fields are dispatcher-supplied, so they are stripped from the schema
+/// `/api/operations` publishes — which means a REST caller reading that schema
+/// has no way to know they exist. Without this, every context-carrying
+/// operation answers a perfectly well-formed request with
+/// `invalid arguments: missing field `repo_root``.
+///
+/// Absent means empty, and empty means unscoped: a session credential is then
+/// refused by the scope check rather than admitted by it, so omitting the field
+/// can only ever narrow what a caller reaches. The CLI and MCP dispatchers
+/// still fill these in properly via `Operands::fill_context`.
+fn with_context_defaults(spec: &'static OperationSpec, mut input: Value) -> Value {
+    let Some(object) = input.as_object_mut() else {
+        return input;
+    };
+    for field in spec.context {
+        object
+            .entry(field.name)
+            .or_insert_with(|| Value::String(String::new()));
+    }
+    input
 }
 
 /// The single authorization decision for a registered operation.

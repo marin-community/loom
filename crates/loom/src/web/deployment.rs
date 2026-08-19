@@ -162,22 +162,12 @@ async fn reconcile_deployment_core(st: &AppState, req: DeploymentReq) -> ApiResu
     })
 }
 
-pub(super) async fn reconcile_deployment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<DeploymentReq>,
-) -> ApiResult<Json<DeploymentView>> {
-    if !principal.is_admin() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
-    }
-    Ok(Json(reconcile_deployment_core(&st, req).await?))
-}
-
-/// `deployment.reconcile` — the twin of [`reconcile_deployment`]. Central
-/// `authorize()` (this operation is declared `actor = Admin`) already
-/// restricts it to an admin credential, so the legacy handler's inline
-/// `principal.is_admin()` check is not repeated here — that duplication is
-/// exactly what the operation registry replaces.
+/// `deployment.reconcile`.
+///
+/// There is no hand-written twin: the legacy `POST /deployment/reconcile` had
+/// the same path, method and body as this operation's derived route, so the two
+/// collided in the router. Central `authorize()` (`actor = Admin`) replaces its
+/// inline `principal.is_admin()` check.
 pub(super) async fn reconcile_deployment_operation(
     context: OperationContext,
     input: reconcile::Input,

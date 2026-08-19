@@ -17,14 +17,12 @@ pub mod effective;
 pub mod env;
 pub mod get;
 pub mod list;
-pub mod probe;
 pub mod update;
 
 static OPERATIONS: &[&OperationSpec] = &[
     <list::List as Operation>::SPEC,
     <get::Get as Operation>::SPEC,
     <effective::Effective as Operation>::SPEC,
-    <probe::Probe as Operation>::SPEC,
     <create::Create as Operation>::SPEC,
     <update::Update as Operation>::SPEC,
     <delete::Delete as Operation>::SPEC,

@@ -42,24 +42,6 @@ pub(crate) mod dispatch;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
-pub(crate) async fn call_registered_tool(
-    adapter: &str,
-    server: &str,
-    name: &str,
-    input: Value,
-) -> Result<Value> {
-    let operation = weaver_api::operation_for_mcp(server, name)
-        .with_context(|| format!("unknown {adapter} tool '{name}'"))?;
-    if !runtime_tool_allowed(name) {
-        bail!("{adapter} tool '{name}' is not allowed by this session");
-    }
-    input
-        .as_object()
-        .with_context(|| format!("{adapter} tool arguments must be an object"))?;
-    runtime_client(adapter)?
-        .invoke_value(operation.id, input)
-        .await
-}
 
 pub(crate) struct Adapter {
     name: &'static str,
@@ -140,15 +122,6 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
     }
 }
 
-pub(crate) async fn resolve_session_argument(
-    client: &weaver_api::Client,
-    arguments: &Value,
-) -> Result<String> {
-    match string_argument(arguments, "session")? {
-        Some(session) if session != "self" => Ok(session.to_string()),
-        _ => Ok(client.self_context().await?.session_id),
-    }
-}
 
 const ADAPTERS: &[&Adapter] = &[
     &github::ADAPTER,
@@ -360,52 +333,6 @@ fn selected_for_groups(set: &McpCapabilitySetView, groups: &[String]) -> bool {
     groups.iter().any(|group| group == &set.group)
         || (set.name == "loom/sessions/read@v1" && groups.iter().any(|group| group == "history"))
         || (set.name == "loom/sessions/write@v1" && groups.iter().any(|group| group == "messaging"))
-}
-
-/// Report whether an exact profile snapshot is still launchable. Profiles
-/// remain inspectable when a set is retired or a custom server is disabled,
-/// but a new session must not silently substitute current registry content.
-pub async fn snapshot_errors(
-    db: &crate::Db,
-    snapshot: &weaver_api::McpPolicySnapshot,
-) -> Result<Vec<String>> {
-    let current = registry();
-    let custom = list_custom(db).await?;
-    let mut errors = Vec::new();
-    for pinned in &snapshot.capability_sets {
-        match current
-            .capability_sets
-            .iter()
-            .find(|candidate| candidate.name == pinned.name)
-        {
-            None => errors.push(format!(
-                "built-in capability set '{}' is no longer supported",
-                pinned.name
-            )),
-            Some(candidate) if candidate != pinned => errors.push(format!(
-                "built-in capability set '{}' changed (pinned {}, current {}); save the profile to reconcile it",
-                pinned.name, pinned.digest, candidate.digest
-            )),
-            Some(_) => {}
-        }
-    }
-    for pinned in &snapshot.custom_servers {
-        match custom
-            .iter()
-            .find(|candidate| candidate.identity == pinned.identity)
-        {
-            None => errors.push(format!(
-                "custom MCP '{}' was removed; save the profile to reconcile it",
-                pinned.identity
-            )),
-            Some(candidate) if !candidate.enabled => errors.push(format!(
-                "custom MCP '{}' is disabled; enable it or save the profile to reconcile it",
-                pinned.identity
-            )),
-            Some(_) => {}
-        }
-    }
-    Ok(errors)
 }
 
 pub async fn resolve_access(
@@ -1041,24 +968,6 @@ mod tests {
         )
         .await
         .is_err());
-    }
-
-    #[tokio::test]
-    async fn changed_builtin_content_invalidates_a_pinned_profile_snapshot() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        let mut snapshot = super::resolve_access(
-            &db,
-            &weaver_api::McpAccess {
-                mode: "groups".into(),
-                groups: vec!["github".into()],
-            },
-        )
-        .await
-        .unwrap();
-        snapshot.capability_sets[0].digest = "sha256:stale".to_string();
-        let errors = super::snapshot_errors(&db, &snapshot).await.unwrap();
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("save the profile to reconcile"));
     }
 
     #[test]

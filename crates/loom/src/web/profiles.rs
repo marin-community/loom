@@ -6,8 +6,7 @@ use axum::{
 use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
     CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView,
-    ProfileDeleteResult, ProfileEnvView, ProfileProbeView, ProfileReq, ProfileView,
-    PutProfileEnvReq,
+    ProfileDeleteResult, ProfileEnvView, ProfileReq, ProfileView, PutProfileEnvReq,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -236,34 +235,6 @@ pub(super) async fn effective_profile_operation(
     input: profiles_operations::effective::Input,
 ) -> ApiResult<EffectiveProfileView> {
     effective_profile_core(&context.state, &input.name).await
-}
-
-async fn probe_profile_core(st: &AppState, name: &str) -> ApiResult<ProfileProbeView> {
-    let item = profile::get(&st.db, name)
-        .await?
-        .ok_or_else(|| AppError::not_found("profile"))?;
-    let eff = effective(st, item).await?;
-    let errors = crate::mcp::snapshot_errors(&st.db, &eff.mcp_policy).await?;
-    Ok(ProfileProbeView {
-        ok: errors.is_empty(),
-        effective: eff,
-        errors,
-    })
-}
-
-pub(super) async fn probe_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<ProfileProbeView>> {
-    Ok(Json(probe_profile_core(&st, &name).await?))
-}
-
-/// `profiles.probe` — the twin of [`probe_profile`].
-pub(super) async fn probe_profile_operation(
-    context: OperationContext,
-    input: profiles_operations::probe::Input,
-) -> ApiResult<ProfileProbeView> {
-    probe_profile_core(&context.state, &input.name).await
 }
 
 async fn create_profile_core(
@@ -669,7 +640,6 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<profiles_operations::list::List, _, _>(list_profiles_operation),
         register::<profiles_operations::get::Get, _, _>(get_profile_operation),
         register::<profiles_operations::effective::Effective, _, _>(effective_profile_operation),
-        register::<profiles_operations::probe::Probe, _, _>(probe_profile_operation),
         register::<profiles_operations::create::Create, _, _>(create_profile_operation),
         register::<profiles_operations::update::Update, _, _>(update_profile_operation),
         register::<profiles_operations::delete::Delete, _, _>(delete_profile_operation),

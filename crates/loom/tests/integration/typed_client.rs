@@ -229,15 +229,15 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(tag_value(&branch, "attention"), Some("attention"));
 
     let error = session
-        .decide_permission_request(
-            &request.id,
-            &DecidePermissionRequestReq {
-                decision: "deny".to_string(),
-                reason: String::new(),
-            },
-        )
+        .invoke::<permission_ops::requests::deny::Deny>(&permission_ops::requests::deny::Input {
+            request: request.id.clone(),
+            reason: String::new(),
+        })
         .await
         .unwrap_err();
+    // `permissions.requests.deny` is declared `actor = User`, so a session
+    // credential is refused by the registry itself — the operation an agent
+    // must not reach simply does not accept its grant.
     assert!(error.to_string().contains("human operator"));
 
     let denied = ts

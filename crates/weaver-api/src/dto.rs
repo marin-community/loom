@@ -812,13 +812,6 @@ pub struct EffectiveProfileView {
     pub mcp_servers: Vec<McpServerProcessView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProfileProbeView {
-    pub ok: bool,
-    pub effective: EffectiveProfileView,
-    pub errors: Vec<String>,
-}
-
 /// Response from the scalar `profiles.delete` operation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ProfileDeleteResult {

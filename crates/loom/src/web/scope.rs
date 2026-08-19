@@ -54,7 +54,13 @@ pub(crate) async fn require_repo_access(
     }
 }
 
-/// A session credential may only reach its own branch.
+/// A session credential may reach the branches of its own session tree.
+///
+/// The tree, not just the session's own branch: a session that launches a child
+/// must still be able to act on what it launched. This is the same rule the
+/// path allowlist in `auth.rs` applied to `/branches/{id}` — moved here so it is
+/// stated once, against the branch the operation's typed input names rather than
+/// against a URL segment.
 pub(crate) async fn require_branch_access(
     st: &AppState,
     principal: &Principal,
@@ -70,19 +76,31 @@ pub(crate) async fn require_branch_access(
     // resolve to the same row, so compare after resolution rather than rejecting
     // a legitimate alias.
     let resolved: Option<String> =
-        sqlx::query_scalar("SELECT id FROM branches WHERE id = ? OR name = ?")
+        sqlx::query_scalar("SELECT id FROM branches WHERE id = ? OR branch = ?")
             .bind(branch)
             .bind(branch)
             .fetch_optional(&st.db)
             .await?;
-    if resolved.as_deref() == Some(branch_id) {
-        Ok(())
-    } else {
-        Err(denied("session credentials are limited to their branch"))
+    let Some(resolved) = resolved else {
+        return Err(denied("session credentials are limited to their branch"));
+    };
+    if resolved == branch_id {
+        return Ok(());
+    }
+    match session_id(principal) {
+        Some(own) if super::auth::branch_belongs_to_session_tree(st, own, &resolved).await => {
+            Ok(())
+        }
+        _ => Err(denied("session credentials are limited to their branch")),
     }
 }
 
-/// A session credential may only reach its own session.
+/// A session credential may reach its own session and its descendants.
+///
+/// The descendant rule is not new: `/sessions/{id}` under a session credential
+/// has always been checked with the same recursive walk, so that a parent can
+/// drive the children it launched. What is new is where it lives — one check,
+/// against the session the operation's typed input names.
 pub(crate) async fn require_session_access(
     st: &AppState,
     principal: &Principal,
@@ -95,15 +113,10 @@ pub(crate) async fn require_session_access(
     if session.is_empty() || session == "self" || session == own {
         return Ok(());
     }
-    let resolved: Option<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ?")
-        .bind(session)
-        .fetch_optional(&st.db)
-        .await?;
-    if resolved.as_deref() == Some(own) {
-        Ok(())
-    } else {
-        Err(denied(
-            "session credentials are limited to their own session",
-        ))
+    if super::auth::is_session_descendant(st, own, session).await {
+        return Ok(());
     }
+    Err(denied(
+        "session credentials are limited to their own session",
+    ))
 }

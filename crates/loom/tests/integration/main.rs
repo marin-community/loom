@@ -7,6 +7,9 @@
 //! The `hook` event → session-status path is covered separately by
 //! `tests/hook_monitor.rs`, so it is not duplicated here.
 
+#[path = "../support/tapestry.rs"]
+mod support;
+
 mod fixtures;
 
 mod acp;

@@ -189,6 +189,28 @@ pub(crate) fn bindings() -> Vec<McpBinding> {
 /// its binding. The single entry point a ported adapter's `tools/call` calls
 /// into — everything above this line is generic over the operation's types,
 /// and everything below it is registry lookups, not per-tool code.
+/// Resolve the tool, *then* connect.
+///
+/// A call naming a tool that does not exist should say so, whatever else is
+/// wrong with the environment. The hand-written adapters have always checked in
+/// this order; the registry-driven ones lost it when they moved onto this
+/// dispatcher and started building their client first — so `loom_context::not_a_tool`
+/// reported a missing `LOOM_TOKEN` instead of an unknown tool.
+pub(crate) async fn call_adapter_tool(
+    adapter: &str,
+    server: &str,
+    tool: &str,
+    arguments: Value,
+) -> Result<Value> {
+    if !super::runtime_tool_allowed(tool) {
+        bail!("{server} tool '{tool}' is not allowed by this session");
+    }
+    weaver_api::operation_for_mcp(server, tool)
+        .with_context(|| format!("unknown {server} tool '{tool}'"))?;
+    let client = super::runtime_client(adapter)?;
+    call_tool(&client, server, tool, arguments).await
+}
+
 pub(crate) async fn call_tool(
     client: &Client,
     server: &str,

@@ -69,7 +69,7 @@ pub(super) async fn is_session_descendant(st: &AppState, ancestor: &str, candida
     .unwrap_or(false)
 }
 
-async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id: &str) -> bool {
+pub(super) async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id: &str) -> bool {
     sqlx::query_scalar::<_, bool>(
         "WITH RECURSIVE tree(id, branch_id) AS (
            SELECT id, branch_id FROM sessions WHERE id = ?
@@ -155,10 +155,16 @@ pub(super) async fn grant_allows(
     if principal.is_admin() {
         return true;
     }
+    // A registered operation carries its own authority, and it is complete:
+    // `actor` here, then `grants` and the resource named by `Scoped` inside
+    // `authorize()` at the dispatcher. The path allowlist below is the *legacy*
+    // model. Running both means every newly declared operation is refused until
+    // someone also adds its URL to a hand-maintained list — which is exactly the
+    // duplicated authority this registry exists to remove, and it is what made
+    // `permissions.requests.create` return 403 to the session it was declared
+    // for.
     if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
-        if !operation_grant_allows(principal, operation) {
-            return false;
-        }
+        return operation_grant_allows(principal, operation);
     }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
@@ -501,35 +507,6 @@ async fn auth_methods(st: &AppState) -> AuthMethods {
         password: true,
         github: auth::github_oauth(&st.db).await.is_some(),
     }
-}
-
-/// `GET /api/auth/me` — who the caller is + which sign-in methods to offer.
-/// Public: an unauthenticated caller gets `authenticated: false`, not a 401.
-pub(super) async fn auth_me(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Json<MeView> {
-    let principal = resolve_principal(&st, &headers, peer.ip()).await;
-    let methods = auth_methods(&st).await;
-    Json(match principal {
-        Some(p) => MeView {
-            authenticated: true,
-            role: p.user_role().map(user_role_view),
-            username: Some(p.username),
-            github_login: p.github_login,
-            via: Some(p.via.as_str().to_string()),
-            methods,
-        },
-        None => MeView {
-            authenticated: false,
-            role: None,
-            username: None,
-            github_login: None,
-            via: None,
-            methods,
-        },
-    })
 }
 
 /// `POST /api/auth/login` — username/password. Sets the session cookie.
@@ -935,9 +912,26 @@ pub(super) async fn put_github_config(
 /// `actor = User` bars an anonymous caller before the handler runs — so it
 /// always answers `authenticated: true`. The "is anyone logged in yet" check
 /// the SPA needs before that point stays served by the legacy route.
+/// `auth.me` — who the caller is + which sign-in methods to offer.
+///
+/// Declared `actor = Anonymous`, so an unauthenticated caller arrives here with
+/// a synthesized anonymous principal rather than a 401, and gets
+/// `authenticated: false`. That is what the login screen reads. This replaces
+/// the hand-written public `GET /api/auth/me`, which served the same two cases
+/// from a second handler on a second router.
 async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView> {
     let methods = auth_methods(&context.state).await;
     let p = context.principal;
+    if matches!(p.grant, Grant::Anonymous) {
+        return Ok(MeView {
+            authenticated: false,
+            role: None,
+            username: None,
+            github_login: None,
+            via: None,
+            methods,
+        });
+    }
     Ok(MeView {
         authenticated: true,
         role: p.user_role().map(user_role_view),

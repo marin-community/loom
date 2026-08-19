@@ -84,8 +84,7 @@ fn tools() -> Value {
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        let client = super::runtime_client("context")?;
-        super::dispatch::call_tool(&client, SERVER_NAME, &name, arguments).await
+        super::dispatch::call_adapter_tool("context", SERVER_NAME, &name, arguments).await
     })
 }
 
