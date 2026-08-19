@@ -10,9 +10,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
-    SessionLayoutView, SetSessionPlacementDefaultReq,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionLayoutView,
+    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use weaver_api::operations::session_layout::{
@@ -116,12 +115,12 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `session_layout.get` — the twin of [`get_session_layout`].
+/// `session_layout.get`.
 async fn get_operation(context: OperationContext, _input: get::Input) -> ApiResult<get::Output> {
     Ok(session_layout::get_layout(&context.state.db, &context.principal.username).await?)
 }
 
-/// `session_layout.spaces.create` — the twin of [`create_session_space`].
+/// `session_layout.spaces.create`.
 async fn spaces_create_operation(
     context: OperationContext,
     input: spaces::create::Input,
@@ -136,7 +135,7 @@ async fn spaces_create_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.spaces.update` — the twin of [`update_session_space`].
+/// `session_layout.spaces.update`.
 async fn spaces_update_operation(
     context: OperationContext,
     input: spaces::update::Input,
@@ -151,7 +150,7 @@ async fn spaces_update_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.spaces.delete` — the twin of [`delete_session_space`].
+/// `session_layout.spaces.delete`.
 async fn spaces_delete_operation(
     context: OperationContext,
     input: spaces::delete::Input,
@@ -166,7 +165,7 @@ async fn spaces_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.create` — the twin of [`create_session_group`].
+/// `session_layout.groups.create`.
 async fn groups_create_operation(
     context: OperationContext,
     input: groups::create::Input,
@@ -182,7 +181,7 @@ async fn groups_create_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.update` — the twin of [`update_session_group`].
+/// `session_layout.groups.update`.
 async fn groups_update_operation(
     context: OperationContext,
     input: groups::update::Input,
@@ -197,7 +196,7 @@ async fn groups_update_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.delete` — the twin of [`delete_session_group`].
+/// `session_layout.groups.delete`.
 async fn groups_delete_operation(
     context: OperationContext,
     input: groups::delete::Input,
@@ -212,10 +211,10 @@ async fn groups_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.preference.set` — the twin of
-/// [`set_session_group_preference`]. Unlike the rest of this bundle it does
-/// not go through `mutation_result`: the legacy route never did either,
-/// because a collapse toggle carries no `expected_revision` to conflict on.
+/// `session_layout.groups.preference.set`. Unlike the rest of this bundle it
+/// does not go through `mutation_result`: the route this replaces never did
+/// either, because a collapse toggle carries no `expected_revision` to
+/// conflict on.
 async fn groups_preference_set_operation(
     context: OperationContext,
     input: groups::preference::set::Input,
@@ -230,7 +229,7 @@ async fn groups_preference_set_operation(
     .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
-/// `session_layout.move` — the twin of [`move_session_layout`].
+/// `session_layout.move`.
 async fn move_operation(
     context: OperationContext,
     input: r#move::Input,
@@ -247,7 +246,7 @@ async fn move_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.reorder` — the twin of [`reorder_session_layout`].
+/// `session_layout.reorder`.
 async fn reorder_operation(
     context: OperationContext,
     input: reorder::Input,
@@ -265,7 +264,7 @@ async fn reorder_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.restore` — the twin of [`restore_session_layout`].
+/// `session_layout.restore`.
 async fn restore_operation(
     context: OperationContext,
     input: restore::Input,
@@ -280,8 +279,7 @@ async fn restore_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.defaults.set` — the twin of
-/// [`set_session_placement_default`].
+/// `session_layout.defaults.set`.
 async fn defaults_set_operation(
     context: OperationContext,
     input: defaults::set::Input,
@@ -298,8 +296,7 @@ async fn defaults_set_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.defaults.delete` — the twin of
-/// [`delete_session_placement_default`].
+/// `session_layout.defaults.delete`.
 async fn defaults_delete_operation(
     context: OperationContext,
     input: defaults::delete::Input,

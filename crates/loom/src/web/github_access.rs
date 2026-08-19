@@ -9,7 +9,6 @@ use weaver_api::operations::permissions as permission_operations;
 use weaver_api::operations::sessions as session_operations;
 use weaver_api::SessionGithubAccessView;
 
-
 use super::operations::OperationContext;
 use super::{require_session, ApiResult, AppError, AppState};
 
@@ -66,11 +65,10 @@ pub(super) async fn validate_github_write(
     Ok(())
 }
 
-/// `sessions.github.access.list` — ported from [`list_github_access`]. Its
-/// `require_human` call is dropped rather than moved: the declaration's
-/// `actor = User` is that same rule, and `authorize()` turns a session or
-/// automation credential away before this handler runs. Two copies of one rule
-/// is one copy too many.
+/// `sessions.github.access.list`. Its `require_human` call is dropped rather
+/// than moved: the declaration's `actor = User` is that same rule, and
+/// `authorize()` turns a session or automation credential away before this
+/// handler runs. Two copies of one rule is one copy too many.
 pub(super) async fn list_github_access_operation(
     context: OperationContext,
     input: session_operations::github::access::list::Input,

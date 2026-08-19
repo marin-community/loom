@@ -99,10 +99,10 @@ async fn collect_issue_board(
     issue_views(&st.db, issues).await
 }
 
-/// `issues.board` — ported from [`list_all_issues`]. The route ran no
-/// repo-access check and neither does this: `scope = Global` names no
-/// repository to check against, so a session credential that may read work
-/// items sees the whole board, exactly as it did through `GET /issues`.
+/// `issues.board`. The route this replaces ran no repo-access check and
+/// neither does this: `scope = Global` names no repository to check against,
+/// so a session credential that may read work items sees the whole board,
+/// exactly as it did through `GET /issues`.
 pub(super) async fn issue_board_operation(
     context: OperationContext,
     input: issue_operations::board::Input,
@@ -298,10 +298,11 @@ async fn apply_issue_edits(
     issue_view(&st.db, issue).await
 }
 
-/// `issues.update` — ported from [`patch_issue`]. The body's
-/// `claimed_branch: Option<Option<String>>` is now an `unclaim: bool`: `null`
-/// was the only value the route accepted, so the 400 it raised for a non-empty
-/// branch name has nothing left to reject.
+/// `issues.update`. The body's `claimed_branch: Option<Option<String>>` is
+/// now an `unclaim: bool`: `null` was the only value the route this replaces
+/// accepted — an `Option<Option<String>>` whose only legal inhabitant was
+/// `Some(None)` — so the 400 it raised for a non-empty branch name has
+/// nothing left to reject.
 pub(super) async fn update_issue_operation(
     context: OperationContext,
     input: issue_operations::update::Input,
@@ -841,7 +842,9 @@ mod tests {
         // `claimed_branch: Option<Option<String>>` and 400'd every inhabitant
         // but `Some(None)`; `unclaim: bool` says the same thing in a type that
         // cannot hold the rejected case, so there is nothing left to reject.
-        let schema = (weaver_api::operation("issues.update").expect("declared").schema)();
+        let schema = (weaver_api::operation("issues.update")
+            .expect("declared")
+            .schema)();
         assert!(
             schema["properties"].get("claimed_branch").is_none(),
             "a claim is made by launching against an item, not by editing it: {schema}"

@@ -230,7 +230,8 @@ pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
             // `sessions.conversation.block` is reachable by whichever surface the
             // reader already holds — the API, `loom`, or an MCP tool — and a URL
             // would have been true for exactly one of them.
-            let full = format!("sessions.conversation.block session={session_id} message={m} block={b}");
+            let full =
+                format!("sessions.conversation.block session={session_id} message={m} block={b}");
             match block {
                 Block::ToolUse { input, .. } => {
                     let rendered = input.to_string();
@@ -629,7 +630,8 @@ mod tests {
             Block::ToolResult { output, .. } => {
                 assert!(output.starts_with(&"x".repeat(TOOL_PREVIEW_BYTES)));
                 assert!(output.contains("elided 1024 bytes"));
-                assert!(output.contains("sessions.conversation.block session=sess1234 message=0 block=2"));
+                assert!(output
+                    .contains("sessions.conversation.block session=sess1234 message=0 block=2"));
             }
             other => panic!("expected tool result, got {other:?}"),
         }

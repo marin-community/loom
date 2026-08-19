@@ -554,7 +554,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `reviews.get` — the twin of [`get_review`].
+/// `reviews.get`.
 async fn get_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::get::Input,
@@ -568,7 +568,7 @@ async fn get_operation(
     durable_review_dto(&st, &item).await
 }
 
-/// `reviews.update` — the twin of [`update_review`].
+/// `reviews.update`.
 async fn update_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::update::Input,
@@ -615,7 +615,7 @@ async fn update_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.discard` — the twin of [`discard_review`].
+/// `reviews.discard`.
 async fn discard_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::discard::Input,
@@ -639,7 +639,7 @@ async fn discard_operation(
     Ok(weaver_api::operations::reviews::discard::Output { discarded: true })
 }
 
-/// `reviews.retarget` — the twin of [`retarget_review_to_current`].
+/// `reviews.retarget`.
 async fn retarget_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::retarget::Input,
@@ -681,7 +681,7 @@ async fn retarget_operation(
     Ok(review_dto(&updated, &current))
 }
 
-/// `reviews.list` — the twin of [`list_session_reviews`].
+/// `reviews.list`.
 async fn list_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::list::Input,
@@ -696,7 +696,7 @@ async fn list_operation(
     list_for(&st, &principal, &session, &branch, &q).await
 }
 
-/// `reviews.create` — the twin of [`create_session_review`].
+/// `reviews.create`.
 async fn create_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::create::Input,
@@ -712,7 +712,7 @@ async fn create_operation(
     create_for(&st, &principal, &session, &branch, &body).await
 }
 
-/// `reviews.comments.update` — the twin of [`update_review_comment`].
+/// `reviews.comments.update`.
 async fn comments_update_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::update::Input,
@@ -771,7 +771,7 @@ async fn comments_update_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.comments.delete` — the twin of [`delete_review_comment`].
+/// `reviews.comments.delete`.
 async fn comments_delete_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::delete::Input,
@@ -797,7 +797,7 @@ async fn comments_delete_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.comments.resolve` — the twin of [`resolve_review_comment`].
+/// `reviews.comments.resolve`.
 async fn comments_resolve_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::resolve::Input,
@@ -824,7 +824,7 @@ async fn comments_resolve_operation(
     Ok(comment_dto(&comment))
 }
 
-/// `reviews.comments.create` — the twin of [`add_review_comment`].
+/// `reviews.comments.create`.
 async fn comments_create_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::create::Input,
@@ -862,7 +862,7 @@ async fn comments_create_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.submit` — the twin of [`submit_review`].
+/// `reviews.submit`.
 async fn submit_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::submit::Input,
@@ -924,7 +924,7 @@ async fn submit_operation(
     durable_review_dto(&st, &refreshed).await
 }
 
-/// `reviews.retry_delivery` — the twin of [`retry_review_delivery`].
+/// `reviews.retry_delivery`.
 async fn retry_delivery_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::retry_delivery::Input,

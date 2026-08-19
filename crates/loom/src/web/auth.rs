@@ -4,7 +4,8 @@ use axum::{
     extract::{ConnectInfo, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response}, Json,
+    response::{IntoResponse, Response},
+    Json,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -12,9 +13,9 @@ use weaver_api::operations::auth::{
     automation_token, federations, github_config, github_token, me, set_password, tokens, users,
 };
 use weaver_api::{
-    AuthMethods, AutomationTokenView, CreatedTokenView, FederationReq,
-    FederationView, GithubConfigView, GithubTokenStatusView, LoginReq, MeView,
-    RemoveFederationResult, RemoveUserResult, RevokeTokenResult, TokenView, UserRole, UserView,
+    AuthMethods, AutomationTokenView, CreatedTokenView, FederationReq, FederationView,
+    GithubConfigView, GithubTokenStatusView, LoginReq, MeView, RemoveFederationResult,
+    RemoveUserResult, RevokeTokenResult, TokenView, UserRole, UserView,
 };
 
 use crate::auth::{self, Grant, Principal};

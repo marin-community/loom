@@ -23,11 +23,11 @@ use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, db, events, git, github, repo};
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq,
-    HandoffReq, HistoryPageView, ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
-    SessionFilesView, SessionIdeInfoView, SessionInterruptResult, SessionModeResult,
-    SessionPreviewResult, SessionSearchAttention, SessionSearchStatus, SessionSendResult,
-    SessionSummaryView, SessionUrlView, SessionView,
+    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq, HandoffReq,
+    HistoryPageView, ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult,
+    SessionChatView, SessionCreatorFilter, SessionFilesView, SessionIdeInfoView,
+    SessionInterruptResult, SessionModeResult, SessionPreviewResult, SessionSearchAttention,
+    SessionSearchStatus, SessionSendResult, SessionSummaryView, SessionUrlView, SessionView,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -642,7 +642,7 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
         Ok(false) => {
             return Err(AppError::conflict(
                 "session is no longer archived — another lifecycle action won",
-            ))
+            ));
         }
         Err(error) => {
             if let Some(other) = session_mod::active_for_branch(&st.db, &branch.id).await? {
@@ -1179,8 +1179,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     bound
 }
 
-/// `sessions.list` — ported from [`search_sessions`], which this replaces:
-/// the operation's `Input` is exactly `SearchSessionsOptions`'s field set.
+/// `sessions.list` — the operation's `Input` is exactly `SearchSessionsOptions`'s
+/// field set.
 async fn op_list(
     context: OperationContext,
     input: ops::list::Input,
@@ -1213,10 +1213,9 @@ async fn op_list(
     .await
 }
 
-/// `sessions.summary.list` — ported from [`list_session_summaries`]. The
-/// query's `q: Option<String>` is a plain `String` operand here, and an empty
-/// one is passed as no needle at all — where `search_needle` would have sent a
-/// blank `Some` anyway.
+/// `sessions.summary.list` — the query's `q: Option<String>` is a plain
+/// `String` operand here, and an empty one is passed as no needle at all —
+/// where `search_needle` would have sent a blank `Some` anyway.
 async fn op_summary_list(
     context: OperationContext,
     input: ops::summary::list::Input,
@@ -1237,16 +1236,16 @@ async fn op_summary_list(
     .await
 }
 
-/// `sessions.get` — ported from [`get_session`].
+/// `sessions.get`.
 async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<SessionView> {
     let (session, branch) = require_session(&context.state.db, &input.session).await?;
     session_view(&context.state.db, &session, &branch).await
 }
 
-/// `sessions.launch` — ported from [`create_session`]. The operation's `Input`
-/// mirrors `CreateReq` field for field, so every launch the legacy route
-/// accepted (including a `class`/`protocol`/`mode` override) remains
-/// expressible; nothing is silently left at `CreateReq::default()`.
+/// `sessions.launch` — the operation's `Input` mirrors `CreateReq` field for
+/// field, so every launch the old REST route accepted (including a
+/// `class`/`protocol`/`mode` override) remains expressible; nothing is
+/// silently left at `CreateReq::default()`.
 ///
 /// The old handler's inline rejection of `Grant::Automation` is dropped: this
 /// operation declares `actor = SessionSelf`, so `authorize()` now refuses an
@@ -1359,7 +1358,7 @@ async fn op_send(
     })
 }
 
-/// `sessions.interrupt` — ported from [`interrupt_session`].
+/// `sessions.interrupt`.
 async fn op_interrupt(
     context: OperationContext,
     input: ops::interrupt::Input,
@@ -1381,7 +1380,7 @@ async fn op_interrupt(
     Ok(SessionInterruptResult { interrupted: true })
 }
 
-/// `sessions.preview` — ported from [`preview_session`].
+/// `sessions.preview`.
 async fn op_preview(
     context: OperationContext,
     input: ops::preview::Input,
@@ -1402,9 +1401,9 @@ async fn op_preview(
     Ok(SessionPreviewResult { screen })
 }
 
-/// `sessions.events.list` — ported from [`branch_events`] (also mounted at
-/// `GET /sessions/{id}/log`, session-key-resolving already via
-/// `require_branch`), scoped here to the session directly.
+/// `sessions.events.list` — the route this replaces was also mounted at
+/// `GET /sessions/{id}/log` and already resolved the session key via
+/// `require_branch`; this operation is scoped to the session directly.
 async fn op_events_list(
     context: OperationContext,
     input: ops::events::list::Input,
@@ -1433,7 +1432,7 @@ async fn op_events_create(
     Ok(event)
 }
 
-/// `sessions.history.list` — ported from [`session_history`].
+/// `sessions.history.list`.
 async fn op_history_list(
     context: OperationContext,
     input: ops::history::list::Input,
@@ -1455,7 +1454,7 @@ async fn op_history_list(
     .map_err(history_error)
 }
 
-/// `sessions.history.search` — ported from [`search_session_history`].
+/// `sessions.history.search`.
 async fn op_history_search(
     context: OperationContext,
     input: ops::history::search::Input,
@@ -1573,9 +1572,8 @@ async fn op_tags_list(
     super::branch_view(&context.state.db, &branch).await
 }
 
-/// `sessions.tags.set` — ported from [`set_session_tag`], returning
-/// `BranchView` (the operation's declared `Output`) rather than the full
-/// `SessionView` the old handler returned.
+/// `sessions.tags.set` — returns `BranchView` (the operation's declared
+/// `Output`) rather than the full `SessionView` the old handler returned.
 async fn op_tags_set(
     context: OperationContext,
     input: ops::tags::set::Input,
@@ -1616,8 +1614,8 @@ async fn op_tags_set(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.tags.delete` — ported from [`clear_session_tag`], returning
-/// `BranchView` rather than the old handler's `SessionView`.
+/// `sessions.tags.delete` — returns `BranchView` rather than the old
+/// handler's `SessionView`.
 async fn op_tags_delete(
     context: OperationContext,
     input: ops::tags::delete::Input,
@@ -1635,9 +1633,8 @@ async fn op_tags_delete(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.launches.resolve` — ported from
-/// [`crate::web::launches::resolve_session_launch`], resolved from typed input
-/// rather than a raw JSON body.
+/// `sessions.launches.resolve` — the route this replaces took a raw JSON
+/// body; this operation resolves from typed input instead.
 async fn op_launches_resolve(
     context: OperationContext,
     input: ops::launches::resolve::Input,
@@ -1658,7 +1655,7 @@ async fn op_launches_resolve(
     .view)
 }
 
-/// `sessions.adopt` — ported from [`adopt_session`].
+/// `sessions.adopt`.
 async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiResult<SessionView> {
     let st = &context.state;
     let (session, branch) = require_session(&st.db, &input.session).await?;
@@ -1667,9 +1664,8 @@ async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiRes
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.archive` — ported from [`archive_session`] and
-/// [`archive_launch_attempt`], folded into one typed result rather than the
-/// old handler's ad hoc JSON object.
+/// `sessions.archive` — folds the session and launch-attempt archive paths
+/// into one typed result rather than the old handlers' ad hoc JSON object.
 async fn op_archive(
     context: OperationContext,
     input: ops::archive::Input,
@@ -1705,9 +1701,8 @@ async fn op_archive(
     })
 }
 
-/// The `sessions.archive` counterpart of [`archive_launch_attempt`]: same
-/// escape hatch for a reservation that never became a session, wired to this
-/// operation's own result type.
+/// The `sessions.archive` fallback for a reservation that never became a
+/// session, wired to this operation's own result type.
 async fn op_archive_launch_attempt(
     st: &AppState,
     session_id: &str,
@@ -1737,7 +1732,7 @@ async fn op_archive_launch_attempt(
     })
 }
 
-/// `sessions.recover` — ported from [`recover_session`].
+/// `sessions.recover`.
 async fn op_recover(
     context: OperationContext,
     input: ops::recover::Input,
@@ -1753,7 +1748,7 @@ async fn op_recover(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.handoff` — ported from [`handoff_session`].
+/// `sessions.handoff`.
 async fn op_handoff(
     context: OperationContext,
     input: ops::handoff::Input,
@@ -1775,7 +1770,7 @@ async fn op_handoff(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.chat` — ported from [`get_session_chat`].
+/// `sessions.chat`.
 async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResult<SessionChatView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -1786,7 +1781,7 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
         _ => {
             return Err(AppError::bad_request(
                 "before_turn and before_seq must be supplied together",
-            ))
+            ));
         }
     };
     let (blocks, has_more) =
@@ -1835,11 +1830,11 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
     })
 }
 
-/// `sessions.conversation` — ported from [`conversation_session`]. Eliding
-/// oversized tool payloads still runs on the blocking pool since it walks and
-/// re-stringifies every block; the JSON encoding itself now happens in the
-/// dispatcher rather than alongside it, since a registered operation returns a
-/// typed value rather than a hand-built `Response`.
+/// `sessions.conversation` — eliding oversized tool payloads still runs on
+/// the blocking pool since it walks and re-stringifies every block; the JSON
+/// encoding itself now happens in the dispatcher rather than alongside it,
+/// since a registered operation returns a typed value rather than a
+/// hand-built `Response`.
 async fn op_conversation(
     context: OperationContext,
     input: ops::conversation::Input,
@@ -1858,7 +1853,7 @@ async fn op_conversation(
     .map_err(|error| AppError::internal("conversation processing failed", error))
 }
 
-/// `sessions.files` — ported from [`list_session_files`].
+/// `sessions.files`.
 async fn op_files(
     context: OperationContext,
     input: ops::files::Input,
@@ -1908,7 +1903,7 @@ async fn op_files(
     Ok(SessionFilesView { files })
 }
 
-/// `sessions.mode` — ported from [`set_mode`].
+/// `sessions.mode`.
 async fn op_mode(
     context: OperationContext,
     input: ops::mode::Input,
@@ -1958,7 +1953,7 @@ pub(super) async fn raw_session_bytes(
     let bytes = match tokio::fs::read(work_dir.join(&rel)).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AppError::not_found("file"))
+            return Err(AppError::not_found("file"));
         }
         Err(e) => return Err(e.into()),
     };
@@ -1972,11 +1967,11 @@ pub(super) async fn raw_session_bytes(
         .into_response())
 }
 
-/// `sessions.url` — ported from [`session_url_route`]. The registered
-/// operation runs without the caller's `Host` header (the dispatcher hands
-/// handlers typed input, not a request), so this can only resolve the
-/// configured `auth.base_url` or the address the server is bound to — not a
-/// browser's own Host the way the REST route it mirrors can.
+/// `sessions.url` — the registered operation runs without the caller's
+/// `Host` header (the dispatcher hands handlers typed input, not a request),
+/// so this can only resolve the configured `auth.base_url` or the address the
+/// server is bound to — not a browser's own Host the way the old REST route
+/// could.
 async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<SessionUrlView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -1999,7 +1994,7 @@ async fn op_ide_info(
     Ok(serde_json::from_value(value)?)
 }
 
-/// `sessions.shells.list` — ported from [`list_session_shells`].
+/// `sessions.shells.list`.
 async fn op_shells_list(
     context: OperationContext,
     input: ops::shells::list::Input,
@@ -2008,10 +2003,10 @@ async fn op_shells_list(
     Ok(crate::shell::list_debug(&session.id).await)
 }
 
-/// `sessions.shells.delete` — ported from [`delete_session_shell`]. Idempotent:
-/// a missing shell is a no-op. Returns the indices still live, so the tab strip
-/// refreshes without a second call — the legacy route returned `{closed: true}`,
-/// which told a caller nothing it did not already know.
+/// `sessions.shells.delete` — idempotent: a missing shell is a no-op.
+/// Returns the indices still live, so the tab strip refreshes without a
+/// second call — the legacy route returned `{closed: true}`, which told a
+/// caller nothing it did not already know.
 async fn op_shells_delete(
     context: OperationContext,
     input: ops::shells::delete::Input,
@@ -2021,11 +2016,11 @@ async fn op_shells_delete(
     Ok(crate::shell::list_debug(&session.id).await)
 }
 
-/// `sessions.update` — ported from [`patch_session`]. The legacy body's
-/// `park`/`sort_order` compatibility fields (always rejected with a fixed
-/// error) are not part of this operation's input at all: they existed only so
-/// an old frontend payload failed loudly instead of being silently ignored,
-/// and a caller of this operation never sends them.
+/// `sessions.update` — the legacy body's `park`/`sort_order` compatibility
+/// fields (always rejected with a fixed error) are not part of this
+/// operation's input at all: they existed only so an old frontend payload
+/// failed loudly instead of being silently ignored, and a caller of this
+/// operation never sends them.
 async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiResult<SessionView> {
     let st = &context.state;
     let (initial_session, _) = require_session(&st.db, &input.session).await?;
@@ -2105,7 +2100,7 @@ async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiR
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.delete` — ported from [`delete_session`].
+/// `sessions.delete`.
 async fn op_delete(
     context: OperationContext,
     input: ops::delete::Input,
@@ -2126,9 +2121,9 @@ async fn op_delete(
     })
 }
 
-/// The `sessions.delete` counterpart of [`delete_launch_attempt`]: same
-/// escape hatch [`op_archive_launch_attempt`] uses for `sessions.archive`,
-/// wired to this operation's own result type.
+/// The `sessions.delete` fallback for a launch attempt: same escape hatch
+/// [`op_archive_launch_attempt`] uses for `sessions.archive`, wired to this
+/// operation's own result type.
 async fn op_delete_launch_attempt(
     st: &AppState,
     session_id: &str,
@@ -2158,7 +2153,7 @@ async fn op_delete_launch_attempt(
     })
 }
 
-/// `sessions.config.set` — ported from [`set_config_option`].
+/// `sessions.config.set`.
 async fn op_config_set(
     context: OperationContext,
     input: ops::config::set::Input,
@@ -2183,7 +2178,7 @@ async fn op_config_set(
     })
 }
 
-/// `sessions.conversation.block` — ported from [`conversation_block`].
+/// `sessions.conversation.block`.
 async fn op_conversation_block(
     context: OperationContext,
     input: ops::conversation::block::Input,
@@ -2200,7 +2195,7 @@ async fn op_conversation_block(
         .ok_or_else(|| AppError::not_found("conversation block"))
 }
 
-/// `sessions.github.refresh` — ported from [`refresh_github_session`].
+/// `sessions.github.refresh`.
 async fn op_github_refresh(
     context: OperationContext,
     input: ops::github::refresh::Input,
@@ -2214,7 +2209,7 @@ async fn op_github_refresh(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.set` — ported from [`set_github_session`].
+/// `sessions.github.set`.
 async fn op_github_set(
     context: OperationContext,
     input: ops::github::set::Input,
@@ -2237,7 +2232,7 @@ async fn op_github_set(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.clear` — ported from [`clear_github_session`].
+/// `sessions.github.clear`.
 async fn op_github_clear(
     context: OperationContext,
     input: ops::github::clear::Input,
@@ -2253,7 +2248,7 @@ async fn op_github_clear(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.labels.add` — ported from [`add_github_session_labels`].
+/// `sessions.github.labels.add`.
 async fn op_github_labels_add(
     context: OperationContext,
     input: ops::github::labels::add::Input,
@@ -2297,7 +2292,7 @@ async fn op_github_labels_add(
     })
 }
 
-/// `sessions.handoff.resolve` — ported from [`resolve_session_handoff`].
+/// `sessions.handoff.resolve`.
 async fn op_handoff_resolve(
     context: OperationContext,
     input: ops::handoff::resolve::Input,
@@ -2309,11 +2304,10 @@ async fn op_handoff_resolve(
         .map_err(map_handoff_error)
 }
 
-/// `sessions.prompt.create` — ported from [`prompt_session`]. `by` is not
-/// read from the caller — see the operation's own doc comment. Provenance is
-/// derived from the credential the same way `set_issue_tag_operation` in
-/// `web/issues.rs` derives its `by`: `manual` for a human operator, `agent`
-/// otherwise.
+/// `sessions.prompt.create` — `by` is not read from the caller — see the
+/// operation's own doc comment. Provenance is derived from the credential the
+/// same way `set_issue_tag_operation` in `web/issues.rs` derives its `by`:
+/// `manual` for a human operator, `agent` otherwise.
 async fn op_prompt_create(
     context: OperationContext,
     input: ops::prompt::create::Input,
@@ -2368,7 +2362,7 @@ async fn op_prompt_create(
     })
 }
 
-/// `sessions.prompt.retract` — ported from [`retract_queued_prompt`].
+/// `sessions.prompt.retract`.
 async fn op_prompt_retract(
     context: OperationContext,
     input: ops::prompt::retract::Input,
@@ -2384,7 +2378,7 @@ async fn op_prompt_retract(
     Ok(ops::prompt::retract::RetractResult { text })
 }
 
-/// `sessions.resumption_cue.get` — ported from [`get_resumption_cue`].
+/// `sessions.resumption_cue.get`.
 async fn op_resumption_cue_get(
     context: OperationContext,
     input: ops::resumption_cue::get::Input,
@@ -2394,7 +2388,7 @@ async fn op_resumption_cue_get(
     Ok(crate::metadata_assist::current_cue(&st.db, &session, &branch).await?)
 }
 
-/// `sessions.resumption_cue.ensure` — ported from [`ensure_resumption_cue`].
+/// `sessions.resumption_cue.ensure`.
 async fn op_resumption_cue_ensure(
     context: OperationContext,
     input: ops::resumption_cue::ensure::Input,
@@ -2404,10 +2398,11 @@ async fn op_resumption_cue_ensure(
     Ok(crate::metadata_assist::ensure_cue(&st.db, &st.acp, &session, &branch, input.force).await?)
 }
 
-/// `sessions.permissions.answer` — ported from [`answer_permission`]. The
-/// legacy handler's `principal.is_human()` refusal is now `actor = User` on
-/// the declaration; the inline check is deleted rather than ported, matching
-/// `auth::automation_token_op`'s treatment of its own former `is_admin` check.
+/// `sessions.permissions.answer` — the route this replaces checked
+/// `principal.is_human()` inline; that check is now `actor = User` on the
+/// operation's declaration, and the inline check is deleted rather than
+/// ported, matching `auth::automation_token_op`'s treatment of its own former
+/// `is_admin` check.
 async fn op_permissions_answer(
     context: OperationContext,
     input: ops::permissions::answer::Input,
@@ -2448,7 +2443,7 @@ async fn op_permissions_answer(
     }
 }
 
-/// `sessions.title.regenerate` — ported from [`regenerate_session_title`].
+/// `sessions.title.regenerate`.
 async fn op_title_regenerate(
     context: OperationContext,
     input: ops::title::regenerate::Input,
@@ -2468,7 +2463,7 @@ async fn op_title_regenerate(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.title.generation.set` — ported from [`set_session_title_generation`].
+/// `sessions.title.generation.set`.
 async fn op_title_generation_set(
     context: OperationContext,
     input: ops::title::generation::set::Input,

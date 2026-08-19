@@ -1,6 +1,3 @@
-
-
-
 // ---------------------------------------------------------------------------
 // Discussion — resolvable, stand-off comment threads anchored to a quoted span
 // of an artifact. See `weaver_core::discussion` and docs/artifacts.md. Name

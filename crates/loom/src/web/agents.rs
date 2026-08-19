@@ -1,8 +1,7 @@
 //! CRUD for **custom agents** — the operator-defined agents in the
 //! `custom_agents` table that appear in the picker beside the builtin
-//! `claude`/`codex`. The picker listing itself is `GET /api/agents`
-//! ([`super::sessions::list_agents`]); these routes add/edit/remove the custom
-//! rows it merges in.
+//! `claude`/`codex`. The picker listing itself is `agents.list`, bound
+//! below; these routes add/edit/remove the custom rows it merges in.
 
 use weaver_api::operations::agents as ops;
 use weaver_api::{
@@ -78,13 +77,11 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `agents.list` — the twin of [`list_agents`](super::sessions::list_agents)
-/// (`web/sessions.rs`, not this file — the picker list has always lived
-/// beside session listing; these routes only add/edit/remove the custom rows
-/// it merges in). Reimplemented here rather than called, since that handler's
-/// module is owned by another agent for the duration of this port; the
-/// `agent::agent_metadata` / `custom_agents::list` / `crate::profile` calls
-/// below are the same shared domain logic that handler uses.
+/// `agents.list`. The route this replaces lived beside session listing
+/// (`web/sessions.rs`), not this file — these routes only add/edit/remove
+/// the custom rows it merges in. The `agent::agent_metadata` /
+/// `custom_agents::list` / `crate::profile` calls below are the same shared
+/// domain logic that route used.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -109,7 +106,7 @@ async fn list_operation(
     })
 }
 
-/// `agents.custom.create` — the twin of [`create_custom_agent`].
+/// `agents.custom.create`.
 async fn custom_create_operation(
     context: OperationContext,
     input: ops::custom::create::Input,
@@ -139,10 +136,9 @@ async fn custom_create_operation(
     custom_agents_view(&st.db).await
 }
 
-/// `agents.custom.update` — the twin of [`update_custom_agent`]. `name` is a
-/// caller-supplied operand here rather than a path segment, but is otherwise
-/// immutable the same way: it selects the row, and is never taken from the
-/// stored/updated fields.
+/// `agents.custom.update`. `name` is a caller-supplied operand here rather
+/// than a path segment, but is still immutable the same way: it selects the
+/// row, and is never taken from the stored/updated fields.
 async fn custom_update_operation(
     context: OperationContext,
     input: ops::custom::update::Input,
@@ -168,7 +164,7 @@ async fn custom_update_operation(
     custom_agents_view(&st.db).await
 }
 
-/// `agents.custom.delete` — the twin of [`delete_custom_agent`].
+/// `agents.custom.delete`.
 async fn custom_delete_operation(
     context: OperationContext,
     input: ops::custom::delete::Input,

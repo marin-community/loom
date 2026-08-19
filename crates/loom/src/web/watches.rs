@@ -4,8 +4,8 @@ use serde_json::{json, Value};
 use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
 use weaver_api::{
-    CreateWatchReq, PatchWatchReq, ProgramView, WatchDeleteResult,
-    WatchRunResult, WatchRunView, WatchView,
+    CreateWatchReq, PatchWatchReq, ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView,
+    WatchView,
 };
 use weaver_core::watch::{self as watch_store, Watch};
 
@@ -417,7 +417,7 @@ async fn agent_oneshot_core(
         .await)
 }
 
-/// `agents.oneshot` — the twin of [`agent_oneshot`].
+/// `agents.oneshot`.
 async fn agent_oneshot_operation(
     context: OperationContext,
     input: agents_operations::oneshot::Input,

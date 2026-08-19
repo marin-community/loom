@@ -8,7 +8,8 @@ use base64::Engine as _;
 use serde_json::json;
 use weaver_api::operations::artifacts::{delete, get, history, list, raw, threads, url, write};
 use weaver_api::{
-    AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactVersion, ArtifactView, CommentDto, IssueRefStatus, SessionUrlView, ThreadDto,
+    AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactVersion, ArtifactView, CommentDto,
+    IssueRefStatus, SessionUrlView, ThreadDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch as branch_mod;
@@ -179,10 +180,7 @@ async fn artifact_view(
 /// bytes and a content type rather than a JSON envelope. Authorization is not
 /// hand-written: the caller there runs the same `authorized` path every JSON
 /// operation does, and what is left for this function is the bytes.
-pub(super) async fn raw_artifact_bytes(
-    st: &AppState,
-    input: &raw::Input,
-) -> ApiResult<Response> {
+pub(super) async fn raw_artifact_bytes(st: &AppState, input: &raw::Input) -> ApiResult<Response> {
     let branch = require_branch(&st.db, &input.branch).await?;
     let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &input.name)
         .await?
@@ -244,7 +242,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `artifacts.list` — the twin of [`list_branch_artifacts`].
+/// `artifacts.list`.
 async fn list_operation(context: OperationContext, input: list::Input) -> ApiResult<list::Output> {
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
@@ -256,9 +254,8 @@ async fn list_operation(context: OperationContext, input: list::Input) -> ApiRes
     Ok(artifacts.iter().map(artifact_meta).collect())
 }
 
-/// `artifacts.get` — the twin of [`get_branch_artifact`]. Reuses
-/// [`artifact_view`], so the projected reference map (issue chips) rides
-/// along exactly as it does for the legacy route.
+/// `artifacts.get`. Reuses [`artifact_view`], so the projected reference map
+/// (issue chips) rides along exactly as it did for the route this replaces.
 async fn get_operation(context: OperationContext, input: get::Input) -> ApiResult<get::Output> {
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
@@ -372,7 +369,7 @@ async fn write_operation(
     artifact_view(&st.db, &branch.repo_root, &a, None).await
 }
 
-/// `artifacts.delete` — the twin of [`delete_branch_artifact`].
+/// `artifacts.delete`.
 async fn delete_operation(
     context: OperationContext,
     input: delete::Input,
@@ -591,11 +588,10 @@ async fn threads_resolve_operation(
     Ok(thread_dto(&resolved))
 }
 
-/// `artifacts.url` — the twin of [`branch_artifact_url_route`]. The dispatcher
-/// hands handlers typed input, not a request, so — same as `sessions.url` —
-/// this can only resolve the configured `auth.base_url` or the address the
-/// server is bound to, not a browser's own Host the way the REST route it
-/// mirrors can.
+/// `artifacts.url`. The dispatcher hands handlers typed input, not a
+/// request, so — same as `sessions.url` — this can only resolve the
+/// configured `auth.base_url` or the address the server is bound to, not a
+/// browser's own Host the way the route it replaces could.
 async fn url_operation(context: OperationContext, input: url::Input) -> ApiResult<SessionUrlView> {
     let st = context.state;
     // Resolve first so a bad key 404s rather than minting a link to nothing,

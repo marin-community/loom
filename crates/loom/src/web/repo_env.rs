@@ -46,7 +46,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `repos.env.get` — the twin of [`get_repo_env`].
+/// `repos.env.get`.
 async fn env_get_operation(
     context: OperationContext,
     input: ops::get::Input,
@@ -56,7 +56,7 @@ async fn env_get_operation(
     repo_env_view(&st.db, &repo_root).await
 }
 
-/// `repos.env.set` — the twin of [`put_repo_env`].
+/// `repos.env.set`.
 async fn env_set_operation(
     context: OperationContext,
     input: ops::set::Input,
@@ -70,7 +70,7 @@ async fn env_set_operation(
     repo_env_view(&st.db, &repo_root).await
 }
 
-/// `repos.env.delete` — the twin of [`delete_repo_env`].
+/// `repos.env.delete`.
 async fn env_delete_operation(
     context: OperationContext,
     input: ops::delete::Input,

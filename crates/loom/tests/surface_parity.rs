@@ -72,8 +72,8 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
 ///
 /// Scanned across the whole source rather than line by line: rustfmt wraps a
 /// long `.route(` onto its own line, and a line-oriented scan therefore saw only
-/// 105 of the 160 routes — a third of the surface was invisible to the ledger
-/// below, including two websockets and an unregistered DELETE.
+/// 105 of the 160 routes that existed then — a third of the surface invisible to
+/// the ledger below, including two websockets and an unregistered DELETE.
 fn mounted_routes() -> BTreeSet<String> {
     let source = include_str!("../src/web/mod.rs");
     let mut routes = BTreeSet::new();
@@ -133,6 +133,8 @@ fn operation_routes() -> BTreeSet<String> {
 /// into. There is no "superseded" bucket to park a route in any more: a route in
 /// `web/mod.rs` that is not in [`TRANSPORT_ROUTES`] is a second API surface, and
 /// the failure message says what to do about it.
+///
+/// [`every_declared_transport_is_mounted`] is the other direction.
 #[test]
 fn no_route_is_unaccounted_for() {
     let transport: BTreeSet<&str> = TRANSPORT_ROUTES.iter().map(|(path, _)| *path).collect();
@@ -154,19 +156,6 @@ fn no_route_is_unaccounted_for() {
             .map(|route| format!("  {route}"))
             .collect::<Vec<_>>()
             .join("\n")
-    );
-
-    // The other direction: a transport that stopped being mounted must leave the
-    // list. A stale entry here is an endpoint the ledger claims to have thought
-    // about and no longer describes anything.
-    let retired: Vec<&str> = TRANSPORT_ROUTES
-        .iter()
-        .map(|(path, _)| *path)
-        .filter(|route| !mounted.contains(*route))
-        .collect();
-    assert!(
-        retired.is_empty(),
-        "these transports are no longer mounted — delete them from the ledger: {retired:?}"
     );
 }
 
@@ -302,11 +291,7 @@ fn no_grant_allows_path_is_unmounted() {
 fn every_channel_operation_checks_reachability() {
     let addressed = weaver_api::operations::operations()
         .filter(|operation| operation.id.starts_with("channels."))
-        .filter(|operation| {
-            (operation.schema)()["properties"]
-                .get("channel")
-                .is_some()
-        })
+        .filter(|operation| (operation.schema)()["properties"].get("channel").is_some())
         .count();
     let checks = include_str!("../src/web/channels.rs")
         .matches("require_channel(&st, &principal,")

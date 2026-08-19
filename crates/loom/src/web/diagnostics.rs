@@ -12,7 +12,8 @@ use anyhow::Result;
 use axum::{
     extract::State,
     http::{header, StatusCode},
-    response::{IntoResponse, Response}, Json,
+    response::{IntoResponse, Response},
+    Json,
 };
 use sqlx::FromRow;
 use weaver_api::operations::diagnostics as diagnostics_operations;
@@ -432,11 +433,11 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     )]
 }
 
-/// `diagnostics.get` — the twin of [`diagnostics`]. `actor = User` already
-/// excludes every non-human principal, so the inline `is_human()` check the
-/// legacy handler makes is not repeated here (same as `auth.automation_token`
-/// dropping its inline `is_admin()` check once `actor = Admin` said the same
-/// thing structurally).
+/// `diagnostics.get`. `actor = User` already excludes every non-human
+/// principal, so the inline `is_human()` check the route this replaces made
+/// is not repeated here (same as `auth.automation_token` dropping its inline
+/// `is_admin()` check once `actor = Admin` said the same thing
+/// structurally).
 async fn diagnostics_operation(
     context: OperationContext,
     _input: diagnostics_operations::get::Input,

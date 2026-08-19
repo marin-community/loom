@@ -1,12 +1,6 @@
-use axum::{
-    extract::State,
-    http::StatusCode, Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use weaver_api::operations::runs as run_operations;
-use weaver_api::{
-    AutomationTokenView, FederateReq, RunReq,
-    RunView, SlackThreadRef,
-};
+use weaver_api::{AutomationTokenView, FederateReq, RunReq, RunView, SlackThreadRef};
 
 use crate::auth::{Grant, Principal};
 

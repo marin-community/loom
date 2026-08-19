@@ -93,10 +93,7 @@ async fn create_lists_and_tears_down() {
         "terminal session missing"
     );
 
-    let list = client
-        .post("/api/sessions/list", json!({}))
-        .await
-        .unwrap();
+    let list = client.post("/api/sessions/list", json!({})).await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
 
     let recent = client.post("/api/repos/recent", json!({})).await.unwrap();
@@ -118,10 +115,7 @@ async fn create_lists_and_tears_down() {
         !backend::has_session(&session).await,
         "terminal session was not killed"
     );
-    let list = client
-        .post("/api/sessions/list", json!({}))
-        .await
-        .unwrap();
+    let list = client.post("/api/sessions/list", json!({})).await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 0);
 
     // The repo outlives its sessions, now with no active branches.
@@ -214,10 +208,7 @@ async fn real_agent_without_github_access_is_rejected_before_provisioning() {
         "unexpected error: {err}"
     );
 
-    let list = client
-        .post("/api/sessions/list", json!({}))
-        .await
-        .unwrap();
+    let list = client.post("/api/sessions/list", json!({})).await.unwrap();
     assert!(
         list.as_array().unwrap().is_empty(),
         "rejected launch should not create a session row: {list}"
@@ -623,7 +614,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         "archived excluded from the default search"
     );
     let beta_shown = client
-        .post("/api/sessions/list", json!({ "q": "beta", "history": true }))
+        .post(
+            "/api/sessions/list",
+            json!({ "q": "beta", "history": true }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -808,10 +802,7 @@ async fn session_records_its_creating_principal() {
     );
 
     // Stored, not recomputed: the attribution is still there on a plain list…
-    let list = client
-        .post("/api/sessions/list", json!({}))
-        .await
-        .unwrap();
+    let list = client.post("/api/sessions/list", json!({})).await.unwrap();
     let row = list
         .as_array()
         .unwrap()
@@ -885,10 +876,7 @@ async fn session_records_its_launcher_as_tree_parent() {
     );
 
     // Stored, not recomputed: the link is still there on a plain list.
-    let list = client
-        .post("/api/sessions/list", json!({}))
-        .await
-        .unwrap();
+    let list = client.post("/api/sessions/list", json!({})).await.unwrap();
     let row = list
         .as_array()
         .unwrap()

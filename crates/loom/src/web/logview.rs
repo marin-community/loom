@@ -64,8 +64,7 @@ pub(super) async fn list_tasks(
         .collect())
 }
 
-/// Shared by [`logs_snapshot`] and `logs.list`: the redacted tail of recent
-/// log lines, oldest first.
+/// The redacted tail of recent log lines, oldest first, backing `logs.list`.
 async fn logs_snapshot_core(
     st: &AppState,
     principal: &Principal,
@@ -90,7 +89,7 @@ fn log_line_view(line: LogLine) -> log_operations::list::LogLineView {
     }
 }
 
-/// `logs.list` — the twin of [`logs_snapshot`].
+/// `logs.list`.
 async fn list_logs_operation(
     context: OperationContext,
     input: log_operations::list::Input,
@@ -188,7 +187,7 @@ fn secret_environment_name(name: &str) -> bool {
 
 /// A small "what am I looking at" status blob for the debug panel: build and
 /// image identity plus process identity, so both deploys and restarts are
-/// attributable. Shared by [`server_status`] and `diagnostics.status`.
+/// attributable. Backs `diagnostics.status`.
 fn status_view() -> diagnostics_operations::status::Output {
     diagnostics_operations::status::Output {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -203,7 +202,7 @@ fn status_view() -> diagnostics_operations::status::Output {
     }
 }
 
-/// `diagnostics.status` — the twin of [`server_status`].
+/// `diagnostics.status`.
 async fn status_operation(
     _context: OperationContext,
     _input: diagnostics_operations::status::Input,

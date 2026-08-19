@@ -35,7 +35,7 @@ fn socket_state_str(state: crate::slack::SocketState) -> &'static str {
 }
 
 /// The state of every link in the Slack trigger path, for the Connections
-/// settings pane. Shared by [`slack_status`] and `slack.connection_status`.
+/// settings pane, backing `slack.connection_status`.
 ///
 /// One `connected` boolean is not enough to run this integration: a deployment
 /// can hold a live socket and still discard every mention — because the bot
@@ -118,7 +118,7 @@ async fn slack_connection_status_view(
     }
 }
 
-/// `slack.connection_status` — the twin of [`slack_status`].
+/// `slack.connection_status`.
 async fn slack_connection_status_operation(
     context: OperationContext,
     _input: slack_operations::connection_status::Input,
@@ -166,7 +166,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `branches.list` — the twin of [`list_branches`].
+/// `branches.list`.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -180,7 +180,7 @@ async fn list_operation(
     Ok(out)
 }
 
-/// `branches.get` — the twin of [`get_branch`].
+/// `branches.get`.
 async fn get_operation(
     context: OperationContext,
     input: ops::get::Input,
@@ -190,7 +190,7 @@ async fn get_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.update` — the twin of [`patch_branch`].
+/// `branches.update`.
 async fn update_operation(
     context: OperationContext,
     input: ops::update::Input,
@@ -287,7 +287,7 @@ async fn update_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.status.set` — the twin of [`set_branch_status`].
+/// `branches.status.set`.
 async fn status_set_operation(
     context: OperationContext,
     input: ops::status::set::Input,
@@ -358,9 +358,9 @@ async fn status_set_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.slack.reply` — the twin of [`slack_reply`]. Backs the
-/// `loom_messaging::slack_reply` MCP tool, so an agent posts through this same
-/// operation rather than a separate path.
+/// `branches.slack.reply`. Backs the `loom_messaging::slack_reply` MCP tool,
+/// so an agent posts through this same operation rather than a separate
+/// path.
 async fn slack_reply_operation(
     context: OperationContext,
     input: ops::slack::reply::Input,
@@ -452,9 +452,8 @@ async fn slack_reply_operation(
 }
 
 /// `branches.events.list` — a bounded `Vec<Event>` read (the last 200 rows),
-/// not a live stream; see the module doc above. Same query
-/// [`branch_events`](super::sessions::branch_events) runs (that handler lives
-/// in `web/sessions.rs`, owned elsewhere for the duration of this port).
+/// not a live stream; see the module doc above. Runs the same query as
+/// `sessions.events.list` (`web/sessions.rs`).
 async fn events_list_operation(
     context: OperationContext,
     input: ops::events::list::Input,
@@ -464,7 +463,7 @@ async fn events_list_operation(
     Ok(events::history(&st.db, &branch.id, 200).await?)
 }
 
-/// `branches.events.create` — the twin of [`create_branch_event`].
+/// `branches.events.create`.
 async fn events_create_operation(
     context: OperationContext,
     input: ops::events::create::Input,
@@ -480,7 +479,7 @@ async fn events_create_operation(
     Ok(event)
 }
 
-/// `branches.tags.set` — the twin of [`set_branch_tag`].
+/// `branches.tags.set`.
 async fn tags_set_operation(
     context: OperationContext,
     input: ops::tags::set::Input,
@@ -527,7 +526,7 @@ async fn tags_set_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.tags.delete` — the twin of [`clear_branch_tag`].
+/// `branches.tags.delete`.
 async fn tags_delete_operation(
     context: OperationContext,
     input: ops::tags::delete::Input,
@@ -543,10 +542,8 @@ async fn tags_delete_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.issues.list` — the twin of
-/// [`list_branch_issues`](super::issues::list_branch_issues) (`web/issues.rs`,
-/// not this file). Reuses that module's `pub(super) fn issue_views` mapping
-/// helper rather than duplicating the issue → `IssueView` projection.
+/// `branches.issues.list`. Reuses [`super::issues::issue_views`] rather than
+/// duplicating the issue → `IssueView` projection.
 async fn issues_list_operation(
     context: OperationContext,
     input: ops::issues::list::Input,

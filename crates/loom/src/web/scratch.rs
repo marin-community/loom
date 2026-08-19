@@ -39,10 +39,10 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `sessions.scratch.limits` — ported from [`scratch_limits`]. `actor = User`:
-/// see the operation's doc comment for why — `grant_allows` in
-/// `crates/loom/src/web/auth.rs` never lets a `Grant::Session` credential
-/// reach the legacy `GET /scratch/limits` route this mirrors.
+/// `sessions.scratch.limits`. `actor = User`: see the operation's doc
+/// comment for why — `grant_allows` in `crates/loom/src/web/auth.rs` never
+/// let a `Grant::Session` credential reach the `GET /scratch/limits` route
+/// this replaced.
 async fn op_scratch_limits(
     _context: OperationContext,
     _input: ops::scratch::limits::Input,
@@ -50,9 +50,9 @@ async fn op_scratch_limits(
     Ok(scratch_limits_view())
 }
 
-/// `sessions.scratch.list` — ported from [`list_scratch`], which hand-rolled
-/// the same two fields as anonymous JSON; the operation returns the
-/// `ScratchFileView` that shape has become.
+/// `sessions.scratch.list`. The route this replaces hand-rolled the same two
+/// fields as anonymous JSON; this returns the `ScratchFileView` that shape
+/// has become.
 async fn op_scratch_list(
     context: OperationContext,
     input: ops::scratch::list::Input,
@@ -100,9 +100,9 @@ pub(super) async fn write_scratch_bytes(
     })
 }
 
-/// `sessions.scratch.delete` — ported from [`delete_scratch`], whose 204 becomes
-/// a result body: the name reported back is the one the store resolved and
-/// removed, not the raw operand.
+/// `sessions.scratch.delete`. The route this replaces returned 204; that
+/// becomes a result body here, and the name reported back is the one the
+/// store resolved and removed, not the raw operand.
 async fn op_scratch_delete(
     context: OperationContext,
     input: ops::scratch::delete::Input,

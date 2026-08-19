@@ -1,13 +1,13 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode, Json,
+    http::StatusCode,
+    Json,
 };
 use serde_json::json;
 use weaver_api::operations::channels as ops;
 use weaver_api::{
     ChannelArchiveResult, ChannelBindingView, ChannelMessageView, ChannelSubscriptionView,
-    ChannelView,
-    CreateChannelMessageReq, SendReq,
+    ChannelView, CreateChannelMessageReq, SendReq,
 };
 
 use crate::{
@@ -683,7 +683,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `channels.bindings.list` — the twin of [`list_channel_bindings`].
+/// `channels.bindings.list`.
 pub(super) async fn list_channel_bindings_operation(
     context: OperationContext,
     input: ops::bindings::list::Input,

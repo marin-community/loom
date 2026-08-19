@@ -695,7 +695,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     bound
 }
 
-/// `repos.list` — the twin of [`list_repos`].
+/// `repos.list`.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -705,7 +705,7 @@ async fn list_operation(
     Ok(repos.into_iter().map(repo_view).collect())
 }
 
-/// `repos.register` — the twin of [`register_repo`].
+/// `repos.register`.
 async fn register_operation(
     context: OperationContext,
     input: ops::register::Input,
@@ -719,7 +719,7 @@ async fn register_operation(
     Ok(repo_view(managed))
 }
 
-/// `repos.recent` — the twin of [`recent_repos`].
+/// `repos.recent`.
 async fn recent_operation(
     context: OperationContext,
     input: ops::recent::Input,
@@ -737,9 +737,9 @@ async fn recent_operation(
         .collect())
 }
 
-/// `repos.branches` — the twin of [`repo_branches`]. Server-local: `cwd` is a
-/// filesystem path the server process can read, not a session's own scope, so
-/// this ignores `context` entirely (`scope = Global`, `actor = User`).
+/// `repos.branches`. Server-local: `cwd` is a filesystem path the server
+/// process can read, not a session's own scope, so this ignores `context`
+/// entirely (`scope = Global`, `actor = User`).
 async fn branches_operation(
     _context: OperationContext,
     input: ops::branches::Input,
@@ -779,7 +779,7 @@ async fn branches_operation(
     Ok(out)
 }
 
-/// `repos.revisions.validate` — the twin of [`validate_repo_revision`].
+/// `repos.revisions.validate`.
 async fn revisions_validate_operation(
     _context: OperationContext,
     input: ops::revisions::validate::Input,
