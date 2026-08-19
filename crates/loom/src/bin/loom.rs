@@ -7,7 +7,7 @@
 //! terminal (the browser terminal is the other interaction surface).
 
 use anyhow::{anyhow, bail, Context, Result};
-use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{Arg, ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use loom::agent_cli::{
     ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, ConfigCmd as AgentConfigCmd,
     IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd, TagCmd as AgentTagCmd,
@@ -219,7 +219,7 @@ enum RegisteredCliCommand {
     Review(ReviewCmd),
     Issues(AgentIssueCmd),
     Permissions(PermissionsCmd),
-    GithubToken,
+    GithubToken(Option<String>),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -377,11 +377,18 @@ fn parse_hook_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCli
 }
 
 fn github_token_command() -> Command {
-    Command::new("github-token").hide(true)
+    Command::new("github-token").hide(true).arg(
+        Arg::new("repository")
+            .long("repository")
+            .value_name("OWNER/NAME")
+            .help("Scope the credential to one repository this session may write"),
+    )
 }
 
-fn parse_github_token_command(_: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
-    Ok(RegisteredCliCommand::GithubToken)
+fn parse_github_token_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
+    Ok(RegisteredCliCommand::GithubToken(
+        matches.get_one::<String>("repository").cloned(),
+    ))
 }
 
 const SESSION_CLI_COMMANDS: &[CliCommandFactory] = &[
@@ -1696,9 +1703,9 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
             loom::agent_cli::run_issue(cmd).await
         }
         RegisteredCliCommand::Permissions(cmd) => run_permissions(cmd).await,
-        RegisteredCliCommand::GithubToken => {
+        RegisteredCliCommand::GithubToken(repository) => {
             configure_agent_client()?;
-            loom::agent_cli::run_github_token().await
+            loom::agent_cli::run_github_token(repository.as_deref()).await
         }
     }
 }
@@ -1843,6 +1850,15 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                 println!("GitHub repositories ({}):", view.github_repositories.len());
                 for repository in view.github_repositories {
                     println!("  {repository}");
+                }
+                if !view.github_repository_patterns.is_empty() {
+                    println!(
+                        "GitHub owners grantable without review ({}):",
+                        view.github_repository_patterns.len()
+                    );
+                    for pattern in view.github_repository_patterns {
+                        println!("  {pattern}");
+                    }
                 }
                 println!("pending requests ({}):", view.pending_requests.len());
                 for request in view.pending_requests {

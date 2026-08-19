@@ -686,7 +686,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
-    let github_app = if (!session_github_repositories.is_empty())
+    let github_app = if crate::runtime::scopes_an_app_token(&session_github_repositories)
         || (launch_profile.restricted && managed_slug.is_some())
     {
         st.trigger.app()

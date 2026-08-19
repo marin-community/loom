@@ -56,7 +56,7 @@ You are working in a detached Loom session. Your opening task is the goal.
 
 - Run `loom summary` to recover durable context after interruption or compaction.
 - Run `loom help` to discover resource groups and `loom <group> --help` for commands.
-- Run `loom permissions show` to inspect effective access; request another GitHub repository with `loom permissions request github-repository owner/repo --reason "..."`.
+- Run `loom permissions show` to inspect effective access; request another GitHub repository with `loom permissions request github-repository owner/repo --reason "..."`. That request is the whole mechanism — it reaches a person in the web UI. Never ask the user to run a command instead; they usually have no shell on this machine.
 - Keep `loom status set --tag <ok|attention|blocked> --message "..."` honest. `attention` and `blocked` mean a person must act.
 - Use `loom channels read` and `loom channels send` for durable communication.
 - Finish delegated work with `loom channels send --kind result "<outcome or PR>"`.

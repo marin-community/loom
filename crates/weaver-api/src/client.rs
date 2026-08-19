@@ -225,13 +225,20 @@ impl Client {
         .await
     }
 
-    pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
-        self.send_typed::<Value, GithubTokenView>(
-            Method::POST,
-            &format!("/api/sessions/{}/github/token", Self::seg(session_id)),
-            None,
-        )
-        .await
+    /// Mint an App credential for this session. `repository` narrows the token
+    /// to one repository, which is required once the session's access spans
+    /// more than one owner — an installation token covers a single owner.
+    pub async fn github_token(
+        &self,
+        session_id: &str,
+        repository: Option<&str>,
+    ) -> Result<GithubTokenView> {
+        let mut path = format!("/api/sessions/{}/github/token", Self::seg(session_id));
+        if let Some(repository) = repository {
+            path.push_str(&format!("?repository={}", Self::seg(repository)));
+        }
+        self.send_typed::<Value, GithubTokenView>(Method::POST, &path, None)
+            .await
     }
 
     pub async fn session_github_access(

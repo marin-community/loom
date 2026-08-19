@@ -435,8 +435,8 @@ pub async fn run_hook(event: String) -> Result<()> {
     cmd_hook(event).await
 }
 
-pub async fn run_github_token() -> Result<()> {
-    cmd_github_token().await
+pub async fn run_github_token(repository: Option<&str>) -> Result<()> {
+    cmd_github_token(repository).await
 }
 
 pub fn run_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
@@ -499,10 +499,10 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
     Ok(key.to_string())
 }
 
-async fn cmd_github_token() -> Result<()> {
+async fn cmd_github_token(repository: Option<&str>) -> Result<()> {
     let session_id =
         std::env::var("LOOM_SESSION_ID").map_err(|_| anyhow!("$LOOM_SESSION_ID is not set"))?;
-    let credential = client().github_token(&session_id).await?;
+    let credential = client().github_token(&session_id, repository).await?;
     println!("{}", credential.token);
     Ok(())
 }

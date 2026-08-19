@@ -51,6 +51,8 @@ const DEFAULT_PROFILE_INSTRUCTIONS: &str = include_str!("../profiles/default/ins
 const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 const MAX_GITHUB_REPOSITORIES: usize = 64;
 
+/// An allowlist entry: a concrete `owner/name`, or an `owner/*` pattern that
+/// lets a session expand into that owner without a human decision.
 fn valid_github_repository(value: &str) -> bool {
     let mut parts = value.split('/');
     let valid_part = |part: &str| {
@@ -61,7 +63,7 @@ fn valid_github_repository(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     };
-    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(name), None) if valid_part(owner) && valid_part(name))
+    matches!((parts.next(), parts.next(), parts.next()), (Some(owner), Some(name), None) if valid_part(owner) && (name == "*" || valid_part(name)))
 }
 
 fn is_restricted_mcp_tool_set(rule: &str) -> bool {
@@ -149,7 +151,7 @@ async fn validate_input(
             .iter()
             .any(|repository| !valid_github_repository(repository))
     {
-        bail!("GitHub repositories must be clean owner/name identifiers (maximum {MAX_GITHUB_REPOSITORIES})");
+        bail!("GitHub repositories must be clean owner/name identifiers or owner/* patterns (maximum {MAX_GITHUB_REPOSITORIES})");
     }
     if input.class.trim() == "automation"
         && input

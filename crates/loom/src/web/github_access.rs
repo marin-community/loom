@@ -26,11 +26,15 @@ fn require_human(principal: &Principal) -> ApiResult<()> {
     }
 }
 
+/// The concrete repositories one session's App token may be scoped to. Any
+/// `owner/*` entry in the launch policy is dropped here: a pattern authorizes
+/// expansion, it is not itself a token scope.
 pub(super) async fn effective_repositories(
     db: &crate::Db,
     session: &crate::session::Session,
 ) -> anyhow::Result<Vec<String>> {
-    let mut repositories: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    let policy: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    let mut repositories = crate::runtime::concrete_repositories(&policy);
     for grant in crate::github_access::list(db, &session.id).await? {
         repositories.retain(|candidate| candidate != &grant.repository);
         if grant.mode == crate::github_access::Mode::Write {
@@ -42,18 +46,24 @@ pub(super) async fn effective_repositories(
     Ok(repositories)
 }
 
-/// Validate that a prospective repository expansion can be represented by one
-/// GitHub App installation token. Nothing is stored until this succeeds.
-pub(super) async fn validate_github_write(
-    st: &AppState,
+/// The `owner/*` entries stamped on one session's launch policy — the owners it
+/// may expand into without a human decision.
+pub(super) fn policy_repository_patterns(
     session: &crate::session::Session,
-    repository: &str,
-) -> ApiResult<()> {
-    let mut repositories = effective_repositories(&st.db, session)
-        .await
-        .map_err(|error| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?;
-    repositories.retain(|candidate| candidate != repository);
-    repositories.push(repository.to_string());
+) -> anyhow::Result<Vec<String>> {
+    let policy: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    Ok(crate::runtime::repository_patterns(&policy))
+}
+
+/// Validate that the GitHub App can actually grant write access to one
+/// repository. Nothing is stored until this succeeds.
+///
+/// Only the new repository is minted, never the session's whole prospective
+/// set: tokens are brokered per repository, so a session may hold access
+/// spanning several owners even though no single installation token could
+/// cover them all.
+pub(super) async fn validate_github_write(st: &AppState, repository: &str) -> ApiResult<()> {
+    let repositories = vec![repository.to_string()];
     let app = st.trigger.app().ok_or_else(|| {
         AppError::new(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -114,11 +124,11 @@ pub(super) async fn set_github_access(
     let mode = crate::github_access::Mode::try_from(mode_text.as_str())
         .map_err(|_| AppError::bad_request("GitHub access mode must be 'write' or 'none'"))?;
 
-    // Validate the complete prospective token scope before changing durable
-    // access. This catches an uninstalled repo and cross-installation mixes at
-    // grant time instead of surprising the agent on its next push.
+    // Prove the App can grant this repository before changing durable access,
+    // so an uninstalled repo fails here rather than surprising the agent on its
+    // next push.
     if mode == crate::github_access::Mode::Write {
-        validate_github_write(&st, &session, &repository).await?;
+        validate_github_write(&st, &repository).await?;
     }
 
     crate::github_access::set(&st.db, &session.id, &repository, mode, &principal.username).await?;

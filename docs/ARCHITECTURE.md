@@ -689,11 +689,25 @@ a Slack conversation.
 
 ## GitHub integration
 
-An agent can request access to an additional repository when a live task
-expands beyond its launch policy. A human grants or revokes that session-only
-access from `loom github access` or Session Details, without restarting it.
-Loom validates write access against the GitHub App installation before storing
-the audited override.
+A session's own repository is its baseline App scope — it is stamped at launch
+whether or not the profile allowlists it, because an interactive session
+already selects the launching user's far broader Account PAT first.
+
+Expanding *beyond* that repository goes through
+`loom permissions request github-repository <owner/repo> --reason "…"`. That
+raises the session's attention tag, posts to its channel, and mirrors the
+status to Slack; a human approves or denies from Session Details in the SPA or
+with `loom permissions approve|deny`, and can grant or revoke directly with
+`loom permissions grant|revoke github-repository`. An agent must never ask a
+person to run a CLI command — the request operation is the whole mechanism, and
+a human operator can act on it from a browser.
+
+When the launch profile carries an `owner/*` allowlist entry, a matching
+request is applied immediately instead of waiting on a person: the pattern is a
+standing decision for that owner. The grant is still validated against the App
+installation, still recorded, and still revocable, and the token is still
+scoped only to the repositories actually asked for. Loom validates write access
+against the GitHub App installation before storing any audited override.
 
 When the GitHub App is configured, loom keeps a per-branch pull-request
 snapshot alongside the session. A second background loop
@@ -893,9 +907,19 @@ helper and a `gh` wrapper because those clients do not speak Loom's session API.
 They are transport adapters, not policy owners: every fresh, resumed, warm, or
 handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the launching user's write-only PAT stored in Loom Account
-settings, `broker` requests the session's short-lived App installation token,
-and `disabled` rejects direct GitHub CLI access. The adapters fail closed when
-the reserved mode is absent. The `gh` wrapper translates the selected mode into
+settings, `broker` requests a short-lived App installation token, and
+`disabled` rejects direct GitHub CLI access. The adapters fail closed when
+the reserved mode is absent.
+
+A `broker` token is minted **per repository**. An App installation covers one
+owner, so a session holding access under two owners has no single token that
+spans them. `credential.useHttpPath` is enabled for github.com, so git names the
+repository in every helper request and the helper forwards it as
+`loom github-token --repository owner/name`; the `gh` wrapper resolves the same
+from `GH_REPO` or the checkout's origin. The server refuses a repository the
+session has no access to, so naming one narrows the token and never widens it.
+Omitting the repository falls back to the session's whole set, which the App can
+mint only while it stays single-owner. The `gh` wrapper translates the selected mode into
 the stock CLI's native authentication contract for each invocation.
 Adapter registration stays in the image's system Git config: linked worktrees
 share repository-local config, agents may clone additional repositories, and

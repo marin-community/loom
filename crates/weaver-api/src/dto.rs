@@ -1095,6 +1095,11 @@ pub struct EffectivePermissionsView {
     pub actor: String,
     pub operations: Vec<String>,
     pub github_repositories: Vec<String>,
+    /// `owner/*` launch-policy entries: owners this session may expand into
+    /// without a human decision. They scope no token until a request applies
+    /// one concrete repository.
+    #[serde(default)]
+    pub github_repository_patterns: Vec<String>,
     pub pending_requests: Vec<PermissionRequestView>,
 }
 
