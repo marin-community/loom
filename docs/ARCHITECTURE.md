@@ -446,7 +446,15 @@ Details → Advanced, not as the primary file or work surface.
   in the UI). On startup and periodically afterward, the active loom generation
   re-attaches every live-relay ACP session missing its in-process driver so its
   journal keeps flowing; a `loom.json` ownership fence prevents an older draining
-  server from competing for Tapestry's single relay subscription. ACP cursors
+  server from competing for Tapestry's single relay subscription. That fence is
+  advisory across a restart overlap, so the *durable* one is
+  `sessions.acp_driver_epoch`: a driver claims it before subscribing, and only
+  the holder may transition the row's runtime status. A driver evicted from the
+  relay by its successor therefore exits quietly instead of marking a session
+  `orphaned` that someone else is driving — a contradiction that would leave the
+  row unadoptable (adoption refuses a live task) and unrepairable (the sweep
+  skips one). Whoever attaches a driver settles the row afterwards, clearing a
+  stale `orphaned` an outgoing driver raced in. ACP cursors
   flush periodically rather than once per streaming frame, and a failed durable
   journal write yields the task so the repair pass replays from the last ACK
   instead of accumulating an unbounded backlog. Tapestry drains durable replay

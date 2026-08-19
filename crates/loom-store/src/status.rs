@@ -244,7 +244,14 @@ pub async fn record_acp_lifecycle(db: &Db, bus: &EventBus, session_id: &str, kin
 
 /// Detach an ACP session whose driver stopped unexpectedly and leave durable,
 /// user-facing recovery instructions in every existing status surface.
-pub async fn record_acp_failure(db: &Db, bus: &EventBus, session_id: &str, reason: &str) {
+/// Ignores failures from superseded drivers.
+pub async fn record_acp_failure(
+    db: &Db,
+    bus: &EventBus,
+    session_id: &str,
+    driver_epoch: i64,
+    reason: &str,
+) {
     let session = match session_mod::get(db, session_id).await {
         Ok(Some(session)) => session,
         Ok(None) => return,
@@ -253,7 +260,7 @@ pub async fn record_acp_failure(db: &Db, bus: &EventBus, session_id: &str, reaso
             return;
         }
     };
-    match session_mod::mark_orphaned(db, session_id).await {
+    match session_mod::mark_orphaned_by_driver(db, session_id, driver_epoch).await {
         Ok(true) => {}
         Ok(false) => return,
         Err(error) => {

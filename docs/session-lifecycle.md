@@ -80,7 +80,10 @@ liveness: `creating`, `waiting`, `delivering`, `running`, `failed`,
 
 ## Actions
 
-- **Adopt** recreates a missing supervisor for an orphaned worktree.
+- **Adopt** recreates a missing supervisor for an orphaned worktree. When the
+  session already has a live ACP driver, adoption instead settles the row: a
+  driver and an `orphaned` status cannot both be true, and the running agent is
+  the authority.
 - **Recover** recreates an archived worktree and resumes its agent.
 - **Archive** tears down terminal, debug shells, editor, credentials, and
   worktree while keeping the session/attempt and branch history.
@@ -122,6 +125,15 @@ flowchart LR
 - `loom-shell-<id>-<index>` belongs to an existing, non-archived session.
 - An unowned name in either namespace is torn down.
 - `loom-scratch-shell` and names outside Loom's namespaces are untouched.
+
+An ACP session has a second ownership axis inside that reconciliation: which
+*driver* owns it. Tapestry's relay admits one subscriber, so attaching a new
+driver evicts the previous one — including a driver belonging to an overlapping
+restart generation, which no in-process registry can observe. Each driver
+therefore claims `sessions.acp_driver_epoch` before it subscribes, and only the
+holder of the current epoch may mark the session `orphaned`. An evicted driver
+exits without touching the row, and the driver that replaced it clears any
+`orphaned` status its predecessor raced in.
 
 The first reconciliation runs before restart adoption; a background pass keeps
 the invariant convergent after crashes and cancellation races. Active
