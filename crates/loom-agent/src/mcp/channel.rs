@@ -1,13 +1,11 @@
 //! Durable channel operations, served by the generic registry dispatcher.
 //!
-//! Every tool here is a registered `channels.*` operation — `tools/list` is
-//! `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)` and `tools/call` is
-//! `super::dispatch::call_tool`. There is no `project_input`/`present` pair
-//! left to maintain: those existed to patch around per-tool argument shaping
-//! (resolving `channel == "self"`, bounding `read`'s scan window, running
-//! `wait`'s poll loop client-side) and each made its own `self_context()`
-//! round-trip, all of which the operations themselves now do server-side —
-//! see `channels.messages.list` and `channels.wait` in
+//! Every tool here is a registered `channels.*` operation: `tools/list` is
+//! `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`, and `tools/call`
+//! is `super::dispatch::call_tool`. Argument shaping — resolving
+//! `channel == "self"`, bounding `read`'s scan window, running `wait`'s poll
+//! loop — belongs in the operation handler, not here: see
+//! `channels.messages.list` and `channels.wait` in
 //! `crates/loom/src/web/channels.rs`.
 //!
 //! `list`/`get` responses include delivery bindings via `ChannelView::bindings`.
@@ -30,8 +28,9 @@ const TOOL_NAMES: [&str; 8] = [
     "subscribe",
 ];
 
-// Existing pinned sessions keep their exact identities. The `mcp/channel/*@v1`
-// capability sets are hand-authored because no operation's grants field names them.
+// The `mcp/channel/*@v1` sets are hand-authored: kept for sessions already
+// granted that exact name (renaming it would break their tool resolution),
+// and because no operation's grants field names them.
 const LEGACY_READ_TOOLS: &[&str] = &["list", "get", "read", "wait"];
 const LEGACY_WRITE_TOOLS: &[&str] = &["send", "ack", "open", "subscribe"];
 const LEGACY_CAPABILITY_SETS: &[CapabilitySet] = &[

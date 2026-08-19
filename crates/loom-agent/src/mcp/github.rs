@@ -1,9 +1,13 @@
 //! Built-in MCP adapter for restricted GitHub sessions.
 //!
-//! TODO(registry): not yet ported — the `github.*` operations are not in the
-//! operation registry yet, so this adapter keeps its own hand-written
-//! schemas, dispatch loop, and capability sets rather than
-//! `super::dispatch::bind`.
+//! All six tools call one registered operation,
+//! `permissions.github.restricted.invoke`: the security boundary here is a
+//! runtime check against the session's stored tool allowlist
+//! (`session.policy_allowed_tools`), not a compile-time grant, so a restricted
+//! session's policy — not its credential — decides which of these six shapes
+//! it may use. `super::dispatch::bind` assumes one tool name maps to one
+//! operation; this is six tool names gated through one, so it keeps its own
+//! schemas and dispatch loop instead.
 //!
 //! Claude sees these fixed tools instead of `Bash`. The bridge carries only the
 //! session-scoped Loom token and forwards each call to Loom's REST API; the

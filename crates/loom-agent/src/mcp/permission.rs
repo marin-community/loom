@@ -1,17 +1,15 @@
 //! Effective access and approval requests, served by the generic registry
 //! dispatcher.
 //!
-//! Every tool here is a registered `permissions.*` operation — `tools/list`
-//! is `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)` and
-//! `tools/call` is `super::dispatch::call_tool`. There is no
-//! `project_input`/`present` pair left to maintain: those existed to patch
-//! around per-tool response framing (a custom one-line summary per tool),
-//! which the generic dispatcher's default `Render` (the operation's own JSON)
-//! now provides. `permissions.requests.approve`/`.deny` stay unreachable here
-//! because they are `actor = User`, not `SessionSelf` — an MCP projection on
-//! a non-agent-reachable operation is rejected by the registry itself, so
-//! "an agent cannot approve its own permission request" needs no adapter-side
-//! enforcement.
+//! Every tool here is a registered `permissions.*` operation: `tools/list` is
+//! `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`, and `tools/call`
+//! is `super::dispatch::call_tool`, which renders each operation's own JSON as
+//! the response — no per-tool summary formatting lives here.
+//! `permissions.requests.approve`/`.deny` stay unreachable through this
+//! adapter because they are `actor = User`, not `SessionSelf`: the registry
+//! itself rejects an MCP projection on a non-agent-reachable operation, so
+//! "an agent cannot approve its own permission request" needs no
+//! adapter-side enforcement.
 
 use std::sync::OnceLock;
 

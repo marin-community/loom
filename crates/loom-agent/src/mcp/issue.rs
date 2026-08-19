@@ -1,11 +1,9 @@
 //! Repository work items, served by the generic registry dispatcher.
 //!
-//! Every tool here is a registered `issues.*` operation — `tools/list` is
-//! `weaver_api::mcp_tools(SERVER_NAME)` and `tools/call` is
-//! `super::dispatch::call_tool`. There is no `project_input`/`present` pair
-//! left to maintain: those existed to patch around per-tool argument shaping
-//! and each made its own `self_context()` round-trip, both of which the
-//! generic dispatcher now does once, from the operation's own types.
+//! Every tool here is a registered `issues.*` operation: `tools/list` is
+//! `weaver_api::mcp_tools(SERVER_NAME)`, and `tools/call` is
+//! `super::dispatch::call_tool`, which resolves each operation's context
+//! fields once, from the operation's own types.
 
 use std::sync::OnceLock;
 
