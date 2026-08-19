@@ -59,7 +59,7 @@ module.exports = (_env, argv) => {
       host: '127.0.0.1',
       port: 5178,
       hot: true,
-      // Don't gzip; it buffers the `/api/.../events` SSE stream.
+      // Don't gzip; it buffers the SSE streams (`events.stream` and friends).
       compress: false,
       // Serve index.html for SPA deep links (HTML5 history routing) so a
       // hard refresh on /s/abc doesn't 404.
@@ -72,7 +72,7 @@ module.exports = (_env, argv) => {
           context: ['/api'],
           target: backend,
           changeOrigin: true,
-          // Upgrade /api/sessions/{id}/terminal to a proxied WebSocket.
+          // Upgrade the `sessions.terminal` / `shell.terminal` websockets.
           ws: true,
           // The backend's CSWSH guard (terminal.rs `origin_ok`) only accepts a
           // WebSocket whose Origin is loopback on its OWN bound port. The

@@ -168,7 +168,7 @@ repository where it is installed. The manual steps below are useful only when
 managing the same App's webhook configuration yourself.
 
 Set a shared secret in loom's environment (it is held outside the settings
-registry and never returned by `GET /api/settings`, like the OAuth client
+registry and never returned by `settings.get`, like the OAuth client
 secret):
 
 ```sh
@@ -299,7 +299,7 @@ installation is what authorizes a repo to trigger.
 `loom setup github-app` already does this (see [above](#create-the-app)) — this
 section is for the manual path, or to move the credentials to a different host.
 Provide the App id and private key through the environment (both held outside the
-settings registry, never returned by `GET /api/settings`, like the OAuth client
+settings registry, never returned by `settings.get`, like the OAuth client
 secret):
 
 ```sh

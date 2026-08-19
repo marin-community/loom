@@ -186,7 +186,7 @@ Two secrets enable the integration — set **both**, or it stays idle
   is what the pane checks.
 
 Both are held outside the settings registry — like the GitHub webhook secret
-and App private key — so `GET /api/settings` never returns them. Set them
+and App private key — so `settings.get` never returns them. Set them
 through the environment, or in `loom.toml` (see
 [`loom.toml.example`](../loom.toml.example)) and run `loom config render-env`
 to fold them into the deploy's `.env`.
@@ -213,7 +213,7 @@ so a broken link names itself. A live socket is not the same as a working
 integration: the connection can be up while the bot token belongs to a person,
 or while no repository is configured, and the pane distinguishes those.
 
-`GET /api/slack/status` returns the same structure for scripting. Alongside it,
+`slack.status` returns the same structure for scripting. Alongside it,
 the server log carries one line per arriving envelope (`slack: envelope
 received`, with the event type, channel, and user), the app id from the `hello`
 frame, and a reason for every trigger that did not become a session. The most
@@ -278,7 +278,7 @@ Routes are delivery records, not caller-chosen grants: loom writes one only
 where it accepted a run for that thread, the workspace is always loom's own, and
 `channel`/`thread_ts` are shape-checked (a `#channel-name` is rejected — Slack
 ids only). Re-delivering the same alert is idempotent. `followups_routed` in
-`GET /api/slack/status` counts mentions delivered this way, which is how a
+`slack.status` counts mentions delivered this way, which is how a
 working alert conversation is distinguished from one quietly launching a
 duplicate session per reply.
 

@@ -7,11 +7,13 @@
 //! Past the cap an ordinary `fetch()` never resolves: no error, no timeout, and
 //! nothing in the server log, because the request never leaves the browser.
 //!
-//! `GET /api/events?topics=…` folds all of them onto one connection. Every frame
-//! is the default `message` event carrying `{topic, event, data}`, so the client
-//! routes on `topic` and recovers the original per-stream event name from
-//! `event`. The per-stream routes stay as they are — they remain the documented
-//! single-stream API, and this is the browser's connection-thrifty path.
+//! `events.stream` (`GET /api/events/stream?topics=…`) folds all of them onto one
+//! connection. Every frame is the default `message` event carrying
+//! `{topic, event, data}`, so the client routes on `topic` and recovers the
+//! original per-stream event name from `event`. The single-topic operations
+//! (`session_layout.events`, `logs.stream`, `sessions.events.stream`,
+//! `sessions.chat.stream`) remain the documented one-stream-per-connection API;
+//! this is the browser's connection-thrifty path over the same feeds.
 //!
 //! Authorization is deliberately *not* a new policy surface. `events.stream` is
 //! a container: reaching it grants nothing, and each topic is authorized against

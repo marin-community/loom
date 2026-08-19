@@ -98,7 +98,7 @@ attempts:
 
 ```text
 POST   /api/sessions/{session-or-reserved-id}/archive
-DELETE /api/sessions/{session-or-reserved-id}
+POST /api/sessions/delete   { session }
 
 loom sessions archive <session-or-reserved-id>
 loom sessions rm <session-or-reserved-id>
@@ -129,6 +129,6 @@ reservations protect early provisioning during a rolling deployment, while
 existing session rows protect every live agent that predates the new server.
 
 Admin inventory can opt into managed watch sessions with
-`GET /api/sessions?automation=true&archived=true&managed=true`. The default
+`sessions.list` with `automation`, `archived`, and `managed` set. The default
 fleet and survey continue to exclude managed sessions so a watch never surveys
 its own infrastructure.

@@ -46,7 +46,7 @@ tools back to the transport-neutral contract with `loom help --json` or
 `GET /api/operations`. Compatibility `mcp/*` identities remain resolvable for
 pinned snapshots; new profile resolutions select their `loom/*` successors.
 
-`channel: "self"` and `session: "self"` resolve through `GET /api/self`.
+`channel: "self"` and `session: "self"` resolve through `sessions.context`.
 Artifact writes are create-or-append operations and may supply `base_rev` for
 optimistic concurrency. Channel sends may supply `idempotency_key` and return
 one receipt per runtime or external binding.

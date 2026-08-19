@@ -49,20 +49,25 @@ loom open           # open the web UI (http://127.0.0.1:7878)
 Run `loom help` for registered resource groups, `loom <group> --help` for
 syntax, `loom help --json` for machine-readable discovery, and inspect the
 running server's `/api/operations` or `/api/openapi.json` for its live surface.
-Each routine operation is one executable registration: descriptor, typed
-input/output, authority boundary, and implementation. Registration mounts the
-canonical `POST /api/<group>/<operation>` route; discovery, typed clients, and
-MCP enumerate that same entry. Argument constraints generate MCP tool
-descriptions and JSON Schema. Custom adapters remain available for streaming,
-PTY, file/stdin, interactive, and genuinely specialized bulk behavior.
+Every operation is declared exactly once, and its id is its path on disk:
+`issues.tags.set` lives in `crates/weaver-api/src/operations/issues/tags/set.rs`
+and nowhere else. The REST route, the JSON Schema, the MCP tool, the clap command,
+and the authority boundary are all derived from that one declaration — a route is
+computed from the id rather than written down, so the two cannot disagree.
+Streams and terminal websockets are registered the same way; `io = Stream` /
+`io = Duplex` names the response encoding, which is the only thing that differs
+about them.
 See [AGENTS.md](AGENTS.md) for the contributor build/test loop.
 
 ## Architecture
 
 The `loom` CLI, MCP adapters, and Vue SPA are REST clients; only the server owns
 sqlite, worktrees, supervisors, agents, and background services. See
-[Architecture](docs/ARCHITECTURE.md) for the module map, flows, storage model,
-and route catalogue.
+[Architecture](docs/ARCHITECTURE.md) for the module map, flows, and storage
+model. The route catalogue is generated, not prose:
+[`crates/weaver-api/tests/surface.txt`](crates/weaver-api/tests/surface.txt)
+lists every operation with its path, actor policy, risk, encoding, and CLI and
+MCP projections, and a test fails if it drifts.
 
 ## Usage
 
