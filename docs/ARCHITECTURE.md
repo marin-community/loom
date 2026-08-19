@@ -715,7 +715,9 @@ Orphan detection is independent: if the session's supervisor is no longer alive,
 the session becomes `orphaned` and is eligible for `loom adopt`.
 
 Archive and recovery serialize their external supervisor/worktree changes.
-Archive waits for the supervisor to disappear before committing `archived`;
+Archive stops the supervisor before committing `archived`, escalating to runtime
+removal and finally committing with a warning if it cannot be confirmed stopped
+— archiving is how a person disposes of a session, so it always terminates;
 recovery first moves `archived → created` with a compare-and-set, which reserves
 the branch's unique active-session slot before it rebuilds or launches anything.
 A failed recovery cleans up its new external state before restoring `archived`.
@@ -725,8 +727,12 @@ Both operations publish a durable `lifecycle_transition` (`archiving` or
 `adopting`) plus a human-readable `lifecycle_step` while external work is in
 flight. REST detail/summary views expose these as `transition`; the SPA shows
 the stage and suppresses lifecycle actions until completion. Transition claims
-are atomic across overlapping server generations, and startup reconciles a
-marker left by a process exit before normal supervisor inventory runs.
+are atomic across overlapping server generations. A marker whose owner process
+is gone, or that has outlived `TRANSITION_STALE_SECS`, is abandoned: startup
+reconciles it before normal supervisor inventory runs, the monitor reconciles it
+again on the retention cadence, and a user-driven archive or recovery takes it
+over rather than refusing. A live marker still refuses concurrent operations, so
+a draining generation keeps its in-flight teardown.
 
 **Retention and automation lifecycle.** Ordinary interactive sessions inherit a
 ten-day idle archive policy (`864000` seconds); a profile override is stamped

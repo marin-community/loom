@@ -1115,6 +1115,11 @@ pub(super) async fn archive_session(
     };
     tracing::debug!(key = %key, session = %session.id, "handling archive session request");
     let warnings = archive(&st, &session, &branch).await.map_err(|error| {
+        // A refusal names a state the caller can act on (another transition owns
+        // the session); only a genuine failure becomes the reassuring 500.
+        if error.downcast_ref::<crate::lifecycle::Refusal>().is_some() {
+            return AppError::from(error);
+        }
         AppError::internal(
             format!(
                 "Could not finish archiving session {}. Its branch and conversation are safe; retry in a moment.",
@@ -1331,6 +1336,8 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
     let session = &current_session;
     let branch = &current_branch;
     tracing::info!(session = %session.id, branch = %branch.id, "recovering archived session");
+    let refreshed = crate::lifecycle::release_abandoned_transition(&st.db, session).await?;
+    let session = &refreshed;
     require_no_transition(session)?;
     if session.status != "archived" {
         return Err(AppError::conflict(format!(

@@ -5,6 +5,8 @@
 //! interactive attach (the xterm bridge) uses [`Client::attach`], which splits
 //! the connection into an output stream + an input sink.
 
+use std::time::Duration;
+
 use anyhow::{bail, Context, Result};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
@@ -17,6 +19,12 @@ use crate::DerivedLaunch;
 /// Bounded so a slow reader back-pressures the socket (and thus the supervisor)
 /// rather than buffering without limit on the client side.
 const ATTACH_BUFFER: usize = 256;
+
+/// How long a control request waits for its reply before the supervisor counts
+/// as unreachable. A supervisor whose core task is wedged still accepts
+/// connections on its socket, so an unbounded probe parks its caller forever —
+/// and every caller behind it, since liveness gates session teardown.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A connected control client for one session.
 pub struct Client {
@@ -39,12 +47,22 @@ impl Client {
     }
 
     /// Whether a supervisor is alive for `name` — connect and ping. A stale
-    /// socket file (no listener) or a supervisor reporting a dead child both read
-    /// as not-alive.
+    /// socket file (no listener), a supervisor reporting a dead child, and one
+    /// that does not answer within [`CONTROL_TIMEOUT`] all read as not-alive:
+    /// a probe that cannot be answered is indistinguishable from a dead
+    /// supervisor to every caller that acts on the result.
     pub async fn is_alive(name: &str) -> bool {
-        match Self::connect(name).await {
-            Ok(mut c) => c.ping().await.map(|p| p.alive).unwrap_or(false),
-            Err(_) => false,
+        let probe = async {
+            let mut client = Self::connect(name).await.ok()?;
+            client.ping().await.ok()
+        };
+        match tokio::time::timeout(CONTROL_TIMEOUT, probe).await {
+            Ok(Some(pong)) => pong.alive,
+            Ok(None) => false,
+            Err(_) => {
+                tracing::warn!(session = %name, "supervisor did not answer a liveness probe");
+                false
+            }
         }
     }
 
@@ -93,10 +111,20 @@ impl Client {
         self.expect_ok().await
     }
 
-    /// Kill the child and shut the supervisor down.
+    /// Kill the child and shut the supervisor down. Bounded by
+    /// [`CONTROL_TIMEOUT`]: the acknowledgement precedes teardown, so a
+    /// supervisor that does not answer one is wedged rather than slow, and the
+    /// caller escalates to removing its runtime.
     pub async fn kill(&mut self) -> Result<()> {
-        protocol::write_frame(&mut self.stream, &req::kill()).await?;
-        self.expect_ok().await
+        let request = async {
+            protocol::write_frame(&mut self.stream, &req::kill()).await?;
+            self.expect_ok().await
+        };
+        tokio::time::timeout(CONTROL_TIMEOUT, request)
+            .await
+            .unwrap_or_else(|_| {
+                bail!("supervisor did not acknowledge kill within {CONTROL_TIMEOUT:?}")
+            })
     }
 
     /// (Relay) Append raw bytes to the child's stdin — a one-shot `WRITE` outside

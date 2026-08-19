@@ -360,6 +360,15 @@ pub async fn send_enter(name: &str) -> Result<()> {
     send_key(name, "Enter").await
 }
 
+/// How long a supervisor gets to release its control socket after being killed
+/// before the runner removes its runtime out from under it.
+const STOP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How long the runner itself gets to remove a session runtime. The container
+/// runner talks to a daemon over a socket, so this call is as capable of
+/// wedging as the supervisor it is removing.
+const RUNTIME_REMOVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Kill the session. Best-effort: a missing supervisor means already gone.
 pub async fn kill_session(name: &str) -> Result<()> {
     if let Ok(mut c) = tapestry::Client::connect(name).await {
@@ -368,7 +377,7 @@ pub async fn kill_session(name: &str) -> Result<()> {
             Err(e) => tracing::warn!(name = %name, error = %e, "failed to kill terminal"),
         }
     } else {
-        runner::remove(name).await?;
+        remove_runtime(name).await?;
     }
     Ok(())
 }
@@ -378,17 +387,39 @@ pub async fn kill_session(name: &str) -> Result<()> {
 /// A kill request is acknowledged before the supervisor finishes teardown. A
 /// caller that immediately reuses the same name (provider handoff does this)
 /// must wait, or the replacement can connect to the dying supervisor.
+///
+/// Every stage is bounded, because this is what session teardown blocks on: a
+/// supervisor that stops answering leaves the caller escalating to
+/// [`remove_runtime`] rather than waiting on it forever.
 pub async fn kill_session_and_wait(name: &str) -> Result<()> {
-    kill_session(name).await?;
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    while has_session(name).await {
-        if tokio::time::Instant::now() >= deadline {
-            bail!("terminal {name} did not stop within 5 seconds");
+    let stopped = tokio::time::timeout(STOP_DEADLINE, async {
+        kill_session(name).await?;
+        while has_session(name).await {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    match stopped {
+        Ok(result) => result?,
+        Err(_) => tracing::warn!(
+            name = %name,
+            "terminal did not stop within {STOP_DEADLINE:?}; removing its runtime"
+        ),
     }
-    runner::remove(name).await?;
+    remove_runtime(name).await?;
+    if has_session(name).await {
+        bail!("terminal {name} is still alive after its runtime was removed");
+    }
     Ok(())
+}
+
+/// Remove a session's runtime through the configured runner, bounded by
+/// [`RUNTIME_REMOVE_DEADLINE`].
+async fn remove_runtime(name: &str) -> Result<()> {
+    tokio::time::timeout(RUNTIME_REMOVE_DEADLINE, runner::remove(name))
+        .await
+        .unwrap_or_else(|_| bail!("removing the runtime for {name} timed out"))
 }
 
 /// Every session with a live supervisor.

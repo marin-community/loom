@@ -187,26 +187,102 @@ pub fn require_no_transition(session: &Session) -> Result<()> {
     Ok(())
 }
 
-/// Shared teardown after the caller has acquired the runtime lifecycle lock and
-/// refreshed the session row.
-pub async fn archive_locked(
+/// How long the external half of an archive gets before the row is committed
+/// anyway. Well under [`TRANSITION_STALE_SECS`], so a slow teardown finishes as
+/// itself rather than being taken over as abandoned.
+const TEARDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How long a transition may sit before another operation may take it over.
+/// Transitions are seconds of work: a marker older than this belongs to a
+/// process that died mid-teardown — a killed server, or a session container
+/// that hosted the operation tearing down its own supervisor.
+pub const TRANSITION_STALE_SECS: i64 = 300;
+
+/// Whether `session`'s transition marker can still be finished by its owner.
+///
+/// A marker this process owns is never stale — its operation is bounded, so it
+/// either completes or releases the marker itself. A marker from another
+/// process is stale once that process is gone, or once it has outlived
+/// [`TRANSITION_STALE_SECS`]: pids are reused, and an owner in another pid
+/// namespace (a session container) is invisible from here, so age is the only
+/// evidence that survives.
+fn transition_is_stale(
+    started_at: Option<&str>,
+    owner_pid: Option<i64>,
+    my_pid: i64,
+    owner_alive: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if owner_pid == Some(my_pid) {
+        return false;
+    }
+    if !owner_alive {
+        return true;
+    }
+    started_at
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .is_none_or(|started| {
+            (now - started.with_timezone(&chrono::Utc)).num_seconds() >= TRANSITION_STALE_SECS
+        })
+}
+
+/// Whether the process that owns a transition still exists. Only meaningful for
+/// pids in this namespace; a pid from a container that has since been removed
+/// reads as gone, which is exactly what it is.
+fn owner_pid_alive(pid: Option<i64>) -> bool {
+    pid.is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+}
+
+/// Whether this session's transition marker is abandoned and may be taken over.
+pub fn transition_abandoned(session: &Session) -> bool {
+    session.lifecycle_transition.is_some()
+        && transition_is_stale(
+            session.lifecycle_transition_started_at.as_deref(),
+            session.lifecycle_transition_owner_pid,
+            i64::from(std::process::id()),
+            owner_pid_alive(session.lifecycle_transition_owner_pid),
+            chrono::Utc::now(),
+        )
+}
+
+/// Release an abandoned transition marker so a new operation can run, and return
+/// the refreshed row. A live transition is left alone — the caller's
+/// [`require_no_transition`] refuses against it as usual.
+///
+/// Without this, one operation that dies between publishing its marker and
+/// committing its status locks the session out of both archive and adopt until
+/// the server restarts.
+pub async fn release_abandoned_transition(db: &Db, session: &Session) -> Result<Session> {
+    if !transition_abandoned(session) {
+        return Ok(session.clone());
+    }
+    let transition = session
+        .lifecycle_transition
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    tracing::warn!(
+        session = %session.id,
+        transition = %transition,
+        owner_pid = ?session.lifecycle_transition_owner_pid,
+        started_at = ?session.lifecycle_transition_started_at,
+        "releasing an abandoned lifecycle transition"
+    );
+    session_mod::clear_interrupted_transition(db, &session.id, &transition).await?;
+    session_mod::get(db, &session.id)
+        .await?
+        .ok_or_else(|| anyhow!("session not found"))
+}
+
+/// The external half of archiving: stop the agent, drop its credentials, and
+/// remove its worktree. Every step is best-effort and reported as a warning —
+/// only losing ownership of the transition (another operation took the session)
+/// aborts the archive.
+async fn archive_teardown(
     st: &AppState,
     session: &Session,
     branch: &Branch,
 ) -> Result<Vec<String>> {
-    tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
-    require_no_transition(session)?;
-    if !session_mod::begin_transition(&st.db, &session.id, "archiving", "Capturing conversation")
-        .await?
-    {
-        return Err(anyhow!(Refusal::Conflict(
-            "another lifecycle transition already owns this session".to_string()
-        )));
-    }
-    record_transition(st, branch, "archiving", "Capturing conversation").await;
-
-    let result: Result<Vec<String>> = async {
-        let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // Capture the agent's conversation log before teardown. The transcript lives
     // outside the worktree so it would survive removal, but capturing first keeps
@@ -219,10 +295,12 @@ pub async fn archive_locked(
     // finishes provisioning after this point cannot promote itself.
     crate::runs::cancel_for_session_with_summary(&st.db, &session.id, "session archived").await?;
     transition_step(st, session, branch, "archiving", "Stopping agent").await?;
-    // The row must never say `archived` while its supervisor is still live.
-    // A tapestry kill is acknowledged before the socket disappears, so wait
-    // for teardown and fail without flipping the row if it cannot complete.
-    backend::kill_session_and_wait(&session.term_session).await?;
+    // A supervisor that will not stop is reported, not obeyed: the kill escalates
+    // to removing the runtime, and a session nobody can stop must still archive.
+    if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
+        tracing::warn!(session = %session.id, %error, "archive could not confirm the agent stopped");
+        warnings.push(format!("stop agent: {error}"));
+    }
     // The killed relay makes its ACP task exit; remove any handle that has not
     // observed that edge yet. For a terminal session this is a no-op.
     if session.protocol == "acp" {
@@ -242,44 +320,88 @@ pub async fn archive_locked(
             tokio::fs::remove_dir_all(&work_dir).await.ok();
         }
     }
-    transition_step(st, session, branch, "archiving", "Finalizing archive").await?;
-    if !session_mod::complete_transition(&st.db, &session.id, "archiving", "archived").await? {
-        return Err(anyhow!("archive lost ownership of its lifecycle transition"));
+    Ok(warnings)
+}
+
+/// Shared teardown after the caller has acquired the runtime lifecycle lock and
+/// refreshed the session row.
+pub async fn archive_locked(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+) -> Result<Vec<String>> {
+    tracing::info!(session = %session.id, branch = %branch.id, "archiving session");
+    // A person archiving a session is asking for it to go away; an abandoned
+    // marker from a dead operation must not be able to refuse that forever.
+    let refreshed = release_abandoned_transition(&st.db, session).await?;
+    let session = &refreshed;
+    require_no_transition(session)?;
+    if !session_mod::begin_transition(&st.db, &session.id, "archiving", "Capturing conversation")
+        .await?
+    {
+        return Err(anyhow!(Refusal::Conflict(
+            "another lifecycle transition already owns this session".to_string()
+        )));
     }
-    crate::channels::archive_session_channel(&st.db, &session.id).await?;
-    // A torn-down session cannot keep owning work. Return every issue it held
-    // to the repo backlog while preserving source-branch provenance and issue
-    // status, just as full session deletion does.
-    weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
-    // An archived session is finished with: its agent is gone, so it can no
-    // longer "need me" — nor is it "resting". Clear every loud tag — the agent's
-    // own `attention` and any watch's typed marks (loudness is value-driven, so
-    // match on the value, not a fixed key set) — plus the soothing `idle` mark,
-    // so the dashboard stops flagging or labelling a torn-down workstream —
-    // absence is the calm state. The history (goal, status, events) is kept; the
-    // `description` message stays too, as do any free-form quiet pills.
-    for tag in tags::list(&st.db, &branch.id).await? {
-        if tags::is_loud_value(&tag.value) || tag.key == tags::IDLE_KEY {
-            tags::clear(&st.db, &branch.id, &tag.key).await?;
-            events::record_tag(&st.db, &st.bus, &branch.id, &tag.key, "", "", "manual")
-                .await
-                .ok();
+    record_transition(st, branch, "archiving", "Capturing conversation").await;
+
+    let result: Result<Vec<String>> = async {
+        let mut warnings: Vec<String> = Vec::new();
+        match tokio::time::timeout(TEARDOWN_DEADLINE, archive_teardown(st, session, branch)).await {
+            Ok(teardown) => warnings.extend(teardown?),
+            Err(_) => {
+                // Every teardown step is bounded on its own, so reaching this is
+                // an unknown external stall. Archiving is how a person gets rid
+                // of a session, so the row still reaches `archived` and the
+                // leftovers are reported rather than hidden.
+                tracing::warn!(
+                    session = %session.id,
+                    "archive teardown exceeded {TEARDOWN_DEADLINE:?}; archiving anyway"
+                );
+                warnings.push(format!(
+                    "teardown did not finish within {}s — the terminal or worktree may survive",
+                    TEARDOWN_DEADLINE.as_secs()
+                ));
+            }
         }
-    }
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "status",
-        json!({ "status": "archived", "reason": "session archived" }),
-    )
-    .await
-    .ok();
-    if warnings.is_empty() {
-        tracing::info!(session = %session.id, branch = %branch.id, "session archived");
-    } else {
-        tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session archived with warnings");
-    }
+        transition_step(st, session, branch, "archiving", "Finalizing archive").await?;
+        if !session_mod::complete_transition(&st.db, &session.id, "archiving", "archived").await? {
+            return Err(anyhow!("archive lost ownership of its lifecycle transition"));
+        }
+        crate::channels::archive_session_channel(&st.db, &session.id).await?;
+        // A torn-down session cannot keep owning work. Return every issue it held
+        // to the repo backlog while preserving source-branch provenance and issue
+        // status, just as full session deletion does.
+        weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
+        // An archived session is finished with: its agent is gone, so it can no
+        // longer "need me" — nor is it "resting". Clear every loud tag — the agent's
+        // own `attention` and any watch's typed marks (loudness is value-driven, so
+        // match on the value, not a fixed key set) — plus the soothing `idle` mark,
+        // so the dashboard stops flagging or labelling a torn-down workstream —
+        // absence is the calm state. The history (goal, status, events) is kept; the
+        // `description` message stays too, as do any free-form quiet pills.
+        for tag in tags::list(&st.db, &branch.id).await? {
+            if tags::is_loud_value(&tag.value) || tag.key == tags::IDLE_KEY {
+                tags::clear(&st.db, &branch.id, &tag.key).await?;
+                events::record_tag(&st.db, &st.bus, &branch.id, &tag.key, "", "", "manual")
+                    .await
+                    .ok();
+            }
+        }
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "status",
+            json!({ "status": "archived", "reason": "session archived" }),
+        )
+        .await
+        .ok();
+        if warnings.is_empty() {
+            tracing::info!(session = %session.id, branch = %branch.id, "session archived");
+        } else {
+            tracing::warn!(branch = %branch.id, warnings = warnings.len(), "session archived with warnings");
+        }
         Ok(warnings)
     }
     .await;
@@ -299,6 +421,125 @@ pub async fn archive_locked(
         }
     }
     result
+}
+
+/// Finish every lifecycle transition whose owner can no longer finish it.
+///
+/// A process can exit between publishing a transition and committing its stable
+/// status — a killed server, a rolling restart, or an operation running inside
+/// the very session container it tears down. The marker it leaves behind refuses
+/// both archive and adopt, so this runs at startup *and* on the monitor's
+/// retention cadence: a session must never need a server restart to become
+/// operable again.
+pub async fn reconcile_interrupted_transitions(state: &AppState) {
+    let sessions = match session_mod::list(&state.db).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, "transition recovery: listing sessions failed");
+            return;
+        }
+    };
+    for session in sessions {
+        let Some(transition) = session.lifecycle_transition.as_deref() else {
+            continue;
+        };
+        if !transition_abandoned(&session) {
+            tracing::debug!(session = %session.id, transition, owner_pid = ?session.lifecycle_transition_owner_pid, "transition recovery: operation is still owned by a live server");
+            continue;
+        }
+        let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
+            tracing::warn!(session = %session.id, transition, "transition recovery: branch missing");
+            continue;
+        };
+        match transition {
+            "archiving" => {
+                // Teardown is idempotent. Release the marker owned by the dead
+                // process and run the normal archive path to completion.
+                match session_mod::clear_interrupted_transition(&state.db, &session.id, "archiving")
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(session = %session.id, "transition recovery: archive marker changed before release");
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not release archive marker");
+                        continue;
+                    }
+                }
+                if let Err(error) = archive(state, &session, &branch).await {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: archive failed");
+                }
+            }
+            "adopting" => {
+                if backend::has_session(&session.term_session).await {
+                    let status = agent::initial_status(&state.db, &session.agent_kind).await;
+                    if let Err(error) = session_mod::complete_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                        status,
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not commit live adoption");
+                    } else if let Err(error) =
+                        crate::channels::reopen_session_channel(&state.db, &session.id).await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not reopen session channel");
+                    }
+                } else if std::path::Path::new(&session.work_dir).exists() {
+                    match session_mod::clear_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(session = %session.id, "transition recovery: adoption marker changed before release");
+                            continue;
+                        }
+                        Err(error) => {
+                            tracing::warn!(session = %session.id, %error, "transition recovery: could not release adoption marker");
+                            continue;
+                        }
+                    }
+                    if let Err(error) = adopt(state, &session, &branch).await {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: adoption failed");
+                    } else if let Err(error) =
+                        crate::channels::reopen_session_channel(&state.db, &session.id).await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not reopen session channel");
+                    }
+                } else if session.status == "created" {
+                    // Recovery had not rebuilt its worktree yet (or adoption
+                    // lost it externally). The branch/history still make this
+                    // a fully recoverable archived session.
+                    if let Err(error) = session_mod::complete_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "adopting",
+                        "archived",
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not restore archived state");
+                    }
+                } else if let Err(error) =
+                    session_mod::clear_interrupted_transition(&state.db, &session.id, "adopting")
+                        .await
+                {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: could not release failed adoption");
+                }
+            }
+            other => {
+                tracing::warn!(session = %session.id, transition = other, "transition recovery: unknown transition left intact");
+            }
+        }
+    }
 }
 
 async fn record_transition(st: &AppState, branch: &Branch, kind: &str, step: &str) {
@@ -736,7 +977,8 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
     else {
         return Err(anyhow!("session not found"));
     };
-    let session = &current_session;
+    let refreshed = release_abandoned_transition(&st.db, &current_session).await?;
+    let session = &refreshed;
     let branch = &current_branch;
     require_no_transition(session)?;
     if session.status == "archived" {
@@ -1066,7 +1308,8 @@ pub async fn recover_acp_runtime(st: &AppState, session: &Session) -> Result<()>
     else {
         return Err(anyhow!("session not found"));
     };
-    let session = &current_session;
+    let refreshed = release_abandoned_transition(&st.db, &current_session).await?;
+    let session = &refreshed;
     require_no_transition(session)?;
     if session.protocol != "acp" {
         return Err(anyhow!(Refusal::Conflict(
@@ -1266,4 +1509,63 @@ pub async fn resume_agent(
     .ok();
     tracing::info!(session = %session.id, branch = %branch.id, reason = %reason, "session resumed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{transition_is_stale, TRANSITION_STALE_SECS};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn a_transition_this_process_owns_is_never_stale() {
+        let now = Utc::now();
+        let started = (now - Duration::seconds(TRANSITION_STALE_SECS * 10)).to_rfc3339();
+        // Own work is bounded and completes or releases its own marker, so age
+        // alone must never let a second operation run against it.
+        assert!(!transition_is_stale(
+            Some(&started),
+            Some(4242),
+            4242,
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn a_transition_whose_owner_is_gone_is_stale_immediately() {
+        let now = Utc::now();
+        let started = now.to_rfc3339();
+        assert!(transition_is_stale(
+            Some(&started),
+            Some(4242),
+            7,
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn a_live_foreign_owner_keeps_its_transition_until_the_deadline() {
+        let now = Utc::now();
+        let fresh = (now - Duration::seconds(TRANSITION_STALE_SECS - 1)).to_rfc3339();
+        // A rolling restart drains the old generation; its in-flight teardown
+        // owns the session until it has plainly outlived any real operation.
+        assert!(!transition_is_stale(Some(&fresh), Some(4242), 7, true, now));
+
+        let old = (now - Duration::seconds(TRANSITION_STALE_SECS)).to_rfc3339();
+        assert!(transition_is_stale(Some(&old), Some(4242), 7, true, now));
+    }
+
+    #[test]
+    fn an_unreadable_start_time_is_stale_rather_than_permanent() {
+        let now = Utc::now();
+        assert!(transition_is_stale(None, Some(4242), 7, true, now));
+        assert!(transition_is_stale(
+            Some("not a timestamp"),
+            None,
+            7,
+            true,
+            now
+        ));
+    }
 }

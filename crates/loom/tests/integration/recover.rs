@@ -423,3 +423,119 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
             .contains("unavailable profile lifetime"));
     }
 }
+
+/// Plant the durable trace of an operation that died mid-teardown: the marker is
+/// published, but its owner is a pid in a namespace that no longer exists — a
+/// killed server, or an archive that ran inside the session container it was
+/// tearing down. `begin_transition` stamps the running process, so the owner is
+/// rewritten afterwards.
+async fn plant_abandoned_transition(ts: &TestServer, id: &str, transition: &str, step: &str) {
+    assert!(
+        loom::session::begin_transition(&ts.state.db, id, transition, step)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE sessions SET lifecycle_transition_owner_pid = ? WHERE id = ?")
+        .bind(i64::from(i32::MAX))
+        .bind(id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+}
+
+/// A person must always be able to archive a session. An abandoned marker used
+/// to refuse every archive and adopt until the server restarted, because only
+/// startup reconciled interrupted transitions.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_takes_over_a_transition_whose_owner_is_gone() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let sess = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "stuck archiving", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap().to_string();
+    let work_dir = sess["work_dir"].as_str().unwrap().to_string();
+    plant_abandoned_transition(&ts, &id, "archiving", "Stopping agent").await;
+
+    client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap();
+
+    let detail = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(detail["status"], "archived");
+    assert!(detail["transition"].is_null(), "{detail}");
+    assert!(
+        !Path::new(&work_dir).exists(),
+        "the take-over archive should still tear the worktree down"
+    );
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+/// The same recovery runs on the monitor's cadence, so a session left mid-archive
+/// finishes archiving on its own rather than waiting for the next restart.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_finishes_an_abandoned_archive_without_a_restart() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let sess = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "abandoned mid-archive", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap().to_string();
+    plant_abandoned_transition(&ts, &id, "archiving", "Stopping agent").await;
+
+    loom::lifecycle::reconcile_interrupted_transitions(&ts.state).await;
+
+    let detail = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert_eq!(detail["status"], "archived");
+    assert!(detail["transition"].is_null(), "{detail}");
+
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
+
+/// A transition this process still owns is live work: a concurrent archive must
+/// keep refusing it rather than tearing down a session mid-operation.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_still_refuses_a_transition_owned_by_this_server() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let sess = client
+        .post(
+            "/api/sessions",
+            json!({ "goal": "busy transitioning", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = sess["id"].as_str().unwrap().to_string();
+    assert!(
+        loom::session::begin_transition(&ts.state.db, &id, "archiving", "Stopping agent")
+            .await
+            .unwrap()
+    );
+
+    let error = client
+        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already archiving"), "{error}");
+
+    loom::session::clear_transition(&ts.state.db, &id, "archiving")
+        .await
+        .unwrap();
+    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+}
