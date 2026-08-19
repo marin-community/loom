@@ -110,7 +110,7 @@ pub async fn shell_ws(
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
     if let Err(e) = crate::shell::ensure(&st).await {
-        tracing::error!(error = %e, "failed to bring up operator scratch shell");
+        tracing::error!(error = %format!("{e:#}"), "failed to bring up operator scratch shell");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start shell").into_response();
     }
     let target = crate::shell::SHELL_SESSION.to_string();
@@ -151,7 +151,7 @@ pub async fn session_shell_ws(
     let target = match crate::shell::ensure_debug(&st, &session, idx).await {
         Ok(name) => name,
         Err(e) => {
-            tracing::error!(session = %key, idx, error = %e, "failed to bring up session debug shell");
+            tracing::error!(session = %key, idx, error = %format!("{e:#}"), "failed to bring up session debug shell");
             return (StatusCode::INTERNAL_SERVER_ERROR, "could not start shell").into_response();
         }
     };
