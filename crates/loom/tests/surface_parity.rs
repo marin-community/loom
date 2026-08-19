@@ -1,23 +1,25 @@
 //! The parallel-surface ledger.
 //!
-//! Every `.route(...)` the server mounts by hand falls in exactly one of three
-//! buckets, and each bucket means something different:
+//! This file used to sort the server's hand-mounted routes into three buckets:
+//! transports the operation DSL cannot express, routes an operation had already
+//! superseded, and routes no operation served at all. The middle bucket was the
+//! debt — 115 URLs whose data was already reachable at `POST /api/<id>`, kept
+//! alive by callers that had not moved — and the third was worse, because a
+//! route with no operation is a piece of API the registry does not describe:
+//! no schema, no CLI, no MCP projection, no declared actor policy.
 //!
-//! * [`TRANSPORT_ROUTES`] — genuinely not an operation. A reverse proxy, an
-//!   unauthenticated probe, an HMAC-authenticated webhook, an OAuth redirect.
-//!   Adding a line here is a decision, not a deferral.
-//! * [`SUPERSEDED_ROUTES`] — an operation already serves this data at
-//!   `POST /api/<id>`; the route is still mounted only because something still
-//!   calls it. This number has to reach zero.
-//! * [`UNREGISTERED_ROUTES`] — no operation serves this yet. This is the
-//!   registry being *incomplete*, which is a different and worse thing than
-//!   being duplicated, and it is why the two are counted separately instead of
-//!   both being called "legacy".
+//! Both are gone. Every caller moved (the browser, the CLI, the typed client,
+//! the Python client, the integration and Playwright suites), the eleven
+//! operations the last routes needed were declared, and the routes were deleted.
+//! What remains is [`TRANSPORT_ROUTES`]: nineteen paths that are *not*
+//! operations on purpose, each with the reason written next to it.
 //!
-//! The previous registry had no such ledger, which is how it ended up declaring
-//! operations whose routes the server had stopped serving. Here the lists are
-//! written down, so "we still have two surfaces" is a number that has to go to
-//! zero rather than an impression.
+//! So the ledger's job changed. It is no longer a debt counter that has to reach
+//! zero — it is the assertion that the count stays zero. A new `.route(` in
+//! `web/mod.rs` that is not a declared transport fails
+//! [`no_route_is_unaccounted_for`], which is the whole point: the way to add an
+//! endpoint is to declare an operation, and the way to add a transport is to
+//! defend it here in writing.
 
 use std::collections::BTreeSet;
 
@@ -66,188 +68,6 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
     ("/openapi.json", "discovery"),
 ];
 
-/// Legacy routes an operation has superseded, still mounted for the browser.
-///
-/// Every one of these has a registered operation serving the same data at
-/// `POST /api/<id>`; what keeps them alive is `crates/loom/frontend`, which still
-/// calls them. This list is a ratchet, not a parking space: a route that is no
-/// longer mounted must be deleted from it, and a hand-mounted route that is not
-/// here fails [`no_route_is_unaccounted_for`]. The number that has to reach zero
-/// is 77.
-const SUPERSEDED_ROUTES: &[&str] = &[
-    "/agent/oneshot",
-    "/agents",
-    "/agents/custom",
-    "/auth/automation-token",
-    "/auth/federations/{id}",
-    "/auth/password",
-    "/auth/tokens",
-    "/auth/tokens/{id}",
-    "/auth/users",
-    "/auth/users/{username}",
-    "/branches",
-    "/branches/{id}",
-    "/branches/{id}/artifacts",
-    "/branches/{id}/issues",
-    "/branches/{id}/slack/reply",
-    "/branches/{id}/status",
-    "/channels",
-    "/channels/{id}",
-    "/diagnostics",
-    "/issues",
-    "/issues/{id}",
-    "/logs",
-    "/repos",
-    "/repos/env",
-    "/reviews/{id}",
-    "/reviews/{id}/comments",
-    "/reviews/{id}/comments/{comment_id}",
-    "/reviews/{id}/comments/{comment_id}/resolve",
-    "/reviews/{id}/retarget-current",
-    "/reviews/{id}/retry-delivery",
-    "/reviews/{id}/submit",
-    "/runs",
-    "/runs/{id}",
-    "/scratch/limits",
-    "/self",
-    "/session-launches/resolve",
-    "/session-layout",
-    "/session-layout/defaults",
-    "/session-layout/defaults/{kind}/{value}",
-    "/session-layout/groups",
-    "/session-layout/groups/{id}",
-    "/session-layout/groups/{id}/preference",
-    "/session-layout/moves",
-    "/session-layout/reorder",
-    "/session-layout/restores",
-    "/session-layout/spaces",
-    "/session-layout/spaces/{id}",
-    "/sessions/search",
-    "/sessions/summary",
-    "/sessions/{id}",
-    "/sessions/{id}/adopt",
-    "/sessions/{id}/archive",
-    "/sessions/{id}/artifacts",
-    "/sessions/{id}/changes",
-    "/sessions/{id}/chat",
-    "/sessions/{id}/config/{config_id}",
-    "/sessions/{id}/conversation",
-    "/sessions/{id}/conversation/blocks/{message}/{block}",
-    "/sessions/{id}/files",
-    "/sessions/{id}/github",
-    "/sessions/{id}/github/access",
-    "/sessions/{id}/github/labels",
-    "/sessions/{id}/handoff",
-    "/sessions/{id}/handoff/resolve",
-    "/sessions/{id}/history",
-    "/sessions/{id}/history/search",
-    "/sessions/{id}/ide-info",
-    "/sessions/{id}/interrupt",
-    "/sessions/{id}/log",
-    "/sessions/{id}/mode",
-    "/sessions/{id}/permissions/{request_id}",
-    "/sessions/{id}/preview",
-    "/sessions/{id}/prompt",
-    "/sessions/{id}/raw",
-    "/sessions/{id}/recover",
-    "/sessions/{id}/resumption-cue",
-    "/sessions/{id}/reviews",
-    "/sessions/{id}/send",
-    "/sessions/{id}/shells",
-    "/sessions/{id}/summary",
-    "/sessions/{id}/tags",
-    "/sessions/{id}/title-generation",
-    "/sessions/{id}/title/regenerate",
-    "/sessions/{id}/url",
-    "/slack/status",
-    "/status",
-    "/tasks",
-    "/watches",
-    "/watches/{id}/run",
-    "/watches/{id}/runs",
-    // Exposed by fixing the route scan: rustfmt had wrapped these onto their own
-    // lines, so a third of the surface was invisible to this ledger.
-    "/agents/custom/{name}",
-    "/auth/federations",
-    "/auth/github-token",
-    "/auth/github/config",
-    "/auth/users/{username}/role",
-    "/branches/{id}/artifacts/{name}",
-    "/branches/{id}/artifacts/{name}/threads",
-    "/branches/{id}/artifacts/{name}/threads/{tid}/comments",
-    "/branches/{id}/artifacts/{name}/threads/{tid}/resolve",
-    "/branches/{id}/artifacts/{name}/url",
-    "/branches/{id}/events",
-    "/branches/{id}/tags/{key}",
-    "/channels/{id}/bindings",
-    "/channels/{id}/messages",
-    "/channels/{id}/read-marker",
-    "/channels/{id}/subscription",
-    "/repos/env/{name}",
-    "/sessions",
-    "/sessions/{id}/artifacts/{name}",
-    "/sessions/{id}/artifacts/{name}/threads",
-    "/sessions/{id}/artifacts/{name}/threads/{tid}/comments",
-    "/sessions/{id}/artifacts/{name}/threads/{tid}/resolve",
-    "/sessions/{id}/shell/{idx}",
-    "/sessions/{id}/tags/{key}",
-    "/watches/{id}",
-];
-
-/// Routes with no operation behind them at all.
-///
-/// Distinct from [`SUPERSEDED_ROUTES`] on purpose. A superseded route is
-/// *duplicated* work — an operation already serves that data and the URL is
-/// waiting on its last caller. A route here is *missing* work: the registry does
-/// not describe this part of the API, so it has no schema, no CLI, no MCP
-/// projection, and no declared actor policy. The rule the registry exists to
-/// enforce is "anything that reaches the API is registered", and every line
-/// below is a place that is not yet true.
-///
-/// This list became visible only when the route scan above was fixed. Before
-/// that it read as zero, which is the most expensive kind of wrong number. It
-/// was 26 lines then and is two now; both survivors are about a wire encoding
-/// the `Io` enum does not yet serve, not about the registry lacking the shape.
-///
-/// A caveat this list cannot express: it is keyed by path, while an operation is
-/// keyed by method *and* path. Several routes are therefore in
-/// [`SUPERSEDED_ROUTES`] with one method that no operation can actually serve
-/// yet. Named here so the gap is written down somewhere other than a frontend
-/// comment:
-///
-/// * `PATCH /issues/{id}` — there is no `issues.update`; `issues.close`/
-///   `.reopen` take an id array and answer a bulk `IssueActionsResult`.
-/// * `GET /sessions/{id}/github/access` — grant and revoke are operations, the
-///   read is not.
-/// * `GET /issues` — the cross-repo, automation-aware board. `issues.list` is
-///   `scope = Repository` and has no `automation` filter: a different read.
-/// * `GET /sessions/summary` — `sessions.list` answers `SessionView[]`, not the
-///   reduced `SessionSummary[]` projection, and this caller needs an
-///   `AbortSignal` the operation client does not thread.
-/// * `POST /sessions` — `sessions.launch` declares `title` as a required
-///   `String`, but the route it replaces takes `Option<String>` and *derives*
-///   the title from the claimed issue (`title_provenance = "derived"`, asserted
-///   in `e2e/tests/create.spec.ts`). The declaration is stricter than the route,
-///   which is the same defect `settings.patch` had; making the operand optional
-///   is a CLI contract change, so it is written down rather than guessed at.
-/// * `POST /channels` — `channels.create` is `scope = Branch` with a `branch`
-///   context field, and the dashboard's picker holds only a repo root.
-/// * `POST /issues` — `issues.backlog.create`'s `Input` has no `tags` field, so
-///   it cannot express the initial tag set the route accepts.
-const UNREGISTERED_ROUTES: &[(&str, &str)] = &[
-    (
-        "/sessions/{id}/artifacts/{name}/raw",
-        "artifacts: the response is image bytes, and `Io` has no variant for a \
-         raw binary body — adding one is a design decision, not a port",
-    ),
-    (
-        "/sessions/{id}/scratch",
-        "sessions: three methods on one path. GET (list) and DELETE are ordinary \
-         JSON and could be registered today; POST takes a raw octet-stream body, \
-         which is what `Io::Upload` is for — it is declared and so far unused",
-    ),
-];
-
 /// Every path `web/mod.rs` mounts by hand.
 ///
 /// Scanned across the whole source rather than line by line: rustfmt wraps a
@@ -273,17 +93,25 @@ fn mounted_routes() -> BTreeSet<String> {
 }
 
 /// The scan above is load-bearing, so it is checked against a known shape.
+///
+/// A line-oriented version of this scan once saw 105 of 160 routes, because
+/// rustfmt wraps a long `.route(` onto its own line — a third of the surface was
+/// invisible to the test whose whole job was seeing it. The wrapped IDE-proxy
+/// route is the fixture for that: if the scan regresses to reading lines, this
+/// fails before `no_route_is_unaccounted_for` starts passing for the wrong
+/// reason.
 #[test]
 fn the_route_scan_sees_wrapped_route_calls() {
     let routes = mounted_routes();
     assert!(
-        routes.contains("/sessions/{id}/shell/{idx}"),
+        routes.contains("/sessions/{id}/ide/{*rest}"),
         "the route scan missed a `.route(` whose path literal is on the next line"
     );
-    assert!(
-        routes.len() > 120,
-        "only {} routes found; the scan is probably broken",
-        routes.len()
+    assert_eq!(
+        routes.len(),
+        TRANSPORT_ROUTES.len(),
+        "the hand-mounted surface and the declared transport list have different \
+         sizes, so one of them moved without the other: {routes:?}"
     );
 }
 
@@ -299,32 +127,27 @@ fn operation_routes() -> BTreeSet<String> {
         .collect()
 }
 
-/// Every hand-mounted route is either an operation's own route or a declared
-/// transport. Anything else is a surface the registry does not know about.
+/// Every hand-mounted route is a declared transport.
+///
+/// This is the invariant the three-bucket ledger was built to retire itself
+/// into. There is no "superseded" bucket to park a route in any more: a route in
+/// `web/mod.rs` that is not in [`TRANSPORT_ROUTES`] is a second API surface, and
+/// the failure message says what to do about it.
 #[test]
 fn no_route_is_unaccounted_for() {
     let transport: BTreeSet<&str> = TRANSPORT_ROUTES.iter().map(|(path, _)| *path).collect();
-    let operations = operation_routes();
-
-    let superseded: BTreeSet<&str> = SUPERSEDED_ROUTES.iter().copied().collect();
-    let unregistered: BTreeSet<&str> = UNREGISTERED_ROUTES.iter().map(|(path, _)| *path).collect();
     let mounted = mounted_routes();
 
-    let unaccounted: Vec<String> = mounted
+    let unaccounted: Vec<&String> = mounted
         .iter()
         .filter(|route| !transport.contains(route.as_str()))
-        .filter(|route| !operations.contains(*route))
-        .filter(|route| !superseded.contains(route.as_str()))
-        .filter(|route| !unregistered.contains(route.as_str()))
-        .cloned()
         .collect();
-
     assert!(
         unaccounted.is_empty(),
-        "{} hand-mounted routes are in none of the three buckets. Each is either an\n\
-         operation waiting to be declared (UNREGISTERED_ROUTES), a route an\n\
-         operation already serves (SUPERSEDED_ROUTES), or something the DSL cannot\n\
-         express (TRANSPORT_ROUTES):\n{}",
+        "{} hand-mounted routes are not declared transports. Declare an operation \
+         instead — the registry derives its route, its schema, its CLI command \
+         and its authority from one place — or, if this really cannot be an \
+         operation, add it to TRANSPORT_ROUTES with the reason:\n{}",
         unaccounted.len(),
         unaccounted
             .iter()
@@ -333,35 +156,17 @@ fn no_route_is_unaccounted_for() {
             .join("\n")
     );
 
-    // The ratchet: a superseded route that is gone must leave this list, so the
-    // count is always the real remaining debt rather than a historical high-water
-    // mark.
-    let retired: Vec<&str> = SUPERSEDED_ROUTES
+    // The other direction: a transport that stopped being mounted must leave the
+    // list. A stale entry here is an endpoint the ledger claims to have thought
+    // about and no longer describes anything.
+    let retired: Vec<&str> = TRANSPORT_ROUTES
         .iter()
-        .copied()
-        .chain(UNREGISTERED_ROUTES.iter().map(|(path, _)| *path))
+        .map(|(path, _)| *path)
         .filter(|route| !mounted.contains(*route))
         .collect();
     assert!(
         retired.is_empty(),
-        "these routes are no longer mounted — delete them from the ledger: {retired:?}"
-    );
-
-    // A route cannot be both superseded and unregistered; that would mean the
-    // ledger disagrees with itself about whether an operation exists.
-    let both: Vec<&str> = superseded.intersection(&unregistered).copied().collect();
-    assert!(both.is_empty(), "routes in two buckets at once: {both:?}");
-
-    // And an operation must not be listed as unregistered.
-    let contradicted: Vec<&str> = unregistered
-        .iter()
-        .copied()
-        .filter(|route| operations.contains(*route))
-        .collect();
-    assert!(
-        contradicted.is_empty(),
-        "UNREGISTERED_ROUTES names routes an operation already serves — move them \
-         to SUPERSEDED_ROUTES: {contradicted:?}"
+        "these transports are no longer mounted — delete them from the ledger: {retired:?}"
     );
 }
 
@@ -390,25 +195,11 @@ fn no_hand_mounted_route_duplicates_an_operation() {
         })
         .collect();
 
-    // Superseded GET routes the browser still calls. Each has an operation that
-    // serves the same data at `POST /api/<id>`, and each disappears when its
-    // frontend call site moves. They are pinned by name rather than tolerated by
-    // rule, so a *new* duplicate still fails this test.
-    let pending_frontend_migration: BTreeSet<&str> = [
-        "/repos/branches",
-        "/repos/recent",
-        "/repos/revisions/validate",
-        "/watches/programs",
-    ]
-    .into_iter()
-    .collect();
-
     let operations = operation_routes();
     let duplicates: Vec<String> = mounted_routes()
         .into_iter()
         .filter(|route| operations.contains(route))
         .filter(|route| !hand_mounted_on_purpose.contains(route))
-        .filter(|route| !pending_frontend_migration.contains(route.as_str()))
         .collect();
 
     assert!(
@@ -468,43 +259,64 @@ fn every_cli_operation_is_reachable() {
     );
 }
 
-/// Every literal path in the session-credential allowlist is a route the server
-/// still mounts.
+/// Every literal path in `grant_allows` is a route the server still mounts.
 ///
-/// `grant_allows` in `src/web/auth.rs` decides a *raw path* — it is the legacy
-/// authority model, and it now applies only to routes that are not operations.
-/// So when a route becomes an operation, its entry there has to go, and two did
-/// not: `/settings` and `/profiles` sat in the bare-GET list for a while after
-/// their routes were deleted.
+/// `grant_allows` decides *raw paths*, and it now decides only the seven that
+/// are not operations. The check survives the collapse because the failure mode
+/// it catches has nothing to do with how long the list is: a path literal there
+/// whose route no longer exists is a standing **pre-authorization** for whatever
+/// gets mounted at that path next, readable by every session credential in the
+/// fleet before anyone decides it should be. Three entries had gone stale that
+/// way — `/settings` and `/profiles` after their routes became operations, and
+/// `/repos/issues`, unmounted since #309.
 ///
-/// A stale entry is worse than dead code. It is a *pre-authorization* for a path
-/// nothing serves — so the day someone mounts something else at `/settings`,
-/// every session credential in the fleet can already read it, and nothing in
-/// this repository would have said so.
+/// Its twin, `no_user_denylist_path_is_unmounted`, is gone with the list it
+/// checked: every path `user_grant_allows` denied to a non-admin human is now an
+/// operation carrying `actor = Admin`, which is the same rule stated once.
 ///
 /// Scanned rather than enumerated, for the same reason the route ledger is: a
 /// hand-kept copy of this list is the thing that goes stale.
 #[test]
-fn no_session_allowlist_path_is_unmounted() {
+fn no_grant_allows_path_is_unmounted() {
     check_path_literals_are_mounted(
-        "Grant::Session {",
-        "pub(super) fn operation_grant_allows",
-        "pre-authorized for session credentials",
+        "let discovery = *method",
+        "/// The session id an IDE-proxy path addresses",
+        "reachable by a bare credential",
     );
 }
 
-/// The same check for the human-operator deny-list.
+/// Every channel operation checks that the caller may reach the channel.
 ///
-/// A stale entry here is the milder direction — a dead *denial* rather than a
-/// dead permission — but it still reads as policy that is being enforced when it
-/// is not, and it is how you end up believing `/settings` is admin-gated by this
-/// function when the real gate is `settings.patch`'s `actor`.
+/// This is the one resource check `Scoped` cannot state. A channel operation is
+/// addressed by channel id, but its declared `scope = Branch` names a *context*
+/// operand — filled from the caller's own branch — so for a session credential
+/// the scope check passes whatever channel was named. The real check is
+/// `require_channel` inside `web/channels.rs`, and it was missing from
+/// `channels.get` and `channels.wait`: they read the store directly, so a
+/// session token could read a sibling session's channel. The legacy path
+/// allowlist had been doing that check, invisibly, until the routes went away.
+///
+/// Counted rather than inspected per-handler: a new channel operation that takes
+/// a `channel` operand and forgets the call moves one side of this equality.
 #[test]
-fn no_user_denylist_path_is_unmounted() {
-    check_path_literals_are_mounted(
-        "fn user_grant_allows(",
-        "\n/// ",
-        "denied to non-admin humans",
+fn every_channel_operation_checks_reachability() {
+    let addressed = weaver_api::operations::operations()
+        .filter(|operation| operation.id.starts_with("channels."))
+        .filter(|operation| {
+            (operation.schema)()["properties"]
+                .get("channel")
+                .is_some()
+        })
+        .count();
+    let checks = include_str!("../src/web/channels.rs")
+        .matches("require_channel(&st, &principal,")
+        .count();
+    assert_eq!(
+        checks, addressed,
+        "{addressed} channel operations are addressed by channel id but \
+         `require_channel` is called {checks} times. Every one of them must go \
+         through it — `scope = Branch` cannot decide this, because `branch` is a \
+         context operand and always names the caller's own."
     );
 }
 
@@ -537,7 +349,7 @@ fn check_path_literals_are_mounted(from: &str, to: &str, role: &str) {
         }
     }
     assert!(
-        claimed.len() > 3,
+        claimed.len() >= 3,
         "the scan between `{from}` and `{to}` found only {claimed:?} — \
          it stopped matching the source"
     );
