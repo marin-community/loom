@@ -284,13 +284,13 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         "mcp_access": { "mode": "none", "groups": [] }
     });
     let profile = client
-        .post("/api/profiles", profile_body.clone())
+        .post("/api/profiles/create", profile_body.clone())
         .await
         .unwrap();
     client
-        .put(
-            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
-            json!({ "value": "at-launch" }),
+        .post(
+            "/api/profiles/env/set",
+            json!({ "profile": "respawn-lifetime", "name": "LIFETIME_TOKEN", "value": "at-launch" }),
         )
         .await
         .unwrap();
@@ -320,10 +320,13 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
     let recover_id = recoverable["id"].as_str().unwrap();
     let adopt_id = adoptable["id"].as_str().unwrap();
     let adopt_term = adoptable["term_session"].as_str().unwrap();
-    let current = client.get("/api/profiles/respawn-lifetime").await.unwrap();
+    let current = client
+        .post("/api/profiles/get", json!({ "name": "respawn-lifetime" }))
+        .await
+        .unwrap();
     let edited = client
-        .put(
-            "/api/profiles/respawn-lifetime",
+        .post(
+            "/api/profiles/update",
             json!({
                 "name": "respawn-lifetime",
                 "description": "same lifetime edit after launch",
@@ -339,9 +342,9 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .unwrap();
     assert_eq!(edited["lifetime"], profile["lifetime"]);
     let rotated = client
-        .put(
-            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
-            json!({ "value": "rotated-after-launch" }),
+        .post(
+            "/api/profiles/env/set",
+            json!({ "profile": "respawn-lifetime", "name": "LIFETIME_TOKEN", "value": "rotated-after-launch" }),
         )
         .await
         .unwrap();
@@ -359,7 +362,7 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .await
         .unwrap();
     client
-        .delete("/api/profiles/respawn-lifetime")
+        .post("/api/profiles/delete", json!({ "name": "respawn-lifetime" }))
         .await
         .unwrap();
 
@@ -386,12 +389,15 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         )
         .await
         .unwrap();
-    let replacement = client.post("/api/profiles", profile_body).await.unwrap();
+    let replacement = client
+        .post("/api/profiles/create", profile_body)
+        .await
+        .unwrap();
     assert_ne!(replacement["lifetime"], profile["lifetime"]);
     client
-        .put(
-            "/api/profiles/respawn-lifetime/env/LIFETIME_TOKEN",
-            json!({ "value": "replacement-lifetime" }),
+        .post(
+            "/api/profiles/env/set",
+            json!({ "profile": "respawn-lifetime", "name": "LIFETIME_TOKEN", "value": "replacement-lifetime" }),
         )
         .await
         .unwrap();

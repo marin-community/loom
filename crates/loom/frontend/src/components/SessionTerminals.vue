@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import AgentTerminal from './AgentTerminal.vue';
 import KeyHint from './KeyHint.vue';
-import { del, invokeOperation } from '../api';
+import { invokeOperation } from '../api';
 
 // The session's terminal area: an inner tab strip over the always-mounted agent
 // terminal plus zero or more worktree **debug shells**.
@@ -64,10 +64,8 @@ async function closeShell(idx: number) {
   if (active.value === idx) active.value = props.shellsOnly ? (shells.value[0] ?? -1) : 'agent';
   // Kill the backend supervisor so a worktree shell never lingers after its tab
   // is gone (archive also sweeps these; closing is the explicit "I'm done").
-  // UNMAPPED: no operation closes a debug shell (only `sessions.shells.list`
-  // is registered).
   try {
-    await del(`/sessions/${props.id}/shell/${idx}`);
+    await invokeOperation('sessions.shells.delete', { session: props.id, index: idx });
   } catch {
     /* already gone */
   }

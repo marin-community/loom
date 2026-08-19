@@ -339,9 +339,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     for path in [
         "/api/sessions",
         "/api/settings",
-        "/api/profiles",
         "/api/agents",
-        "/api/mcps",
         "/api/diagnostics",
         "/api/logs",
         "/api/status",
@@ -357,6 +355,22 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK, "user GET {path}");
+    }
+
+    // `profiles.list` and `mcps.get` are the twins of the legacy `GET
+    // /api/profiles` and `GET /api/mcps` above — same `User`-reachable read.
+    for (path, body) in [
+        ("/api/profiles/list", json!({})),
+        ("/api/mcps/get", json!({})),
+    ] {
+        let response = http
+            .post(url(&ts, path))
+            .bearer_auth(&user_token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "user POST {path}");
     }
 
     let preferences: Value = http
@@ -415,9 +429,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         (reqwest::Method::GET, "/api/auth/github/config"),
         (reqwest::Method::POST, "/api/auth/automation-token"),
         (reqwest::Method::GET, "/api/auth/federations"),
-        (reqwest::Method::POST, "/api/profiles"),
+        (reqwest::Method::POST, "/api/profiles/create"),
         (reqwest::Method::POST, "/api/agents/custom"),
-        (reqwest::Method::POST, "/api/mcps/custom"),
+        (reqwest::Method::POST, "/api/mcps/custom/create"),
         (reqwest::Method::PUT, "/api/env/SHARED_VALUE"),
         (reqwest::Method::GET, "/api/shell/terminal"),
         (reqwest::Method::POST, "/api/shell/restart"),

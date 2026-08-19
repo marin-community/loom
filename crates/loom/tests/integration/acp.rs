@@ -3032,7 +3032,7 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
     ] {
         ts.client
             .post(
-                "/api/profiles",
+                "/api/profiles/create",
                 json!({
                     "name": name,
                     "description": name,
@@ -3151,7 +3151,7 @@ async fn same_source_handoffs_to_different_profiles_have_one_winner() {
     ] {
         ts.client
             .post(
-                "/api/profiles",
+                "/api/profiles/create",
                 json!({
                     "name": profile,
                     "agent_kind": agent,
