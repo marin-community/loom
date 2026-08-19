@@ -1081,7 +1081,6 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/profiles", get(list_profiles).post(create_profile))
         .route("/profiles/{name}/effective", get(effective_profile))
-        .route("/profiles/{name}/probe", post(probe_profile))
         .route("/profiles/{name}/clone", post(clone_profile))
         .route(
             "/profiles/{name}",

@@ -28,16 +28,15 @@ use crate::dto::{
     ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
     HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
     MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
-    PermissionRequestView, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
-    ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
-    ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
-    RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView,
-    SendReq, SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq,
-    SetChannelSubscriptionReq, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq,
-    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto,
-    TokenView, UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq,
-    UpdateSessionSpaceReq, WatchView,
+    PermissionRequestView, ProfileReq, ProfileView, PutProfileEnvReq, ReadinessView,
+    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
+    RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
+    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView, SendReq,
+    SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
+    SessionPlacementSelectorKind, SessionView, SetChannelReadMarkerReq, SetChannelSubscriptionReq,
+    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
+    SettingsEnvelope, SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq,
+    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -1445,15 +1444,6 @@ impl Client {
     pub async fn effective_profile(&self, name: &str) -> Result<EffectiveProfileView> {
         self.get_typed(&format!("/api/profiles/{}/effective", Self::seg(name)))
             .await
-    }
-
-    pub async fn probe_profile(&self, name: &str) -> Result<ProfileProbeView> {
-        self.send_typed::<(), _>(
-            Method::POST,
-            &format!("/api/profiles/{}/probe", Self::seg(name)),
-            None,
-        )
-        .await
     }
 
     pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
