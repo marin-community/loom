@@ -210,11 +210,30 @@ const SUPERSEDED_ROUTES: &[&str] = &[
 /// the `Io` enum does not yet serve, not about the registry lacking the shape.
 ///
 /// A caveat this list cannot express: it is keyed by path, while an operation is
-/// keyed by method *and* path. Two routes are therefore in [`SUPERSEDED_ROUTES`]
-/// with one method still unregistered — `PATCH /issues/{id}` (there is no
-/// `issues.update`; close/reopen return a bulk shape) and
-/// `GET /sessions/{id}/github/access` (grant and revoke are operations, the read
-/// is not). Both are named here so the gap is written down somewhere.
+/// keyed by method *and* path. Several routes are therefore in
+/// [`SUPERSEDED_ROUTES`] with one method that no operation can actually serve
+/// yet. Named here so the gap is written down somewhere other than a frontend
+/// comment:
+///
+/// * `PATCH /issues/{id}` — there is no `issues.update`; `issues.close`/
+///   `.reopen` take an id array and answer a bulk `IssueActionsResult`.
+/// * `GET /sessions/{id}/github/access` — grant and revoke are operations, the
+///   read is not.
+/// * `GET /issues` — the cross-repo, automation-aware board. `issues.list` is
+///   `scope = Repository` and has no `automation` filter: a different read.
+/// * `GET /sessions/summary` — `sessions.list` answers `SessionView[]`, not the
+///   reduced `SessionSummary[]` projection, and this caller needs an
+///   `AbortSignal` the operation client does not thread.
+/// * `POST /sessions` — `sessions.launch` declares `title` as a required
+///   `String`, but the route it replaces takes `Option<String>` and *derives*
+///   the title from the claimed issue (`title_provenance = "derived"`, asserted
+///   in `e2e/tests/create.spec.ts`). The declaration is stricter than the route,
+///   which is the same defect `settings.patch` had; making the operand optional
+///   is a CLI contract change, so it is written down rather than guessed at.
+/// * `POST /channels` — `channels.create` is `scope = Branch` with a `branch`
+///   context field, and the dashboard's picker holds only a repo root.
+/// * `POST /issues` — `issues.backlog.create`'s `Input` has no `tags` field, so
+///   it cannot express the initial tag set the route accepts.
 const UNREGISTERED_ROUTES: &[(&str, &str)] = &[
     (
         "/sessions/{id}/artifacts/{name}/raw",

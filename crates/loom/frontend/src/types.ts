@@ -1241,7 +1241,7 @@ export interface SettingView {
   is_default: boolean;
 }
 
-/** Canonical reply from both GET and PATCH /api/settings. */
+/** Canonical reply from both `settings.get` and `settings.patch`. */
 export interface SettingsEnvelope {
   settings: SettingView[];
 }

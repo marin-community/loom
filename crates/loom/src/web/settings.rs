@@ -291,3 +291,39 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<preferences_operations::patch::Patch, _, _>(patch_preferences_operation),
     ]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::setting_value;
+    use serde_json::json;
+
+    /// A caller writes the value it means, not a pre-stringified one.
+    ///
+    /// This is the contract `settings.patch` broke when it declared its operand
+    /// `Option<String>`: `{"auth.trust_loopback": false}` — the exact body the
+    /// settings pane sends for a toggle — became a deserialization error, while
+    /// the route it replaced had always coerced it. Both `settings.patch` and
+    /// `preferences.patch` reduce through here, so the coercion is stated once.
+    #[test]
+    fn json_scalars_reduce_to_the_string_a_setting_stores() {
+        assert_eq!(setting_value(Some(json!("dark"))), Ok(Some("dark".into())));
+        assert_eq!(setting_value(Some(json!(false))), Ok(Some("false".into())));
+        assert_eq!(setting_value(Some(json!(13))), Ok(Some("13".into())));
+    }
+
+    /// `null` and an absent key both mean "clear this back to the default".
+    #[test]
+    fn null_clears_the_key() {
+        assert_eq!(setting_value(Some(json!(null))), Ok(None));
+        assert_eq!(setting_value(None), Ok(None));
+    }
+
+    /// An array or an object is not a setting value. Refusing it by key beats
+    /// stringifying it into something that would fail validation later with a
+    /// worse message — or worse, pass.
+    #[test]
+    fn a_composite_is_refused_rather_than_stringified() {
+        assert!(setting_value(Some(json!([1, 2]))).is_err());
+        assert!(setting_value(Some(json!({ "a": 1 }))).is_err());
+    }
+}

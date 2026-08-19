@@ -206,7 +206,7 @@ async function load() {
       listAgents(),
     ]);
     if (!Array.isArray(res?.settings)) {
-      throw new Error('Unexpected /api/settings response — the server may be out of date.');
+      throw new Error('Unexpected settings.get response — the server may be out of date.');
     }
     settings.value = res.settings;
     customAgents.value = agentRes.custom;

@@ -465,7 +465,7 @@ async function submitPrompt() {
   optimistic.value.push(pending);
   autoFollow();
   try {
-    await promptSession(id.value, text, undefined, [...selectedFiles.value]);
+    await promptSession(id.value, text, [...selectedFiles.value]);
     const index = optimistic.value.findIndex((o) => o.key === pending.key);
     if (index >= 0) optimistic.value.splice(index, 1);
     draft.value = '';

@@ -82,6 +82,11 @@ export const destroy = (path: string, body: unknown) =>
 export const invokeOperation = (operation: string, input: unknown) =>
   post(`/${operation.split('.').map(encodeURIComponent).join('/')}`, input);
 
+// UNMAPPED: `sessions.scratch.limits` is the only registered scratch
+// operation. This upload sends the file's bytes as the raw request body, and
+// the operation dispatcher only ever decodes a JSON `Input` — no operation
+// serves a raw body — so it stays on the legacy route, as do the list and
+// delete calls in `ScratchPanel.vue`.
 /** Upload one prompt/reference attachment into the session-owned scratch dir. */
 export const uploadSessionScratch = (id: string, file: File) =>
   upload(`/sessions/${id}/scratch?name=${encodeURIComponent(file.name)}`, file) as Promise<
@@ -94,6 +99,11 @@ export const getScratchLimits = () =>
 
 // --- Sessions ----------------------------------------------------------------
 
+// UNMAPPED: `sessions.list` is a different read — it answers `SessionView[]`
+// (full session context) and has no `automation` filter, where this is the
+// compact `SessionSummary[]` projection the fleet list renders. It also needs an
+// `AbortSignal`, which `invokeOperation` does not thread through, so it calls
+// `request` directly.
 /** Compact fleet inventory/search. Full session context is fetched from the
  * item endpoint only when a row or session page discloses it. */
 export const listSessionSummaries = (
@@ -123,9 +133,12 @@ export const listSessionSummaries = (
 export const getSession = (id: string) =>
   invokeOperation('sessions.get', { session: id }) as Promise<Session>;
 
-// No operation covers listing a session's GitHub access overrides yet (the
-// legacy `GET .../github/access` route has no registry counterpart) — left
-// as-is.
+// UNMAPPED: no operation reads a session's per-repository GitHub access
+// overrides. `permissions.github.grant`/`.revoke` are the write half (used
+// below), and the nearest read — `permissions.effective.get` — answers with an
+// `EffectivePermissionsView` (allowed operations plus external scope), not the
+// `SessionGithubAccess[]` row list this pane renders. A different read, so the
+// legacy route stays hand-mounted.
 export const getSessionGithubAccess = (id: string) =>
   get(`/sessions/${encodeURIComponent(id)}/github/access`) as Promise<SessionGithubAccess[]>;
 /** The `PUT` half of the old `github/access` route is now the two operations
@@ -168,21 +181,26 @@ export const decidePermissionRequest = (
  *  produced a usable session (`GET /api/runs`). */
 export const listRuns = () => invokeOperation('runs.list', {}) as Promise<AutomationRun[]>;
 export const archiveSession = (id: string) => invokeOperation('sessions.archive', { session: id });
-// No `sessions.delete` operation exists (only `sessions.archive`) — left as-is.
-export const removeSession = (id: string) => del(`/sessions/${encodeURIComponent(id)}`);
+/** Delete a session outright (the irreversible counterpart of `archiveSession`).
+ *  `sessions.delete` answers `200` with a `{ deleted, kind, warnings }` result
+ *  where the legacy `DELETE` answered `204` with an empty body; no caller reads
+ *  the value, so it stays unannotated here rather than adding a response type. */
+export const removeSession = (id: string) => invokeOperation('sessions.delete', { session: id });
 export const clearSessionTag = (id: string, key: string) =>
   invokeOperation('sessions.tags.delete', { key, session: id });
-// No operation covers title regeneration — left as-is.
 export const regenerateSessionTitle = (id: string) =>
-  post(`/sessions/${encodeURIComponent(id)}/title/regenerate`) as Promise<Session>;
+  invokeOperation('sessions.title.regenerate', { session: id }) as Promise<Session>;
 export const setSessionTitleGeneration = (id: string, enabled: boolean) =>
-  put(`/sessions/${encodeURIComponent(id)}/title-generation`, { enabled }) as Promise<Session>;
+  invokeOperation('sessions.title.generation.set', { enabled, session: id }) as Promise<Session>;
+/** The stored cue, if one has been generated — a pure read. */
 export const getResumptionCue = (id: string) =>
-  get(`/sessions/${encodeURIComponent(id)}/resumption-cue`) as Promise<
+  invokeOperation('sessions.resumption_cue.get', { session: id }) as Promise<
     import('./types').ResumptionCue
   >;
+/** Generate the cue when it is missing or stale (`force` regenerates it
+ *  unconditionally) — the separate write half of the pair above. */
 export const ensureResumptionCue = (id: string, force = false) =>
-  post(`/sessions/${encodeURIComponent(id)}/resumption-cue`, { force }) as Promise<
+  invokeOperation('sessions.resumption_cue.ensure', { force, session: id }) as Promise<
     import('./types').ResumptionCue
   >;
 
@@ -195,9 +213,9 @@ export const createSessionSpace = (name: string, expectedRevision: number) =>
     name,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
-// No `session_layout.spaces.update`/`.delete` operations exist — left as-is.
 export const updateSessionSpace = (id: string, name: string, expectedRevision: number) =>
-  patch(`/session-layout/spaces/${encodeURIComponent(id)}`, {
+  invokeOperation('session_layout.spaces.update', {
+    id,
     name,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
@@ -206,7 +224,8 @@ export const deleteSessionSpace = (
   destinationGroupId: string | null,
   expectedRevision: number,
 ) =>
-  destroy(`/session-layout/spaces/${encodeURIComponent(id)}`, {
+  invokeOperation('session_layout.spaces.delete', {
+    id,
     destination_group_id: destinationGroupId,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
@@ -216,10 +235,9 @@ export const createSessionGroup = (spaceId: string, name: string, expectedRevisi
     name,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
-// No `session_layout.groups.update`/`.delete`/preference operations exist —
-// left as-is.
 export const updateSessionGroup = (id: string, name: string, expectedRevision: number) =>
-  patch(`/session-layout/groups/${encodeURIComponent(id)}`, {
+  invokeOperation('session_layout.groups.update', {
+    id,
     name,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
@@ -228,7 +246,8 @@ export const deleteSessionGroup = (
   destinationGroupId: string | null,
   expectedRevision: number,
 ) =>
-  destroy(`/session-layout/groups/${encodeURIComponent(id)}`, {
+  invokeOperation('session_layout.groups.delete', {
+    id,
     destination_group_id: destinationGroupId,
     expected_revision: expectedRevision,
   }) as Promise<SessionLayout>;
@@ -250,7 +269,8 @@ export const restoreSessionGroups = (body: {
   expected_revision: number;
 }) => invokeOperation('session_layout.restore', body) as Promise<SessionLayout>;
 export const setSessionGroupPreference = (groupId: string, collapsed: boolean) =>
-  put(`/session-layout/groups/${encodeURIComponent(groupId)}/preference`, {
+  invokeOperation('session_layout.groups.preference.set', {
+    id: groupId,
     collapsed,
   }) as Promise<SessionLayout>;
 
@@ -502,13 +522,13 @@ export const patchIssue = (
   },
 ) => patch(`/issues/${id}`, body) as Promise<Issue>;
 
-// UNMAPPED: no `sessions.github.*` operations exist for refresh/set/clear.
 /** Refresh, pin, or clear a session's PR association. */
 export const refreshSessionGithub = (id: string) =>
-  post(`/sessions/${id}/github`, {}) as Promise<Session>;
+  invokeOperation('sessions.github.refresh', { session: id }) as Promise<Session>;
 export const setSessionGithub = (id: string, prNumber: number) =>
-  put(`/sessions/${id}/github`, { pr_number: prNumber }) as Promise<Session>;
-export const clearSessionGithub = (id: string) => del(`/sessions/${id}/github`) as Promise<Session>;
+  invokeOperation('sessions.github.set', { pr_number: prNumber, session: id }) as Promise<Session>;
+export const clearSessionGithub = (id: string) =>
+  invokeOperation('sessions.github.clear', { session: id }) as Promise<Session>;
 
 /** Delete an issue outright. */
 export const deleteIssue = (id: number) =>
@@ -594,27 +614,30 @@ export const resolveThread = (id: string, name: string, tid: number) =>
 
 // --- Staged reviews --------------------------------------------------------
 
-// UNMAPPED: no `reviews.*` operation lists reviews (by artifact or by
-// changes) — only `reviews.comments.create`, `.retry_delivery`, and `.submit`
-// exist in the registry.
+// `reviews.list` is one operation for both reads below, discriminated by the
+// `subject_kind`/`subject_key` pair exactly as the legacy query string was.
 export const listArtifactReviews = (id: string, name: string) =>
-  get(
-    `/sessions/${id}/reviews?subject_kind=artifact&subject_key=${encodeURIComponent(name)}`,
-  ) as Promise<Review[]>;
+  invokeOperation('reviews.list', {
+    subject_kind: 'artifact',
+    subject_key: name,
+    session: id,
+  }) as Promise<Review[]>;
 
 export const getChanges = (id: string) =>
   invokeOperation('sessions.changes', { session: id }) as Promise<ChangeSet>;
 
 export const listChangesReviews = (id: string) =>
-  get(`/sessions/${id}/reviews?subject_kind=changes&subject_key=changes`) as Promise<Review[]>;
+  invokeOperation('reviews.list', {
+    subject_kind: 'changes',
+    subject_key: 'changes',
+    session: id,
+  }) as Promise<Review[]>;
 
-// The `reviews.*` bundle registers only three operations: `.comments.create`,
-// `.retry_delivery`, and `.submit`. Everything else below — creating a
-// review, editing/deleting a comment, editing or discarding a review,
-// retargeting it — has no operation and stays on the legacy `/reviews*` REST
-// routes (UNMAPPED).
+// `reviews.create` takes the reviewed session as an ordinary operand (not a
+// context field): the caller here is always a human operator, who has no
+// session of their own for the dispatcher to fall back to.
 export const createReview = (id: string, body: CreateReviewBody) =>
-  post(`/sessions/${id}/reviews`, body) as Promise<Review>;
+  invokeOperation('reviews.create', { session: id, ...body }) as Promise<Review>;
 
 export const addReviewComment = (reviewId: number, body: AddReviewCommentBody) =>
   invokeOperation('reviews.comments.create', { id: reviewId, ...body }) as Promise<Review>;
@@ -623,22 +646,31 @@ export const updateReviewComment = (
   reviewId: number,
   commentId: number,
   body: UpdateReviewCommentBody,
-) => patch(`/reviews/${reviewId}/comments/${commentId}`, body) as Promise<Review>;
+) =>
+  invokeOperation('reviews.comments.update', {
+    id: reviewId,
+    comment_id: commentId,
+    ...body,
+  }) as Promise<Review>;
 
 export const updateReview = (reviewId: number, body: UpdateReviewBody) =>
-  patch(`/reviews/${reviewId}`, body) as Promise<Review>;
+  invokeOperation('reviews.update', { id: reviewId, ...body }) as Promise<Review>;
 
 export const deleteReviewComment = (
   reviewId: number,
   commentId: number,
   expectedRevision: number,
 ) =>
-  destroy(`/reviews/${reviewId}/comments/${commentId}`, {
+  invokeOperation('reviews.comments.delete', {
+    id: reviewId,
+    comment_id: commentId,
     expected_revision: expectedRevision,
   }) as Promise<Review>;
 
+/** `reviews.discard` answers `200` with `{ discarded: true }` where the legacy
+ *  `DELETE` answered `204` with an empty body. No caller reads the value. */
 export const discardReview = (reviewId: number, expectedRevision: number) =>
-  destroy(`/reviews/${reviewId}`, { expected_revision: expectedRevision });
+  invokeOperation('reviews.discard', { id: reviewId, expected_revision: expectedRevision });
 
 export const submitReview = (
   reviewId: number,
@@ -646,7 +678,8 @@ export const submitReview = (
 ) => invokeOperation('reviews.submit', { id: reviewId, ...body }) as Promise<Review>;
 
 export const retargetReviewToCurrent = (reviewId: number, expectedRevision: number) =>
-  post(`/reviews/${reviewId}/retarget-current`, {
+  invokeOperation('reviews.retarget', {
+    id: reviewId,
     expected_revision: expectedRevision,
   }) as Promise<Review>;
 
@@ -658,7 +691,9 @@ export const setReviewCommentResolution = (
   commentId: number,
   resolved: boolean,
 ) =>
-  post(`/reviews/${reviewId}/comments/${commentId}/resolve`, {
+  invokeOperation('reviews.comments.resolve', {
+    id: reviewId,
+    comment_id: commentId,
     resolved,
   }) as Promise<ReviewComment>;
 
@@ -677,13 +712,12 @@ export const handoffSession = (id: string, body: import('./types').HandoffInput)
 export const recoverSession = (id: string) =>
   invokeOperation('sessions.recover', { session: id }) as Promise<Session>;
 /** Resolve a profile-first handoff against an existing session's class and
- * capacity slot before sending its optimistic revisions.
- *
- * UNMAPPED: no `sessions.handoff.resolve` operation exists (only
- * `sessions.handoff` and the pre-launch `sessions.launches.resolve`, which
- * takes no session id at all). */
+ * capacity slot before sending its optimistic revisions. */
 export const resolveSessionHandoff = (id: string, selection: LaunchSelection) =>
-  post(`/sessions/${id}/handoff/resolve`, { selection }) as Promise<ResolvedLaunch>;
+  invokeOperation('sessions.handoff.resolve', {
+    selection,
+    session: id,
+  }) as Promise<ResolvedLaunch>;
 
 // --- ACP conversation (protocol='acp' sessions) ----------------------------
 
@@ -698,32 +732,32 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
     session: id,
   }) as Promise<ChatSnapshot>;
 
-// UNMAPPED: no `sessions.prompt` operation exists for either the "send now"
-// or "force queued" ACP prompt paths.
+// `sessions.prompt.create` serves both ACP prompt paths. It takes no `by`: the
+// legacy body's caller-supplied author is gone, and provenance is derived from
+// the credential instead (a dashboard call is a human, so it records `manual`).
 /** Send a user message to an ACP session now, stopping and replacing a live turn. */
-export const promptSession = (id: string, text: string, by?: string, files: string[] = []) =>
-  post(`/sessions/${id}/prompt`, {
+export const promptSession = (id: string, text: string, files: string[] = []) =>
+  invokeOperation('sessions.prompt.create', {
     text,
-    by,
     send_now: true,
     files,
+    session: id,
   }) as Promise<PromptAck>;
 
 /** Send all durable next-turn feedback now, stopping a live turn first. */
-export const forceQueuedSession = (id: string, by?: string) =>
-  post(`/sessions/${id}/prompt`, {
+export const forceQueuedSession = (id: string) =>
+  invokeOperation('sessions.prompt.create', {
     text: '',
-    by,
     force_queued: true,
     files: [],
+    session: id,
   }) as Promise<PromptAck>;
 
-// UNMAPPED: no operation retracts the queued-prompt (`DELETE .../prompt`).
 /** Atomically pull unseen next-turn feedback out of the server queue so it can
  * be edited in the composer. A 409 means the current ACP state has no queue
  * available to retract. */
 export const retractQueuedSession = (id: string) =>
-  del(`/sessions/${id}/prompt`) as Promise<{ text: string }>;
+  invokeOperation('sessions.prompt.retract', { session: id }) as Promise<{ text: string }>;
 
 /** Worktree-backed completion for `@file` mentions in the ACP composer. */
 export const listSessionFiles = (id: string, query: string) =>
@@ -734,15 +768,18 @@ export const listSessionFiles = (id: string, query: string) =>
 export const interruptSession = (id: string) =>
   invokeOperation('sessions.interrupt', { session: id }) as Promise<{ interrupted: boolean }>;
 
-// UNMAPPED: no operation answers an in-flight ACP permission prompt (distinct
-// from `permissions.requests.approve/deny`, which decide a human-approved
-// GitHub-access request, not an agent runtime's tool-call permission option).
 /** Answer a pending permission request (`{option_id}`). 404 for an unknown id,
- *  409 when it was already resolved. */
+ *  409 when it was already resolved. `sessions.permissions.answer` — distinct
+ *  from `permissions.requests.approve`/`.deny`, which decide a human-approved
+ *  GitHub-access request rather than an agent runtime's tool-call prompt — does
+ *  still accept `by` (a watch name, blank for `manual`), unlike
+ *  `sessions.prompt.create`, so the parameter stays. */
 export const answerPermission = (id: string, requestId: string, optionId: string, by?: string) =>
-  post(`/sessions/${id}/permissions/${encodeURIComponent(requestId)}`, {
+  invokeOperation('sessions.permissions.answer', {
+    request_id: requestId,
     option_id: optionId,
     by,
+    session: id,
   }) as Promise<{ resolved: boolean; option_id: string }>;
 
 /** Change an ACP session's mode (`session/set_mode`). */
@@ -751,11 +788,14 @@ export const setSessionMode = (id: string, modeId: string, by?: string) =>
     mode_id: string;
   }>;
 
-// UNMAPPED: no `sessions.config` operation exists.
 /** Change an agent-owned ACP session configuration selector (model, reasoning
  * effort, or an adapter-specific option). */
 export const setSessionConfigOption = (id: string, configId: string, value: string | boolean) =>
-  put(`/sessions/${id}/config/${encodeURIComponent(configId)}`, { value }) as Promise<{
+  invokeOperation('sessions.config.set', {
+    config_id: configId,
+    value,
+    session: id,
+  }) as Promise<{
     config_id: string;
     value: string | boolean;
     metadata: AcpMetadata;
@@ -816,9 +856,8 @@ export const setProfileEnv = (profile: string, name: string, value: string) =>
 export const deleteProfileEnv = (profile: string, name: string) =>
   invokeOperation('profiles.env.delete', { profile, name }) as Promise<Profile>;
 
-// UNMAPPED: no `shell.restart` operation exists.
 /** Reset the operator scratch shell — kill it and spawn a fresh login shell. */
-export const restartShell = () => post('/shell/restart');
+export const restartShell = () => invokeOperation('shell.restart', {});
 
 // --- Authentication --------------------------------------------------------
 
@@ -889,13 +928,13 @@ export const setUserRole = (username: string, role: UserRole) =>
 /** Remove an approved operator. */
 export const removeUser = (username: string) => invokeOperation('auth.users.remove', { username });
 
-// UNMAPPED: no `preferences.*` operation bundle exists.
 /** Effective preferences for the signed-in user. */
-export const getPreferences = () => get('/preferences') as Promise<UserPreferencesEnvelope>;
+export const getPreferences = () =>
+  invokeOperation('preferences.get', {}) as Promise<UserPreferencesEnvelope>;
 
 /** Set personal overrides; null clears a key back to its deployment value. */
 export const patchPreferences = (changes: Record<string, string | null>) =>
-  patch('/preferences', changes) as Promise<UserPreferencesEnvelope>;
+  invokeOperation('preferences.patch', { changes }) as Promise<UserPreferencesEnvelope>;
 
 /** The GitHub App / sign-in config (secret withheld). */
 export const getGithubConfig = () =>
@@ -927,24 +966,25 @@ export const runWatch = (id: string, dryRun = false) =>
 
 // --- Slack -------------------------------------------------------------
 
-// UNMAPPED: no `slack.*` operation bundle exists.
 /** Read-only Slack connection state — configured/connected plus the bot
- *  identity or error (`GET /api/slack/status`). */
-export const getSlackStatus = () => get('/slack/status') as Promise<SlackStatus>;
+ *  identity or error (`slack.connection_status`). */
+export const getSlackStatus = () =>
+  invokeOperation('slack.connection_status', {}) as Promise<SlackStatus>;
 
 // --- Server logs / debug ---------------------------------------------------
 
-// UNMAPPED: no `logs.*`/`status`/`diagnostics` operations exist.
 /** A snapshot of the most recent server log lines (oldest first). The live tail
  *  is an EventSource on `logs.stream`, opened directly by the Logs panel. */
 export const getLogs = (limit = 500) =>
-  get(`/logs?limit=${limit}`) as Promise<import('./types').LogLine[]>;
+  invokeOperation('logs.list', { limit }) as Promise<import('./types').LogLine[]>;
 
 /** Build version, pid, and start time of the running server. */
-export const getServerStatus = () => get('/status') as Promise<import('./types').ServerStatus>;
+export const getServerStatus = () =>
+  invokeOperation('diagnostics.status', {}) as Promise<import('./types').ServerStatus>;
 
 /** Redacted durable-state and capacity snapshot for approved operators. */
-export const getDiagnostics = () => get('/diagnostics') as Promise<import('./types').Diagnostics>;
+export const getDiagnostics = () =>
+  invokeOperation('diagnostics.get', {}) as Promise<import('./types').Diagnostics>;
 
 /** Recent detached background tasks (the `@loom` webhook launches that run off the
  *  request), newest first. Operator-only, like the log endpoints. */

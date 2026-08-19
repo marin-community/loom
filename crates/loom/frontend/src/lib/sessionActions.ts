@@ -54,9 +54,12 @@ export function useSessionActions(
     }
   }
 
-  // `branches.update` is the operation here — there is no `sessions.update`.
-  // Its `branch` context field resolves through the same session-id fallback
-  // `require_branch` always has, so the session id works unchanged.
+  // `branches.update` is the operation here. `sessions.update` also exists now
+  // and accepts the same three title operands, but this is a branch-field write
+  // whose result is discarded (the caller reloads), so there is nothing to gain
+  // by switching to the session-scoped wrapper. Its `branch` context field
+  // resolves through the same session-id fallback `require_branch` always has,
+  // so the session id works unchanged.
   const rename = (title: string, expectedTitle: string, expectedProvenance: string) =>
     act('title', async () => {
       await invokeOperation('branches.update', {
