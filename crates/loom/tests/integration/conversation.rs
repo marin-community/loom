@@ -1,5 +1,5 @@
-//! `GET /api/sessions/{id}/conversation` — the normalized iris log behind the
-//! dashboard's Conversation tab.
+//! `sessions.conversation` — the normalized iris log behind the dashboard's
+//! Conversation tab.
 
 use serde_json::json;
 use serial_test::serial;
@@ -19,7 +19,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "chat me", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -30,7 +30,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
     // Before any transcript exists, the endpoint 404s (no conversation yet).
     assert!(
         client
-            .get(&format!("/api/sessions/{id}/conversation"))
+            .post("/api/sessions/conversation", json!({ "session": id }))
             .await
             .is_err(),
         "no transcript yet → 404"
@@ -39,7 +39,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
     plant_claude_transcript(home.path(), &work_dir, "do the work", "Working on it.");
 
     let log = client
-        .get(&format!("/api/sessions/{id}/conversation"))
+        .post("/api/sessions/conversation", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(log["source"], "claude");
@@ -55,7 +55,10 @@ async fn conversation_endpoint_returns_the_iris_log() {
     // The normalized history resource reads the same live terminal transcript,
     // but gives agents a bounded, cursor-paged record contract.
     let latest = client
-        .get(&format!("/api/sessions/{id}/history?limit=1"))
+        .post(
+            "/api/sessions/history/list",
+            json!({ "session": id, "limit": 1 }),
+        )
         .await
         .unwrap();
     assert_eq!(latest["source"], "claude");
@@ -66,9 +69,10 @@ async fn conversation_endpoint_returns_the_iris_log() {
     let cursor = latest["older_cursor"].as_str().unwrap();
 
     let older = client
-        .get(&format!(
-            "/api/sessions/{id}/history?limit=1&before={cursor}"
-        ))
+        .post(
+            "/api/sessions/history/list",
+            json!({ "session": id, "limit": 1, "before": cursor }),
+        )
         .await
         .unwrap();
     assert_eq!(older["records"][0]["role"], "user");
@@ -76,9 +80,10 @@ async fn conversation_endpoint_returns_the_iris_log() {
     assert!(older.get("older_cursor").is_none());
 
     let search = client
-        .get(&format!(
-            "/api/sessions/{id}/history/search?q=WORKING&kinds=message"
-        ))
+        .post(
+            "/api/sessions/history/search",
+            json!({ "session": id, "q": "WORKING", "kinds": ["message"] }),
+        )
         .await
         .unwrap();
     assert_eq!(search["records"].as_array().unwrap().len(), 1);
@@ -88,7 +93,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
     // profile configured it exposes an API-ready unavailable boundary and the
     // exact conversation/artifact cursor that a later ensure would summarize.
     let unavailable = client
-        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .post("/api/sessions/resumption_cue/get", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(unavailable["status"], "unavailable");
@@ -118,15 +123,15 @@ async fn conversation_endpoint_returns_the_iris_log() {
     .await
     .unwrap();
     let cached = client
-        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .post("/api/sessions/resumption_cue/get", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(cached["status"], "generated");
     assert_eq!(cached["text"], "Continue from the verified transcript.");
     let ensured = client
         .post(
-            &format!("/api/sessions/{id}/resumption-cue"),
-            json!({ "force": false }),
+            "/api/sessions/resumption_cue/ensure",
+            json!({ "session": id, "force": false }),
         )
         .await
         .unwrap();
@@ -139,7 +144,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
         .await
         .unwrap();
     let advanced = client
-        .get(&format!("/api/sessions/{id}/resumption-cue"))
+        .post("/api/sessions/resumption_cue/get", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(advanced["status"], "unavailable");
@@ -164,7 +169,7 @@ async fn chat_endpoint_pages_long_journals_from_the_tail() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "long chat", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -189,7 +194,7 @@ async fn chat_endpoint_pages_long_journals_from_the_tail() {
     }
 
     let latest = client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     let blocks = latest["blocks"].as_array().unwrap();
@@ -199,9 +204,10 @@ async fn chat_endpoint_pages_long_journals_from_the_tail() {
     assert_eq!(latest["older_cursor"], json!({ "turn": 0, "seq": 5 }));
 
     let older = client
-        .get(&format!(
-            "/api/sessions/{id}/chat?before_turn=0&before_seq=5"
-        ))
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": id, "before_turn": 0, "before_seq": 5 }),
+        )
         .await
         .unwrap();
     let blocks = older["blocks"].as_array().unwrap();
@@ -221,7 +227,7 @@ async fn acp_history_search_is_literal_filtered_and_honest_about_tool_input() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "search tools", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -261,9 +267,10 @@ async fn acp_history_search_is_literal_filtered_and_honest_about_tool_input() {
     .unwrap();
 
     let page = client
-        .get(&format!(
-            "/api/sessions/{id}/history/search?q=GREEN&kinds=tool_call"
-        ))
+        .post(
+            "/api/sessions/history/search",
+            json!({ "session": id, "q": "GREEN", "kinds": ["tool_call"] }),
+        )
         .await
         .unwrap();
     assert_eq!(page["source"], "acp");
@@ -281,14 +288,20 @@ async fn acp_history_search_is_literal_filtered_and_honest_about_tool_input() {
 
     assert!(
         client
-            .get(&format!("/api/sessions/{id}/history?kinds=made_up"))
+            .post(
+                "/api/sessions/history/list",
+                json!({ "session": id, "kinds": ["made_up"] }),
+            )
             .await
             .is_err(),
         "unknown filters fail closed"
     );
     assert!(
         client
-            .get(&format!("/api/sessions/{id}/history/search?q="))
+            .post(
+                "/api/sessions/history/search",
+                json!({ "session": id, "q": "" }),
+            )
             .await
             .is_err(),
         "empty searches are rejected"

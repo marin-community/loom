@@ -219,28 +219,26 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         .unwrap()
         .is_empty());
     let hidden_mutation = reqwest::Client::new()
-        .patch(format!("http://{}/api/reviews/{}", ts.addr, draft.id))
+        .post(format!("http://{}/api/reviews/update", ts.addr))
         .bearer_auth(&token)
-        .json(&UpdateReviewReq {
-            expected_revision: added.draft_revision,
-            summary: Some("not mine".to_string()),
-            subject_version: None,
-        })
+        .json(&json!({
+            "id": draft.id,
+            "expected_revision": added.draft_revision,
+            "summary": "not mine",
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(hidden_mutation.status(), StatusCode::NOT_FOUND);
 
     let stale_mutation = reqwest::Client::new()
-        .patch(format!(
-            "http://{}/api/reviews/{}/comments/{}",
-            ts.addr, draft.id, added.comments[0].id
-        ))
-        .json(&UpdateReviewCommentReq {
-            expected_revision: summarized.draft_revision,
-            body: Some("unseen overwrite".to_string()),
-            ..Default::default()
-        })
+        .post(format!("http://{}/api/reviews/comments/update", ts.addr))
+        .json(&json!({
+            "id": draft.id,
+            "comment_id": added.comments[0].id,
+            "expected_revision": summarized.draft_revision,
+            "body": "unseen overwrite",
+        }))
         .send()
         .await
         .unwrap();
@@ -327,14 +325,12 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     );
 
     let stale_retry = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/reviews/{}/submit",
-            ts.addr, draft.id
-        ))
-        .json(&SubmitReviewReq {
-            expected_revision: 0,
-            acknowledge_outdated: true,
-        })
+        .post(format!("http://{}/api/reviews/submit", ts.addr))
+        .json(&json!({
+            "id": draft.id,
+            "expected_revision": 0,
+            "acknowledge_outdated": true,
+        }))
         .send()
         .await
         .unwrap();
@@ -610,7 +606,7 @@ async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> V
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{session_id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": session_id }))
             .await
             .unwrap();
         let count = chat["blocks"]
@@ -639,8 +635,8 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     seed_artifact(&ts, &session).await;
     ts.client
         .post(
-            "/api/sessions/acp-review/prompt",
-            json!({ "text": "wait:1200|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-review", "text": "wait:1200|say:first" }),
         )
         .await
         .unwrap();
@@ -688,7 +684,7 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let chat = ts
         .client
-        .get("/api/sessions/acp-review/chat")
+        .post("/api/sessions/chat", json!({ "session": "acp-review" }))
         .await
         .unwrap();
     assert_eq!(
@@ -714,8 +710,8 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     seed_artifact(&ts, &original).await;
     ts.client
         .post(
-            "/api/sessions/acp-review-rehome/prompt",
-            json!({ "text": "wait:30000|say:keep-busy" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-review-rehome", "text": "wait:30000|say:keep-busy" }),
         )
         .await
         .unwrap();
@@ -723,7 +719,10 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     // the subsequently submitted review in the protected inbox so a successor
     // can prove the cross-runtime rehome path.
     ts.client
-        .post("/api/sessions/acp-review-rehome/interrupt", json!({}))
+        .post(
+            "/api/sessions/interrupt",
+            json!({ "session": "acp-review-rehome" }),
+        )
         .await
         .unwrap();
     let rehomed = draft_with_comment(&ts, &original, "Rehome this immutable review.").await;

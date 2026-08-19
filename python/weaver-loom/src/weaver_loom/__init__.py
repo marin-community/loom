@@ -1,9 +1,11 @@
 """weaver_loom — the Python layer over the loom REST API.
 
-Everything loom can do is exposed over HTTP (`crates/loom/src/web.rs`); this
-module is a convenience layer on top, nothing more. It holds no state the API
-doesn't, and a script could always speak HTTP directly — the loom daemon stays
-the single owner of the live runtime either way.
+Everything loom can do is exposed over HTTP through the operation registry
+(`crates/weaver-api/src/operations/**`, one JSON operation per `POST
+/api/<id with dots replaced by slashes>`); this module is a convenience layer
+on top, nothing more. It holds no state the API doesn't, and a script could
+always speak HTTP directly — the loom daemon stays the single owner of the
+live runtime either way.
 
 Two pieces:
 
@@ -331,26 +333,30 @@ class Client:
         """Every non-automation active session.
 
         Watch surveys must not inspect the automation sessions they launch;
-        ``class`` is the durable recursion guard.
+        ``class`` is the durable recursion guard. ``sessions.list`` (unlike the
+        retired ``automation=false`` query filter) always includes them, so
+        this filters client-side instead — the same result, since the server's
+        old filter was exactly this same ``class`` check.
         """
-        return self._request("GET", "/sessions?automation=false")
+        sessions = self._request("POST", "/sessions/list", {}) or []
+        return [s for s in sessions if s.get("class") != "automation"]
 
     def session(self, key):
         """One session by id, branch id, branch name, or ``repo:branch``."""
-        return self._request("GET", f"/sessions/{key}")
+        return self._request("POST", "/sessions/get", {"session": key})
 
     def preview(self, key, lines=0):
         """The session's terminal as text, with ``lines`` of scrollback."""
-        reply = self._request("GET", f"/sessions/{key}/preview?lines={lines}")
+        reply = self._request("POST", "/sessions/preview", {"session": key, "lines": lines})
         return (reply or {}).get("screen", "")
 
     def changes(self, key):
         """Typed, bounded worktree changes relative to the session's local base."""
-        return self._request("GET", f"/sessions/{key}/changes")
+        return self._request("POST", "/sessions/changes", {"session": key})
 
     def programs(self):
         """The builtin watch program registry."""
-        return self._request("GET", "/watches/programs")
+        return self._request("POST", "/watches/programs", {})
 
     def agent(self, prompt, model="", effort="", runtime="", profile=""):
         """Run a fresh ACP prompt in the daemon and return its text, or ``None``
@@ -368,7 +374,7 @@ class Client:
             body["agent"] = runtime
         reply = self._request(
             "POST",
-            "/agent/oneshot",
+            "/agents/oneshot",
             body,
         )
         return (reply or {}).get("output")
@@ -386,7 +392,7 @@ class Client:
             body["watch_id"] = self.watch_id
         return self._request(
             "POST",
-            "/runs",
+            "/runs/create",
             body,
         )
 
@@ -395,34 +401,53 @@ class Client:
     def set_tag(self, key, tag_key, value, note="", by=None):
         """Set (upsert) a tag on a session; needs ``mark``."""
         self._gate("mark")
-        body = {"value": value, "note": note}
+        body = {"session": key, "key": tag_key, "value": value, "note": note}
         if by is not None:
             body["by"] = by
-        return self._request("PUT", f"/sessions/{key}/tags/{tag_key}", body)
+        return self._request("POST", "/sessions/tags/set", body)
 
     def add_github_labels(self, key, labels):
         """Label the session's current pull request through Loom; needs ``mark``."""
         self._gate("mark")
-        return self._request("POST", f"/sessions/{key}/github/labels", {"labels": labels})
+        return self._request(
+            "POST", "/sessions/github/labels/add", {"session": key, "labels": labels}
+        )
 
     def set_tags(self, key, tags, by=None, clear=None):
-        """Atomically replace this author's complete tag set on a session.
+        """Best-effort replace of this author's complete tag set on a session.
 
-        ``clear`` contains exact ``{"key", "value"}`` lifecycle marks to
-        remove in the same transaction. Needs ``mark``.
+        No atomic bulk-tag operation survives in the registry — only the
+        single-key ``sessions.tags.set``/``sessions.tags.delete`` operations
+        the retired bulk route itself upserted/deleted through — so this
+        reconciles with several requests instead of that route's one
+        transaction: list the session's current tags, drop every one still
+        authored by ``by`` that isn't in the new ``tags``, set every tag in
+        ``tags``, then drop every exact ``{"key", "value"}`` entry in
+        ``clear``. A concurrent writer can interleave with these calls in a
+        way the retired atomic route couldn't. Needs ``mark``.
         """
         self._gate("mark")
-        body = {"tags": tags, "clear": clear or []}
-        if by is not None:
-            body["by"] = by
-        return self._request("PUT", f"/sessions/{key}/tags", body)
+        author = by if by is not None else "manual"
+        desired = tags or []
+        desired_keys = {tag["key"] for tag in desired}
+        current = self._request("POST", "/sessions/tags/list", {"session": key}) or {}
+        for tag in current.get("tags") or []:
+            if tag.get("set_by") == author and tag.get("key") not in desired_keys:
+                self.clear_tag(key, tag["key"], by)
+        for tag in desired:
+            self.set_tag(key, tag["key"], tag["value"], tag.get("note", ""), by)
+        for item in clear or []:
+            self.clear_tag(key, item["key"], by)
+        return self._request("POST", "/sessions/get", {"session": key})
 
     def clear_tag(self, key, tag_key, by=None):
         """Clear a tag — how a loud axis returns to calm; needs ``mark``.
         ``by`` attributes the clear (a watch name)."""
         self._gate("mark")
-        query = f"?by={urllib.parse.quote(by, safe='')}" if by else ""
-        return self._request("DELETE", f"/sessions/{key}/tags/{tag_key}{query}")
+        body = {"session": key, "key": tag_key}
+        if by is not None:
+            body["by"] = by
+        return self._request("POST", "/sessions/tags/delete", body)
 
     def mark(self, key, level, note="", by=None):
         """Stamp the watch's ``triage`` mark; needs ``mark``. A ``level``
@@ -435,15 +460,15 @@ class Client:
         """Type a message into the session's agent pane; needs ``nudge``.
         ``by`` attributes the recorded ``nudge`` audit event."""
         self._gate("nudge")
-        body = {"text": text, "submit": submit}
+        body = {"session": key, "text": text, "submit": submit}
         if by is not None:
             body["by"] = by
-        return self._request("POST", f"/sessions/{key}/send", body)
+        return self._request("POST", "/sessions/send", body)
 
     def interrupt(self, key):
         """Send a break (Escape) to stop the current turn; needs ``interrupt``."""
         self._gate("interrupt")
-        return self._request("POST", f"/sessions/{key}/interrupt", {})
+        return self._request("POST", "/sessions/interrupt", {"session": key})
 
 
 class Round:

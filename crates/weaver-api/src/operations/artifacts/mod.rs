@@ -15,6 +15,7 @@ pub mod delete;
 pub mod get;
 pub mod history;
 pub mod list;
+pub mod raw;
 pub mod threads;
 pub mod url;
 pub mod write;
@@ -22,6 +23,7 @@ pub mod write;
 static OPERATIONS: &[&OperationSpec] = &[
     <list::List as Operation>::SPEC,
     <get::Get as Operation>::SPEC,
+    <raw::Raw as Operation>::SPEC,
     <write::Write as Operation>::SPEC,
     <delete::Delete as Operation>::SPEC,
     <history::History as Operation>::SPEC,

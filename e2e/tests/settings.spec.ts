@@ -6,7 +6,11 @@ test.describe("settings · profiles", () => {
     weaver,
   }) => {
     const registry = (await (
-      await fetch(`${weaver.baseUrl}/api/agents`)
+      await fetch(`${weaver.baseUrl}/api/agents/list`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      })
     ).json()) as {
       agents: {
         kind: string;

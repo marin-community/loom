@@ -119,7 +119,7 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
 
     let session = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "debug shell test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -210,7 +210,7 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     sh0.send(Message::Close(None)).await.ok();
     sh1.send(Message::Close(None)).await.ok();
     client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     let mut swept = false;

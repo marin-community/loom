@@ -60,7 +60,7 @@ and the rule for placing a new module.
 | `crates/loom-watch/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
 | `crates/loom-watch/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom-watch/watches/`, embedded into the binary |
 | `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
-| `crates/loom-agent/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agent/oneshot` |
+| `crates/loom-agent/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agents/oneshot` |
 | `crates/loom-agent/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom-policy/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
 | `crates/loom-policy/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
@@ -350,7 +350,7 @@ than a reason to leave the registry:
 A `Stream` or `Duplex` operation takes its operands from the query string
 (`GET /api/sessions/terminal?session=abc`) rather than from path segments,
 precisely so that its real route equals its derived one. Its handler lives in
-[`crates/loom/src/web/streams.rs`](../crates/loom/src/web/streams.rs) and calls
+[`crates/loom/src/web/encodings.rs`](../crates/loom/src/web/encodings.rs) and calls
 the same `authorize` the JSON dispatcher does — a custom encoding does not mean
 custom authority.
 
@@ -456,7 +456,10 @@ There is **no** `/api/hook` endpoint — see [Status & tags](#status--tags).
 
 **Scratch files** are reference material dropped into the worktree's `scratch/`
 directory (git-ignored, so it never enters the agent's diff). They can be added
-to a live session via `POST /api/sessions/{id}/scratch`, or attached up-front in
+to a live session via `sessions.scratch.write` (`POST
+/api/sessions/scratch/write?session=…&name=…`, the file's bytes as the body —
+the one `io = Upload` operation, since there is no JSON envelope to carry
+operands in and they ride the query string instead), or attached up-front in
 the New Session form: those ride in the create request as `scratch` and are
 written *before* the agent launches, with a note appended to the launch prompt
 so a fresh agent knows the files are there. The stored branch goal stays the
@@ -656,8 +659,8 @@ loud self-report still wins the badge. We don't try to mechanically separate
 good-enough idle signal, and the status watch upgrades it when warranted (below).
 
 The **`attention` tag** is otherwise the agent's own call, set via `loom
-status set --tag <level> [--message "<message>"]`. That calls `POST /api/branches/{key}/status`,
-which writes the tag (and, when a message is given, the `description`) and
+status set --tag <level> [--message "<message>"]`. That calls `sessions.status.set`
+(`POST /api/sessions/status/set`), which writes the tag (and, when a message is given, the `description`) and
 records a `tag` event the monitor re-broadcasts over SSE, atomically in one
 request — `ok` clears the tag, the two loud levels upsert it. The message rides
 the event as its `note`, so the event log carries the full **status trail** —
@@ -668,11 +671,13 @@ and keeps the last message. Last write wins, so an explicit declaration
 overrides the hook-inferred default. The general `loom sessions tags` group
 writes any key the same way, over the
 `branches.tags.set` / `branches.tags.delete` operations; the session-scoped
-`sessions.tags.set` / `sessions.tags.delete` serve the UI. Watches replace their
-complete author-scoped set through one bulk tag transaction. The transaction removes only rows
-still attributed to that watch, so a stale round cannot delete a key another
-actor took over after the round's fleet snapshot; exact `(key, value)` clears
-handle lifecycle marks such as `idle: idle` without a key-only race. The builtin
+`sessions.tags.set` / `sessions.tags.delete` serve the UI. There is no bulk-tag
+operation: a watch reconciling its complete author-scoped set (the
+`weaver_loom` Python client's `set_tags`) lists the branch's current tags and
+issues one `sessions.tags.set` or `sessions.tags.delete` call per key that
+changed. That is no longer one atomic transaction, so a stale round can in
+principle race a concurrent actor's key the way the retired bulk-tag route
+couldn't. The builtin
 status watch, when a session goes idle (the agent's finished-turn hook), asks the
 judge model for the set of tags the session warrants and reconciles its own
 typed marks to that set — never mirroring the agent's own `attention`. When the
@@ -709,8 +714,8 @@ existing tab keeps working before the SPA rewires onto `/chat`). The Vue viewer
 renders the iris log natively — user/assistant turns, collapsible thinking, and
 each tool call with its result — so a session stays reviewable in the UI after
 its terminal is gone. While the agent is still live the tab is also drivable: a
-composer at its foot sends a new prompt straight to the agent pane via `POST
-/api/sessions/{id}/send` (type + Enter), and the log auto-refreshes on the
+composer at its foot sends a new prompt straight to the agent pane via
+`sessions.send` (`POST /api/sessions/send`, type + Enter), and the log auto-refreshes on the
 agent's lifecycle edges (the `status`/`tag` SSE events that fire at each
 turn boundary), so a reply lands without a manual reload. The composer hides
 once the terminal is gone (orphaned/done/archived), leaving the read-only log.
@@ -803,8 +808,8 @@ flag, `reviewDecision`, a rolled-up `checks` verdict (`passing`/`failing`/
 `pending`), head SHA/update age, and mergeability — is written to the loom-owned
 `branch_github` table (one row per branch, keyed `branch_id`) and served as
 `BranchView.github`.
-The dashboard renders it on the session list and session header; `POST
-/api/sessions/{id}/github` forces an immediate re-poll.
+The dashboard renders it on the session list and session header; `sessions.github.refresh`
+(`POST /api/sessions/github/refresh`) forces an immediate re-poll.
 
 The loop self-gates and degrades quietly: it is always spawned but does nothing
 while the `github.poll` setting is off, the GitHub App is unavailable, or the
@@ -815,10 +820,11 @@ than a failure.
 The session header always renders PR and issue association pills, including an
 empty state. Existing associations are direct GitHub links; adjacent edit
 controls keep reassociation secondary. The PR editor can pin an explicit number
-or return to live-branch discovery through `PUT` / `DELETE
-/api/sessions/{id}/github`; the issue editor patches the GitHub link on the
-session's weaver tracking issue, which remains the source of truth for that
-association.
+through `sessions.github.set` (`POST /api/sessions/github/set`) or return to
+live-branch discovery through `sessions.github.clear`
+(`POST /api/sessions/github/clear`); the issue editor patches the GitHub link
+on the session's weaver tracking issue, which remains the source of truth for
+that association.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session
@@ -1072,7 +1078,7 @@ A round runs the **program** the watch names:
 Builtin scripts and custom files run on one executor: an env-stripped
 subprocess that reaches the fleet only through the loom REST API — everything
 loom can do is an HTTP route (including one-shot agent judgement, at
-`POST /api/agent/oneshot`), and Python is purely a convenience layer on top.
+`POST /api/agents/oneshot`), and Python is purely a convenience layer on top.
 There is deliberately no privileged in-Rust program shape: a builtin sees
 exactly the API a custom program sees.
 The contract: `$WEAVER_API` carries the daemon's base URL, `$WEAVER_WATCH`

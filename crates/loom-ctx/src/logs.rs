@@ -428,7 +428,7 @@ mod tests {
         // a unique marker (other tests may share the buffer).
         let subscriber = tracing_subscriber::registry().with(layer());
         tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("http", method = "GET", path = "/api/tasks");
+            let span = tracing::info_span!("http", method = "GET", path = "/api/tasks/list");
             let _g = span.enter();
             tracing::warn!("mark-9f3c authentication required");
         });

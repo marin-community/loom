@@ -1,9 +1,10 @@
 //! The loom ACP client end to end: a real relay supervisor runs the scripted
 //! `fake-acp-agent.mjs`, and `loom::acp` drives it over JSON-RPC while the HTTP
-//! `/chat`, `/prompt`, `/permissions`, `/mode`, and `/interrupt` routes exercise
-//! the same session. The suite shares the server's `AppState` (its ACP registry
-//! is `Arc`-shared), so `loom::acp::start`/`attach` register into the very
-//! registry the routes read.
+//! `sessions.chat`, `sessions.prompt.create`, `sessions.permissions.answer`,
+//! `sessions.config.set`, and `sessions.interrupt` operations exercise the same
+//! session. The suite shares the server's `AppState` (its ACP registry is
+//! `Arc`-shared), so `loom::acp::start`/`attach` register into the very
+//! registry the operations read.
 
 use std::path::Path;
 use std::time::Duration;
@@ -314,7 +315,7 @@ async fn drain_events(
     out
 }
 
-/// Poll `GET /chat` until `pred` accepts the block list, returning the chat body.
+/// Poll `sessions.chat` until `pred` accepts the block list, returning the chat body.
 async fn poll_chat(
     ts: &TestServer,
     id: &str,
@@ -328,7 +329,7 @@ async fn poll_chat(
     .await
 }
 
-/// Poll `GET /chat` until `pred` accepts the whole snapshot.
+/// Poll `sessions.chat` until `pred` accepts the whole snapshot.
 async fn poll_chat_state(
     ts: &TestServer,
     id: &str,
@@ -339,7 +340,7 @@ async fn poll_chat_state(
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .unwrap();
         if pred(&chat) {
@@ -368,7 +369,7 @@ async fn poll_metadata(ts: &TestServer, id: &str, timeout: Duration) -> Value {
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .unwrap();
         if chat["metadata"]["commands"]
@@ -385,7 +386,7 @@ async fn poll_metadata(ts: &TestServer, id: &str, timeout: Duration) -> Value {
 }
 
 /// The adapter owns command discovery and live permission/model/reasoning
-/// controls. The `/chat` snapshot exposes the initial state, a config write
+/// controls. The `sessions.chat` snapshot exposes the initial state, a config write
 /// waits for the ACP response, and the refreshed full option set is returned
 /// and broadcast over SSE.
 #[serial]
@@ -422,9 +423,9 @@ async fn composer_metadata_and_config_options_round_trip() {
         .subscribe();
     let changed = ts
         .client
-        .put(
-            "/api/sessions/acp-meta/config/model",
-            json!({ "value": "fake-deep" }),
+        .post(
+            "/api/sessions/config/set",
+            json!({ "config_id": "model", "value": "fake-deep", "session": "acp-meta" }),
         )
         .await
         .expect("model config changes");
@@ -453,9 +454,9 @@ async fn composer_metadata_and_config_options_round_trip() {
 
     let changed = ts
         .client
-        .put(
-            "/api/sessions/acp-meta/config/mode",
-            json!({ "value": "acceptEdits" }),
+        .post(
+            "/api/sessions/config/set",
+            json!({ "config_id": "mode", "value": "acceptEdits", "session": "acp-meta" }),
         )
         .await
         .expect("permission posture changes");
@@ -472,9 +473,9 @@ async fn composer_metadata_and_config_options_round_trip() {
 
     let changed = ts
         .client
-        .put(
-            "/api/sessions/acp-meta/config/fast-mode",
-            json!({ "value": true }),
+        .post(
+            "/api/sessions/config/set",
+            json!({ "config_id": "fast-mode", "value": true, "session": "acp-meta" }),
         )
         .await
         .expect("boolean config changes");
@@ -492,16 +493,24 @@ async fn composer_metadata_survives_live_task_loss() {
     poll_metadata(&ts, "acp-durable-metadata", Duration::from_secs(5)).await;
 
     ts.client
-        .put(
-            "/api/sessions/acp-durable-metadata/config/model",
-            json!({ "value": "fake-deep" }),
+        .post(
+            "/api/sessions/config/set",
+            json!({
+                "config_id": "model",
+                "value": "fake-deep",
+                "session": "acp-durable-metadata"
+            }),
         )
         .await
         .expect("model config changes");
     ts.client
-        .put(
-            "/api/sessions/acp-durable-metadata/config/thought_level",
-            json!({ "value": "high" }),
+        .post(
+            "/api/sessions/config/set",
+            json!({
+                "config_id": "thought_level",
+                "value": "high",
+                "session": "acp-durable-metadata"
+            }),
         )
         .await
         .expect("effort config changes");
@@ -509,7 +518,10 @@ async fn composer_metadata_survives_live_task_loss() {
     assert!(ts.state.acp.stop("acp-durable-metadata"));
     let chat = ts
         .client
-        .get("/api/sessions/acp-durable-metadata/chat")
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": "acp-durable-metadata" }),
+        )
         .await
         .expect("durable chat remains available");
     let options = chat["metadata"]["config_options"].as_array().unwrap();
@@ -529,7 +541,10 @@ async fn composer_metadata_survives_live_task_loss() {
         .expect("relay re-attaches");
     let attached = ts
         .client
-        .get("/api/sessions/acp-durable-metadata/chat")
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": "acp-durable-metadata" }),
+        )
         .await
         .expect("re-attached chat remains available");
     let attached_options = attached["metadata"]["config_options"].as_array().unwrap();
@@ -634,8 +649,8 @@ async fn new_session_end_to_end() {
     let res = ts
         .client
         .post(
-            "/api/sessions/acp-e2e/prompt",
-            json!({ "text": "say:hello" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:hello", "session": "acp-e2e" }),
         )
         .await
         .unwrap();
@@ -678,7 +693,11 @@ async fn new_session_end_to_end() {
         "a turn-ended event with end_turn"
     );
 
-    let chat = ts.client.get("/api/sessions/acp-e2e/chat").await.unwrap();
+    let chat = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": "acp-e2e" }))
+        .await
+        .unwrap();
     let blocks = chat["blocks"].as_array().unwrap();
     let ks = kinds(blocks);
     assert!(ks.contains(&"user_message".to_string()));
@@ -691,7 +710,11 @@ async fn new_session_end_to_end() {
     );
 
     // The SessionView exposes the ACP fields.
-    let view = ts.client.get("/api/sessions/acp-e2e").await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": "acp-e2e" }))
+        .await
+        .unwrap();
     assert_eq!(view["protocol"], "acp");
     assert!(view["acp_session_id"]
         .as_str()
@@ -716,8 +739,8 @@ async fn chat_stream_route_delivers_sse() {
 
     ts.client
         .post(
-            "/api/sessions/acp-sse/prompt",
-            json!({ "text": "say:streamed" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:streamed", "session": "acp-sse" }),
         )
         .await
         .unwrap();
@@ -770,8 +793,11 @@ async fn claude_task_notification_flushes_autonomous_prose() {
 
     ts.client
         .post(
-            "/api/sessions/acp-task-notification/prompt",
-            json!({ "text": "task-notification:100:background finished" }),
+            "/api/sessions/prompt/create",
+            json!({
+                "text": "task-notification:100:background finished",
+                "session": "acp-task-notification"
+            }),
         )
         .await
         .unwrap();
@@ -820,8 +846,8 @@ async fn claude_task_notification_flushes_autonomous_prose() {
 
     ts.client
         .post(
-            "/api/sessions/acp-task-notification/prompt",
-            json!({ "text": "say:next turn" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:next turn", "session": "acp-task-notification" }),
         )
         .await
         .unwrap();
@@ -856,8 +882,8 @@ async fn tool_call_live_then_journaled() {
 
     ts.client
         .post(
-            "/api/sessions/acp-tool/prompt",
-            json!({ "text": "tool:edit" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "tool:edit", "session": "acp-tool" }),
         )
         .await
         .unwrap();
@@ -893,7 +919,11 @@ async fn tool_call_live_then_journaled() {
         "the diff content survived: {content:?}"
     );
 
-    let chat = ts.client.get("/api/sessions/acp-tool/chat").await.unwrap();
+    let chat = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": "acp-tool" }))
+        .await
+        .unwrap();
     let blocks = chat["blocks"].as_array().unwrap();
     assert_eq!(
         count_kind(blocks, "tool_call"),
@@ -918,8 +948,8 @@ async fn permission_auto_answered_under_no_prompt_modes() {
 
         ts.client
             .post(
-                &format!("/api/sessions/{id}/prompt"),
-                json!({ "text": "permission:secret|say:done" }),
+                "/api/sessions/prompt/create",
+                json!({ "text": "permission:secret|say:done", "session": id }),
             )
             .await
             .unwrap();
@@ -937,7 +967,7 @@ async fn permission_auto_answered_under_no_prompt_modes() {
 
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .unwrap();
         let blocks = chat["blocks"].as_array().unwrap();
@@ -978,8 +1008,11 @@ async fn restricted_session_rejects_unmatched_permission_requests() {
 
     ts.client
         .post(
-            "/api/sessions/acp-restricted/prompt",
-            json!({ "text": "permission:outside-policy|say:continued" }),
+            "/api/sessions/prompt/create",
+            json!({
+                "text": "permission:outside-policy|say:continued",
+                "session": "acp-restricted"
+            }),
         )
         .await
         .unwrap();
@@ -999,7 +1032,7 @@ async fn restricted_session_rejects_unmatched_permission_requests() {
 }
 
 /// 3b. Permission REST-answer: under `default` the request stays open until a
-///     `POST /permissions/{id}` answers it, then the turn completes.
+///     `sessions.permissions.answer` answers it, then the turn completes.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn permission_answered_over_rest() {
@@ -1008,8 +1041,8 @@ async fn permission_answered_over_rest() {
 
     ts.client
         .post(
-            "/api/sessions/acp-rest/prompt",
-            json!({ "text": "permission:edit-file|say:granted" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "permission:edit-file|say:granted", "session": "acp-rest" }),
         )
         .await
         .unwrap();
@@ -1047,8 +1080,8 @@ async fn permission_answered_over_rest() {
     let scoped = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
     let error = scoped
         .post(
-            &format!("/api/sessions/acp-rest/permissions/{request_id}"),
-            json!({ "option_id": "allow-once" }),
+            "/api/sessions/permissions/answer",
+            json!({ "request_id": request_id, "option_id": "allow-once", "session": "acp-rest" }),
         )
         .await
         .unwrap_err();
@@ -1058,8 +1091,8 @@ async fn permission_answered_over_rest() {
     assert!(
         ts.client
             .post(
-                "/api/sessions/acp-rest/permissions/nope",
-                json!({ "option_id": "allow-once" }),
+                "/api/sessions/permissions/answer",
+                json!({ "request_id": "nope", "option_id": "allow-once", "session": "acp-rest" }),
             )
             .await
             .is_err(),
@@ -1069,8 +1102,8 @@ async fn permission_answered_over_rest() {
     let res = ts
         .client
         .post(
-            &format!("/api/sessions/acp-rest/permissions/{request_id}"),
-            json!({ "option_id": "allow-once" }),
+            "/api/sessions/permissions/answer",
+            json!({ "request_id": request_id, "option_id": "allow-once", "session": "acp-rest" }),
         )
         .await
         .unwrap();
@@ -1093,8 +1126,12 @@ async fn permission_answered_over_rest() {
     assert!(
         ts.client
             .post(
-                &format!("/api/sessions/acp-rest/permissions/{request_id}"),
-                json!({ "option_id": "allow-once" }),
+                "/api/sessions/permissions/answer",
+                json!({
+                    "request_id": request_id,
+                    "option_id": "allow-once",
+                    "session": "acp-rest"
+                }),
             )
             .await
             .is_err(),
@@ -1113,22 +1150,29 @@ async fn permission_policy_uses_the_turn_start_mode() {
 
     ts.client
         .post(
-            "/api/sessions/acp-turn-mode/prompt",
-            json!({ "text": "wait:250|permission:old-turn|say:old-done" }),
+            "/api/sessions/prompt/create",
+            json!({
+                "text": "wait:250|permission:old-turn|say:old-done",
+                "session": "acp-turn-mode"
+            }),
         )
         .await
         .unwrap();
     let live = ts
         .client
-        .get("/api/sessions/acp-turn-mode/chat")
+        .post("/api/sessions/chat", json!({ "session": "acp-turn-mode" }))
         .await
         .unwrap();
     assert_eq!(live["effective_mode"], "default");
 
     ts.client
-        .put(
-            "/api/sessions/acp-turn-mode/config/mode",
-            json!({ "value": "bypassPermissions" }),
+        .post(
+            "/api/sessions/config/set",
+            json!({
+                "config_id": "mode",
+                "value": "bypassPermissions",
+                "session": "acp-turn-mode"
+            }),
         )
         .await
         .expect("next-turn mode changes while the turn is live");
@@ -1152,8 +1196,12 @@ async fn permission_policy_uses_the_turn_start_mode() {
     let request_id = old_permission["payload"]["request_id"].as_str().unwrap();
     ts.client
         .post(
-            &format!("/api/sessions/acp-turn-mode/permissions/{request_id}"),
-            json!({ "option_id": "allow-once" }),
+            "/api/sessions/permissions/answer",
+            json!({
+                "request_id": request_id,
+                "option_id": "allow-once",
+                "session": "acp-turn-mode"
+            }),
         )
         .await
         .unwrap();
@@ -1166,8 +1214,8 @@ async fn permission_policy_uses_the_turn_start_mode() {
     // explicit no-prompt policy safely.
     ts.client
         .post(
-            "/api/sessions/acp-turn-mode/prompt",
-            json!({ "text": "permission:new-turn|say:new-done" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "permission:new-turn|say:new-done", "session": "acp-turn-mode" }),
         )
         .await
         .unwrap();
@@ -1207,8 +1255,8 @@ async fn prompt_queues_during_a_live_turn() {
     let first = ts
         .client
         .post(
-            "/api/sessions/acp-queue/prompt",
-            json!({ "text": "wait:700|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:700|say:first", "session": "acp-queue" }),
         )
         .await
         .unwrap();
@@ -1220,8 +1268,8 @@ async fn prompt_queues_during_a_live_turn() {
     let second = ts
         .client
         .post(
-            "/api/sessions/acp-queue/prompt",
-            json!({ "text": "say:second" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:second", "session": "acp-queue" }),
         )
         .await
         .unwrap();
@@ -1230,8 +1278,8 @@ async fn prompt_queues_during_a_live_turn() {
     let third = ts
         .client
         .post(
-            "/api/sessions/acp-queue/prompt",
-            json!({ "text": "say:third" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:third", "session": "acp-queue" }),
         )
         .await
         .unwrap();
@@ -1286,16 +1334,16 @@ async fn queued_prompt_can_be_retracted_for_editing() {
 
     ts.client
         .post(
-            "/api/sessions/acp-edit-queue/prompt",
-            json!({ "text": "wait:900|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:900|say:first", "session": "acp-edit-queue" }),
         )
         .await
         .unwrap();
     let queued = ts
         .client
         .post(
-            "/api/sessions/acp-edit-queue/prompt",
-            json!({ "text": "say:revise me" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:revise me", "session": "acp-edit-queue" }),
         )
         .await
         .unwrap();
@@ -1303,14 +1351,17 @@ async fn queued_prompt_can_be_retracted_for_editing() {
 
     let retracted = ts
         .client
-        .delete("/api/sessions/acp-edit-queue/prompt")
+        .post(
+            "/api/sessions/prompt/retract",
+            json!({ "session": "acp-edit-queue" }),
+        )
         .await
         .unwrap();
     assert_eq!(retracted["text"], "say:revise me");
 
     let chat = ts
         .client
-        .get("/api/sessions/acp-edit-queue/chat")
+        .post("/api/sessions/chat", json!({ "session": "acp-edit-queue" }))
         .await
         .unwrap();
     assert!(chat["pending_prompt"].is_null());
@@ -1343,16 +1394,16 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
 
     ts.client
         .post(
-            "/api/sessions/acp-queue-failure/prompt",
-            json!({ "text": "wait:300|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:300|say:first", "session": "acp-queue-failure" }),
         )
         .await
         .unwrap();
     let queued = ts
         .client
         .post(
-            "/api/sessions/acp-queue-failure/prompt",
-            json!({ "text": "say:must-stay-queued" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:must-stay-queued", "session": "acp-queue-failure" }),
         )
         .await
         .unwrap();
@@ -1398,7 +1449,10 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
 
     let chat = ts
         .client
-        .get("/api/sessions/acp-queue-failure/chat")
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": "acp-queue-failure" }),
+        )
         .await
         .unwrap();
     assert_eq!(chat["pending_prompt"], "say:must-stay-queued");
@@ -1428,8 +1482,8 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
     let first = ts
         .client
         .post(
-            "/api/sessions/acp-ignore-steering/prompt",
-            json!({ "text": "wait:500|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:500|say:first", "session": "acp-ignore-steering" }),
         )
         .await
         .unwrap();
@@ -1438,8 +1492,8 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
     let second = ts
         .client
         .post(
-            "/api/sessions/acp-ignore-steering/prompt",
-            json!({ "text": "say:second" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:second", "session": "acp-ignore-steering" }),
         )
         .await
         .unwrap();
@@ -1479,16 +1533,16 @@ async fn prompt_stops_and_sends_the_durable_queue() {
 
     ts.client
         .post(
-            "/api/sessions/acp-stop-and-send/prompt",
-            json!({ "text": "wait:1200|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:1200|say:first", "session": "acp-stop-and-send" }),
         )
         .await
         .unwrap();
     let queued = ts
         .client
         .post(
-            "/api/sessions/acp-stop-and-send/prompt",
-            json!({ "text": "say:feedback" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:feedback", "session": "acp-stop-and-send" }),
         )
         .await
         .unwrap();
@@ -1497,8 +1551,8 @@ async fn prompt_stops_and_sends_the_durable_queue() {
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-stop-and-send/prompt",
-            json!({ "text": "", "force_queued": true }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "", "force_queued": true, "session": "acp-stop-and-send" }),
         )
         .await
         .unwrap();
@@ -1537,16 +1591,16 @@ async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-prompt-now/prompt",
-            json!({ "text": "wait:1200|say:stale" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:1200|say:stale", "session": "acp-prompt-now" }),
         )
         .await
         .unwrap();
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-prompt-now/prompt",
-            json!({ "text": "say:replacement", "send_now": true }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:replacement", "send_now": true, "session": "acp-prompt-now" }),
         )
         .await
         .unwrap();
@@ -1573,7 +1627,7 @@ async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
     }));
 }
 
-/// Cross-session `/send` is control-plane input, not ordinary composer
+/// Cross-session `sessions.send` is control-plane input, not ordinary composer
 /// feedback. It cancels a live turn and starts the message immediately instead
 /// of leaving it in the durable next-turn queue.
 #[serial]
@@ -1584,16 +1638,16 @@ async fn session_send_restarts_a_live_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-send-restart/prompt",
-            json!({ "text": "wait:1200|say:stale" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:1200|say:stale", "session": "acp-send-restart" }),
         )
         .await
         .unwrap();
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-send-restart/send",
-            json!({ "text": "say:take this now" }),
+            "/api/sessions/send",
+            json!({ "text": "say:take this now", "session": "acp-send-restart" }),
         )
         .await
         .unwrap();
@@ -1639,16 +1693,16 @@ async fn prompt_send_now_restarts_a_steerable_live_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-prompt-steer/prompt",
-            json!({ "text": "wait:1200|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:1200|say:first", "session": "acp-prompt-steer" }),
         )
         .await
         .unwrap();
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-prompt-steer/prompt",
-            json!({ "text": "say:injected", "send_now": true }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:injected", "send_now": true, "session": "acp-prompt-steer" }),
         )
         .await
         .unwrap();
@@ -1698,8 +1752,8 @@ async fn prompt_send_now_restarts_a_tool_blocked_live_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-prompt-tool/prompt",
-            json!({ "text": "toolwait:3000:PR monitor|say:stale" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "toolwait:3000:PR monitor|say:stale", "session": "acp-prompt-tool" }),
         )
         .await
         .unwrap();
@@ -1713,8 +1767,8 @@ async fn prompt_send_now_restarts_a_tool_blocked_live_turn() {
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-prompt-tool/prompt",
-            json!({ "text": "say:replacement", "send_now": true }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:replacement", "send_now": true, "session": "acp-prompt-tool" }),
         )
         .await
         .unwrap();
@@ -1741,7 +1795,7 @@ async fn prompt_send_now_restarts_a_tool_blocked_live_turn() {
     }));
 }
 
-/// External `/send` input always stops and starts a normal ACP turn, even when
+/// External `sessions.send` input always stops and starts a normal ACP turn, even when
 /// the adapter advertises private steering.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1758,16 +1812,16 @@ async fn session_send_restarts_a_steerable_live_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-send-steerable/prompt",
-            json!({ "text": "wait:1200|say:stale" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:1200|say:stale", "session": "acp-send-steerable" }),
         )
         .await
         .unwrap();
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-send-steerable/send",
-            json!({ "text": "say:external" }),
+            "/api/sessions/send",
+            json!({ "text": "say:external", "session": "acp-send-steerable" }),
         )
         .await
         .unwrap();
@@ -1817,8 +1871,8 @@ async fn prompt_forwards_validated_file_resources() {
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-resources/prompt",
-            json!({ "text": "resources", "files": ["context.txt"] }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "resources", "files": ["context.txt"], "session": "acp-resources" }),
         )
         .await
         .unwrap();
@@ -1844,8 +1898,8 @@ async fn crash_recovery_replays_without_duplicates() {
 
     ts.client
         .post(
-            "/api/sessions/acp-crash/prompt",
-            json!({ "text": "say:recovered|wait:1500" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:recovered|wait:1500", "session": "acp-crash" }),
         )
         .await
         .unwrap();
@@ -1921,9 +1975,10 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
     let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
+            "/api/sessions/prompt/create",
             json!({
-                "text": "say:before-disconnect|usage:1:10|wait:1000|say:after-disconnect"
+                "text": "say:before-disconnect|usage:1:10|wait:1000|say:after-disconnect",
+                "session": id
             }),
         )
         .await
@@ -1961,9 +2016,20 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
         .unwrap()
         .contains("select Adopt to reconnect"));
 
+    // `peek` and the maximal `limit` keep this read equivalent to the unbounded,
+    // marker-preserving listing this assertion was written against.
     let messages = ts
         .client
-        .get(&format!("/api/channels/{id}/messages"))
+        .post(
+            "/api/channels/messages/list",
+            json!({
+                "channel": id,
+                "kinds": [],
+                "limit": weaver_api::CHANNEL_MESSAGE_LIMIT_MAX,
+                "peek": true,
+                "branch": ""
+            }),
+        )
         .await
         .unwrap();
     assert!(messages.as_array().unwrap().iter().any(|message| {
@@ -2020,8 +2086,8 @@ async fn repair_restores_a_live_relay_after_journal_failure() {
     .unwrap();
     ts.client
         .post(
-            "/api/sessions/acp-repair/prompt",
-            json!({ "text": "usage:1:10|say:survived" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "usage:1:10|say:survived", "session": "acp-repair" }),
         )
         .await
         .unwrap();
@@ -2062,8 +2128,8 @@ async fn repair_restores_a_live_relay_after_journal_failure() {
 
     ts.client
         .post(
-            "/api/sessions/acp-repair/prompt",
-            json!({ "text": "say:still-driveable" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:still-driveable", "session": "acp-repair" }),
         )
         .await
         .expect("the repaired ACP task accepts another prompt");
@@ -2088,7 +2154,10 @@ async fn user_echo_chunks_do_not_duplicate_history() {
     // The adapter echoes two user turns (as after a /compact replay), then replies.
     let script = "echo:what is the PR status|echo:/compact|say:done";
     ts.client
-        .post("/api/sessions/acp-echo/prompt", json!({ "text": script }))
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": script, "session": "acp-echo" }),
+        )
         .await
         .unwrap();
 
@@ -2127,8 +2196,8 @@ async fn interrupt_cancels_the_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-int/prompt",
-            json!({ "text": "wait:3000|say:unreached" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:unreached", "session": "acp-int" }),
         )
         .await
         .unwrap();
@@ -2136,7 +2205,7 @@ async fn interrupt_cancels_the_turn() {
 
     let res = ts
         .client
-        .post("/api/sessions/acp-int/interrupt", json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": "acp-int" }))
         .await
         .unwrap();
     assert_eq!(res["interrupted"], true);
@@ -2152,7 +2221,11 @@ async fn interrupt_cancels_the_turn() {
         "the interrupted turn ended cancelled"
     );
 
-    let chat = ts.client.get("/api/sessions/acp-int/chat").await.unwrap();
+    let chat = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": "acp-int" }))
+        .await
+        .unwrap();
     let blocks = chat["blocks"].as_array().unwrap();
     let turn_end = blocks
         .iter()
@@ -2185,20 +2258,26 @@ async fn interrupt_notice_does_not_leak_below_the_restarted_turn() {
 
     ts.client
         .post(
-            "/api/sessions/acp-int-restart/prompt",
-            json!({ "text": "wait:3000|say:unreached" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:unreached", "session": "acp-int-restart" }),
         )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     ts.client
-        .post("/api/sessions/acp-int-restart/interrupt", json!({}))
+        .post(
+            "/api/sessions/interrupt",
+            json!({ "session": "acp-int-restart" }),
+        )
         .await
         .unwrap();
     ts.client
         .post(
-            "/api/sessions/acp-int-restart/prompt",
-            json!({ "text": "wait:100|tool:other:continued work|say:continued" }),
+            "/api/sessions/prompt/create",
+            json!({
+                "text": "wait:100|tool:other:continued work|say:continued",
+                "session": "acp-int-restart"
+            }),
         )
         .await
         .unwrap();
@@ -2232,30 +2311,33 @@ async fn next_prompt_preserves_feedback_queued_before_an_interrupt() {
 
     ts.client
         .post(
-            "/api/sessions/acp-stop-queue/prompt",
-            json!({ "text": "wait:3000|say:unreached" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:unreached", "session": "acp-stop-queue" }),
         )
         .await
         .unwrap();
     let queued = ts
         .client
         .post(
-            "/api/sessions/acp-stop-queue/prompt",
-            json!({ "text": "say:after stop" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:after stop", "session": "acp-stop-queue" }),
         )
         .await
         .unwrap();
     assert_eq!(queued["queued"], true);
 
     ts.client
-        .post("/api/sessions/acp-stop-queue/interrupt", json!({}))
+        .post(
+            "/api/sessions/interrupt",
+            json!({ "session": "acp-stop-queue" }),
+        )
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     let stopped = ts
         .client
-        .get("/api/sessions/acp-stop-queue/chat")
+        .post("/api/sessions/chat", json!({ "session": "acp-stop-queue" }))
         .await
         .unwrap();
     assert_eq!(stopped["live_turn"], Value::Null);
@@ -2269,8 +2351,8 @@ async fn next_prompt_preserves_feedback_queued_before_an_interrupt() {
     let sent = ts
         .client
         .post(
-            "/api/sessions/acp-stop-queue/prompt",
-            json!({ "text": "say:continue" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:continue", "session": "acp-stop-queue" }),
         )
         .await
         .unwrap();
@@ -2357,7 +2439,7 @@ async fn interrupting_a_review_turn_does_not_redeliver_it() {
     })
     .await;
     ts.client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
 
@@ -2366,7 +2448,7 @@ async fn interrupting_a_review_turn_does_not_redeliver_it() {
     loom::review_delivery::drain(&ts.state).await.unwrap();
     let chat = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(chat["live_turn"], Value::Null);
@@ -2403,8 +2485,8 @@ async fn review_notification_replaces_an_ordinary_live_turn_once() {
     start_new(&ts, id, None, None).await;
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "wait:30000|say:stale-work" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:30000|say:stale-work", "session": id }),
         )
         .await
         .unwrap();
@@ -2446,7 +2528,7 @@ async fn review_notification_replaces_an_ordinary_live_turn_once() {
     loom::review_delivery::drain(&ts.state).await.unwrap();
     let after_retry = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(
@@ -2463,8 +2545,8 @@ async fn review_notification_replaces_an_ordinary_live_turn_once() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "wait:30000|say:must-survive" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:30000|say:must-survive", "session": id }),
         )
         .await
         .unwrap();
@@ -2477,7 +2559,7 @@ async fn review_notification_replaces_an_ordinary_live_turn_once() {
         .unwrap_err();
     let ordinary = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(ordinary["live_turn"], 2);
@@ -2487,7 +2569,7 @@ async fn review_notification_replaces_an_ordinary_live_turn_once() {
             && block["payload"]["stop_reason"] == "cancelled"
     }));
     ts.client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -2505,13 +2587,13 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
     start_new(&ts, id, None, None).await;
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "wait:3000|say:original-finished" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:original-finished", "session": id }),
         )
         .await
         .unwrap();
     ts.client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
     insert_protected_review(&ts, id, delivery_key, payload).await;
@@ -2533,7 +2615,7 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
     loom::review_delivery::drain(&ts.state).await.unwrap();
     let stopped = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(stopped["live_turn"], Value::Null);
@@ -2550,8 +2632,8 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "say:resume" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:resume", "session": id }),
         )
         .await
         .unwrap();
@@ -2566,7 +2648,7 @@ async fn interrupt_pauses_automatic_review_dispatch_until_an_explicit_send() {
     }));
 }
 
-/// The `/chat` routes reject a terminal-backend session with 409.
+/// The chat/prompt operations reject a terminal-backend session with 409.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_routes_reject_terminal_sessions() {
@@ -2574,7 +2656,7 @@ async fn chat_routes_reject_terminal_sessions() {
     let ws = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "terminal", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -2583,7 +2665,7 @@ async fn chat_routes_reject_terminal_sessions() {
 
     assert!(
         ts.client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .is_err(),
         "a terminal session has no chat journal"
@@ -2591,16 +2673,16 @@ async fn chat_routes_reject_terminal_sessions() {
     assert!(
         ts.client
             .post(
-                &format!("/api/sessions/{id}/prompt"),
-                json!({ "text": "hi" })
+                "/api/sessions/prompt/create",
+                json!({ "text": "hi", "session": id })
             )
             .await
             .is_err(),
-        "a terminal session has no /prompt"
+        "a terminal session has no prompt journal to drive"
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -2610,11 +2692,11 @@ async fn chat_routes_reject_terminal_sessions() {
 //
 // Phase-4's protocol axis and turn-driven lifecycle over the *public* API: a
 // custom agent whose ACP adapter is the scripted fake, created through
-// `POST /api/sessions`, then driven and torn down exactly as the dashboard does.
+// `POST /api/sessions/launch`, then driven and torn down exactly as the dashboard does.
 // ---------------------------------------------------------------------------
 
 /// Seed a custom agent whose ACP `launch` command is the scripted fake adapter,
-/// so `POST /api/sessions` resolves `protocol='acp'` and brings it up over a relay.
+/// so `POST /api/sessions/launch` resolves `protocol='acp'` and brings it up over a relay.
 async fn seed_acp_agent(ts: &TestServer, name: &str) {
     seed_acp_agent_with_launch(ts, name, agent_cmd()).await;
 }
@@ -2642,7 +2724,7 @@ async fn seed_acp_agent_with_launch(ts: &TestServer, name: &str, launch: String)
 async fn rest_create(ts: &TestServer, agent: &str, goal: &str) -> Value {
     ts.client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": goal, "cwd": ts.cwd(), "agent": agent }),
         )
         .await
@@ -2673,12 +2755,12 @@ async fn rest_create_uses_the_configured_permission_default() {
     })
     .await;
     ts.client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
 }
 
-/// Poll `GET /api/sessions/{id}` until `pred` accepts the view, returning it.
+/// Poll `sessions.get` until `pred` accepts the view, returning it.
 async fn poll_view(
     ts: &TestServer,
     id: &str,
@@ -2687,7 +2769,11 @@ async fn poll_view(
 ) -> Value {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let view = ts
+            .client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         if pred(&view) {
             return view;
         }
@@ -2700,7 +2786,7 @@ async fn poll_view(
 
 /// A. REST create stamps `protocol='acp'`, seeds the goal as turn 0, and the
 ///    turn-driven lifecycle runs: turn end stamps the quiet `idle` mark, and a
-///    `/send` dispatches turn 1 (clearing `idle`) while recording the nudge audit.
+///    `sessions.send` dispatches turn 1 (clearing `idle`) while recording the nudge audit.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_create_drives_the_turn_lifecycle() {
@@ -2748,8 +2834,8 @@ async fn rest_create_drives_the_turn_lifecycle() {
     let sent = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "wait:1500|say:again" }),
+            "/api/sessions/send",
+            json!({ "text": "wait:1500|say:again", "session": id }),
         )
         .await
         .unwrap();
@@ -2803,14 +2889,18 @@ async fn recover_restarts_a_poisoned_live_acp_runtime() {
         blocks.iter().any(|block| block["kind"] == "turn_end")
     })
     .await;
-    let before = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let before = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     let acp_session_id = before["acp_session_id"].as_str().unwrap().to_string();
 
     for (prompt, error_count) in [("poison", 1), ("say:never reached", 2)] {
         ts.client
             .post(
-                &format!("/api/sessions/{id}/prompt"),
-                json!({ "text": prompt }),
+                "/api/sessions/prompt/create",
+                json!({ "text": prompt, "session": id }),
             )
             .await
             .expect("the live task accepts the prompt");
@@ -2832,7 +2922,7 @@ async fn recover_restarts_a_poisoned_live_acp_runtime() {
 
     let recovered = ts
         .client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": id }))
         .await
         .expect("runtime recovery succeeds");
     assert_eq!(recovered["status"], "running");
@@ -2849,8 +2939,8 @@ async fn recover_restarts_a_poisoned_live_acp_runtime() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "say:healthy again" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:healthy again", "session": id }),
         )
         .await
         .expect("the replacement accepts a prompt");
@@ -2898,7 +2988,7 @@ async fn rest_create_failure_exposes_the_recoverable_error_session() {
     .unwrap();
 
     let response = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions", ts.addr))
+        .post(format!("http://{}/api/sessions/launch", ts.addr))
         .json(&json!({
             "goal": "cannot start",
             "cwd": ts.cwd(),
@@ -2915,7 +3005,11 @@ async fn rest_create_failure_exposes_the_recoverable_error_session() {
         .as_str()
         .unwrap_or("")
         .contains("acp launch failed"));
-    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["status"], "error");
     assert_eq!(branch_tag_value(&view, "attention"), "blocked");
     assert!(!ts.state.acp.is_live(id));
@@ -2956,8 +3050,8 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     let handed = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "fake-b" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "fake-b", "session": id }),
         )
         .await
         .expect("handoff succeeds");
@@ -2995,8 +3089,8 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "say:after" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:after", "session": id }),
         )
         .await
         .expect("replacement accepts later work");
@@ -3058,7 +3152,7 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
     let created = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "goal": "say:before canonical handoff",
@@ -3076,9 +3170,10 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
     let mismatch = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff/resolve"),
+            "/api/sessions/handoff/resolve",
             json!({
-                "selection": { "profile": "automation-target", "overrides": {} }
+                "selection": { "profile": "automation-target", "overrides": {} },
+                "session": id
             }),
         )
         .await
@@ -3094,18 +3189,20 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
     let preview = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff/resolve"),
+            "/api/sessions/handoff/resolve",
             json!({
-                "selection": { "profile": "strict-target", "overrides": {} }
+                "selection": { "profile": "strict-target", "overrides": {} },
+                "session": id
             }),
         )
         .await
         .unwrap();
     assert_eq!(preview["valid"], true);
     let unstamped = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions/{id}/handoff", ts.addr))
+        .post(format!("http://{}/api/sessions/handoff", ts.addr))
         .json(&json!({
-            "selection": { "profile": "strict-target", "overrides": {} }
+            "selection": { "profile": "strict-target", "overrides": {} },
+            "session": id
         }))
         .send()
         .await
@@ -3114,11 +3211,12 @@ async fn canonical_handoff_selects_a_strict_profile_and_rejects_class_mismatch()
     let handed = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
+            "/api/sessions/handoff",
             json!({
                 "selection": { "profile": "strict-target", "overrides": {} },
                 "expected_profile_revision": preview["profile_revision"],
-                "expected_resolver_revision": preview["resolver_revision"]
+                "expected_resolver_revision": preview["resolver_revision"],
+                "session": id
             }),
         )
         .await
@@ -3175,8 +3273,8 @@ async fn same_source_handoffs_to_different_profiles_have_one_winner() {
         previews.push(
             ts.client
                 .post(
-                    &format!("/api/sessions/{id}/handoff/resolve"),
-                    json!({ "selection": { "profile": profile, "overrides": {} } }),
+                    "/api/sessions/handoff/resolve",
+                    json!({ "selection": { "profile": profile, "overrides": {} }, "session": id }),
                 )
                 .await
                 .unwrap(),
@@ -3189,14 +3287,16 @@ async fn same_source_handoffs_to_different_profiles_have_one_winner() {
         .into_iter()
         .zip(previews)
     {
-        let url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        let url = format!("http://{}/api/sessions/handoff", ts.addr);
+        let handoff_id = id.clone();
         tasks.push(tokio::spawn(async move {
             reqwest::Client::new()
                 .post(url)
                 .json(&json!({
                     "selection": { "profile": profile, "overrides": {} },
                     "expected_profile_revision": preview["profile_revision"],
-                    "expected_resolver_revision": preview["resolver_revision"]
+                    "expected_resolver_revision": preview["resolver_revision"],
+                    "session": handoff_id
                 }))
                 .send()
                 .await
@@ -3240,7 +3340,7 @@ async fn same_source_handoffs_to_different_profiles_have_one_winner() {
     ));
     let chat = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(
@@ -3274,11 +3374,12 @@ async fn archive_and_delete_win_against_a_waiting_handoff_without_resurrection()
         })
         .await;
         let permit = ts.state.launch_gate.acquire_session(&id).await;
-        let url = format!("http://{}/api/sessions/{id}/handoff", ts.addr);
+        let url = format!("http://{}/api/sessions/handoff", ts.addr);
+        let handoff_id = id.clone();
         let handoff = tokio::spawn(async move {
             reqwest::Client::new()
                 .post(url)
-                .json(&json!({ "agent": "lifecycle-target" }))
+                .json(&json!({ "agent": "lifecycle-target", "session": handoff_id }))
                 .send()
                 .await
                 .unwrap()
@@ -3288,12 +3389,12 @@ async fn archive_and_delete_win_against_a_waiting_handoff_without_resurrection()
 
         if action == "archive" {
             ts.client
-                .post(&format!("/api/sessions/{id}/archive"), json!({}))
+                .post("/api/sessions/archive", json!({ "session": id }))
                 .await
                 .unwrap();
         } else {
             ts.client
-                .delete(&format!("/api/sessions/{id}"))
+                .post("/api/sessions/delete", json!({ "session": id }))
                 .await
                 .unwrap();
         }
@@ -3372,8 +3473,8 @@ async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
     let handed = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "fake-replacement" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "fake-replacement", "session": id }),
         )
         .await
         .expect("disconnected handoff succeeds");
@@ -3416,16 +3517,16 @@ async fn handoff_rejects_an_inflight_turn_without_stopping_it() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "wait:500|say:finished" }),
+            "/api/sessions/send",
+            json!({ "text": "wait:500|say:finished", "session": id }),
         )
         .await
         .unwrap();
     let err = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "fake-b" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "fake-b", "session": id }),
         )
         .await
         .expect_err("live turn blocks handoff");
@@ -3433,7 +3534,11 @@ async fn handoff_rejects_an_inflight_turn_without_stopping_it() {
         err.to_string().contains("cannot hand off while a turn"),
         "{err}"
     );
-    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["agent_kind"], "fake-a", "old provider stays live");
     poll_chat(&ts, &id, Duration::from_secs(10), |blocks| {
         blocks
@@ -3477,13 +3582,17 @@ async fn handoff_failure_cleans_up_the_replacement() {
     let err = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "broken-acp" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "broken-acp", "session": id }),
         )
         .await
         .expect_err("broken replacement fails");
     assert!(err.to_string().contains("agent handoff failed"), "{err}");
-    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["status"], "error");
     assert_eq!(view["agent_kind"], "broken-acp");
     assert_eq!(view["acp_session_id"], Value::Null);
@@ -3537,7 +3646,7 @@ async fn adopt_can_answer_a_permission_replayed_during_load() {
     let adopt_id = id.clone();
     let adopt = tokio::spawn(async move {
         adopt_client
-            .post(&format!("/api/sessions/{adopt_id}/adopt"), json!({}))
+            .post("/api/sessions/adopt", json!({ "session": adopt_id }))
             .await
     });
 
@@ -3553,8 +3662,8 @@ async fn adopt_can_answer_a_permission_replayed_during_load() {
         match ts
             .client
             .post(
-                &format!("/api/sessions/{id}/permissions/4242"),
-                json!({ "option_id": "allow-once" }),
+                "/api/sessions/permissions/answer",
+                json!({ "request_id": "4242", "option_id": "allow-once", "session": &id }),
             )
             .await
         {
@@ -3578,7 +3687,7 @@ async fn adopt_can_answer_a_permission_replayed_during_load() {
     assert!(ts.state.acp.is_live(&id));
     let chat = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     let permission = chat["blocks"]
@@ -3608,7 +3717,11 @@ async fn adopt_reopens_via_load_without_duplicates() {
         blocks.iter().any(|b| b["kind"] == "turn_end")
     })
     .await;
-    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert!(
         view["acp_session_id"]
             .as_str()
@@ -3631,7 +3744,7 @@ async fn adopt_reopens_via_load_without_duplicates() {
     // Adopt: respawn + `session/load`. The replayed history dedups against the
     // existing journal, so the counts are unchanged (no duplicate blocks).
     ts.client
-        .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+        .post("/api/sessions/adopt", json!({ "session": id }))
         .await
         .expect("adopt succeeds");
     poll_view(&ts, &id, Duration::from_secs(10), |v| {
@@ -3641,7 +3754,7 @@ async fn adopt_reopens_via_load_without_duplicates() {
 
     let chat = ts
         .client
-        .get(&format!("/api/sessions/{id}/chat"))
+        .post("/api/sessions/chat", json!({ "session": id }))
         .await
         .unwrap();
     let blocks = chat["blocks"].as_array().unwrap();
@@ -3665,8 +3778,8 @@ async fn adopt_reopens_via_load_without_duplicates() {
     // cleanly on top of the seeded cursor.
     ts.client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "say:continued" }),
+            "/api/sessions/send",
+            json!({ "text": "say:continued", "session": id }),
         )
         .await
         .expect("post-adopt send dispatches");
@@ -3689,7 +3802,7 @@ async fn adopt_reopens_via_load_without_duplicates() {
     );
 }
 
-/// C. `/conversation` serves the journal as an iris log live, and archiving writes
+/// C. `sessions.conversation` serves the journal as an iris log live, and archiving writes
 ///    the same log to `chat.json` under the configured log dir.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3716,10 +3829,10 @@ async fn conversation_is_live_and_archive_captures_it() {
     })
     .await;
 
-    // `/conversation` maps the live journal to an iris log for the Conversation tab.
+    // `sessions.conversation` maps the live journal to an iris log for the Conversation tab.
     let log = ts
         .client
-        .get(&format!("/api/sessions/{id}/conversation"))
+        .post("/api/sessions/conversation", json!({ "session": id }))
         .await
         .expect("live conversation serves the journal");
     assert_eq!(
@@ -3743,7 +3856,7 @@ async fn conversation_is_live_and_archive_captures_it() {
     // Archiving captures the same log to `chat.json` (from the journal, not a
     // JSONL scrape) under the pinned log dir.
     ts.client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .expect("archive succeeds");
 
@@ -3781,7 +3894,7 @@ async fn archive_recover_restores_the_acp_driver() {
     .await;
 
     ts.client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .expect("archive succeeds");
     assert!(!ts.state.acp.is_live(&id), "archive removes the ACP task");
@@ -3792,7 +3905,7 @@ async fn archive_recover_restores_the_acp_driver() {
 
     let recovered = ts
         .client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": id }))
         .await
         .expect("ACP recovery succeeds");
     assert_eq!(recovered["protocol"], "acp");
@@ -3805,8 +3918,8 @@ async fn archive_recover_restores_the_acp_driver() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{id}/prompt"),
-            json!({ "text": "say:after-recovery" }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:after-recovery", "session": id }),
         )
         .await
         .expect("the recovered ACP task accepts a prompt");
@@ -3818,7 +3931,7 @@ async fn archive_recover_restores_the_acp_driver() {
     .await;
 }
 
-/// D. `/preview` renders the last journal blocks as compact plain text — the CLI's
+/// D. `sessions.preview` renders the last journal blocks as compact plain text — the CLI's
 ///    "what does this session look like right now" for an ACP session.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3835,7 +3948,7 @@ async fn preview_renders_the_journal_tail_as_text() {
 
     let preview = ts
         .client
-        .get(&format!("/api/sessions/{id}/preview"))
+        .post("/api/sessions/preview", json!({ "session": id }))
         .await
         .expect("preview renders the journal tail");
     let screen = preview["screen"].as_str().unwrap();
@@ -3874,7 +3987,7 @@ async fn builtin_codex_launches_over_codex_acp() {
     let created = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "title": "Codex prompt shape", "goal": "say:codex online", "cwd": ts.cwd(),
                     "agent": "codex", "protocol": "acp" }),
         )
@@ -4088,7 +4201,7 @@ async fn adopt_converts_a_terminal_builtin_session_to_acp() {
     .unwrap();
 
     ts.client
-        .post("/api/sessions/acp-convert/adopt", json!({}))
+        .post("/api/sessions/adopt", json!({ "session": "acp-convert" }))
         .await
         .expect("the terminal session adopts");
 

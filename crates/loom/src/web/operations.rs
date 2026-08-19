@@ -98,7 +98,7 @@ where
 /// concrete response type, and an SSE body or a websocket upgrade is not a
 /// `Serialize`. What those operations must *not* skip is the decision — so this
 /// is the same context fill and the same [`authorize`] the JSON dispatcher runs,
-/// factored out and called by the handlers in [`super::streams`].
+/// factored out and called by the handlers in [`super::encodings`].
 ///
 /// `input` is taken by `&mut` because context resolution is half the point: a
 /// session credential naming no session gets its own, exactly as over JSON.
@@ -319,7 +319,7 @@ pub(super) fn registry() -> Vec<Bound> {
     bound.extend(super::session_layout::bound_operations());
     bound.extend(super::sessions::bound_operations());
     bound.extend(super::settings::bound_operations());
-    bound.extend(super::streams::bound_operations());
+    bound.extend(super::encodings::bound_operations());
     bound.extend(super::watches::bound_operations());
     bound.sort_by_key(|entry| entry.operation.id);
     bound

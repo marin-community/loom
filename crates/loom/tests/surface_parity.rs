@@ -30,7 +30,7 @@ const TRANSPORT_ROUTES: &[(&str, &str)] = &[
     // stream needs its arguments in the URL and so could not sit at a derived
     // path. That was wrong twice over: an operand is an operand regardless of
     // encoding, and `?session=…` is a URL. All eight are registered operations
-    // now with `io = Stream` / `io = Duplex`, mounted by `web::streams` at the
+    // now with `io = Stream` / `io = Duplex`, mounted by `web::encodings` at the
     // paths their ids derive — see `hand_mounted_on_purpose` below.
     //
     // Reverse proxy to the embedded editor. This one really is not an operation:

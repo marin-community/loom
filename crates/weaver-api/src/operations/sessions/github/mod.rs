@@ -4,6 +4,7 @@
 //! Distinct from `permissions.github.{grant,revoke}`, which govern *repository
 //! access* for a session — a different resource entirely.
 pub(super) use super::prelude;
+pub mod access;
 pub mod clear;
 pub mod labels;
 pub mod refresh;

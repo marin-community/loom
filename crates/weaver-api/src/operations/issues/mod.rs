@@ -11,6 +11,7 @@ pub(super) use super::prelude;
 
 pub mod actions;
 pub mod backlog;
+pub mod board;
 pub mod close;
 pub mod create;
 pub mod delete;
@@ -18,11 +19,14 @@ pub mod get;
 pub mod list;
 pub mod reopen;
 pub mod tags;
+pub mod update;
 
 static OPERATIONS: &[&OperationSpec] = &[
     <list::List as Operation>::SPEC,
+    <board::Board as Operation>::SPEC,
     <get::Get as Operation>::SPEC,
     <create::Create as Operation>::SPEC,
+    <update::Update as Operation>::SPEC,
     <backlog::create::Create as Operation>::SPEC,
     <close::Close as Operation>::SPEC,
     <reopen::Reopen as Operation>::SPEC,

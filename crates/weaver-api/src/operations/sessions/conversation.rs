@@ -8,7 +8,8 @@ pub mod block;
 
 /// The session's agent conversation as a normalized iris log — the live
 /// transcript when present, else the capture archived alongside it. Oversized
-/// tool payloads are elided to a preview pointing at the full-content route.
+/// tool payloads are elided to a preview naming `sessions.conversation.block`
+/// and the coordinates that fetch the rest.
 #[operation(
     id = "sessions.conversation",
     actor = SessionSelf,

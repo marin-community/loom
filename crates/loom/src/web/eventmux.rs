@@ -43,7 +43,7 @@ use weaver_api::operations::{events, logs as log_operations, session_layout, ses
 use crate::auth::Principal;
 use crate::logs;
 
-use super::streams::authorized;
+use super::encodings::authorized;
 use super::{require_branch, require_session, ApiResult, AppError, AppState};
 
 /// A boxed per-topic stream. Every topic is erased to this so one [`StreamMap`]

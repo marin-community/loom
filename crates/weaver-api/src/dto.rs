@@ -416,7 +416,7 @@ wire_enum!(SessionCreatorFilter {
     OtherUsers => "other-users",
 });
 
-/// Typed filters for `GET /api/sessions/search`.
+/// Typed filters for `sessions.list`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchSessionsOptions {
     #[serde(default, rename = "q")]
@@ -431,6 +431,13 @@ pub struct SearchSessionsOptions {
     pub attention: Option<SessionSearchAttention>,
     #[serde(default)]
     pub creator: Option<SessionCreatorFilter>,
+    /// Include automation-class sessions. `None` takes the operation's default,
+    /// which is to include them; `loom ps` passes `Some(false)`.
+    #[serde(default)]
+    pub automation: Option<bool>,
+    /// Include engine-managed warm sessions. Human credentials only.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// One session's canonical position in the shared Spaces → Groups layout.
@@ -976,6 +983,35 @@ pub struct ProfileEnvMutationReq {
     pub value: Option<String>,
     #[serde(default)]
     pub secret_ref: Option<String>,
+}
+
+/// Result of archiving a custom channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChannelArchiveResult {
+    pub archived: bool,
+}
+
+/// One file in a session's Scratch directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchFileView {
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// Result of writing a Scratch file: the accepted name, its size, and the
+/// worktree-relative path the session sees it at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchWriteResult {
+    pub name: String,
+    pub bytes: u64,
+    pub path: String,
+}
+
+/// Result of deleting a Scratch file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchDeleteResult {
+    pub name: String,
+    pub deleted: bool,
 }
 
 /// Shared upload limits for launch-time and live-session Scratch attachments:
@@ -2291,6 +2327,11 @@ pub struct SelfContextView {
     pub links: SelfContextLinks,
 }
 
+/// Where a session reads its own channel, artifacts, and session record.
+///
+/// Each value is an operation's path, not a per-id URL: the operand these three
+/// reads take is the caller's own context, so a session credential posting an
+/// empty body to any of them gets its own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SelfContextLinks {
     pub channel: String,

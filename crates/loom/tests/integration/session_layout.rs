@@ -12,7 +12,7 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     let created = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "representative layout wiring",
                 "cwd": ts.cwd(),
@@ -25,7 +25,11 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     let session_id = created["id"].as_str().unwrap();
     assert_eq!(created["placement"]["group_id"], "group-user-inbox");
 
-    let seeded = ts.client.get("/api/session-layout").await.unwrap();
+    let seeded = ts
+        .client
+        .post("/api/session_layout/get", json!({}))
+        .await
+        .unwrap();
     assert_eq!(seeded["spaces"].as_array().unwrap().len(), 5);
     assert_eq!(seeded["spaces"][0]["name"], "Later");
     assert_eq!(seeded["spaces"][0]["system_key"], "later");
@@ -44,7 +48,7 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     let with_group = ts
         .client
         .post(
-            "/api/session-layout/groups",
+            "/api/session_layout/groups/create",
             json!({
                 "space_id": "space-user",
                 "name": "Focused",
@@ -68,7 +72,7 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     let moved = ts
         .client
         .post(
-            "/api/session-layout/moves",
+            "/api/session_layout/move",
             json!({
                 "session_ids": [session_id],
                 "destination_group_id": focused_id,
@@ -91,14 +95,14 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
 
     let session = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert_eq!(session["placement"]["group_id"], focused_id);
     assert_eq!(session["placement"]["group_name"], "Focused");
 
     let stale = reqwest::Client::new()
-        .post(format!("http://{}/api/session-layout/moves", ts.addr))
+        .post(format!("http://{}/api/session_layout/move", ts.addr))
         .json(&json!({
             "session_ids": [session_id],
             "destination_group_id": "group-user-inbox",
@@ -137,7 +141,7 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
     assert!(stdout.contains(session_id));
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }

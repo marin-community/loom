@@ -23,6 +23,13 @@ pub struct Input {
     pub body: String,
     /// Link the item to an existing GitHub issue number.
     pub github_issue: Option<i64>,
+    /// Tags to apply in the same transaction as the insert.
+    ///
+    /// Atomic on purpose: the create-issue form stages tags before the item
+    /// exists, and applying them afterwards would leave a window where the board
+    /// shows an untagged item — or, if the second call fails, keeps it untagged.
+    #[operand(json, default = Vec::new())]
+    pub tags: Vec<IssueTagInput>,
     #[operand(context)]
     pub repo_root: String,
     /// The branch that filed this item, for provenance.

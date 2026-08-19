@@ -399,7 +399,7 @@ test.describe('artifacts surface', () => {
     const standalone = page.getByTestId('artifact-image');
     await expect(standalone).toHaveAttribute(
       'src',
-      new RegExp(`/api/sessions/${session.id}/artifacts/A\\.png/raw\\?rev=1$`),
+      new RegExp(`/api/artifacts/raw\\?branch=${session.id}&name=A\\.png&rev=1$`),
     );
     await expect(standalone).toHaveAttribute('alt', 'Screenshot');
     await expect
@@ -407,7 +407,7 @@ test.describe('artifacts surface', () => {
       .toBe(1);
 
     const raw = await page.request.get(
-      `${weaver.baseUrl}/api/sessions/${session.id}/artifacts/A.png/raw`,
+      `${weaver.baseUrl}/api/artifacts/raw?branch=${session.id}&name=A.png`,
     );
     expect(raw.ok()).toBe(true);
     expect(raw.headers()['content-type']).toBe('image/png');
@@ -419,7 +419,7 @@ test.describe('artifacts surface', () => {
     const linked = page.locator('.markdown-body img');
     await expect(linked).toHaveAttribute(
       'src',
-      new RegExp(`/api/sessions/${session.id}/artifacts/A\\.png/raw$`),
+      new RegExp(`/api/artifacts/raw\\?branch=${session.id}&name=A\\.png$`),
     );
     await expect(linked).toHaveAttribute('alt', 'Linked screenshot');
     await expect.poll(() => linked.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBe(1);

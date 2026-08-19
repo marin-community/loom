@@ -7,7 +7,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::channels as ops;
 use weaver_api::{
-    ChannelBindingView, ChannelMessageView, ChannelSubscriptionView, ChannelView,
+    ChannelArchiveResult, ChannelBindingView, ChannelMessageView, ChannelSubscriptionView,
+    ChannelView,
     CreateChannelMessageReq, CreateChannelReq, SendReq, SetChannelReadMarkerReq,
     SetChannelSubscriptionReq,
 };
@@ -638,6 +639,12 @@ pub(super) async fn create_channel_message_operation(
     Ok(message)
 }
 
+/// `channels.create` — open a custom channel in a repository.
+///
+/// The channel belongs to `repo_root`; `branch` only records which branch
+/// opened it. Both are context operands, so a session gets them filled from its
+/// own row and a human from the repo it named — the two callers that used to
+/// need two different routes.
 pub(super) async fn create_channel_operation(
     context: OperationContext,
     input: ops::create::Input,
@@ -648,12 +655,11 @@ pub(super) async fn create_channel_operation(
     let topic = input.topic.trim();
     validate_text("name", name, 1, MAX_NAME_LEN)?;
     validate_text("topic", topic, 0, MAX_TOPIC_LEN)?;
-    let branch = super::require_branch(&st.db, &input.branch).await?;
     let subject = principal_subject(&principal);
     let channel = channels::create_custom(
         &st.db,
-        &branch.repo_root,
-        Some(branch.id.as_str()),
+        &input.repo_root,
+        input.branch.as_deref(),
         name,
         topic,
         &subject,
@@ -668,6 +674,48 @@ pub(super) async fn create_channel_operation(
     .await
     .ok();
     Ok(channel)
+}
+
+/// `channels.archive` — retire a custom channel.
+///
+/// Who may archive is narrower than who may reach the channel, which is why the
+/// creator check stays here: `scope = Branch` gets the caller as far as the
+/// channel, and this decides whether it is theirs to close. A session channel is
+/// refused outright — it follows the session's lifecycle, not a caller's.
+pub(super) async fn archive_channel_operation(
+    context: OperationContext,
+    input: ops::archive::Input,
+) -> ApiResult<ChannelArchiveResult> {
+    let st = context.state;
+    let principal = context.principal;
+    let id = input.channel;
+    let channel = require_channel(&st, &id).await?;
+    if channel.session_id.is_some() {
+        return Err(AppError::conflict(
+            "a session channel follows the session lifecycle",
+        ));
+    }
+    let subject = principal_subject(&principal);
+    if !principal.is_human()
+        && (channel.created_by_kind != subject.kind.as_str() || channel.created_by != subject.id)
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "only the channel creator may archive it",
+        ));
+    }
+    if !channels::archive_custom(&st.db, &id).await? {
+        return Err(AppError::conflict("channel is already archived"));
+    }
+    events::record_system(
+        &st.db,
+        &st.bus,
+        "channel_archived",
+        json!({ "channel_id": id }),
+    )
+    .await
+    .ok();
+    Ok(ChannelArchiveResult { archived: true })
 }
 
 pub(super) async fn set_channel_subscription_operation(
@@ -798,6 +846,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::messages::list::List, _, _>(list_channel_messages_operation),
         register::<ops::messages::create::Create, _, _>(create_channel_message_operation),
         register::<ops::create::Create, _, _>(create_channel_operation),
+        register::<ops::archive::Archive, _, _>(archive_channel_operation),
         register::<ops::subscription::set::Set, _, _>(set_channel_subscription_operation),
         register::<ops::read_marker::set::Set, _, _>(set_channel_read_marker_operation),
         register::<ops::wait::Wait, _, _>(wait_for_channel_message_operation),

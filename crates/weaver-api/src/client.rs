@@ -1,8 +1,8 @@
 //! The typed loom REST client. A thin layer over an untyped JSON `send`: the
 //! untyped `get`/`post`/`patch`/`delete` are kept for callers that pretty-print
-//! raw JSON (the `loom` CLI), and the typed methods over them serialize the
-//! right request DTO and deserialize the right View — the surface the Python
-//! binding wraps.
+//! raw JSON (the `loom` CLI), and the typed methods over them each invoke one
+//! code-registered operation, serializing its `Input` and deserializing its
+//! `Output` — the surface the Python binding wraps.
 
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
@@ -19,18 +19,17 @@ use crate::dto::{
     CreateChannelReq, CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq,
     CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView,
     DecidePermissionRequestReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
-    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
-    ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
-    HistoryPageView, IssueView, McpRegistryView, MoveSessionsReq, NewCommentBody, PatchIssueReq,
-    PatchSessionReq, PatchWatchReq, PermissionRequestView, ProfileReq, ProfileView, ReadinessView,
-    ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq, ResolvedLaunchView,
-    RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto, RunReq, RunView,
-    RunWatchReq, ScratchLimitsView, SearchSessionsOptions, SelfContextView, SendReq,
-    SessionCatchupView, SessionGithubAccessView, SessionGroupPreferenceReq, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq,
-    SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq, SettingsEnvelope,
-    SubmitReviewReq, TagReq, ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq, FederationReq,
+    FederationView, GithubTokenView, HandoffReq, HistoryPageView, IssueView, McpRegistryView,
+    MoveSessionsReq, PatchIssueReq, PatchSessionReq, PatchWatchReq, PermissionRequestView,
+    ProfileReq, ProfileView, ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq,
+    ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
+    ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions,
+    SelfContextView, SendReq, SessionCatchupView, SessionGithubAccessView,
+    SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind, SessionView,
+    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
+    SettingsEnvelope, SubmitReviewReq, ThreadDto, TokenView, UpdateReviewCommentReq,
+    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -69,8 +68,9 @@ impl Client {
 
     // -- URL construction ---------------------------------------------------
 
-    /// Percent-encode a value embedded as a single URL path segment. Branch
-    /// keys in particular are often `repo_root:branch` — a real repo root is
+    /// Percent-encode a value embedded as a single URL path segment. Needed
+    /// only by [`Client::set_tags`], the one method left on a hand-written
+    /// route: a session key can be `repo_root:branch`, and a real repo root is
     /// an absolute path full of `/`, which would otherwise split into extra
     /// path segments the router never matches.
     fn seg(s: &str) -> String {
@@ -201,11 +201,9 @@ impl Client {
     /// segment through [`Self::seg`], which escapes `NON_ALPHANUMERIC` and so
     /// turned every id containing an underscore into a path the server does not
     /// serve — `channels.read_marker.set` was requested as
-    /// `/api/channels/read%5Fmarker/set` and came back 405. `seg` exists for
-    /// *caller-supplied* path segments on the legacy routes, where a channel name
-    /// or branch really can contain a slash. An operation id cannot: it is
-    /// `[a-z0-9_]` joined by dots, which is why the derivation is a plain
-    /// substitution on both sides.
+    /// `/api/channels/read%5Fmarker/set` and came back 405. An operation id
+    /// cannot contain a slash: it is `[a-z0-9_]` joined by dots, which is why
+    /// the derivation is a plain substitution on both sides.
     fn operation_path(id: &str) -> String {
         format!("/api/{}", id.replace('.', "/"))
     }
@@ -240,14 +238,16 @@ impl Client {
         .await
     }
 
+    /// The repository access one session has been granted
+    /// (`sessions.github.access.list`).
     pub async fn session_github_access(
         &self,
         session_id: &str,
     ) -> Result<Vec<SessionGithubAccessView>> {
-        self.get_typed(&format!(
-            "/api/sessions/{}/github/access",
-            Self::seg(session_id)
-        ))
+        use crate::operations::sessions::github::access::list;
+        self.invoke::<list::List>(&list::Input {
+            session: session_id.to_string(),
+        })
         .await
     }
 
@@ -326,6 +326,8 @@ impl Client {
             status: options.status,
             attention: options.attention,
             creator: options.creator,
+            automation: options.automation.unwrap_or(true),
+            managed: options.managed,
         })
         .await
     }
@@ -354,11 +356,12 @@ impl Client {
         id: &str,
         req: &UpdateSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/session-layout/spaces/{}", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::session_layout::spaces::update;
+        self.invoke::<update::Update>(&update::Input {
+            id: id.to_string(),
+            name: req.name.clone(),
+            expected_revision: req.expected_revision,
+        })
         .await
     }
 
@@ -367,11 +370,12 @@ impl Client {
         id: &str,
         req: &DeleteSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(
-            Method::DELETE,
-            &format!("/api/session-layout/spaces/{}", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::session_layout::spaces::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            id: id.to_string(),
+            destination_group_id: req.destination_group_id.clone(),
+            expected_revision: req.expected_revision,
+        })
         .await
     }
 
@@ -393,11 +397,12 @@ impl Client {
         id: &str,
         req: &UpdateSessionGroupReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/session-layout/groups/{}", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::session_layout::groups::update;
+        self.invoke::<update::Update>(&update::Input {
+            id: id.to_string(),
+            name: req.name.clone(),
+            expected_revision: req.expected_revision,
+        })
         .await
     }
 
@@ -406,11 +411,12 @@ impl Client {
         id: &str,
         req: &DeleteSessionGroupReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(
-            Method::DELETE,
-            &format!("/api/session-layout/groups/{}", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::session_layout::groups::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            id: id.to_string(),
+            destination_group_id: req.destination_group_id.clone(),
+            expected_revision: req.expected_revision,
+        })
         .await
     }
 
@@ -457,11 +463,11 @@ impl Client {
         id: &str,
         req: &SessionGroupPreferenceReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/session-layout/groups/{}/preference", Self::seg(id)),
-            Some(req),
-        )
+        use crate::operations::session_layout::groups::preference::set;
+        self.invoke::<set::Set>(&set::Input {
+            id: id.to_string(),
+            collapsed: req.collapsed,
+        })
         .await
     }
 
@@ -469,8 +475,14 @@ impl Client {
         &self,
         req: &SetSessionPlacementDefaultReq,
     ) -> Result<SessionLayoutView> {
-        self.send_typed(Method::PUT, "/api/session-layout/defaults", Some(req))
-            .await
+        use crate::operations::session_layout::defaults::set;
+        self.invoke::<set::Set>(&set::Input {
+            selector_kind: req.selector_kind,
+            selector_value: req.selector_value.clone(),
+            group_id: req.group_id.clone(),
+            expected_revision: req.expected_revision,
+        })
+        .await
     }
 
     pub async fn delete_session_placement_default(
@@ -479,15 +491,12 @@ impl Client {
         value: &str,
         expected_revision: i64,
     ) -> Result<SessionLayoutView> {
-        self.send_typed::<(), SessionLayoutView>(
-            Method::DELETE,
-            &format!(
-                "/api/session-layout/defaults/{}/{}?expected_revision={expected_revision}",
-                kind,
-                Self::seg(value)
-            ),
-            None,
-        )
+        use crate::operations::session_layout::defaults::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            selector_kind: kind,
+            selector_value: value.to_string(),
+            expected_revision,
+        })
         .await
     }
 
@@ -550,10 +559,34 @@ impl Client {
         .await
     }
 
-    /// Launch a new session (`POST /api/sessions`).
+    /// Launch a new session (`sessions.launch`).
     pub async fn create_session(&self, req: &CreateReq) -> Result<SessionView> {
-        self.send_typed(Method::POST, "/api/sessions", Some(req))
-            .await
+        use crate::operations::sessions::launch;
+        self.invoke::<launch::Launch>(&launch::Input {
+            title: req.title.clone(),
+            goal: req.goal.clone(),
+            repo: req.repo.clone(),
+            cwd: req.cwd.clone(),
+            base: req.base.clone(),
+            agent: req.agent.clone(),
+            protocol: req.protocol.clone(),
+            mode: req.mode.clone(),
+            class: req.class.clone(),
+            profile: req.profile.clone(),
+            claim_issue: req.claim_issue,
+            issue: req.issue,
+            parent_branch: req.parent_branch.clone(),
+            name: req.name.clone(),
+            existing_branch: req.existing_branch.clone(),
+            github_issue: req.github_issue,
+            model: req.model.clone(),
+            effort: req.effort.clone(),
+            selection: req.selection.clone(),
+            scratch: req.scratch.clone(),
+            expected_profile_revision: req.expected_profile_revision,
+            expected_resolver_revision: req.expected_resolver_revision.clone(),
+        })
+        .await
     }
 
     /// Resolve and validate a profile selection without launching
@@ -570,71 +603,86 @@ impl Client {
     }
 
     /// Resolve a canonical profile selection in the context of an existing
-    /// session handoff, including honest class and capacity credit.
+    /// session handoff, including honest class and capacity credit
+    /// (`sessions.handoff.resolve`).
     pub async fn resolve_session_handoff(
         &self,
         key: &str,
         req: &ResolveLaunchReq,
     ) -> Result<ResolvedLaunchView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/sessions/{}/handoff/resolve", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::handoff::resolve;
+        self.invoke::<resolve::Resolve>(&resolve::Input {
+            selection: req.selection.clone(),
+            session: key.to_string(),
+        })
         .await
     }
 
-    /// Patch a session's lifecycle / branch fields (`PATCH /api/sessions/{key}`).
+    /// Patch a session's lifecycle / branch fields (`sessions.update`).
+    ///
+    /// `PatchSessionReq`'s `park`/`sort_order` are dropped: they existed only so
+    /// the legacy route could reject a layout client that had not moved to the
+    /// revisioned session-layout operations, and `sessions.update` has no
+    /// operand for either.
     pub async fn patch_session(&self, key: &str, req: &PatchSessionReq) -> Result<SessionView> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/sessions/{}", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::update;
+        self.invoke::<update::Update>(&update::Input {
+            status: req.status.clone(),
+            title: req.title.clone(),
+            expected_title: req.expected_title.clone(),
+            expected_title_provenance: req.expected_title_provenance.clone(),
+            goal: req.goal.clone(),
+            description: req.description.clone(),
+            session: key.to_string(),
+        })
         .await
     }
 
+    /// Regenerate a session's title now, bypassing the confidence guard
+    /// (`sessions.title.regenerate`).
     pub async fn regenerate_session_title(&self, key: &str) -> Result<SessionView> {
-        self.send_typed::<(), _>(
-            Method::POST,
-            &format!("/api/sessions/{}/title/regenerate", Self::seg(key)),
-            None,
-        )
+        use crate::operations::sessions::title::regenerate;
+        self.invoke::<regenerate::Regenerate>(&regenerate::Input {
+            session: key.to_string(),
+        })
         .await
     }
 
+    /// Toggle automatic title generation (`sessions.title.generation.set`).
     pub async fn set_session_title_generation(
         &self,
         key: &str,
         req: &SetTitleGenerationReq,
     ) -> Result<SessionView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/sessions/{}/title-generation", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::title::generation::set;
+        self.invoke::<set::Set>(&set::Input {
+            enabled: req.enabled,
+            session: key.to_string(),
+        })
         .await
     }
 
+    /// The session's current resumption cue (`sessions.resumption_cue.get`).
     pub async fn get_resumption_cue(&self, key: &str) -> Result<ResumptionCueView> {
-        self.send_typed::<(), _>(
-            Method::GET,
-            &format!("/api/sessions/{}/resumption-cue", Self::seg(key)),
-            None,
-        )
+        use crate::operations::sessions::resumption_cue::get;
+        self.invoke::<get::Get>(&get::Input {
+            session: key.to_string(),
+        })
         .await
     }
 
+    /// Generate the resumption cue if it is missing or stale
+    /// (`sessions.resumption_cue.ensure`).
     pub async fn ensure_resumption_cue(
         &self,
         key: &str,
         req: &EnsureResumptionCueReq,
     ) -> Result<ResumptionCueView> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/sessions/{}/resumption-cue", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::resumption_cue::ensure;
+        self.invoke::<ensure::Ensure>(&ensure::Input {
+            force: req.force,
+            session: key.to_string(),
+        })
         .await
     }
 
@@ -655,10 +703,12 @@ impl Client {
         .await
     }
 
-    /// Set (upsert) a tag on a session
-    /// (`PUT /api/sessions/{key}/tags/{tag_key}`). For a loud key (`attention` |
-    /// `triage`) `value` is `attention` | `blocked`; use [`Client::clear_tag`] to
-    /// return to calm rather than setting an `ok` value.
+    /// Set (upsert) a tag on a session (`sessions.tags.set`). For a loud key
+    /// (`attention` | `triage`) `value` is `attention` | `blocked`; use
+    /// [`Client::clear_tag`] to return to calm rather than setting an `ok` value.
+    ///
+    /// The operation answers with the branch projection it wrote, so the session
+    /// view this method promises is re-read afterwards.
     pub async fn set_tag(
         &self,
         key: &str,
@@ -667,25 +717,25 @@ impl Client {
         note: &str,
         by: Option<&str>,
     ) -> Result<SessionView> {
-        let req = TagReq {
+        use crate::operations::sessions::tags::set;
+        self.invoke::<set::Set>(&set::Input {
+            key: tag_key.to_string(),
             value: value.to_string(),
             note: note.to_string(),
             by: by.map(str::to_string),
-        };
-        self.send_typed(
-            Method::PUT,
-            &format!(
-                "/api/sessions/{}/tags/{}",
-                Self::seg(key),
-                Self::seg(tag_key)
-            ),
-            Some(&req),
-        )
-        .await
+            session: key.to_string(),
+        })
+        .await?;
+        self.get_session(key).await
     }
 
     /// Atomically replace every tag authored by `by` on a session. Exact
     /// `(key, value)` entries in `clear` are removed in the same transaction.
+    ///
+    /// The only method still on a hand-written route: the operation surface has
+    /// no author-scoped bulk replacement, and `sessions.tags.set`/`.delete`
+    /// per key would drop both the atomicity and the "remove what this author
+    /// set and no longer wants" half that the status watch depends on.
     pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
         self.send_typed(
             Method::PUT,
@@ -695,32 +745,25 @@ impl Client {
         .await
     }
 
-    /// Clear a tag on a session (`DELETE /api/sessions/{key}/tags/{tag_key}`) —
-    /// how a loud axis returns to calm (`ok`). `by` attributes the clear on
-    /// the audit event (a watch name); the server defaults `manual`.
+    /// Clear a tag on a session (`sessions.tags.delete`) — how a loud axis
+    /// returns to calm (`ok`). `by` attributes the clear on the audit event (a
+    /// watch name); the server defaults `manual`.
+    ///
+    /// Re-reads the session view for the same reason as [`Client::set_tag`].
     pub async fn clear_tag(
         &self,
         key: &str,
         tag_key: &str,
         by: Option<&str>,
     ) -> Result<SessionView> {
-        let query = by
-            .map(|b| {
-                format!(
-                    "?by={}",
-                    percent_encoding::utf8_percent_encode(b, percent_encoding::NON_ALPHANUMERIC)
-                )
-            })
-            .unwrap_or_default();
-        let value = self
-            .delete(&format!(
-                "/api/sessions/{}/tags/{}{query}",
-                Self::seg(key),
-                Self::seg(tag_key)
-            ))
-            .await?;
-        serde_json::from_value(value)
-            .map_err(|e| anyhow!("decoding response from /api/sessions/{key}/tags/{tag_key}: {e}"))
+        use crate::operations::sessions::tags::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            key: tag_key.to_string(),
+            by: by.map(str::to_string),
+            session: key.to_string(),
+        })
+        .await?;
+        self.get_session(key).await
     }
 
     /// Stamp a watch's mark on a session — the `triage` tag. A convenience
@@ -816,8 +859,14 @@ impl Client {
     }
 
     pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
-        self.send_typed(Method::POST, "/api/channels", Some(req))
-            .await
+        use crate::operations::channels::create;
+        self.invoke::<create::Create>(&create::Input {
+            name: req.name.clone(),
+            topic: req.topic.clone(),
+            repo_root: req.repo_root.clone().unwrap_or_default(),
+            branch: None,
+        })
+        .await
     }
 
     pub async fn get_channel(&self, id: &str) -> Result<ChannelView> {
@@ -830,8 +879,12 @@ impl Client {
     }
 
     pub async fn channel_bindings(&self, id: &str) -> Result<Vec<ChannelBindingView>> {
-        self.get_typed(&format!("/api/channels/{}/bindings", Self::seg(id)))
-            .await
+        use crate::operations::channels::bindings::list;
+        self.invoke::<list::List>(&list::Input {
+            channel: id.to_string(),
+            branch: String::new(),
+        })
+        .await
     }
 
     pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
@@ -969,8 +1022,8 @@ impl Client {
     }
 
     /// Append a raw event row to a branch's log — the escape hatch for an
-    /// event kind with no dedicated mutating route (e.g. an agent hook)
-    /// (`POST /api/branches/{key}/events`).
+    /// event kind with no dedicated mutating operation (e.g. an agent hook)
+    /// (`branches.events.create`).
     pub async fn record_branch_event(&self, key: &str, kind: &str, data: Value) -> Result<Value> {
         use crate::operations::branches::events::create;
         let event = self
@@ -985,10 +1038,9 @@ impl Client {
 
     // -- Branch-scoped artifacts ---------------------------------------------
     //
-    // Unlike the session-scoped `/api/sessions/{key}/artifacts*` routes (which
-    // 404 without a live session — the dashboard's normal case), these work
-    // against the branch row directly: what the `loom artifacts` CLI needs,
-    // since it may target a branch with no active session.
+    // The `artifacts.*` operations are addressed by branch, not by session:
+    // what the `loom artifacts` CLI needs, since it may target a branch with no
+    // active session.
 
     /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
     /// every artifact in the repo regardless of scope (`artifacts.list`).
@@ -1023,9 +1075,8 @@ impl Client {
     }
 
     /// Write a new revision of an artifact, creating it if absent
-    /// (`artifacts.write`) — unlike the session-scoped `PUT`, which requires
-    /// the artifact to already exist. `author` is dropped: the operation
-    /// derives the writer from the credential.
+    /// (`artifacts.write`). `author` is dropped: the operation derives the
+    /// writer from the credential.
     pub async fn write_branch_artifact(
         &self,
         key: &str,
@@ -1046,27 +1097,24 @@ impl Client {
     }
 
     /// The dashboard deep-link for a branch artifact, resolved server-side
-    /// (`GET /api/branches/{key}/artifacts/{name}/url`) so it carries the
-    /// externally-visible origin (`auth.base_url`, else the request Host) rather
-    /// than the loopback/wildcard address the agent dials — a `0.0.0.0` link is
-    /// useless to whoever reads it. See `loom session url` for the same pattern.
+    /// (`artifacts.url`) so it carries the externally-visible origin
+    /// (`auth.base_url`, else the request Host) rather than the loopback/wildcard
+    /// address the agent dials — a `0.0.0.0` link is useless to whoever reads it.
+    /// See `loom session url` for the same pattern.
     pub async fn branch_artifact_url(&self, key: &str, name: &str) -> Result<String> {
-        let v = self
-            .get(&format!(
-                "/api/branches/{}/artifacts/{}/url",
-                Self::seg(key),
-                Self::seg(name)
-            ))
+        use crate::operations::artifacts::url;
+        let view = self
+            .invoke::<url::Url>(&url::Input {
+                name: name.to_string(),
+                branch: key.to_string(),
+            })
             .await?;
-        v.get("url")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| anyhow!("server returned no url"))
+        Ok(view.url)
     }
 
     /// Delete an artifact and its whole revision history. `repo: true` targets
     /// the repo-shared row of this name rather than the branch-scoped one
-    /// (`DELETE /api/branches/{key}/artifacts/{name}`).
+    /// (`artifacts.delete`).
     pub async fn delete_branch_artifact(&self, key: &str, name: &str, repo: bool) -> Result<Value> {
         use crate::operations::artifacts::delete;
         let result = self
@@ -1081,9 +1129,8 @@ impl Client {
 
     // -- Branch-scoped discussion ---------------------------------------------
     //
-    // The twin of Loom's session-scoped thread routes, for `loom artifacts
-    // comment/resolve/threads`, which — like every other `weaver` command —
-    // needs no live session.
+    // Addressed by branch for `loom artifacts comment/resolve/threads`, which —
+    // like every other `weaver` command — needs no live session.
 
     /// Every thread on an artifact, open and resolved, each with its comments
     /// (`artifacts.threads.list`).
@@ -1117,8 +1164,9 @@ impl Client {
         .await
     }
 
-    /// Append a reply to an existing thread
-    /// (`POST /api/branches/{key}/artifacts/{name}/threads/{tid}/comments`).
+    /// Append a reply to an existing thread (`artifacts.threads.comment`,
+    /// `target: {"kind": "reply", ...}`). The operation answers with the whole
+    /// thread for both targets, so the appended reply is its last comment.
     pub async fn add_branch_thread_comment(
         &self,
         key: &str,
@@ -1126,19 +1174,20 @@ impl Client {
         thread_id: i64,
         body: &str,
     ) -> Result<CommentDto> {
-        let req = NewCommentBody {
-            body: body.to_string(),
-        };
-        self.send_typed(
-            Method::POST,
-            &format!(
-                "/api/branches/{}/artifacts/{}/threads/{thread_id}/comments",
-                Self::seg(key),
-                Self::seg(name)
-            ),
-            Some(&req),
-        )
-        .await
+        use crate::operations::artifacts::threads::comment;
+        let thread = self
+            .invoke::<comment::Comment>(&comment::Input {
+                name: name.to_string(),
+                body: body.to_string(),
+                target: comment::CommentTarget::Reply { thread_id },
+                branch: key.to_string(),
+            })
+            .await?;
+        thread
+            .comments
+            .into_iter()
+            .next_back()
+            .ok_or_else(|| anyhow!("thread {thread_id} carries no comment after the reply"))
     }
 
     /// Mark a thread resolved (`artifacts.threads.resolve`).
@@ -1161,18 +1210,20 @@ impl Client {
 
     // -- Staged reviews ------------------------------------------------------
 
+    /// A session's reviews for one subject — an artifact, or its change-set
+    /// (`reviews.list`).
     pub async fn list_session_reviews(
         &self,
         session: &str,
         subject_kind: &str,
         subject_key: &str,
     ) -> Result<Vec<ReviewDto>> {
-        self.get_typed(&format!(
-            "/api/sessions/{}/reviews?subject_kind={}&subject_key={}",
-            Self::seg(session),
-            Self::seg(subject_kind),
-            Self::seg(subject_key)
-        ))
+        use crate::operations::reviews::list;
+        self.invoke::<list::List>(&list::Input {
+            subject_kind: review_subject_kind(subject_kind)?,
+            subject_key: subject_key.to_string(),
+            session: session.to_string(),
+        })
         .await
     }
 
@@ -1181,11 +1232,13 @@ impl Client {
         session: &str,
         req: &CreateReviewReq,
     ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/sessions/{}/reviews", Self::seg(session)),
-            Some(req),
-        )
+        use crate::operations::reviews::create;
+        self.invoke::<create::Create>(&create::Input {
+            session: session.to_string(),
+            subject_kind: req.subject_kind,
+            subject_key: req.subject_key.clone(),
+            subject_version: req.subject_version.clone(),
+        })
         .await
     }
 
@@ -1207,7 +1260,8 @@ impl Client {
     }
 
     pub async fn get_review(&self, review_id: i64) -> Result<ReviewDto> {
-        self.get_typed(&format!("/api/reviews/{review_id}")).await
+        use crate::operations::reviews::get;
+        self.invoke::<get::Get>(&get::Input { id: review_id }).await
     }
 
     pub async fn update_review_comment(
@@ -1216,20 +1270,27 @@ impl Client {
         comment_id: i64,
         req: &UpdateReviewCommentReq,
     ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/reviews/{review_id}/comments/{comment_id}"),
-            Some(req),
-        )
+        use crate::operations::reviews::comments::update;
+        self.invoke::<update::Update>(&update::Input {
+            id: review_id,
+            comment_id,
+            expected_revision: req.expected_revision,
+            body: req.body.clone(),
+            subject_version: req.subject_version.clone(),
+            anchor_kind: req.anchor_kind,
+            anchor: req.anchor.clone(),
+        })
         .await
     }
 
     pub async fn update_review(&self, review_id: i64, req: &UpdateReviewReq) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::PATCH,
-            &format!("/api/reviews/{review_id}"),
-            Some(req),
-        )
+        use crate::operations::reviews::update;
+        self.invoke::<update::Update>(&update::Input {
+            id: review_id,
+            expected_revision: req.expected_revision,
+            summary: req.summary.clone(),
+            subject_version: req.subject_version.clone(),
+        })
         .await
     }
 
@@ -1239,21 +1300,24 @@ impl Client {
         comment_id: i64,
         expected_revision: i64,
     ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::DELETE,
-            &format!("/api/reviews/{review_id}/comments/{comment_id}"),
-            Some(&ExpectedReviewRevisionReq { expected_revision }),
-        )
+        use crate::operations::reviews::comments::delete;
+        self.invoke::<delete::Delete>(&delete::Input {
+            id: review_id,
+            comment_id,
+            expected_revision,
+        })
         .await
     }
 
     pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
-        self.send_typed(
-            Method::DELETE,
-            &format!("/api/reviews/{review_id}"),
-            Some(&ExpectedReviewRevisionReq { expected_revision }),
-        )
-        .await
+        use crate::operations::reviews::discard;
+        let result = self
+            .invoke::<discard::Discard>(&discard::Input {
+                id: review_id,
+                expected_revision,
+            })
+            .await?;
+        Ok(serde_json::to_value(result)?)
     }
 
     pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {
@@ -1271,11 +1335,11 @@ impl Client {
         review_id: i64,
         expected_revision: i64,
     ) -> Result<ReviewDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/reviews/{review_id}/retarget-current"),
-            Some(&ExpectedReviewRevisionReq { expected_revision }),
-        )
+        use crate::operations::reviews::retarget;
+        self.invoke::<retarget::Retarget>(&retarget::Input {
+            id: review_id,
+            expected_revision,
+        })
         .await
     }
 
@@ -1285,11 +1349,12 @@ impl Client {
         comment_id: i64,
         resolved: bool,
     ) -> Result<ReviewCommentDto> {
-        self.send_typed(
-            Method::POST,
-            &format!("/api/reviews/{review_id}/comments/{comment_id}/resolve"),
-            Some(&ResolveReviewCommentReq { resolved }),
-        )
+        use crate::operations::reviews::comments::resolve;
+        self.invoke::<resolve::Resolve>(&resolve::Input {
+            id: review_id,
+            comment_id,
+            resolved,
+        })
         .await
     }
 
@@ -1312,10 +1377,32 @@ impl Client {
 
     // -- Issues ---------------------------------------------------------------
 
-    /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
+    /// Patch a work item's title/body/status/GitHub mapping (`issues.update`).
+    ///
+    /// `PatchIssueReq::claimed_branch` had exactly one legal value — `null`,
+    /// meaning "return this to the backlog" — which the operation spells as the
+    /// `unclaim` operand. Naming a branch is still rejected: a claim is made by
+    /// launching a session against the item.
     pub async fn patch_issue(&self, id: i64, req: &PatchIssueReq) -> Result<IssueView> {
-        self.send_typed(Method::PATCH, &format!("/api/issues/{id}"), Some(req))
-            .await
+        use crate::operations::issues::update;
+        if req
+            .claimed_branch
+            .as_ref()
+            .and_then(|branch| branch.as_deref())
+            .is_some_and(|branch| !branch.trim().is_empty())
+        {
+            bail!("claimed_branch can only be cleared; launch a session to claim an issue");
+        }
+        self.invoke::<update::Update>(&update::Input {
+            id,
+            title: req.title.clone(),
+            body: req.body.clone(),
+            status: req.status.clone(),
+            github: req.github.clone(),
+            unclaim: req.claimed_branch.is_some(),
+            repo_root: String::new(),
+        })
+        .await
     }
 
     // -- Settings -------------------------------------------------------------
@@ -1325,9 +1412,10 @@ impl Client {
         self.get_typed("/api/ready").await
     }
 
-    /// Human-readable redacted operational inventory (`GET /api/diagnostics`).
+    /// Human-readable redacted operational inventory (`diagnostics.get`).
     pub async fn diagnostics(&self) -> Result<DiagnosticsView> {
-        self.get_typed("/api/diagnostics").await
+        use crate::operations::diagnostics::get;
+        self.invoke::<get::Get>(&get::Input {}).await
     }
 
     /// Trusted MCP adapters and their provider-neutral capability sets
@@ -1727,6 +1815,16 @@ impl Client {
             .invoke::<revoke::Revoke>(&revoke::Input { id: id.to_string() })
             .await?;
         Ok(serde_json::to_value(result)?)
+    }
+}
+
+/// Parse the wire spelling of a review subject kind, which
+/// [`Client::list_session_reviews`] still takes as a plain string.
+fn review_subject_kind(kind: &str) -> Result<ReviewSubjectKindDto> {
+    match kind.trim() {
+        "artifact" => Ok(ReviewSubjectKindDto::Artifact),
+        "changes" => Ok(ReviewSubjectKindDto::Changes),
+        other => Err(anyhow!("unknown review subject kind `{other}`")),
     }
 }
 

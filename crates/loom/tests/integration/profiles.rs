@@ -74,7 +74,7 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
     crate::fixtures::sh(other_repo.path(), "git", &["commit", "-m", "init"]);
 
     let permit = ts.state.launch_gate.acquire_profile("one-at-a-time").await;
-    let url = format!("http://{}/api/sessions", ts.addr);
+    let url = format!("http://{}/api/sessions/launch", ts.addr);
     let first_http = reqwest::Client::new();
     let first_url = url.clone();
     let first_cwd = ts.cwd();
@@ -154,10 +154,10 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
         1
     );
     ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": session["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }
@@ -451,7 +451,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "profile": "github_comment",
@@ -497,17 +497,17 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     );
     assert!(ts
         .client
-        .put(
-            &format!("/api/sessions/{id}/mode"),
-            json!({ "mode_id": "bypassPermissions" }),
+        .post(
+            "/api/sessions/mode",
+            json!({ "mode_id": "bypassPermissions", "session": id }),
         )
         .await
         .is_err());
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "codex" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "codex", "session": id }),
         )
         .await
         .is_err());
@@ -515,7 +515,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .unwrap();
         if let Some(message) = chat["blocks"]
@@ -658,7 +658,7 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     });
     let first = ts
         .client
-        .post("/api/runs", first_request.clone())
+        .post("/api/runs/create", first_request.clone())
         .await
         .unwrap();
     let second_request = json!({
@@ -674,16 +674,20 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     });
     let second = ts
         .client
-        .post("/api/runs", second_request.clone())
+        .post("/api/runs/create", second_request.clone())
         .await
         .unwrap();
-    let duplicate = ts.client.post("/api/runs", second_request).await.unwrap();
+    let duplicate = ts
+        .client
+        .post("/api/runs/create", second_request)
+        .await
+        .unwrap();
     let mut collision_request = first_request;
     collision_request["channel"] = json!("another-operator");
     collision_request["session"]["goal"] = json!("must not be delivered");
     let collision = ts
         .client
-        .post("/api/runs", collision_request)
+        .post("/api/runs/create", collision_request)
         .await
         .unwrap();
 
@@ -696,16 +700,16 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 
     let sessions = ts
         .client
-        .get("/api/sessions?automation=true")
+        .post("/api/sessions/summary/list", json!({ "automation": true }))
         .await
         .unwrap();
     assert_eq!(sessions.as_array().unwrap().len(), 1);
     let launched = ts
         .client
-        .get(&format!(
-            "/api/sessions/{}",
-            first["session_id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/get",
+            json!({ "session": first["session_id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
     assert_eq!(launched["origin"], "grafana");
@@ -714,10 +718,10 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 
     let chat = ts
         .client
-        .get(&format!(
-            "/api/sessions/{}/chat",
-            first["session_id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": first["session_id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
     let second_deliveries = chat["blocks"]
@@ -923,11 +927,12 @@ async fn deployment_reconcile_rest_journey() {
             .await
             .unwrap()
     });
-    let mutation_url = format!("http://{}/api/agents/custom/shell", ts.addr);
+    let mutation_url = format!("http://{}/api/agents/custom/update", ts.addr);
     let mutation = tokio::spawn(async move {
         reqwest::Client::new()
-            .put(mutation_url)
+            .post(mutation_url)
             .json(&json!({
+                "name": "shell",
                 "label": "Shell changed to ACP",
                 "setup": "",
                 "launch": "node fake-acp.mjs",

@@ -74,7 +74,12 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
     assert_eq!(typed.profiles[0].active, 1);
     assert_eq!(typed.automation_runs.recent_failures.len(), 1);
 
-    let response = http.get(url(&ts, "/api/diagnostics")).send().await.unwrap();
+    let response = http
+        .post(url(&ts, "/api/diagnostics/get"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let diagnostics: Value = response.json().await.unwrap();
     let orphan = diagnostics["sessions"]
@@ -148,11 +153,17 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
         .await
         .unwrap();
 
-    let unauthenticated = http.get(url(&ts, "/api/diagnostics")).send().await.unwrap();
+    let unauthenticated = http
+        .post(url(&ts, "/api/diagnostics/get"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
     let scoped = http
-        .get(url(&ts, "/api/diagnostics"))
+        .post(url(&ts, "/api/diagnostics/get"))
         .bearer_auth(session_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();

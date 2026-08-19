@@ -1346,6 +1346,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 client
                     .invoke::<issue_ops::backlog::create::Create>(
                         &issue_ops::backlog::create::Input {
+                            tags: Vec::new(),
                             title: title.clone(),
                             body: body.unwrap_or_default(),
                             github_issue: github,

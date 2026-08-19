@@ -133,6 +133,16 @@ pub enum Io {
     /// client-side affordance. Getting this backwards silently deletes an MCP
     /// tool, because a non-JSON operation may not have one.
     Upload,
+    /// Raw response body: bytes plus a guessed content type.
+    ///
+    /// The mirror image of `Upload`, and it exists for the same reason: a
+    /// browser reaches these through an `<img src>` or a download link, which is
+    /// a `GET` for bytes and cannot be a JSON POST. Operands arrive in the query
+    /// string, exactly as a stream's do.
+    ///
+    /// Like every other non-JSON encoding this is about the *wire*. An operation
+    /// that answers with base64 inside a JSON envelope stays `Json`.
+    Download,
     /// JSON body plus a browser session-cookie effect.
     ///
     /// Logging in and out are ordinary operations in every respect a caller can
@@ -155,6 +165,7 @@ impl Io {
             Self::Stream => "stream",
             Self::Duplex => "duplex",
             Self::Upload => "upload",
+            Self::Download => "download",
             Self::Session => "session",
         }
     }
@@ -332,7 +343,7 @@ impl OperationSpec {
     pub fn method(&self) -> &'static str {
         match self.io {
             Io::Json | Io::Upload | Io::Session => "POST",
-            Io::Stream | Io::Duplex => "GET",
+            Io::Stream | Io::Duplex | Io::Download => "GET",
         }
     }
 }

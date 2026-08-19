@@ -161,7 +161,7 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
     let remotes = tempfile::tempdir().unwrap();
     let url = make_bare_remote(remotes.path());
     ts.client
-        .post("/api/repos", json!({ "repo": url }))
+        .post("/api/repos/register", json!({ "repo": url }))
         .await
         .unwrap();
     // The webhook's ordinary interactive session has no Account PAT in this
@@ -330,7 +330,7 @@ async fn post_event(
 /// How many sessions the fleet listing shows.
 async fn session_count(ts: &TestServer) -> usize {
     ts.client
-        .get("/api/sessions")
+        .post("/api/sessions/list", json!({}))
         .await
         .unwrap()
         .as_array()
@@ -368,7 +368,11 @@ async fn wait_for_comments(fake: &FakeGithub, n: usize) {
 /// when a test needs to assert the bookkeeping tag rather than racing it.
 async fn wait_for_session_tag(ts: &TestServer, session_id: &str, key: &str) -> serde_json::Value {
     for _ in 0..200 {
-        let sessions = ts.client.get("/api/sessions").await.unwrap();
+        let sessions = ts
+            .client
+            .post("/api/sessions/list", json!({}))
+            .await
+            .unwrap();
         if let Some(session) = sessions.as_array().unwrap().iter().find(|session| {
             session["id"] == session_id
                 && session["branch"]["tags"]
@@ -530,7 +534,11 @@ async fn happy_path_creates_session_and_replies() {
     wait_for_sessions(&ts, 1).await;
 
     // A session now exists, seeded from the issue title.
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let sessions = sessions.as_array().unwrap();
     assert_eq!(
         sessions.len(),
@@ -567,7 +575,7 @@ async fn happy_path_creates_session_and_replies() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -594,7 +602,11 @@ async fn issue_body_mention_creates_session_and_replies() {
     assert_eq!(resp.status(), 200);
 
     wait_for_sessions(&ts, 1).await;
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let session = &sessions.as_array().unwrap()[0];
     let id = session["id"].as_str().unwrap();
     assert_eq!(session["created_by"].as_str(), Some("rjpower"));
@@ -662,7 +674,11 @@ async fn issue_edit_that_introduces_the_mention_creates_a_session() {
 
     wait_for_sessions(&ts, 1).await;
     wait_for_comments(&fake, 1).await;
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let sessions = sessions.as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["created_by"].as_str(), Some("rjpower"));
@@ -694,7 +710,11 @@ async fn comment_edit_that_introduces_the_mention_creates_a_session() {
 
     wait_for_sessions(&ts, 1).await;
     wait_for_comments(&fake, 1).await;
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let sessions = sessions.as_array().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["created_by"].as_str(), Some("rjpower"));
@@ -772,7 +792,11 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     wait_for_sessions(&ts, 1).await;
     wait_for_comments(&fake, 1).await;
 
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let session_id = sessions[0]["id"].as_str().unwrap().to_string();
     let session = wait_for_session_tag(&ts, &session_id, "github.status_comment").await;
     let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
@@ -796,8 +820,8 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     // First status report → the reply is edited in place into the card.
     ts.client
         .post(
-            &format!("/api/branches/{branch_id}/status"),
-            json!({ "level": "ok", "message": "wired the gateway" }),
+            "/api/branches/status/set",
+            json!({ "branch": branch_id, "level": "ok", "message": "wired the gateway" }),
         )
         .await
         .unwrap();
@@ -821,8 +845,8 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     // A second report re-renders the card with the whole trail.
     ts.client
         .post(
-            &format!("/api/branches/{branch_id}/status"),
-            json!({ "level": "attention", "message": "ready for review" }),
+            "/api/branches/status/set",
+            json!({ "branch": branch_id, "level": "attention", "message": "ready for review" }),
         )
         .await
         .unwrap();
@@ -846,7 +870,7 @@ async fn status_writes_mirror_onto_the_on_it_comment() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -882,12 +906,16 @@ async fn replayed_delivery_is_a_noop() {
         "the replay posts no second reply"
     );
 
-    let id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+    let id = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap()[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -941,12 +969,16 @@ async fn repeat_trigger_forwards_to_active_session() {
         "the forward posts no ack comment"
     );
 
-    let id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+    let id = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap()[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -987,12 +1019,16 @@ async fn forward_ack_falls_back_to_a_comment_when_the_reaction_fails() {
         comments[1].2
     );
 
-    let id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+    let id = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap()[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -1019,7 +1055,11 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
     wait_for_sessions(&ts, 1).await;
     wait_for_comments(&fake, 1).await;
 
-    let first_id = ts.client.get("/api/sessions").await.unwrap()[0]["id"]
+    let first_id = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap()[0]["id"]
         .as_str()
         .unwrap()
         .to_string();
@@ -1055,7 +1095,7 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
     for _ in 0..200 {
         let n = ts
             .client
-            .get("/api/sessions?archived=true")
+            .post("/api/sessions/summary/list", json!({ "archived": true }))
             .await
             .unwrap()
             .as_array()
@@ -1068,7 +1108,11 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
     }
     wait_for_comments(&fake, 2).await;
 
-    let sessions = ts.client.get("/api/sessions?archived=true").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/summary/list", json!({ "archived": true }))
+        .await
+        .unwrap();
     let sessions = sessions.as_array().unwrap().clone();
     assert_eq!(sessions.len(), 2, "the archived session plus the fresh one");
     let retired = sessions
@@ -1081,7 +1125,11 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
         "the unreachable session was archived so the branch is free"
     );
     // The default fleet shows only the fresh session.
-    let visible = ts.client.get("/api/sessions").await.unwrap();
+    let visible = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let visible = visible.as_array().unwrap().clone();
     assert_eq!(
         visible.len(),
@@ -1107,7 +1155,7 @@ async fn orphaned_session_terminal_relaunches_instead_of_dropping() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{fresh_id}"))
+        .post("/api/sessions/delete", json!({ "session": fresh_id }))
         .await
         .unwrap();
 }
@@ -1134,7 +1182,11 @@ async fn pr_trigger_attaches_to_pr_head_branch() {
     );
     wait_for_sessions(&ts, 1).await;
 
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let sessions = sessions.as_array().unwrap();
     assert_eq!(sessions.len(), 1, "the PR trigger launched one session");
     assert_eq!(
@@ -1145,7 +1197,7 @@ async fn pr_trigger_attaches_to_pr_head_branch() {
 
     let id = sessions[0]["id"].as_str().unwrap().to_string();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -1176,12 +1228,16 @@ async fn submitted_pr_review_mention_triggers_a_session() {
     );
     wait_for_sessions(&ts, 1).await;
 
-    let sessions = ts.client.get("/api/sessions").await.unwrap();
+    let sessions = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     assert_eq!(sessions[0]["branch"]["branch"].as_str(), Some("feature"));
 
     let id = sessions[0]["id"].as_str().unwrap();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }

@@ -80,7 +80,7 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(context.session_id, id);
     assert_eq!(context.branch_id, created.branch.id);
     assert_eq!(context.channel_id, id);
-    assert_eq!(context.links.channel, format!("/api/channels/{id}"));
+    assert_eq!(context.links.channel, "/api/channels/get");
     let bindings = session_client.channel_bindings(&id).await.unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].id, format!("session:{id}"));
@@ -164,7 +164,10 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(status[0].urgency, "attention");
     assert_eq!(status[0].body, "review the boundary");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 #[serial]
@@ -337,8 +340,12 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     // second Slack reply after an ambiguous client-side failure.
     let retry = client
         .post(
-            &format!("/api/branches/{}/slack/reply", created.branch.id),
-            json!({ "text": "the canonical answer", "idempotency_key": "answer-once" }),
+            "/api/branches/slack/reply",
+            json!({
+                "branch": created.branch.id,
+                "text": "the canonical answer",
+                "idempotency_key": "answer-once"
+            }),
         )
         .await
         .unwrap();
@@ -350,7 +357,7 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     assert_eq!(posted["text"], "the canonical answer");
 
     ts.client
-        .delete(&format!("/api/sessions/{}", created.id))
+        .post("/api/sessions/delete", json!({ "session": created.id }))
         .await
         .unwrap();
     weaver_core::config::apply(&ts.state.db, &[("slack.bot_token".to_string(), None)])

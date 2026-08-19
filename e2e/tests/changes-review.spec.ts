@@ -24,8 +24,9 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
   const refreshedChanges = page.waitForResponse(
     (response) =>
       response.ok() &&
-      response.request().method() === 'GET' &&
-      new URL(response.url()).pathname === `/api/sessions/${session.id}/changes`,
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/sessions/changes' &&
+      (response.request().postDataJSON() as { session?: string })?.session === session.id,
   );
   await page.getByRole('button', { name: 'Refresh' }).click();
   await refreshedChanges;
@@ -34,7 +35,9 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
     (response) =>
       response.status() === 409 &&
       response.request().method() === 'POST' &&
-      /\/api\/(?:sessions\/[^/]+\/reviews|reviews\/\d+\/comments)$/.test(response.url()),
+      ['/api/reviews/create', '/api/reviews/comments/create'].includes(
+        new URL(response.url()).pathname,
+      ),
   );
   await composer.getByRole('button', { name: 'Add pending comment' }).click();
   await staleSave;
@@ -49,8 +52,8 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
   const initialSave = page.waitForResponse(
     (response) =>
       response.ok() &&
-      response.request().method() === 'PATCH' &&
-      /\/api\/reviews\/\d+$/.test(response.url()),
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/reviews/update',
   );
   await overall.fill('Shared overall note.');
   await overall.press('Tab');
@@ -64,7 +67,7 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
     (response) =>
       response.ok() &&
       response.request().method() === 'POST' &&
-      /\/api\/reviews\/\d+\/submit$/.test(response.url()),
+      new URL(response.url()).pathname === '/api/reviews/submit',
   );
   await peer.getByTestId('submit-review').click();
   await peerSubmit;
@@ -72,8 +75,8 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
   const saveConflict = page.waitForResponse(
     (response) =>
       response.status() === 409 &&
-      response.request().method() === 'PATCH' &&
-      /\/api\/reviews\/\d+$/.test(response.url()),
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/reviews/update',
   );
   await overall.focus();
   await overall.press('Tab');
@@ -83,8 +86,8 @@ test('preserves Changes drafts through refresh and peer-submit conflicts', async
   const retrySave = page.waitForResponse(
     (response) =>
       response.ok() &&
-      response.request().method() === 'PATCH' &&
-      /\/api\/reviews\/\d+$/.test(response.url()),
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === '/api/reviews/update',
   );
   await overall.focus();
   await overall.press('Tab');

@@ -31,6 +31,21 @@ pub struct Input {
     /// Filter by who created the session, relative to the caller.
     #[operand(json, default = None)]
     pub creator: Option<SessionCreatorFilter>,
+    /// Include automation-class sessions.
+    ///
+    /// Defaults to including them, which is what a fleet listing means by
+    /// "every session". `loom ps` passes `false` to keep its historical
+    /// interactive-only inventory.
+    #[operand(default = true)]
+    pub automation: bool,
+    /// Include engine-managed warm sessions.
+    ///
+    /// An operator inventory escape hatch, refused to anything but a human
+    /// credential: normal fleet and survey callers must not see a watcher's own
+    /// infrastructure, because a watch that can see its own warm session can
+    /// recurse into it.
+    #[operand(default = false)]
+    pub managed: bool,
 }
 
 pub type Output = Vec<SessionView>;

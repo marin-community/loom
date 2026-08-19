@@ -14,6 +14,8 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use weaver_api::operations::permissions::github::restricted::invoke;
+
 use super::{Adapter, CapabilitySet, ServeFuture};
 
 const SERVER_NAME: &str = "loom_github";
@@ -181,22 +183,18 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     }
     let session_id =
         std::env::var("LOOM_SESSION_ID").context("restricted MCP is missing LOOM_SESSION_ID")?;
-    let path = format!(
-        "/api/sessions/{}/restricted-github/{}",
-        percent_encoding::utf8_percent_encode(&session_id, percent_encoding::NON_ALPHANUMERIC),
-        percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC),
-    );
     let token = weaver_api::endpoint::token_from_env()
         .context("restricted MCP is missing its session-scoped LOOM_TOKEN")?;
-    let value = weaver_api::Client::new(weaver_api::endpoint::base_url())
+    // The session and the tool are operands, not path segments, so neither is
+    // percent-encoded: they travel in the JSON body.
+    let view = weaver_api::Client::new(weaver_api::endpoint::base_url())
         .with_token(Some(token))
-        .post(
-            &path,
-            serde_json::to_value(weaver_api::RestrictedGithubToolReq { arguments })?,
-        )
+        .invoke::<invoke::Invoke>(&invoke::Input {
+            tool: name.to_string(),
+            arguments,
+            session: session_id,
+        })
         .await?;
-    let view: weaver_api::RestrictedGithubToolView =
-        serde_json::from_value(value).context("decoding restricted GitHub tool response")?;
     Ok(json!({
         "content": [{ "type": "text", "text": view.text }],
         "isError": false

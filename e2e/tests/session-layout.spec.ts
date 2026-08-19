@@ -17,7 +17,11 @@ interface Layout {
 }
 
 async function getLayout(baseUrl: string): Promise<Layout> {
-  const response = await fetch(`${baseUrl}/api/session-layout`);
+  const response = await fetch(`${baseUrl}/api/session_layout/get`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
   expect(response.ok).toBe(true);
   return (await response.json()) as Layout;
 }
@@ -29,7 +33,7 @@ async function move(
   beforeSessionId?: string,
 ) {
   const current = await getLayout(baseUrl);
-  const response = await fetch(`${baseUrl}/api/session-layout/moves`, {
+  const response = await fetch(`${baseUrl}/api/session_layout/move`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -73,7 +77,7 @@ async function seedAutomationSession(
   baseUrl: string,
   repoPath: string,
 ): Promise<{ id: string }> {
-  const response = await fetch(`${baseUrl}/api/sessions`, {
+  const response = await fetch(`${baseUrl}/api/sessions/launch`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -90,14 +94,13 @@ async function seedAutomationSession(
 }
 
 async function createFailedRun(baseUrl: string) {
-  const response = await fetch(`${baseUrl}/api/runs`, {
+  const response = await fetch(`${baseUrl}/api/runs/create`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       profile: "default",
       idempotency_key: `failed-workbench-${Date.now()}`,
       source: "ops",
-      service_tag: "fleet-maintenance",
       session: {
         cwd: "/definitely/missing/automation-repo",
         title: "failed-automation-task",
@@ -109,7 +112,13 @@ async function createFailedRun(baseUrl: string) {
   expect(response.ok).toBe(false);
   await expect
     .poll(async () => {
-      const runs = (await (await fetch(`${baseUrl}/api/runs`)).json()) as {
+      const runs = (await (
+        await fetch(`${baseUrl}/api/runs/list`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({}),
+        })
+      ).json()) as {
         status: string;
       }[];
       return runs[0]?.status;
@@ -185,7 +194,7 @@ test.describe("durable session workbench", () => {
       goal: "Third keyboard-operated task",
       name: "keyboard-mailbox-three",
     });
-    await page.route("**/api/sessions/summary**", async (route) => {
+    await page.route("**/api/sessions/summary/list", async (route) => {
       const response = await route.fetch();
       const summaries = (await response.json()) as Array<{
         id: string;
@@ -348,24 +357,30 @@ test.describe("durable session workbench", () => {
       goal,
       name: "compact-fleet-row",
     });
+    // The fleet poll's filters are operands now, so the assertion reads the
+    // request body where it used to read the query string. `postDataJSON` only
+    // after the path matches — it throws on a non-JSON body.
     const summaryResponse = page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return (
-        response.request().method() === "GET" &&
-        url.pathname === "/api/sessions/summary" &&
-        !url.searchParams.has("archived") &&
-        url.searchParams.get("automation") === "true"
-      );
+      if (
+        response.request().method() !== "POST" ||
+        new URL(response.url()).pathname !== "/api/sessions/summary/list"
+      ) {
+        return false;
+      }
+      const operands = (response.request().postDataJSON() ?? {}) as {
+        archived?: boolean;
+        automation?: boolean;
+      };
+      return operands.archived === false && operands.automation === true;
     });
     const detailRequests: string[] = [];
     page.on("request", (request) => {
       const url = new URL(request.url());
-      if (
-        request.method() === "GET" &&
-        url.pathname === `/api/sessions/${session.id}`
-      ) {
-        detailRequests.push(url.pathname);
+      if (request.method() !== "POST" || url.pathname !== "/api/sessions/get") {
+        return;
       }
+      const operands = (request.postDataJSON() ?? {}) as { session?: string };
+      if (operands.session === session.id) detailRequests.push(url.pathname);
     });
 
     await page.goto(weaver.baseUrl);
@@ -380,15 +395,13 @@ test.describe("durable session workbench", () => {
 
     const row = page.locator(`[data-session-id="${session.id}"]`);
     await expect(row).toBeVisible();
-    await expect
-      .poll(() => detailRequests)
-      .toEqual([`/api/sessions/${session.id}`]);
+    await expect.poll(() => detailRequests).toEqual(["/api/sessions/get"]);
     await expect(page.getByTestId("session-mailbox-preview")).toContainText(
       goal,
     );
 
     await row.getByTestId("session-details-toggle").click();
-    expect(detailRequests).toEqual([`/api/sessions/${session.id}`]);
+    expect(detailRequests).toEqual(["/api/sessions/get"]);
     await expect(row.getByTestId("session-preview")).toContainText(goal);
   });
 
@@ -412,7 +425,12 @@ test.describe("durable session workbench", () => {
     await expect(access).toBeVisible();
     await expect(access.locator("xpath=..")).toContainText("none");
     const response = await fetch(
-      `${weaver.baseUrl}/api/sessions/${session.id}/github/access`,
+      `${weaver.baseUrl}/api/sessions/github/access/list`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session: session.id }),
+      },
     );
     expect(response.ok).toBe(true);
     expect(await response.json()).toMatchObject([
@@ -466,7 +484,7 @@ test.describe("durable session workbench", () => {
       [namedChild.id, "2025-02-01T00:00:00Z"],
       [namedGrandchild.id, "2025-03-01T00:00:00Z"],
     ]);
-    await page.route("**/api/sessions/summary**", async (route) => {
+    await page.route("**/api/sessions/summary/list", async (route) => {
       const response = await route.fetch();
       const summaries = (await response.json()) as Array<{
         id: string;

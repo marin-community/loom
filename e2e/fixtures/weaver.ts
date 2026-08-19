@@ -54,7 +54,8 @@ export interface Branch {
   github: { pr_number: number; pr_url: string; pr_state: string } | null;
 }
 
-/** A session as returned by `/api/sessions[/...]`. */
+/** A session as returned by the `sessions.*` operations (`sessions.get`,
+ *  `sessions.list`, `sessions.launch`, …). */
 export interface Session {
   id: string;
   status: string;
@@ -92,8 +93,8 @@ export interface SeedOpts {
   claimIssue?: number;
 }
 
-/** A watch as returned by `/api/watches` (the fields the e2e tests
- *  read; the full DTO has more). */
+/** A watch as returned by `watches.list`/`watches.get` (the fields the e2e
+ *  tests read; the full DTO has more). */
 export interface Watch {
   id: string;
   name: string;
@@ -103,7 +104,7 @@ export interface Watch {
   last_outcome: string | null;
 }
 
-/** An issue as returned by `/api/issues` (the fields the e2e tests read). */
+/** An issue as returned by `issues.board` (the fields the e2e tests read). */
 export interface Issue {
   id: number;
   repo_root: string;
@@ -170,15 +171,15 @@ export interface WeaverFixture {
     name: string,
     opts?: { repo?: boolean },
   ): Promise<void>;
-  /** Set (upsert) a free-form label on an issue via `PUT …/issues/{id}/tags/{key}`. */
+  /** Set (upsert) a free-form label on an issue via `issues.tags.set`. */
   tagIssue(id: number, key: string, value: string): Promise<Issue>;
-  /** GET /api/issues (cross-repo board). */
+  /** `issues.board` (cross-repo board). */
   listIssues(all?: boolean): Promise<Issue[]>;
-  /** GET /api/sessions/{id}. */
+  /** `sessions.get`. */
   getSession(id: string): Promise<Session>;
-  /** GET /api/sessions. */
+  /** `sessions.list`. */
   listSessions(): Promise<Session[]>;
-  /** POST /api/sessions/{id}/archive — tear the session down (branch kept), so a
+  /** `sessions.archive` — tear the session down (branch kept), so a
    *  test can set up the archived state it wants to act on. */
   archiveSession(id: string): Promise<void>;
   /** Mark a seeded session as engine-managed infrastructure in the worker's
@@ -198,14 +199,14 @@ export interface WeaverFixture {
     level: "ok" | "attention" | "blocked",
     message?: string,
   ): Promise<void>;
-  /** Set (upsert) one tag on a session's branch via `PUT …/tags/{key}`. */
+  /** Set (upsert) one tag on a session's branch via `sessions.tags.set`. */
   setTag(
     session: Session,
     key: string,
     value: string,
     opts?: { note?: string; by?: string },
   ): Promise<void>;
-  /** Clear one tag via `DELETE …/tags/{key}`. */
+  /** Clear one tag via `sessions.tags.delete`. */
   clearTag(session: Session, key: string): Promise<void>;
   /** Stamp a watch's `triage` mark — sugar over `setTag(triage, …)`. */
   mark(
@@ -277,13 +278,15 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
  *  count-based assertions. */
 async function deleteAllSessions(baseUrl: string) {
   try {
-    const all = (await fetchJson(
-      `${baseUrl}/api/sessions?archived=true&automation=true&managed=true`,
-    )) as Session[];
+    const all = (await fetchJson(`${baseUrl}/api/sessions/list`, {
+      method: "POST",
+      body: JSON.stringify({ history: true, automation: true, managed: true }),
+    })) as Session[];
     for (const s of all) {
       try {
-        await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {
-          method: "DELETE",
+        await fetchJson(`${baseUrl}/api/sessions/delete`, {
+          method: "POST",
+          body: JSON.stringify({ session: s.id, keep_branch: false }),
         });
       } catch {
         /* best effort */
@@ -316,10 +319,16 @@ function deleteAllAutomationRuns(dbPath: string) {
  *  to a session, so the per-test wipe clears them explicitly. */
 async function deleteAllWatches(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/watches`)) as { id: string }[];
+    const all = (await fetchJson(`${baseUrl}/api/watches/list`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    })) as { id: string }[];
     for (const o of all) {
       try {
-        await fetch(`${baseUrl}/api/watches/${o.id}`, { method: "DELETE" });
+        await fetchJson(`${baseUrl}/api/watches/delete`, {
+          method: "POST",
+          body: JSON.stringify({ key: o.id }),
+        });
       } catch {
         /* best effort */
       }
@@ -334,14 +343,17 @@ async function deleteAllWatches(baseUrl: string) {
  *  per-test wipe keeps count-based assertions order-independent. */
 async function deleteAllIssues(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/issues?all=true`)) as {
+    const all = (await fetchJson(`${baseUrl}/api/issues/board`, {
+      method: "POST",
+      body: JSON.stringify({ all: true }),
+    })) as {
       id: number;
     }[];
     for (const i of all) {
       try {
         await fetchJson(`${baseUrl}/api/issues/delete`, {
           method: "POST",
-          body: JSON.stringify({ id: i.id }),
+          body: JSON.stringify({ ids: [i.id] }),
         });
       } catch {
         /* best effort */
@@ -481,7 +493,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // agent (execs a bare login shell, hookless → `running` immediately). This
       // gives every test its cheap, deterministic no-op agent and must exist
       // before the `agent.default` patch below validates against it.
-      await fetchJson(`${baseUrl}/api/agents/custom`, {
+      await fetchJson(`${baseUrl}/api/agents/custom/create`, {
         method: "POST",
         body: JSON.stringify({ name: "shell", label: "Shell" }),
       });
@@ -534,7 +546,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       repoPath,
 
       async seedSession(opts) {
-        return (await fetchJson(`${baseUrl}/api/sessions`, {
+        return (await fetchJson(`${baseUrl}/api/sessions/launch`, {
           method: "POST",
           body: JSON.stringify({
             goal: opts.goal,
@@ -550,7 +562,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async seedWatch(opts) {
-        return (await fetchJson(`${baseUrl}/api/watches`, {
+        return (await fetchJson(`${baseUrl}/api/watches/create`, {
           method: "POST",
           body: JSON.stringify({
             name: opts.name,
@@ -568,7 +580,8 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           method: "POST",
           body: JSON.stringify({
             branch: session.branch.id,
-            request: { title, body: body ?? "" },
+            title,
+            body: body ?? "",
           }),
         })) as Issue;
       },
@@ -628,27 +641,35 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       async tagIssue(id, key, value) {
         return (await fetchJson(`${baseUrl}/api/issues/tags/set`, {
           method: "POST",
-          body: JSON.stringify({ id, key, request: { value } }),
+          body: JSON.stringify({ id, key, value }),
         })) as Issue;
       },
 
       async listIssues(all = false) {
-        return (await fetchJson(
-          `${baseUrl}/api/issues${all ? "?all=true" : ""}`,
-        )) as Issue[];
+        return (await fetchJson(`${baseUrl}/api/issues/board`, {
+          method: "POST",
+          body: JSON.stringify({ all }),
+        })) as Issue[];
       },
 
       async getSession(id) {
-        return (await fetchJson(`${baseUrl}/api/sessions/${id}`)) as Session;
+        return (await fetchJson(`${baseUrl}/api/sessions/get`, {
+          method: "POST",
+          body: JSON.stringify({ session: id }),
+        })) as Session;
       },
 
       async listSessions() {
-        return (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
+        return (await fetchJson(`${baseUrl}/api/sessions/list`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        })) as Session[];
       },
 
       async archiveSession(id) {
-        await fetchJson(`${baseUrl}/api/sessions/${id}/archive`, {
+        await fetchJson(`${baseUrl}/api/sessions/archive`, {
           method: "POST",
+          body: JSON.stringify({ session: id }),
         });
       },
 
@@ -693,15 +714,22 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async setTag(session, key, value, opts) {
-        await fetchJson(`${baseUrl}/api/sessions/${session.id}/tags/${key}`, {
-          method: "PUT",
-          body: JSON.stringify({ value, note: opts?.note, by: opts?.by }),
+        await fetchJson(`${baseUrl}/api/sessions/tags/set`, {
+          method: "POST",
+          body: JSON.stringify({
+            key,
+            value,
+            note: opts?.note,
+            by: opts?.by,
+            session: session.id,
+          }),
         });
       },
 
       async clearTag(session, key) {
-        await fetchJson(`${baseUrl}/api/sessions/${session.id}/tags/${key}`, {
-          method: "DELETE",
+        await fetchJson(`${baseUrl}/api/sessions/tags/delete`, {
+          method: "POST",
+          body: JSON.stringify({ key, session: session.id }),
         });
       },
 

@@ -21,7 +21,7 @@ async fn terminal_websocket_roundtrip() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "terminal test",
                 "cwd": ts.cwd(),
@@ -109,7 +109,10 @@ async fn terminal_websocket_roundtrip() {
     );
     term2.send(Message::Close(None)).await.ok();
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// The HTTP `send` endpoint (the composer / webhook-forward path) must actually
@@ -128,7 +131,7 @@ async fn http_send_submits_via_bracketed_paste() {
 
     let session = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "send test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -157,8 +160,8 @@ async fn http_send_submits_via_bracketed_paste() {
     // shell executed the line rather than merely echoing the keystrokes.
     let resp = client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo SEND$((21 * 2))" }),
+            "/api/sessions/send",
+            json!({ "session": id, "text": "echo SEND$((21 * 2))" }),
         )
         .await
         .unwrap();
@@ -175,5 +178,8 @@ async fn http_send_submits_via_bracketed_paste() {
     );
 
     term.send(Message::Close(None)).await.ok();
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }

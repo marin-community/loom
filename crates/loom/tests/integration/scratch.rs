@@ -13,7 +13,10 @@ use crate::fixtures::TestServer;
 async fn scratch_upload_list_and_delete() {
     let ts = TestServer::start().await;
     let client = &ts.client;
-    let limits = client.get("/api/scratch/limits").await.unwrap();
+    let limits = client
+        .post("/api/sessions/scratch/limits", json!({}))
+        .await
+        .unwrap();
     assert_eq!(limits["max_files"], 20);
     assert_eq!(limits["max_file_bytes"], 25 * 1024 * 1024);
     assert_eq!(limits["max_total_bytes"], 50 * 1024 * 1024);
@@ -21,7 +24,7 @@ async fn scratch_upload_list_and_delete() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "scratch test",
                 "cwd": ts.cwd(),
@@ -34,13 +37,16 @@ async fn scratch_upload_list_and_delete() {
     let work_dir = ws["work_dir"].as_str().unwrap().to_string();
 
     let scratch = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(scratch.as_array().unwrap().len(), 0, "scratch starts empty");
 
     let http = reqwest::Client::new();
-    let upload_url = format!("{}/api/sessions/{id}/scratch?name=notes.txt", client.base());
+    let upload_url = format!(
+        "{}/api/sessions/scratch/write?session={id}&name=notes.txt",
+        client.base()
+    );
     let resp = http
         .post(&upload_url)
         .body("hello agent")
@@ -54,7 +60,7 @@ async fn scratch_upload_list_and_delete() {
     assert_eq!(dropped, "hello agent");
 
     let listed = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     let arr = listed.as_array().unwrap();
@@ -65,7 +71,7 @@ async fn scratch_upload_list_and_delete() {
     // Traversal attempts are refused.
     let bad = http
         .post(format!(
-            "{}/api/sessions/{id}/scratch?name=../escape.txt",
+            "{}/api/sessions/scratch/write?session={id}&name=../escape.txt",
             client.base()
         ))
         .body("nope")
@@ -75,7 +81,7 @@ async fn scratch_upload_list_and_delete() {
     assert_eq!(bad.status().as_u16(), 400, "path traversal rejected");
     let housekeeping = reqwest::Client::new()
         .post(format!(
-            "{}/api/sessions/{id}/scratch?name=.gitignore",
+            "{}/api/sessions/scratch/write?session={id}&name=.gitignore",
             client.base()
         ))
         .body("overwrite")
@@ -88,8 +94,8 @@ async fn scratch_upload_list_and_delete() {
         format!("{}.txt", "x".repeat(241)),
     ] {
         let invalid = reqwest::Client::new()
-            .post(format!("{}/api/sessions/{id}/scratch", client.base()))
-            .query(&[("name", invalid_name)])
+            .post(format!("{}/api/sessions/scratch/write", client.base()))
+            .query(&[("session", id.as_str()), ("name", invalid_name.as_str())])
             .body("nope")
             .send()
             .await
@@ -99,7 +105,7 @@ async fn scratch_upload_list_and_delete() {
 
     let dotfile = reqwest::Client::new()
         .post(format!(
-            "{}/api/sessions/{id}/scratch?name=.env.example",
+            "{}/api/sessions/scratch/write?session={id}&name=.env.example",
             client.base()
         ))
         .body("SAFE=value")
@@ -108,7 +114,7 @@ async fn scratch_upload_list_and_delete() {
         .unwrap();
     assert!(dotfile.status().is_success());
     let listed = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     assert!(listed
@@ -119,21 +125,27 @@ async fn scratch_upload_list_and_delete() {
 
     // Delete removes it.
     client
-        .delete(&format!("/api/sessions/{id}/scratch?name=notes.txt"))
+        .post(
+            "/api/sessions/scratch/delete",
+            json!({ "session": id, "name": "notes.txt" }),
+        )
         .await
         .unwrap();
     let after = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(after.as_array().unwrap().len(), 1);
     assert_eq!(after[0]["name"], ".env.example");
     client
-        .delete(&format!("/api/sessions/{id}/scratch?name=.env.example"))
+        .post(
+            "/api/sessions/scratch/delete",
+            json!({ "session": id, "name": ".env.example" }),
+        )
         .await
         .unwrap();
     let after = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     assert!(
@@ -155,13 +167,13 @@ async fn scratch_upload_list_and_delete() {
         .await;
     let first_http = http.clone();
     let first_url = format!(
-        "{}/api/sessions/{id}/scratch?name=concurrent-a.txt",
+        "{}/api/sessions/scratch/write?session={id}&name=concurrent-a.txt",
         client.base()
     );
     let first =
         tokio::spawn(async move { first_http.post(first_url).body("a").send().await.unwrap() });
     let second_url = format!(
-        "{}/api/sessions/{id}/scratch?name=concurrent-b.txt",
+        "{}/api/sessions/scratch/write?session={id}&name=concurrent-b.txt",
         client.base()
     );
     let second = tokio::spawn(async move { http.post(second_url).body("b").send().await.unwrap() });
@@ -197,12 +209,15 @@ async fn scratch_upload_list_and_delete() {
         1
     );
     let listed = client
-        .get(&format!("/api/sessions/{id}/scratch"))
+        .post("/api/sessions/scratch/list", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(listed.as_array().unwrap().len(), 20);
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 #[serial]
@@ -212,7 +227,7 @@ async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
     let original = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "goal": "own main before replacement",
@@ -224,9 +239,9 @@ async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
         .unwrap();
     let original_id = original["id"].as_str().unwrap().to_string();
     ts.client
-        .patch(
-            &format!("/api/sessions/{original_id}"),
-            json!({ "status": "error" }),
+        .post(
+            "/api/sessions/update",
+            json!({ "session": original_id, "status": "error" }),
         )
         .await
         .unwrap();
@@ -243,7 +258,7 @@ async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
         .launch_gate
         .acquire_scratch(Path::new(&work_dir))
         .await;
-    let launch_url = format!("http://{}/api/sessions", ts.addr);
+    let launch_url = format!("http://{}/api/sessions/launch", ts.addr);
     let launch_cwd = ts.cwd();
     let launch = tokio::spawn(async move {
         reqwest::Client::new()
@@ -263,7 +278,7 @@ async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
             .unwrap()
     });
     let upload_url = format!(
-        "http://{}/api/sessions/{original_id}/scratch?name=from-upload.txt",
+        "http://{}/api/sessions/scratch/write?session={original_id}&name=from-upload.txt",
         ts.addr
     );
     let upload = tokio::spawn(async move {

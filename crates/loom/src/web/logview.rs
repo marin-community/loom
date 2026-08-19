@@ -125,7 +125,7 @@ pub(super) async fn logs_stream(
     Extension(principal): Extension<Principal>,
     Query(input): Query<log_operations::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    super::streams::authorized::<log_operations::stream::Stream>(&st, &principal, input).await?;
+    super::encodings::authorized::<log_operations::stream::Stream>(&st, &principal, input).await?;
     let redactor = log_redactor(&st.db, &principal).await?;
     let stream = BroadcastStream::new(logs::buffer().subscribe()).filter_map(move |result| {
         // A lagged subscriber yields Err; skip the gap (the client can re-snapshot).

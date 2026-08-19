@@ -79,8 +79,8 @@ async fn multiplexed_stream_tags_frames_with_their_topic() {
 
     ts.client
         .post(
-            "/api/sessions/acp-mux/prompt",
-            json!({ "text": "say:multiplexed" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-mux", "text": "say:multiplexed" }),
         )
         .await
         .unwrap();
@@ -143,8 +143,8 @@ async fn unresolvable_topic_is_isolated_from_the_rest() {
 
     ts.client
         .post(
-            "/api/sessions/acp-live/prompt",
-            json!({ "text": "say:still-flowing" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-live", "text": "say:still-flowing" }),
         )
         .await
         .unwrap();
@@ -174,7 +174,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
     let mine = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "scoped", "agent": "shell" }),
         )
         .await
@@ -189,7 +189,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
     let theirs = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "unrelated", "agent": "shell" }),
         )
         .await

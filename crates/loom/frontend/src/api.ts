@@ -62,50 +62,54 @@ async function rawBody(method: string, path: string, body: BodyInit): Promise<un
   return text ? JSON.parse(text) : null;
 }
 
-export const upload = (path: string, body: BodyInit) => rawBody('POST', path, body);
-export const get = (path: string) => request(path);
-export const post = (path: string, body?: unknown) =>
-  request(path, { method: 'POST', body: JSON.stringify(body ?? {}) });
-export const put = (path: string, body?: unknown) =>
-  request(path, { method: 'PUT', body: JSON.stringify(body ?? {}) });
-export const patch = (path: string, body: unknown) =>
-  request(path, { method: 'PATCH', body: JSON.stringify(body) });
-export const del = (path: string) => request(path, { method: 'DELETE' });
-export const destroy = (path: string, body: unknown) =>
-  request(path, { method: 'DELETE', body: JSON.stringify(body) });
+// Every operation is a `POST` of a JSON operand envelope, or — for the byte
+// encodings — a `GET`/`POST` whose operands are in the query string. There is
+// no other verb left to reach the server with, so these two are the whole
+// transport and stay module-private: a call goes through `invokeOperation`.
+const upload = (path: string, body: BodyInit) => rawBody('POST', path, body);
+const post = (path: string, body?: unknown, opts: RequestInit = {}) =>
+  request(path, { ...opts, method: 'POST', body: JSON.stringify(body ?? {}) });
 
-/** Invoke a routine code-registered operation. Its dotted identity maps to a
- * resource-grouped API path (`issues.tags.set` → `/api/issues/tags/set`).
- * Exported so a component with no api.ts wrapper of its own for an operation
- * (a handful of direct callers still exist — see each call site) can reach it
- * without inlining a second copy of this path derivation. */
-export const invokeOperation = (operation: string, input: unknown) =>
-  post(`/${operation.split('.').map(encodeURIComponent).join('/')}`, input);
+/** An operation's dotted identity as its API path (`issues.tags.set` →
+ * `/issues/tags/set`). The `io = Upload`/`Download` operations need the path
+ * without the JSON envelope, so this is separate from `invokeOperation`. */
+const operationPath = (operation: string) =>
+  `/${operation.split('.').map(encodeURIComponent).join('/')}`;
 
-// UNMAPPED: `sessions.scratch.limits` is the only registered scratch
-// operation. This upload sends the file's bytes as the raw request body, and
-// the operation dispatcher only ever decodes a JSON `Input` — no operation
-// serves a raw body — so it stays on the legacy route, as do the list and
-// delete calls in `ScratchPanel.vue`.
-/** Upload one prompt/reference attachment into the session-owned scratch dir. */
+/** Invoke a routine code-registered operation. Exported so a component with no
+ * api.ts wrapper of its own for an operation (a handful of direct callers still
+ * exist — see each call site) can reach it without inlining a second copy of
+ * this path derivation. `opts` carries an `AbortSignal` for the poll/search
+ * loops that supersede their own in-flight request. */
+export const invokeOperation = (operation: string, input: unknown, opts: RequestInit = {}) =>
+  post(operationPath(operation), input, opts);
+
+/** Upload one prompt/reference attachment into the session-owned scratch dir.
+ *  `sessions.scratch.write` is `io = Upload`: the body is the file's bytes, so
+ *  its operands travel in the query string. */
 export const uploadSessionScratch = (id: string, file: File) =>
-  upload(`/sessions/${id}/scratch?name=${encodeURIComponent(file.name)}`, file) as Promise<
-    ScratchFile & { path: string }
-  >;
+  upload(
+    `${operationPath('sessions.scratch.write')}?session=${encodeURIComponent(id)}&name=${encodeURIComponent(file.name)}`,
+    file,
+  ) as Promise<ScratchFile & { path: string }>;
 
 /** Server-owned attachment limits shared by launch staging and live Scratch. */
 export const getScratchLimits = () =>
   invokeOperation('sessions.scratch.limits', {}) as Promise<ScratchLimits>;
 
+/** Every scratch attachment a session currently holds. */
+export const listSessionScratch = (id: string) =>
+  invokeOperation('sessions.scratch.list', { session: id }) as Promise<ScratchFile[]>;
+
+/** Remove one scratch attachment by name. */
+export const deleteSessionScratch = (id: string, name: string) =>
+  invokeOperation('sessions.scratch.delete', { name, session: id });
+
 // --- Sessions ----------------------------------------------------------------
 
-// UNMAPPED: `sessions.list` is a different read — it answers `SessionView[]`
-// (full session context) and has no `automation` filter, where this is the
-// compact `SessionSummary[]` projection the fleet list renders. It also needs an
-// `AbortSignal`, which `invokeOperation` does not thread through, so it calls
-// `request` directly.
 /** Compact fleet inventory/search. Full session context is fetched from the
- * item endpoint only when a row or session page discloses it. */
+ * item endpoint only when a row or session page discloses it. `signal` lets a
+ * superseded search or poll abandon its request. */
 export const listSessionSummaries = (
   opts: {
     archived?: boolean;
@@ -117,32 +121,28 @@ export const listSessionSummaries = (
     creator?: SessionSearchOptions['creator'];
   } = {},
   signal?: AbortSignal,
-) => {
-  const params = new URLSearchParams();
-  if (opts.archived) params.set('archived', 'true');
-  if (opts.archivedOnly) params.set('archived_only', 'true');
-  if (opts.automation !== undefined) params.set('automation', String(opts.automation));
-  if (opts.query) params.set('q', opts.query);
-  if (opts.status) params.set('status', opts.status);
-  if (opts.attention) params.set('attention', opts.attention);
-  if (opts.creator) params.set('creator', opts.creator);
-  const qs = params.toString();
-  return request(`/sessions/summary${qs ? `?${qs}` : ''}`, { signal }) as Promise<SessionSummary[]>;
-};
+) =>
+  invokeOperation(
+    'sessions.summary.list',
+    {
+      archived: opts.archived ?? false,
+      archived_only: opts.archivedOnly ?? false,
+      automation: opts.automation ?? false,
+      q: opts.query ?? '',
+      status: opts.status ?? null,
+      attention: opts.attention ?? null,
+      creator: opts.creator ?? null,
+    },
+    { signal },
+  ) as Promise<SessionSummary[]>;
 
 export const getSession = (id: string) =>
   invokeOperation('sessions.get', { session: id }) as Promise<Session>;
 
-// UNMAPPED: no operation reads a session's per-repository GitHub access
-// overrides. `permissions.github.grant`/`.revoke` are the write half (used
-// below), and the nearest read — `permissions.effective.get` — answers with an
-// `EffectivePermissionsView` (allowed operations plus external scope), not the
-// `SessionGithubAccess[]` row list this pane renders. A different read, so the
-// legacy route stays hand-mounted.
 export const getSessionGithubAccess = (id: string) =>
-  get(`/sessions/${encodeURIComponent(id)}/github/access`) as Promise<SessionGithubAccess[]>;
-/** The `PUT` half of the old `github/access` route is now the two operations
- *  `permissions.github.grant` (mode `write`) and `.revoke` (mode `none`). */
+  invokeOperation('sessions.github.access.list', { session: id }) as Promise<SessionGithubAccess[]>;
+/** The write half is the two operations `permissions.github.grant` (mode
+ *  `write`) and `.revoke` (mode `none`). */
 export const setSessionGithubAccess = (
   id: string,
   repository: string,
@@ -178,7 +178,7 @@ export const decidePermissionRequest = (
   ) as Promise<PermissionRequest>;
 
 /** Durable automation launch reservations, including failures that never
- *  produced a usable session (`GET /api/runs`). */
+ *  produced a usable session. */
 export const listRuns = () => invokeOperation('runs.list', {}) as Promise<AutomationRun[]>;
 export const archiveSession = (id: string) => invokeOperation('sessions.archive', { session: id });
 /** Delete a session outright (the irreversible counterpart of `archiveSession`).
@@ -337,13 +337,8 @@ export const listChannels = (archived = false) =>
 export const getChannel = (id: string) =>
   invokeOperation('channels.get', { channel: id }) as Promise<Channel>;
 
-// GAP: `channels.create` requires a `branch` (session) — it calls
-// `require_branch` and 404s without one — but this call site offers only a
-// bare repo root from a picker with no session in scope. The old repo-scoped
-// custom channel has no equivalent under the branch-scoped operation model,
-// so this stays on the legacy route.
 export const createChannel = (name: string, topic: string, repoRoot: string) =>
-  post('/channels', { name, topic, repo_root: repoRoot }) as Promise<Channel>;
+  invokeOperation('channels.create', { name, topic, repo_root: repoRoot }) as Promise<Channel>;
 
 // `peek: true` preserves the old route's behavior: listing never advanced the
 // read marker on its own (`markChannelRead` below is the explicit, separate
@@ -413,7 +408,7 @@ interface RepoEnvEnvelope {
   env: RepoEnvVar[];
 }
 
-/** The per-repo env vars' metadata for a repo (`GET /api/repos/env`). Names and
+/** The per-repo env vars' metadata for a repo (`repos.env.get`). Names and
  *  timestamps only — values are write-only and never returned. */
 export const listRepoEnv = (repoRoot: string) =>
   invokeOperation('repos.env.get', { repo_root: repoRoot }).then((r) => (r as RepoEnvEnvelope).env);
@@ -464,36 +459,24 @@ export const deleteCustomAgent = (name: string) =>
     (r) => r.custom,
   );
 
-// UNMAPPED: `issues.list` is repository-scoped (`repo_root` required) and has
-// no `automation` filter — it is not the same read as this cross-repo,
-// automation-aware board. No operation replaces `GET /api/issues`.
 /** Every issue across every repo — the Issues pane's cross-repo board. Pass
  *  `all` to include closed issues, `automation` to include issues claimed by an
  *  automation-class session (the issue board retains this policy filter even
  *  though the session fleet is unified). */
-export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) => {
-  const params = new URLSearchParams();
-  if (opts.all) params.set('all', 'true');
-  if (opts.automation) params.set('automation', 'true');
-  const qs = params.toString();
-  return get(`/issues${qs ? `?${qs}` : ''}`) as Promise<Issue[]>;
-};
+export const listIssues = (opts: { all?: boolean; automation?: boolean } = {}) =>
+  invokeOperation('issues.board', {
+    all: opts.all ?? false,
+    automation: opts.automation ?? false,
+  }) as Promise<Issue[]>;
 
-// GAP: `sessions.launch` exists, but its `title` field is required (no
-// default) and this call site never had one to give — the legacy
-// `POST /api/sessions` route derived the title server-side from the claimed
-// issue. Left on the legacy route rather than inventing a title.
 /** Launch a new Loom session that picks up (claims) an existing Loom issue:
  *  the issue's repo is the new session's cwd, and the backend seeds the branch's
  *  title/goal from the issue and stamps it as the tracking (claimed) issue.
+ *  No `title` — a claiming launch derives it from the issue.
  *  Returns the created session view, whose `id` deep-links to its detail page. */
 export const launchSessionForIssue = (repoRoot: string, issueId: number) =>
-  post('/sessions', { cwd: repoRoot, claim_issue: issueId }) as Promise<Session>;
+  invokeOperation('sessions.launch', { cwd: repoRoot, claim_issue: issueId }) as Promise<Session>;
 
-// GAP: `issues.backlog.create`'s Input has no `tags` field, so the initial
-// tag set a caller may have staged in the create-issue form cannot be applied
-// atomically with creation (it was already inert before this migration, since
-// the operation's Input silently ignores unknown fields).
 /** Create an unclaimed repo-level backlog issue and its initial tags atomically. */
 export const createRepoIssue = (
   repoRoot: string,
@@ -505,22 +488,19 @@ export const createRepoIssue = (
     repo_root: repoRoot,
     title,
     body,
+    tags,
   }) as Promise<Issue>;
 
-/** Patch an issue's editable fields. Blank `github` unlinks it;
- *  `claimed_branch: null` returns it to the unclaimed backlog.
- *
- *  UNMAPPED: no `issues.update` operation exists for a single-issue partial
- *  edit. `issues.close`/`issues.reopen` cover the `status` variant but take
- *  an id array and return a bulk `IssueActionsResult`, not a single `Issue`
- *  — a different shape, so not a substitute here. */
+/** Patch an issue's editable fields. Blank `github` unlinks it; `unclaim`
+ *  returns it to the unclaimed backlog. Claiming is not expressible here — an
+ *  issue is claimed by launching a session against it. */
 export const patchIssue = (
   id: number,
   body: Partial<Pick<Issue, 'title' | 'body' | 'status'>> & {
     github?: string;
-    claimed_branch?: null;
+    unclaim?: boolean;
   },
-) => patch(`/issues/${id}`, body) as Promise<Issue>;
+) => invokeOperation('issues.update', { id, ...body }) as Promise<Issue>;
 
 /** Refresh, pin, or clear a session's PR association. */
 export const refreshSessionGithub = (id: string) =>

@@ -22,16 +22,14 @@ use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, config, custom_agents, db, events, git, github, repo};
-use base64::Engine as _;
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
     AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq, EnsureResumptionCueReq,
     HandoffReq, HistoryPageView, PatchSessionReq, ResolvedLaunchView, ResumptionCueView,
     SearchSessionsOptions, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
     SessionFilesView, SessionIdeInfoView, SessionInterruptResult, SessionModeResult,
-    SessionPreviewResult, SessionRawFileView, SessionSearchAttention, SessionSearchStatus,
-    SessionSendResult, SessionSummaryView, SessionUrlView, SessionView, SetTagsReq,
-    SetTitleGenerationReq, TagReq,
+    SessionPreviewResult, SessionSearchAttention, SessionSearchStatus, SessionSendResult,
+    SessionSummaryView, SessionUrlView, SessionView, SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -690,19 +688,20 @@ pub(super) async fn set_session_tag(
     Ok(Json(session_view(&st.db, &session, &branch).await?))
 }
 
-/// Atomically replace one author's complete tag set on a session branch.
+/// `sessions.tags.replace` — atomically replace one author's complete tag set.
 ///
-/// This is the watch-safe counterpart to the per-key routes: rows still
-/// authored by `by` are replaced as one transaction, so a stale round cannot
-/// DELETE a key another actor took over after its fleet snapshot. Exact-match
-/// `clear` entries let a real status replace lifecycle marks such as
-/// `(idle, idle)` without making a key-only stale delete.
-pub(super) async fn set_session_tags(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<SetTagsReq>,
-) -> ApiResult<Json<SessionView>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
+/// The watch-safe counterpart to `sessions.tags.set`: rows still authored by
+/// `by` are replaced as one transaction, so a stale round cannot delete a key
+/// another actor took over after its fleet snapshot. Exact-match `clear` entries
+/// let a real status replace lifecycle marks such as `(idle, idle)` without
+/// making a key-only stale delete.
+async fn op_tags_replace(
+    context: OperationContext,
+    input: ops::tags::replace::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let req = input;
+    let (session, branch) = require_session(&st.db, &req.session).await?;
     let by = author_or_manual(req.by.as_deref());
     let mut seen = HashSet::new();
     let mut desired = Vec::with_capacity(req.tags.len());
@@ -788,7 +787,7 @@ pub(super) async fn set_session_tags(
         }
     }
     let (session, branch) = require_session(&st.db, &session.id).await?;
-    Ok(Json(session_view(&st.db, &session, &branch).await?))
+    session_view(&st.db, &session, &branch).await
 }
 
 /// Clear a tag on a session's branch — delete the row and broadcast a `tag`
@@ -1792,7 +1791,7 @@ pub(super) async fn events_sse(
     Query(input): Query<ops::events::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     let input =
-        super::streams::authorized::<ops::events::stream::Stream>(&st, &principal, input).await?;
+        super::encodings::authorized::<ops::events::stream::Stream>(&st, &principal, input).await?;
     let branch = require_branch(&st.db, &input.session).await?;
     let id = branch.id;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(move |result| {
@@ -2071,7 +2070,7 @@ pub(super) async fn chat_stream(
     Query(input): Query<ops::chat::stream::Input>,
 ) -> ApiResult<impl IntoResponse> {
     let input =
-        super::streams::authorized::<ops::chat::stream::Stream>(&st, &principal, input).await?;
+        super::encodings::authorized::<ops::chat::stream::Stream>(&st, &principal, input).await?;
     let (session, _) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
     let boxed: Pin<Box<dyn Stream<Item = Result<sse::Event, Infallible>> + Send>> =
@@ -2413,7 +2412,9 @@ pub(super) async fn set_mode(
 //
 // The `sessions` bundle: 17 operations under `weaver_api::operations::sessions`.
 // `sessions.summary.get` lives in the sibling `session_summary.rs` and is
-// folded in below. `sessions.context` also lives in a sibling file
+// folded in below, and `sessions.github.access.list` is bound below to a
+// handler in `github_access.rs`, beside the repository-access helpers it reads
+// through. `sessions.context` also lives in a sibling file
 // (`self_context.rs`), but `registry()` (`web/operations.rs`, coordinator-owned)
 // already wires `self_context::bound_operations()` in on its own — it predates
 // `context` moving into this bundle and still treats it as independent — so it
@@ -2426,6 +2427,7 @@ pub(super) async fn set_mode(
 pub(super) fn bound_operations() -> Vec<Bound> {
     let mut bound = vec![
         register::<ops::list::List, _, _>(op_list),
+        register::<ops::summary::list::List, _, _>(op_summary_list),
         register::<ops::get::Get, _, _>(op_get),
         register::<ops::launch::Launch, _, _>(op_launch),
         register::<ops::launches::resolve::Resolve, _, _>(op_launches_resolve),
@@ -2441,6 +2443,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::tags::list::List, _, _>(op_tags_list),
         register::<ops::tags::set::Set, _, _>(op_tags_set),
         register::<ops::tags::delete::Delete, _, _>(op_tags_delete),
+        register::<ops::tags::replace::Replace, _, _>(op_tags_replace),
         register::<ops::adopt::Adopt, _, _>(op_adopt),
         register::<ops::archive::Archive, _, _>(op_archive),
         register::<ops::recover::Recover, _, _>(op_recover),
@@ -2449,7 +2452,6 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::conversation::Conversation, _, _>(op_conversation),
         register::<ops::files::Files, _, _>(op_files),
         register::<ops::mode::Mode, _, _>(op_mode),
-        register::<ops::raw::Raw, _, _>(op_raw),
         register::<ops::url::Url, _, _>(op_url),
         register::<ops::ide_info::IdeInfo, _, _>(op_ide_info),
         register::<ops::shells::list::List, _, _>(op_shells_list),
@@ -2462,6 +2464,9 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::github::set::Set, _, _>(op_github_set),
         register::<ops::github::clear::Clear, _, _>(op_github_clear),
         register::<ops::github::labels::add::Add, _, _>(op_github_labels_add),
+        register::<ops::github::access::list::List, _, _>(
+            super::github_access::list_github_access_operation,
+        ),
         register::<ops::handoff::resolve::Resolve, _, _>(op_handoff_resolve),
         register::<ops::prompt::create::Create, _, _>(op_prompt_create),
         register::<ops::prompt::retract::Retract, _, _>(op_prompt_retract),
@@ -2483,14 +2488,49 @@ async fn op_list(
     context: OperationContext,
     input: ops::list::Input,
 ) -> ApiResult<Vec<SessionView>> {
+    // `managed` is the operator inventory escape hatch, and the one filter on
+    // this operation whose authority `actor`/`Scoped` cannot express: it is not
+    // about which session the caller may reach but about whether a caller may
+    // see a watcher's own infrastructure at all. A session credential that could
+    // list warm sessions could recurse into one.
+    if input.managed && !context.principal.is_human() {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "human grant required to list managed sessions",
+        ));
+    }
     collect_sessions(
         &context.state,
-        false,
+        input.managed,
         SessionCollectionFilter {
             archived: input.history || input.archived_only,
             archived_only: input.archived_only,
-            automation: true,
+            automation: input.automation,
             search: Some(&input.q),
+            status: input.status,
+            attention: input.attention,
+            creator: input.creator,
+            viewer: &context.principal.username,
+        },
+    )
+    .await
+}
+
+/// `sessions.summary.list` — ported from [`list_session_summaries`]. The
+/// query's `q: Option<String>` is a plain `String` operand here, and an empty
+/// one is passed as no needle at all — where `search_needle` would have sent a
+/// blank `Some` anyway.
+async fn op_summary_list(
+    context: OperationContext,
+    input: ops::summary::list::Input,
+) -> ApiResult<Vec<SessionSummaryView>> {
+    collect_session_summaries(
+        &context.state,
+        SessionCollectionFilter {
+            archived: input.archived || input.archived_only,
+            archived_only: input.archived_only,
+            automation: input.automation,
+            search: (!input.q.is_empty()).then_some(input.q.as_str()),
             status: input.status,
             attention: input.attention,
             creator: input.creator,
@@ -2506,12 +2546,10 @@ async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<
     session_view(&context.state.db, &session, &branch).await
 }
 
-/// `sessions.launch` — ported from [`create_session`]. The operation's surface
-/// is a reduced `CreateReq`: fields `create_session` accepts but this
-/// operation doesn't declare (`model`, `effort`, `scratch`, `protocol`,
-/// `mode`, `class`, `name`, `github_issue`, `existing_branch`, the canonical
-/// `selection`/revision pair) are left at `CreateReq::default()`, identical to
-/// what a client posting a body that omits them already gets today.
+/// `sessions.launch` — ported from [`create_session`]. The operation's `Input`
+/// mirrors `CreateReq` field for field, so every launch the legacy route
+/// accepted (including a `class`/`protocol`/`mode` override) remains
+/// expressible; nothing is silently left at `CreateReq::default()`.
 ///
 /// The old handler's inline rejection of `Grant::Automation` is dropped: this
 /// operation declares `actor = SessionSelf`, so `authorize()` now refuses an
@@ -2523,12 +2561,15 @@ async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<
 async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiResult<SessionView> {
     let st = context.state;
     let req = CreateReq {
-        title: Some(input.title),
+        title: input.title,
         goal: input.goal,
         repo: input.repo,
         cwd: input.cwd,
         base: input.base,
         agent: input.agent,
+        protocol: input.protocol,
+        mode: input.mode,
+        class: input.class,
         profile: input.profile,
         claim_issue: input.claim_issue,
         issue: input.issue,
@@ -2946,6 +2987,12 @@ async fn op_archive(
         Err(error) => return Err(error),
     };
     let warnings = archive(st, &session, &branch).await.map_err(|error| {
+        // A refusal names a state the caller can act on (another transition
+        // owns the session); only a genuine failure becomes the reassuring
+        // 500. Same distinction `archive_session` makes.
+        if error.downcast_ref::<crate::lifecycle::Refusal>().is_some() {
+            return AppError::from(error);
+        }
         AppError::internal(
             format!(
                 "Could not finish archiving session {}. Its branch and conversation are safe; retry in a moment.",
@@ -3199,13 +3246,16 @@ async fn op_mode(
     })
 }
 
-/// `sessions.raw` — ported from [`raw_session`]. JSON cannot carry raw bytes,
-/// so the wire body carries base64 rather than the REST route's octet stream.
-async fn op_raw(
-    context: OperationContext,
-    input: ops::raw::Input,
-) -> ApiResult<SessionRawFileView> {
-    let st = &context.state;
+/// `sessions.raw` — a worktree file's bytes, with a guessed content type.
+///
+/// The authorization already ran in [`super::encodings`], which is why this
+/// takes the state and the input rather than a full `OperationContext`: an
+/// `io = Download` operation needs a concrete `Response`, so its axum handler
+/// lives beside the other non-JSON encodings and calls in here for the bytes.
+pub(super) async fn raw_session_bytes(
+    st: &AppState,
+    input: &ops::raw::Input,
+) -> ApiResult<Response> {
     let (session, _) = require_session(&st.db, &input.session).await?;
     let work_dir = PathBuf::from(&session.work_dir);
     let rel = rel_path(&input.path)?;
@@ -3216,10 +3266,14 @@ async fn op_raw(
         }
         Err(e) => return Err(e.into()),
     };
-    Ok(SessionRawFileView {
-        content_type: content_type_for(&rel).to_string(),
-        content_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-    })
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type_for(&rel)),
+            (header::CONTENT_DISPOSITION, "inline"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// `sessions.url` — ported from [`session_url_route`]. The registered

@@ -14,8 +14,13 @@ pub struct Launch;
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
 pub struct Input {
     /// One-line task label for the new session.
+    ///
+    /// Optional because a launch that claims an issue derives its title from
+    /// that issue (`title_provenance = "derived"`), and a launch against a
+    /// managed repo can fall back to the branch name. Declaring it required
+    /// would make the operation stricter than the act it describes.
     #[operand(positional)]
-    pub title: String,
+    pub title: Option<String>,
     /// Detailed goal for the new session; defaults to the task label.
     pub goal: Option<String>,
     /// A managed repository (GitHub `owner/name`) to launch against.
@@ -28,6 +33,19 @@ pub struct Input {
     pub base: Option<String>,
     /// Agent runtime to launch; blank uses the profile's default.
     pub agent: Option<String>,
+    /// Execution-backend override: `"terminal"` forces the PTY fallback for a
+    /// builtin; `"acp"` opts in explicitly. Blank/absent uses the agent's
+    /// declared default (acp for the builtins). Rejected for agents that don't
+    /// support the requested backend.
+    pub protocol: Option<String>,
+    /// The ACP launch permission posture (`auto` | `bypassPermissions` |
+    /// `acceptEdits` | `default` | `plan`). Blank/absent uses the configured
+    /// `agent.mode` (which defaults to `auto`). Ignored for a terminal launch.
+    pub mode: Option<String>,
+    /// Session class override: `"interactive"` or `"automation"` (anything
+    /// else is rejected). Blank/absent derives from the launch origin
+    /// (watch/actions/ops/grafana → automation, else interactive).
+    pub class: Option<String>,
     /// Named launch profile; blank selects `default`.
     pub profile: Option<String>,
     /// A pre-existing Loom backlog item to claim for this session.
@@ -61,6 +79,7 @@ pub struct Input {
     #[operand(json, skip_cli)]
     pub selection: Option<LaunchSelection>,
     /// Files to seed the session's scratch directory with.
+    #[serde(default)]
     #[operand(json, skip_cli)]
     pub scratch: Vec<ScratchUpload>,
     /// Optimistic-concurrency guards: the profile and resolver revisions the

@@ -133,9 +133,13 @@ fn run_identity(
             }
             Ok((subject.clone(), profiles.clone()))
         }
-        Grant::Anonymous | Grant::User | Grant::Session { .. } => unreachable!(
-            "authorize() only admits Admin/Automation grants to an actor = Internal operation"
-        ),
+        // `actor = Internal` should have refused these before we got here, but a
+        // policy is not a proof: an actor widened by mistake would turn an
+        // `unreachable!` into a panic reachable from the network.
+        Grant::Anonymous | Grant::User | Grant::Session { .. } => Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "creating an automation run requires an admin or automation credential",
+        )),
     }
 }
 

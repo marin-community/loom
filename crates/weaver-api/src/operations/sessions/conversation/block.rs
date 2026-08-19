@@ -1,7 +1,7 @@
 use super::prelude::*;
 
-/// One conversation block, untruncated — the target of the `full` pointer
-/// `sessions.conversation` leaves in place of an oversized tool payload.
+/// One conversation block, untruncated — what the `full` pointer
+/// `sessions.conversation` leaves in place of an oversized tool payload names.
 /// Addressed by position in the log, matching [`super::Conversation`].
 #[operation(
     id = "sessions.conversation.block",

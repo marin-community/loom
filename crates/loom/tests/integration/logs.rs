@@ -1,4 +1,4 @@
-//! The human log viewer's HTTP surface: `/api/status`, the `/api/logs`
+//! The human log viewer's HTTP surface: `diagnostics.status`, the `logs.list`
 //! snapshot, and the `/api/logs/stream` tail. The security-critical properties
 //! are that all three require a human role and user-role messages are redacted.
 //! This suite proves the HTTP shape and auth boundary; redaction is exercised by
@@ -26,7 +26,8 @@ async fn status_and_logs_are_shaped_and_human_only() {
 
     // Loopback-trusted (the harness connects from 127.0.0.1): reachable + shaped.
     let st: Value = http
-        .get(url(&ts, "/api/status"))
+        .post(url(&ts, "/api/diagnostics/status"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -57,7 +58,8 @@ async fn status_and_logs_are_shaped_and_human_only() {
     );
 
     let logs: Value = http
-        .get(url(&ts, "/api/logs"))
+        .post(url(&ts, "/api/logs/list"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -68,7 +70,8 @@ async fn status_and_logs_are_shaped_and_human_only() {
 
     // `limit` is honored and clamped (never negative / never panics).
     let r = http
-        .get(url(&ts, "/api/logs?limit=1"))
+        .post(url(&ts, "/api/logs/list"))
+        .json(&json!({ "limit": 1 }))
         .send()
         .await
         .unwrap();
@@ -85,12 +88,32 @@ async fn status_and_logs_are_shaped_and_human_only() {
     assert_eq!(r.status(), StatusCode::OK);
 
     // All three log endpoints are now operator-gated.
-    for path in ["/api/status", "/api/logs", "/api/logs/stream"] {
-        let r = http.get(url(&ts, path)).send().await.unwrap();
-        assert_eq!(
-            r.status(),
-            StatusCode::UNAUTHORIZED,
-            "{path} must require auth"
-        );
-    }
+    let r = http
+        .post(url(&ts, "/api/diagnostics/status"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "/api/diagnostics/status must require auth"
+    );
+    let r = http
+        .post(url(&ts, "/api/logs/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "/api/logs/list must require auth"
+    );
+    let r = http.get(url(&ts, "/api/logs/stream")).send().await.unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::UNAUTHORIZED,
+        "/api/logs/stream must require auth"
+    );
 }

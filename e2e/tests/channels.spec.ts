@@ -12,7 +12,12 @@ test.describe("channels mailbox", () => {
     });
     await weaver.setStatus(session, "attention", "review the channel boundary");
 
-    const before = await page.request.get(`${weaver.baseUrl}/api/channels`);
+    const before = await page.request.post(
+      `${weaver.baseUrl}/api/channels/list`,
+      {
+        data: {},
+      },
+    );
     const channels = (await before.json()) as {
       id: string;
       unread_count: number;
@@ -34,8 +39,9 @@ test.describe("channels mailbox", () => {
 
     await expect
       .poll(async () => {
-        const response = await page.request.get(
-          `${weaver.baseUrl}/api/channels`,
+        const response = await page.request.post(
+          `${weaver.baseUrl}/api/channels/list`,
+          { data: {} },
         );
         const rows = (await response.json()) as {
           id: string;

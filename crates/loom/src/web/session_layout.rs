@@ -219,7 +219,7 @@ pub(super) async fn session_layout_events(
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     // `actor = User` on the declaration is the same rule `require_human` was:
     // the layout is the signed-in operator's own dashboard state.
-    super::streams::authorized::<events::Events>(&st, &principal, input).await?;
+    super::encodings::authorized::<events::Events>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
         if event.kind != "session_layout" {
@@ -238,7 +238,7 @@ pub(super) async fn session_layout_events(
 // `weaver_api::operations::session_layout`. These are the operation-typed
 // twins of every route above, including the per-item PATCH/DELETE and
 // default-selector routes (`session_layout.events` is registered too, but as
-// `io = Stream`, so `web::streams` serves it). Every revision-guarded
+// `io = Stream`, so `web::encodings` serves it). Every revision-guarded
 // mutation still funnels through `mutation_response`/`mutation_result`, so
 // the optimistic-concurrency conflict shape — refetch the current layout and
 // hand it back alongside the 409 — is identical between the legacy routes and

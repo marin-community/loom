@@ -266,7 +266,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{}", created.id))
+        .post("/api/sessions/delete", json!({ "session": created.id }))
         .await
         .unwrap();
 }

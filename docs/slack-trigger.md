@@ -238,12 +238,12 @@ from its actions menu.
 ## The reply route
 
 A session's own replies — a question, a design to review, the finished
-result — post back to the wired thread through `POST
-/api/branches/{branch}/slack/reply` with `{"text": "…"}` and the session's
-`LOOM_TOKEN`. loom resolves the destination channel and thread from the
-branch's `slack` wiring tag server-side; the bot token itself never reaches
-the agent, the same separation used by Loom's App-backed server-side GitHub
-tools.
+result — post back to the wired thread through `branches.slack.reply`
+(`POST /api/branches/slack/reply` with `{"text": "…"}`) and the session's
+`LOOM_TOKEN`; the branch is resolved from the calling session, never supplied
+by hand. loom resolves the destination channel and thread from the branch's
+`slack` wiring tag server-side; the bot token itself never reaches the agent,
+the same separation used by Loom's App-backed server-side GitHub tools.
 
 Adding `"thread": {"channel": "C…", "thread_ts": "…"}` posts to one of the
 session's *routed* threads instead (see [Automation-delivered
@@ -254,7 +254,8 @@ among the session's own threads rather than granting it the workspace. The
 
 ## Automation-delivered threads
 
-A `POST /api/runs` body may carry `"slack": {"channel": "C…", "thread_ts": "…"}`
+A `runs.create` (`POST /api/runs/create`) body may carry
+`"slack": {"channel": "C…", "thread_ts": "…"}`
 — the thread the caller announced this delivery in. loom **routes** that thread
 to whichever session the run lands on, and from then on the thread and the
 session are joined in both directions:

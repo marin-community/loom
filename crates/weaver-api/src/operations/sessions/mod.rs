@@ -51,6 +51,7 @@ pub mod url;
 static OPERATIONS: &[&OperationSpec] = &[
     <context::Get as Operation>::SPEC,
     <summary::get::Get as Operation>::SPEC,
+    <summary::list::List as Operation>::SPEC,
     <list::List as Operation>::SPEC,
     <get::Get as Operation>::SPEC,
     <launch::Launch as Operation>::SPEC,
@@ -66,6 +67,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     <status::set::Set as Operation>::SPEC,
     <tags::list::List as Operation>::SPEC,
     <tags::set::Set as Operation>::SPEC,
+    <tags::replace::Replace as Operation>::SPEC,
     <tags::delete::Delete as Operation>::SPEC,
     <adopt::Adopt as Operation>::SPEC,
     <archive::Archive as Operation>::SPEC,
@@ -84,12 +86,16 @@ static OPERATIONS: &[&OperationSpec] = &[
     <shells::list::List as Operation>::SPEC,
     <shells::delete::Delete as Operation>::SPEC,
     <scratch::limits::Limits as Operation>::SPEC,
+    <scratch::list::List as Operation>::SPEC,
+    <scratch::write::Write as Operation>::SPEC,
+    <scratch::delete::Delete as Operation>::SPEC,
     <update::Update as Operation>::SPEC,
     <delete::Delete as Operation>::SPEC,
     <config::set::Set as Operation>::SPEC,
     <github::refresh::Refresh as Operation>::SPEC,
     <github::set::Set as Operation>::SPEC,
     <github::clear::Clear as Operation>::SPEC,
+    <github::access::list::List as Operation>::SPEC,
     <github::labels::add::Add as Operation>::SPEC,
     <prompt::create::Create as Operation>::SPEC,
     <prompt::retract::Retract as Operation>::SPEC,
@@ -100,7 +106,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     <title::generation::set::Set as Operation>::SPEC,
     // Non-JSON: SSE feeds and terminal websockets. Registered exactly like the
     // rest — only the response encoding differs, so a custom handler in
-    // `loom::web::streams` serves them off these same declarations.
+    // `loom::web::encodings` serves them off these same declarations.
     <events::stream::Stream as Operation>::SPEC,
     <chat::stream::Stream as Operation>::SPEC,
     <terminal::Terminal as Operation>::SPEC,

@@ -52,7 +52,7 @@ async fn make_session(ts: &TestServer, goal: &str) -> (String, String, String) {
     let ws = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": goal, "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -143,9 +143,9 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     // The agent declares `blocked` about itself (the reactive signal): its own
     // `attention` tag.
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "blocked", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "blocked", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -231,7 +231,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -254,9 +254,9 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     // The session reports `attention` about itself so it falls inside the
     // watch's `!ok` scope (the survey will name it, proving it ran).
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -346,7 +346,7 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -442,7 +442,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     // The judged tag landed on its own typed key, attributed to the watch.
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -481,7 +481,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert!(
@@ -490,7 +490,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -580,7 +580,7 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -599,9 +599,9 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "tick me").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -666,7 +666,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -685,9 +685,9 @@ async fn cooldown_and_overlap_refire_are_refused() {
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "cool down").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "blocked", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "blocked", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -763,16 +763,16 @@ async fn cooldown_and_overlap_refire_are_refused() {
     }
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
 
-/// T8/T9: the operator REST surface end to end — create via POST, read back via
-/// GET, enable via PATCH, fire a `dry_run` round via POST /run (the audit row
-/// comes back with an outcome), list the round history via GET /runs, then
-/// DELETE. Plus the validation gates: a bad capability and a duplicate name are
-/// both rejected.
+/// T8/T9: the operator REST surface end to end — create via `watches.create`,
+/// read back via `watches.get`, enable via `watches.update`, fire a `dry_run`
+/// round via `watches.run` (the audit row comes back with an outcome), list
+/// the round history via `watches.runs`, then `watches.delete`. Plus the
+/// validation gates: a bad capability and a duplicate name are both rejected.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_watch_lifecycle_and_validation() {
@@ -785,9 +785,9 @@ async fn rest_watch_lifecycle_and_validation() {
     // dry-run round has something to "would-tag".
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "rest me").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -800,7 +800,7 @@ async fn rest_watch_lifecycle_and_validation() {
     let created = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({
                 "name": "rest-watch",
                 "trigger": { "cron": "0 * * * *" },
@@ -825,7 +825,7 @@ async fn rest_watch_lifecycle_and_validation() {
     // A duplicate name is rejected (the client surfaces the error status).
     let dup = ts
         .client
-        .post("/api/watches", json!({ "name": "rest-watch" }))
+        .post("/api/watches/create", json!({ "name": "rest-watch" }))
         .await;
     assert!(dup.is_err(), "a duplicate name is rejected");
 
@@ -833,20 +833,32 @@ async fn rest_watch_lifecycle_and_validation() {
     let bad_cap = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "bad", "capabilities": ["observe", "teleport"] }),
         )
         .await;
     assert!(bad_cap.is_err(), "an unknown capability is rejected");
 
     // GET by id (resolve also accepts the name).
-    let got = ts.client.get(&format!("/api/watches/{id}")).await.unwrap();
+    let got = ts
+        .client
+        .post("/api/watches/get", json!({ "key": id.as_str() }))
+        .await
+        .unwrap();
     assert_eq!(got["name"], "rest-watch");
-    let by_name = ts.client.get("/api/watches/rest-watch").await.unwrap();
+    let by_name = ts
+        .client
+        .post("/api/watches/get", json!({ "key": "rest-watch" }))
+        .await
+        .unwrap();
     assert_eq!(by_name["id"], id.as_str());
 
     // It shows up in the list.
-    let list = ts.client.get("/api/watches").await.unwrap();
+    let list = ts
+        .client
+        .post("/api/watches/list", json!({}))
+        .await
+        .unwrap();
     assert!(list
         .as_array()
         .unwrap()
@@ -856,9 +868,9 @@ async fn rest_watch_lifecycle_and_validation() {
     // Enable via PATCH, and update a mutable field in the same call.
     let patched = ts
         .client
-        .patch(
-            &format!("/api/watches/{id}"),
-            json!({ "enabled": true, "cooldown_secs": 120 }),
+        .post(
+            "/api/watches/update",
+            json!({ "key": id, "enabled": true, "cooldown_secs": 120 }),
         )
         .await
         .unwrap();
@@ -868,10 +880,7 @@ async fn rest_watch_lifecycle_and_validation() {
     // Dry-run a round: it returns a run id + outcome, applies no mark.
     let run = ts
         .client
-        .post(
-            &format!("/api/watches/{id}/run"),
-            json!({ "dry_run": true }),
-        )
+        .post("/api/watches/run", json!({ "key": id, "dry_run": true }))
         .await
         .unwrap();
     let run_id = run["run_id"].as_i64().unwrap();
@@ -882,7 +891,7 @@ async fn rest_watch_lifecycle_and_validation() {
     );
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert!(
@@ -893,7 +902,7 @@ async fn rest_watch_lifecycle_and_validation() {
     // GET /runs returns the audit history with actions parsed back to JSON.
     let runs = ts
         .client
-        .get(&format!("/api/watches/{id}/runs?limit=10"))
+        .post("/api/watches/runs", json!({ "key": id, "limit": 10 }))
         .await
         .unwrap();
     let runs = runs.as_array().unwrap();
@@ -907,15 +916,18 @@ async fn rest_watch_lifecycle_and_validation() {
     // DELETE.
     let deleted = ts
         .client
-        .delete(&format!("/api/watches/{id}"))
+        .post("/api/watches/delete", json!({ "key": id }))
         .await
         .unwrap();
     assert_eq!(deleted["deleted"], true);
-    let gone = ts.client.get(&format!("/api/watches/{id}")).await;
+    let gone = ts
+        .client
+        .post("/api/watches/get", json!({ "key": id }))
+        .await;
     assert!(gone.is_err(), "a deleted watch 404s");
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -991,7 +1003,11 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
 async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ts = TestServer::start().await;
 
-    let programs = ts.client.get("/api/watches/programs").await.unwrap();
+    let programs = ts
+        .client
+        .post("/api/watches/programs", json!({}))
+        .await
+        .unwrap();
     let arr = programs.as_array().unwrap();
     let names: Vec<&str> = arr.iter().map(|p| p["program"].as_str().unwrap()).collect();
     for expected in [
@@ -1065,7 +1081,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let bad = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "bad", "program": "builtin:nope" }),
         )
         .await;
@@ -1073,7 +1089,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ok = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "good", "program": "builtin:archive-merged" }),
         )
         .await
@@ -1135,7 +1151,10 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         .unwrap();
     let runs = ts
         .client
-        .get("/api/watches/archive-watch/runs?limit=10")
+        .post(
+            "/api/watches/runs",
+            json!({ "key": "archive-watch", "limit": 10 }),
+        )
         .await
         .unwrap();
     let run = runs
@@ -1172,7 +1191,10 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         .unwrap();
     let runs = ts
         .client
-        .get("/api/watches/label-watch/runs?limit=10")
+        .post(
+            "/api/watches/runs",
+            json!({ "key": "label-watch", "limit": 10 }),
+        )
         .await
         .unwrap();
     let run = runs
@@ -1191,13 +1213,17 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
 
     // Observe-only: neither session was archived or otherwise mutated.
     for id in [&merged_id, &open_id] {
-        let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let view = ts
+            .client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         assert_ne!(view["status"], "archived", "builtin scripts mutate nothing");
     }
 
     for id in [merged_id, open_id] {
         ts.client
-            .delete(&format!("/api/sessions/{id}"))
+            .post("/api/sessions/delete", json!({ "session": id }))
             .await
             .unwrap();
     }
@@ -1244,7 +1270,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/get", json!({ "session": sid }))
         .await
         .unwrap();
     assert_eq!(
@@ -1268,7 +1294,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/get", json!({ "session": sid }))
         .await
         .unwrap();
     assert!(
@@ -1277,13 +1303,13 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/delete", json!({ "session": sid }))
         .await
         .unwrap();
 }
 
 /// The LLM judgement path end to end: the status script calls the daemon's
-/// `POST /api/agent/oneshot` for its verdict and applies the parsed tag set.
+/// `agents.oneshot` for its verdict and applies the parsed tag set.
 /// First drives the endpoint directly against configured Claude and Codex ACP
 /// adapters (an empty prompt 400s), then runs a round whose stubbed judge
 /// recommends a `blocked` mark on an otherwise-calm session — the tag lands
@@ -1301,7 +1327,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let _endpoint_agent = fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", "ping");
     let reply = ts
         .client
-        .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
+        .post("/api/agents/oneshot", json!({ "prompt": "ping" }))
         .await
         .unwrap();
     assert_eq!(reply["output"], "ping", "the stub agent echoes the prompt");
@@ -1309,7 +1335,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let reply = ts
         .client
         .post(
-            "/api/agent/oneshot",
+            "/api/agents/oneshot",
             json!({ "prompt": "ping", "agent": "codex" }),
         )
         .await
@@ -1321,7 +1347,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let reply = ts
         .client
         .post(
-            "/api/agent/oneshot",
+            "/api/agents/oneshot",
             json!({ "prompt": "ping", "profile": "watch" }),
         )
         .await
@@ -1333,7 +1359,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     drop(_codex_agent);
     assert!(
         ts.client
-            .post("/api/agent/oneshot", json!({ "prompt": "" }))
+            .post("/api/agents/oneshot", json!({ "prompt": "" }))
             .await
             .is_err(),
         "an empty prompt is rejected"
@@ -1369,7 +1395,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
 
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -1385,7 +1411,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -1472,9 +1498,9 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     // An ordinary fleet session, reporting non-ok so the survey would mark it.
     let (visible_id, _branch_id, repo_root) = make_session(&ts, "visible work").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{visible_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": visible_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -1518,7 +1544,11 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     .unwrap();
 
     // The dashboard listing shows the ordinary session, not the warm one.
-    let list = ts.client.get("/api/sessions").await.unwrap();
+    let list = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let ids: Vec<&str> = list
         .as_array()
         .unwrap()
@@ -1554,7 +1584,7 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{visible_id}"))
+        .post("/api/sessions/delete", json!({ "session": visible_id }))
         .await
         .unwrap();
 }
@@ -1766,7 +1796,7 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     let created = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({
                 "name": "merge-watch",
                 "program": survey_triggered_program(),
@@ -1780,7 +1810,10 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         "the stored trigger came from the script's manifest: {created:?}"
     );
     ts.client
-        .patch("/api/watches/merge-watch", json!({ "enabled": true }))
+        .post(
+            "/api/watches/update",
+            json!({ "key": "merge-watch", "enabled": true }),
+        )
         .await
         .unwrap();
     let o = watch_store::get_by_name(&state.db, "merge-watch")
@@ -1821,7 +1854,7 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     assert!(run.duration_ms.is_some());
 
     ts.client
-        .delete(&format!("/api/sessions/{merged_id}"))
+        .post("/api/sessions/delete", json!({ "session": merged_id }))
         .await
         .unwrap();
 }

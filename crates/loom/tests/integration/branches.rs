@@ -22,7 +22,7 @@ async fn branch_issues_and_repo_board() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "integration test goal",
                 "cwd": repo_root,
@@ -35,13 +35,13 @@ async fn branch_issues_and_repo_board() {
     let branch_id = ws["branch"]["id"].as_str().unwrap().to_string();
 
     // Branches endpoint lists this branch with the right metadata.
-    let branches = client.get("/api/branches").await.unwrap();
+    let branches = client.post("/api/branches/list", json!({})).await.unwrap();
     let arr = branches.as_array().unwrap();
     assert_eq!(arr.len(), 1, "one branch tracked");
     assert_eq!(arr[0]["branch"], "weaver/integration-test-goal");
     assert_eq!(arr[0]["open_issue_count"], 0);
     let tracking = client
-        .get(&format!("/api/branches/{branch_id}/issues"))
+        .post("/api/branches/issues/list", json!({ "branch": branch_id }))
         .await
         .unwrap();
     let tracking = tracking.as_array().unwrap();
@@ -65,7 +65,7 @@ async fn branch_issues_and_repo_board() {
         "a branch issue is claimed by its branch"
     );
     let listed = client
-        .get(&format!("/api/branches/{branch_id}/issues"))
+        .post("/api/branches/issues/list", json!({ "branch": branch_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -74,7 +74,7 @@ async fn branch_issues_and_repo_board() {
         "only the hand-created work item"
     );
     let branch_view = client
-        .get(&format!("/api/branches/{branch_id}"))
+        .post("/api/branches/get", json!({ "branch": branch_id }))
         .await
         .unwrap();
     assert_eq!(branch_view["open_issue_count"], 1);
@@ -104,7 +104,10 @@ async fn branch_issues_and_repo_board() {
 
     // Issues are repo-owned: deleting the session returns its claimed issue to
     // the unclaimed backlog rather than deleting it.
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
     let board = client
         .post(
             "/api/issues/list",
@@ -124,10 +127,10 @@ async fn branch_issues_and_repo_board() {
     );
 }
 
-/// The cross-repo issue board (`GET /api/issues`) and issue tags: a label set
+/// The cross-repo issue board (`issues.board`) and issue tags: a label set
 /// through the typed client surfaces on the issue's `tags`, including when its
 /// free-form key contains reserved URL characters, and clearing removes it.
-/// Closed issues only appear with `?all=true`.
+/// Closed issues only appear with `all: true`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cross_repo_board_and_issue_tags() {
@@ -137,7 +140,7 @@ async fn cross_repo_board_and_issue_tags() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "board me", "cwd": repo_root, "agent": "shell" }),
         )
         .await
@@ -159,7 +162,7 @@ async fn cross_repo_board_and_issue_tags() {
     );
 
     // The cross-repo board lists the open issues (tracking + the new one).
-    let board = client.get("/api/issues").await.unwrap();
+    let board = client.post("/api/issues/board", json!({})).await.unwrap();
     let board = board.as_array().unwrap();
     assert!(
         board.iter().any(|i| i["id"].as_i64() == Some(issue_id)),
@@ -239,8 +242,8 @@ async fn cross_repo_board_and_issue_tags() {
     assert_eq!(reopened.issues[0].status, "open");
     close(vec![issue_id]).await.unwrap();
 
-    // A closed issue leaves the default board but returns with ?all=true.
-    let open_board = client.get("/api/issues").await.unwrap();
+    // A closed issue leaves the default board but returns with all: true.
+    let open_board = client.post("/api/issues/board", json!({})).await.unwrap();
     assert!(
         !open_board
             .as_array()
@@ -249,20 +252,26 @@ async fn cross_repo_board_and_issue_tags() {
             .any(|i| i["id"].as_i64() == Some(issue_id)),
         "a closed issue is off the default board"
     );
-    let all_board = client.get("/api/issues?all=true").await.unwrap();
+    let all_board = client
+        .post("/api/issues/board", json!({ "all": true }))
+        .await
+        .unwrap();
     assert!(
         all_board
             .as_array()
             .unwrap()
             .iter()
             .any(|i| i["id"].as_i64() == Some(issue_id)),
-        "?all=true includes the closed issue"
+        "all: true includes the closed issue"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
-/// The triage axis: `PUT /api/sessions/{id}/tags/triage` stamps the watch's
+/// The triage axis: `sessions.tags.set` on the `triage` key stamps the watch's
 /// mark on the session's branch, surfaces it on the SessionView's `branch.tags`,
 /// and never disturbs the agent's own `attention` tag. An invalid value is
 /// rejected.
@@ -275,7 +284,7 @@ async fn triage_axis_marks_a_session() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "triage me", "cwd": repo_root, "agent": "shell" }),
         )
         .await
@@ -284,15 +293,18 @@ async fn triage_axis_marks_a_session() {
 
     // The agent declares `blocked` about itself — its own `attention` tag.
     client
-        .put(
-            &format!("/api/sessions/{id}/tags/attention"),
-            json!({ "value": "blocked", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": id, "key": "attention", "value": "blocked", "by": "agent" }),
         )
         .await
         .unwrap();
 
     // Fresh: no watch mark yet.
-    let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert!(
         branch_tag(&view, "triage").is_none(),
         "unmarked: no triage tag yet"
@@ -300,13 +312,27 @@ async fn triage_axis_marks_a_session() {
 
     // A watch stamps a mark via the triage tag.
     let marked = client
-        .put(
-            &format!("/api/sessions/{id}/tags/triage"),
-            json!({ "value": "attention", "note": "idle 30m with red CI", "by": "status-check" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({
+                "session": id,
+                "key": "triage",
+                "value": "attention",
+                "note": "idle 30m with red CI",
+                "by": "status-check"
+            }),
         )
         .await
         .unwrap();
-    let triage = branch_tag(&marked, "triage").expect("the mark wrote a triage tag");
+    // `sessions.tags.set` answers with the branch directly (unlike
+    // `sessions.get`'s `SessionView`, there is no outer `branch` wrapper), so
+    // this reads `marked["tags"]` rather than the `branch_tag()` helper.
+    let triage = marked["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["key"] == "triage")
+        .expect("the mark wrote a triage tag");
     assert_eq!(triage["value"], "attention");
     assert_eq!(triage["note"], "idle 30m with red CI");
     assert_eq!(triage["set_by"], "status-check");
@@ -315,22 +341,31 @@ async fn triage_axis_marks_a_session() {
         "a mark stamps set_at"
     );
     // The agent's own attention is untouched — two actors, two axes.
+    let attention = marked["tags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["key"] == "attention")
+        .map(|t| t["value"].as_str().unwrap_or(""))
+        .unwrap_or("");
     assert_eq!(
-        branch_tag_value(&marked, "attention"),
-        "blocked",
+        attention, "blocked",
         "triage must not stomp the agent's self-report"
     );
 
     // An invalid value is rejected.
     let bad = client
-        .put(
-            &format!("/api/sessions/{id}/tags/triage"),
-            json!({ "value": "bogus" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": id, "key": "triage", "value": "bogus" }),
         )
         .await;
     assert!(bad.is_err(), "invalid triage value should be rejected");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// A watch replaces its complete authored tag set in one request. The
@@ -344,7 +379,7 @@ async fn batch_tags_replace_one_authors_set_atomically() {
     let client = &ts.client;
     let session = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "reconcile labels", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -357,18 +392,19 @@ async fn batch_tags_replace_one_authors_set_atomically() {
         ("idle", "idle", "agent"),
     ] {
         client
-            .put(
-                &format!("/api/sessions/{id}/tags/{key}"),
-                json!({ "value": value, "by": by }),
+            .post(
+                "/api/sessions/tags/set",
+                json!({ "session": id, "key": key, "value": value, "by": by }),
             )
             .await
             .unwrap();
     }
 
     let replaced = client
-        .put(
-            &format!("/api/sessions/{id}/tags"),
+        .post(
+            "/api/sessions/tags/replace",
             json!({
+                "session": id,
                 "by": "status-check",
                 "tags": [
                     { "key": "review", "value": "attention", "note": "ready" }
@@ -387,16 +423,16 @@ async fn batch_tags_replace_one_authors_set_atomically() {
     // has since replaced that key. Its next empty replacement must not delete
     // the person's newer value.
     client
-        .put(
-            &format!("/api/sessions/{id}/tags/review"),
-            json!({ "value": "keep", "by": "manual" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": id, "key": "review", "value": "keep", "by": "manual" }),
         )
         .await
         .unwrap();
     let calm = client
-        .put(
-            &format!("/api/sessions/{id}/tags"),
-            json!({ "by": "status-check", "tags": [] }),
+        .post(
+            "/api/sessions/tags/replace",
+            json!({ "session": id, "by": "status-check", "tags": [] }),
         )
         .await
         .unwrap();
@@ -404,7 +440,10 @@ async fn batch_tags_replace_one_authors_set_atomically() {
     assert_eq!(review["value"], "keep");
     assert_eq!(review["set_by"], "manual");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// Attaching to an existing branch reuses its worktree if one exists, creates
@@ -418,7 +457,7 @@ async fn attach_to_existing_branch() {
     let cwd = ts.cwd();
 
     let branches_q = client
-        .get(&format!("/api/repos/branches?cwd={cwd}"))
+        .post("/api/repos/branches", json!({ "cwd": cwd }))
         .await
         .unwrap();
     let arr = branches_q.as_array().unwrap();
@@ -429,18 +468,20 @@ async fn attach_to_existing_branch() {
     );
 
     let valid_base = client
-        .get(&format!(
-            "/api/repos/revisions/validate?cwd={cwd}&revision=main"
-        ))
+        .post(
+            "/api/repos/revisions/validate",
+            json!({ "cwd": cwd, "revision": "main" }),
+        )
         .await
         .unwrap();
     assert_eq!(valid_base["valid"], true);
     assert_eq!(valid_base["message"], serde_json::Value::Null);
 
     let missing_base = client
-        .get(&format!(
-            "/api/repos/revisions/validate?cwd={cwd}&revision=agent/missing-upstream-worktree"
-        ))
+        .post(
+            "/api/repos/revisions/validate",
+            json!({ "cwd": cwd, "revision": "agent/missing-upstream-worktree" }),
+        )
         .await
         .unwrap();
     assert_eq!(missing_base["valid"], false);
@@ -453,7 +494,7 @@ async fn attach_to_existing_branch() {
     sh(&repo, "git", &["branch", "feature/x", "main"]);
     let attached = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": cwd,
                 "goal": "attach to feature/x",
@@ -487,7 +528,7 @@ async fn attach_to_existing_branch() {
     );
     let attached_y = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": cwd,
                 "goal": "attach to feature/y",
@@ -508,7 +549,7 @@ async fn attach_to_existing_branch() {
     // A non-existent branch is rejected.
     let missing = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": cwd,
                 "goal": "missing branch",
@@ -520,14 +561,14 @@ async fn attach_to_existing_branch() {
     assert!(missing.is_err(), "missing branch should be rejected");
 
     client
-        .delete(&format!("/api/sessions/{attached_id}"))
+        .post("/api/sessions/delete", json!({ "session": attached_id }))
         .await
         .unwrap();
     client
-        .delete(&format!(
-            "/api/sessions/{}",
-            attached_y["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": attached_y["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }
@@ -545,18 +586,19 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "slack reply scope", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
         .unwrap();
     let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
-    let reply_url = format!("http://{}/api/branches/{branch_id}/slack/reply", ts.addr);
+    let reply_url = format!("http://{}/api/branches/slack/reply", ts.addr);
 
     // An unrouted thread is forbidden even though it is well-formed.
     let unrouted = http
         .post(&reply_url)
         .json(&json!({
+            "branch": branch_id,
             "text": "status update",
             "thread": { "channel": "C0123ABCD", "thread_ts": "1700000000.123456" },
         }))
@@ -569,6 +611,7 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
     let malformed = http
         .post(&reply_url)
         .json(&json!({
+            "branch": branch_id,
             "text": "status update",
             "thread": { "channel": "#marin-eng", "thread_ts": "1700000000.123456" },
         }))
@@ -580,17 +623,17 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
     // Without `thread`, an unwired branch still reports that it has no thread.
     let unwired = http
         .post(&reply_url)
-        .json(&json!({ "text": "status update" }))
+        .json(&json!({ "branch": branch_id, "text": "status update" }))
         .send()
         .await
         .unwrap();
     assert_eq!(unwired.status(), StatusCode::BAD_REQUEST);
 
     ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": session["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }

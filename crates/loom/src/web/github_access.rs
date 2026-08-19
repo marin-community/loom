@@ -10,6 +10,7 @@ use axum::{
 };
 use serde_json::json;
 use weaver_api::operations::permissions as permission_operations;
+use weaver_api::operations::sessions as session_operations;
 use weaver_api::SessionGithubAccessView;
 
 use crate::auth::Principal;
@@ -99,6 +100,29 @@ pub(super) async fn list_github_access(
         })
         .collect();
     Ok(Json(grants))
+}
+
+/// `sessions.github.access.list` — ported from [`list_github_access`]. Its
+/// `require_human` call is dropped rather than moved: the declaration's
+/// `actor = User` is that same rule, and `authorize()` turns a session or
+/// automation credential away before this handler runs. Two copies of one rule
+/// is one copy too many.
+pub(super) async fn list_github_access_operation(
+    context: OperationContext,
+    input: session_operations::github::access::list::Input,
+) -> ApiResult<Vec<SessionGithubAccessView>> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    Ok(crate::github_access::list(&st.db, &session.id)
+        .await?
+        .into_iter()
+        .map(|grant| SessionGithubAccessView {
+            repository: grant.repository,
+            mode: grant.mode.as_str().to_string(),
+            granted_by: grant.granted_by,
+            granted_at: grant.granted_at,
+        })
+        .collect())
 }
 
 /// Shared body for `permissions.github.grant` and `permissions.github.revoke`:

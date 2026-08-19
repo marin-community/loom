@@ -124,7 +124,7 @@ async fn hook_event_drives_session_status() {
     // Spawn a session (shell agent — no real claude needed).
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "hook smoke test",
                 "cwd": repo.path().to_string_lossy(),
@@ -149,7 +149,10 @@ async fn hook_event_drives_session_status() {
     let mut got = String::new();
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let ws = client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         got = ws["status"].as_str().unwrap_or("").to_string();
         if got == "running" {
             break;
@@ -185,7 +188,10 @@ async fn hook_event_drives_session_status() {
     let mut idle = String::new();
     for _ in 0..40 {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let ws = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let ws = client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         let tags = ws["branch"]["tags"].as_array().cloned().unwrap_or_default();
         idle = tags
             .iter()
@@ -209,7 +215,7 @@ async fn hook_event_drives_session_status() {
 
     // Verify the hook event row landed too.
     let log = client
-        .get(&format!("/api/sessions/{id}/log"))
+        .post("/api/sessions/events/list", json!({ "session": id }))
         .await
         .unwrap();
     let kinds: Vec<&str> = log

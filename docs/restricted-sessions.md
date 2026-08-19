@@ -86,7 +86,7 @@ request=$(jq -n \
 curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer $loom_token" \
   -H 'Content-Type: application/json' \
-  -d "$request" "$LOOM_URL/api/runs"
+  -d "$request" "$LOOM_URL/api/runs/create"
 ```
 
 GitHub caller keys accept up to 128 ASCII letters, digits, `.`, `_`, `:`, and

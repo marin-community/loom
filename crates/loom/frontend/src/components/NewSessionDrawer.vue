@@ -8,7 +8,6 @@ import {
   listAgents,
   listProfiles,
   listRepos,
-  post,
   registerRepo,
   resolveSessionLaunch,
   validateRepoRevision,
@@ -649,13 +648,9 @@ async function create() {
         })),
       );
     }
-    // GAP: `sessions.launch`'s `title` field is required (no default), but
-    // this form allows submitting with only a `goal` (see `createBlockReason`
-    // above — title OR goal, not both required) and the legacy route derives
-    // a title server-side when it's blank. Migrating would either send an
-    // empty title or force synthesizing one client-side, both a behavior
-    // change, so this stays on the legacy route.
-    const session = (await post('/sessions', body)) as Session;
+    // `title` is left out when the form has only a goal (see
+    // `createBlockReason` — title OR goal): `sessions.launch` derives it.
+    const session = (await invokeOperation('sessions.launch', body)) as Session;
     resetForm();
     emit('created');
     emit('close');

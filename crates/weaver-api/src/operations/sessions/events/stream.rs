@@ -9,7 +9,7 @@ use super::prelude::*;
 /// `io = Stream` changes exactly one thing: the response encoding, so a custom
 /// handler serves it instead of the JSON dispatcher. The actor policy, the
 /// grants, and the resource scope are read from this declaration by that
-/// handler — see `loom::web::streams`.
+/// handler — see `loom::web::encodings`.
 #[operation(
     id = "sessions.events.stream",
     actor = SessionSelf,

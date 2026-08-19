@@ -1151,16 +1151,16 @@ enum WatchCmd {
         /// The watch name; also the file stem (`<name>.py`).
         name: String,
     },
-    /// List the builtin programs that ship with loom (GET /api/watches/programs).
+    /// List the builtin programs that ship with loom (`watches.programs`).
     Programs {
         /// Print one program's script source instead of the table, e.g.
         /// `--source builtin:archive-merged` — a working example to start from.
         #[arg(long)]
         source: Option<String>,
     },
-    /// Register a watch from flags (POST /api/watches).
+    /// Register a watch from flags (`watches.create`).
     Add(Box<AddOpts>),
-    /// Remove a watch (DELETE).
+    /// Remove a watch.
     Rm {
         /// Watch id or name.
         name: String,
@@ -2940,7 +2940,7 @@ async fn cmd_login(name: String, url: Option<String>, token_stdin: bool) -> Resu
     }
 
     let remote = Client::new(url.clone()).with_token(Some(token.to_string()));
-    let me = remote.get("/api/auth/me").await?;
+    let me = remote.post("/api/auth/me", json!({})).await?;
     if me.get("authenticated").and_then(Value::as_bool) != Some(true)
         || me.get("via").and_then(Value::as_str) != Some("token")
     {
@@ -4394,20 +4394,6 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Percent-encode a query-string value (paths can contain spaces).
-fn encode_query(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
-
 // ---------------------------------------------------------------------------
 // Server lifecycle (status / start / stop / restart)
 // ---------------------------------------------------------------------------
@@ -4780,27 +4766,11 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
     Ok(())
 }
 
-/// Percent-encode a session key for use as a single URL path segment. Branch-name
-/// keys contain `/` (`weaver/issue-6`), which raw interpolation would leave as a
-/// path separator — the request then misses the `/api/sessions/{id}/...` route
-/// entirely (a 404/405 from the server, not a resolution failure).
-fn enc_key(key: &str) -> String {
-    use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
-    const SEG: &AsciiSet = &CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'#')
-        .add(b'%')
-        .add(b'/')
-        .add(b'?');
-    utf8_percent_encode(key, SEG).to_string()
-}
-
 /// Resolve a session view by key, surfacing a clearer error than a bare 404 when
 /// the key matches no live session.
 async fn fetch_session(client: &Client, key: &str) -> Result<Value> {
     client
-        .get(&format!("/api/sessions/{}", enc_key(key)))
+        .post("/api/sessions/get", json!({ "session": key }))
         .await
         .with_context(|| format!("no live session for '{key}'"))
 }
@@ -4837,7 +4807,7 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
     };
     let client = client::default()?;
     let res: Value = client
-        .get(&format!("/api/sessions/{}/url", enc_key(&key)))
+        .post("/api/sessions/url", json!({ "session": key }))
         .await
         .with_context(|| format!("no live session for '{key}'"))?;
     let url = res
@@ -4956,8 +4926,8 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     let client = client::default()?;
     client
         .post(
-            &format!("/api/sessions/{}/send", enc_key(&key)),
-            json!({ "text": message, "submit": submit }),
+            "/api/sessions/send",
+            json!({ "session": key, "text": message, "submit": submit }),
         )
         .await?;
     println!(
@@ -4971,10 +4941,7 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
 async fn cmd_session_interrupt(key: String) -> Result<()> {
     let client = client::default()?;
     client
-        .post(
-            &format!("/api/sessions/{}/interrupt", enc_key(&key)),
-            json!({}),
-        )
+        .post("/api/sessions/interrupt", json!({ "session": key }))
         .await?;
     println!("interrupted {key}");
     Ok(())
@@ -4984,10 +4951,10 @@ async fn cmd_session_interrupt(key: String) -> Result<()> {
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .get(&format!(
-            "/api/sessions/{}/preview?lines={lines}",
-            enc_key(&key)
-        ))
+        .post(
+            "/api/sessions/preview",
+            json!({ "session": key, "lines": lines }),
+        )
         .await?;
     print!("{}", str_field(&res, "screen"));
     // The capture is right-trimmed server-side; ensure a clean final newline.
@@ -5015,48 +4982,30 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
         creator,
     } = options;
     let client = client::default()?;
-    // The compatibility GET omits automation by default; this fleet inventory
-    // explicitly opts into successful automation work.
-    let mut query = Vec::new();
-    if archived {
-        query.push("archived=true".to_string());
-    }
-    query.push("automation=true".to_string());
-    if managed {
-        query.push("managed=true".to_string());
-    }
     let search = search.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    if managed {
-        if status.is_some() || attention.is_some() {
-            bail!("--status and --attention cannot be combined with --managed");
-        }
-        if let Some(search) = search {
-            query.push(format!("q={}", encode_query(search)));
-        }
-        if let Some(creator) = creator {
-            query.push(format!("creator={creator}"));
-        }
+    // `--managed` is the operator inventory: it is the only listing that shows a
+    // watcher's own warm sessions, and `sessions.list` refuses it to anything but
+    // a human credential. `--status`/`--attention` are excluded from it because
+    // the managed survey has never filtered on either, not because it could not.
+    if managed && (status.is_some() || attention.is_some()) {
+        bail!("--status and --attention cannot be combined with --managed");
     }
-    let list = if !managed
-        && (search.is_some() || status.is_some() || attention.is_some() || creator.is_some())
-    {
-        serde_json::to_value(
-            client
-                .search_sessions(&SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                })
-                .await?,
-        )?
-    } else {
+    let list = serde_json::to_value(
         client
-            .get(&format!("/api/sessions?{}", query.join("&")))
-            .await?
-    };
+            .search_sessions(&SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .await?,
+    )?;
     let rows = list.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         let hint = match search {
@@ -5094,15 +5043,16 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
 async fn cmd_show(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .get(&format!("/api/sessions/{}", enc_key(&key)))
+        .post("/api/sessions/get", json!({ "session": key }))
         .await?;
     print_session(&ws);
     Ok(())
 }
 
-/// `loom sessions rename` — set a session's one-line dashboard title via
-/// `PATCH /api/sessions/{key}`. This keeps the CLI at parity with the dashboard's
-/// inline title editor.
+/// `loom sessions rename` — set a session's one-line dashboard title
+/// (`sessions.update`). This keeps the CLI at parity with the dashboard's inline
+/// title editor: the observed label and provenance travel with the edit so a
+/// concurrent rename is rejected rather than silently overwritten.
 async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     let title = title.trim();
     if title.is_empty() {
@@ -5110,12 +5060,13 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     }
     let client = client::default()?;
     let current = client
-        .get(&format!("/api/sessions/{}", enc_key(&key)))
+        .post("/api/sessions/get", json!({ "session": key }))
         .await?;
     let ws = client
-        .patch(
-            &format!("/api/sessions/{}", enc_key(&key)),
+        .post(
+            "/api/sessions/update",
             json!({
+                "session": key,
                 "title": title,
                 "expected_title": branch_str(&current, "title"),
                 "expected_title_provenance": branch_str(&current, "title_provenance"),
@@ -5133,10 +5084,7 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
 async fn cmd_session_regenerate_title(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post(
-            &format!("/api/sessions/{}/title/regenerate", enc_key(&key)),
-            json!({}),
-        )
+        .post("/api/sessions/title/regenerate", json!({ "session": key }))
         .await?;
     println!(
         "{} — {}",
@@ -5149,9 +5097,9 @@ async fn cmd_session_regenerate_title(key: String) -> Result<()> {
 async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .put(
-            &format!("/api/sessions/{}/title-generation", enc_key(&key)),
-            json!({ "enabled": enabled }),
+        .post(
+            "/api/sessions/title/generation/set",
+            json!({ "session": key, "enabled": enabled }),
         )
         .await?;
     println!(
@@ -5169,11 +5117,20 @@ const CUE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2)
 
 async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
     let client = client::default()?;
-    let path = format!("/api/sessions/{}/resumption-cue", enc_key(&key));
     let mut cue = if ensure {
-        client.post(&path, json!({ "force": force })).await?
+        client
+            .post(
+                "/api/sessions/resumption_cue/ensure",
+                json!({ "session": key, "force": force }),
+            )
+            .await?
     } else {
-        client.get(&path).await?
+        client
+            .post(
+                "/api/sessions/resumption_cue/get",
+                json!({ "session": key }),
+            )
+            .await?
     };
     // An ensure only *starts* generation — the model call runs detached so it
     // cannot hold a connection open. Wait it out here so the command still
@@ -5184,7 +5141,12 @@ async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
                 break;
             }
             tokio::time::sleep(CUE_POLL_INTERVAL).await;
-            cue = client.get(&path).await?;
+            cue = client
+                .post(
+                    "/api/sessions/resumption_cue/get",
+                    json!({ "session": key }),
+                )
+                .await?;
         }
     }
     println!("status: {}", str_field(&cue, "status"));
@@ -5304,7 +5266,7 @@ async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let client = client::default()?;
     let ws = client
-        .get(&format!("/api/sessions/{}", enc_key(&key)))
+        .post("/api/sessions/get", json!({ "session": key }))
         .await?;
     let session = ws
         .get("term_session")
@@ -5329,10 +5291,7 @@ async fn cmd_attach(key: String) -> Result<()> {
 async fn cmd_archive(key: String) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .post(
-            &format!("/api/sessions/{}/archive", enc_key(&key)),
-            json!({}),
-        )
+        .post("/api/sessions/archive", json!({ "session": key }))
         .await?;
     if str_field(&res, "kind") == "launch_attempt" {
         println!("archived launch attempt {key} (reserved runtime removed; history kept)");
@@ -5355,7 +5314,7 @@ async fn cmd_archive(key: String) -> Result<()> {
 async fn cmd_adopt(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post(&format!("/api/sessions/{}/adopt", enc_key(&key)), json!({}))
+        .post("/api/sessions/adopt", json!({ "session": key }))
         .await?;
     println!(
         "adopted session {}  ({})",
@@ -5371,10 +5330,7 @@ async fn cmd_adopt(key: String) -> Result<()> {
 async fn cmd_recover(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post(
-            &format!("/api/sessions/{}/recover", enc_key(&key)),
-            json!({}),
-        )
+        .post("/api/sessions/recover", json!({ "session": key }))
         .await?;
     println!(
         "recovered session {}  ({})",
@@ -5453,8 +5409,12 @@ async fn cmd_handoff(
 
 async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
     let client = client::default()?;
-    let path = format!("/api/sessions/{}?keep_branch={keep_branch}", enc_key(&key));
-    let res = client.delete(&path).await?;
+    let res = client
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": key, "keep_branch": keep_branch }),
+        )
+        .await?;
     println!("removed session {key}");
     if let Some(warnings) = res.get("warnings").and_then(Value::as_array) {
         for w in warnings {
@@ -5567,7 +5527,7 @@ async fn cmd_watch_new(name: String) -> Result<()> {
 async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .get("/api/watches/programs")
+        .post("/api/watches/programs", json!({}))
         .await?
         .as_array()
         .cloned()
@@ -5630,7 +5590,7 @@ fn build_scope(opts: &AddOpts) -> Result<Value> {
     Ok(scope)
 }
 
-/// `loom watch add` — register a watch via POST /api/watches.
+/// `loom watch add` — register a watch (`watches.create`).
 async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     let client = client::default()?;
     let trigger = build_trigger(&opts);
@@ -5665,7 +5625,9 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
         body.insert("cooldown_secs".into(), json!(cooldown));
     }
 
-    let o = client.post("/api/watches", Value::Object(body)).await?;
+    let o = client
+        .post("/api/watches/create", Value::Object(body))
+        .await?;
     println!(
         "registered watch {}  ({})",
         str_field(&o, "name"),
@@ -5685,18 +5647,21 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 /// `loom watch rm` — delete a watch.
 async fn cmd_watch_rm(name: String) -> Result<()> {
     let client = client::default()?;
-    client.delete(&format!("/api/watches/{name}")).await?;
+    client
+        .post("/api/watches/delete", json!({ "key": name }))
+        .await?;
     println!("removed watch {name}");
     Ok(())
 }
 
-/// `loom watch enable|disable` — PATCH the `enabled` toggle.
+/// `loom watch enable|disable` — flip the `enabled` toggle
+/// (`watches.update`).
 async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let o = client
-        .patch(
-            &format!("/api/watches/{name}"),
-            json!({ "enabled": enabled }),
+        .post(
+            "/api/watches/update",
+            json!({ "key": name, "enabled": enabled }),
         )
         .await?;
     println!(
@@ -5711,7 +5676,7 @@ async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
 async fn cmd_watch_ls() -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .get("/api/watches")
+        .post("/api/watches/list", json!({}))
         .await?
         .as_array()
         .cloned()
@@ -5748,8 +5713,8 @@ async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
     let client = client::default()?;
     let res = client
         .post(
-            &format!("/api/watches/{name}/run"),
-            json!({ "dry_run": dry_run }),
+            "/api/watches/run",
+            json!({ "key": name, "dry_run": dry_run }),
         )
         .await?;
     let outcome = str_field(&res, "outcome");
@@ -5767,7 +5732,7 @@ async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
 async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .get(&format!("/api/watches/{name}/runs?limit={limit}"))
+        .post("/api/watches/runs", json!({ "key": name, "limit": limit }))
         .await?
         .as_array()
         .cloned()
@@ -6610,13 +6575,6 @@ settings:
         assert_eq!(action_summary(&would), "would mark s1: ok");
         let nudge = json!({ "action": "nudge", "session": "s1", "text": "try again" });
         assert_eq!(action_summary(&nudge), "nudge s1: try again");
-    }
-    #[test]
-    fn session_keys_encode_to_one_path_segment() {
-        // Branch-name keys carry a slash; ids pass through untouched.
-        assert_eq!(enc_key("weaver/issue-6"), "weaver%2Fissue-6");
-        assert_eq!(enc_key("la1djzrs"), "la1djzrs");
-        assert_eq!(enc_key("repo:weaver/issue-6"), "repo:weaver%2Fissue-6");
     }
 
     #[test]

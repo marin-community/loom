@@ -346,17 +346,21 @@ fn session_only_operations_are_pinned() {
 /// Each of these needs a hand-written handler, so each is a place the
 /// declaration and the implementation can drift. That is a cost worth counting,
 /// not a category worth hiding: `io` names *why* the handler is custom, and the
-/// three reasons are the whole list.
+/// reasons below are the whole list.
 ///
 /// * `session` — the response must carry a `Set-Cookie`, which the dispatcher
 ///   cannot emit. Served beside the auth routes.
 /// * `stream` — the response is an SSE body.
 /// * `duplex` — the response is a websocket upgrade.
+/// * `upload` — the *request* body is the payload's raw bytes.
+/// * `download` — the *response* body is raw bytes with a guessed content type,
+///   because the caller is a browser fetching a URL rather than posting JSON.
 ///
-/// The streams and websockets used to be unregistered on the theory that a GET
-/// stream cannot sit at a derived path. It can: `?session=…` is a URL, an operand
-/// is an operand regardless of encoding, and `loom::web::streams` mounts all
-/// eight off these declarations.
+/// Every one of these is still a registered operation with a derived route, a
+/// declared actor, and the dispatcher's own `authorize`. The streams used to be
+/// unregistered on the theory that a GET cannot sit at a derived path. It can:
+/// `?session=…` is a URL, an operand is an operand regardless of encoding, and
+/// `loom::web::encodings` mounts all of these off these declarations.
 #[test]
 fn transport_specific_operations_are_pinned() {
     let special: BTreeMap<&str, &str> = operations::operations()
@@ -370,8 +374,11 @@ fn transport_specific_operations_are_pinned() {
         ("events.stream", "stream"),
         ("logs.stream", "stream"),
         ("session_layout.events", "stream"),
+        ("artifacts.raw", "download"),
         ("sessions.chat.stream", "stream"),
         ("sessions.events.stream", "stream"),
+        ("sessions.raw", "download"),
+        ("sessions.scratch.write", "upload"),
         ("sessions.shells.terminal", "duplex"),
         ("sessions.terminal", "duplex"),
         ("shell.terminal", "duplex"),
@@ -385,21 +392,24 @@ fn transport_specific_operations_are_pinned() {
     );
 }
 
-/// A `Stream` or `Duplex` operation takes its operands from the query string,
-/// which axum deserializes before any dispatcher default-filling could run. So
-/// every one of its operands must be optional on the wire — otherwise the
-/// declared route 400s on a caller that named nothing, including exactly the
+/// An operation with no JSON request body takes its operands from the query
+/// string, which axum deserializes before any dispatcher default-filling could
+/// run. So every one of its operands must be optional on the wire — otherwise
+/// the declared route 400s on a caller that named nothing, including exactly the
 /// request a session credential makes when it means "my own session".
 ///
 /// `io = Session` is exempt: it is a POST with a JSON body, and its response is
 /// special only in carrying a `Set-Cookie`.
 ///
 /// Checked here as a property of the *declaration* (the server-side counterpart,
-/// which runs the real `Query` extractor, lives in `loom::web::streams`).
+/// which runs the real `Query` extractor, lives in `loom::web::encodings`).
 #[test]
 fn streaming_operations_declare_no_required_operand() {
     for operation in operations::operations() {
-        if !matches!(operation.io.as_str(), "stream" | "duplex") {
+        if !matches!(
+            operation.io.as_str(),
+            "stream" | "duplex" | "upload" | "download"
+        ) {
             continue;
         }
         let schema = (operation.schema)();

@@ -20,7 +20,7 @@ async fn recover_rebuilds_worktree_and_resumes() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "recover me", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -35,7 +35,7 @@ async fn recover_rebuilds_worktree_and_resumes() {
 
     // Archive tears the worktree down but keeps the branch + row.
     let res = client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(res["archived"], true);
@@ -47,14 +47,20 @@ async fn recover_rebuilds_worktree_and_resumes() {
         !backend::has_session(&term_session).await,
         "archive should kill the terminal session"
     );
-    let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["status"], "archived");
-    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    let channel = client
+        .post("/api/channels/get", json!({ "channel": id }))
+        .await
+        .unwrap();
     assert_eq!(channel["state"], "archived");
 
     // Recover rebuilds the worktree and resumes the agent at the same path.
     let rec = client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": id }))
         .await
         .unwrap();
     // The row is live again (shell is hookless, so it comes up `running`), on the
@@ -62,10 +68,16 @@ async fn recover_rebuilds_worktree_and_resumes() {
     assert_eq!(rec["status"], "running");
     assert_eq!(rec["work_dir"], work_dir);
     assert_eq!(rec["term_session"], term_session);
-    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    let channel = client
+        .post("/api/channels/get", json!({ "channel": id }))
+        .await
+        .unwrap();
     assert_eq!(channel["state"], "open");
     let messages = client
-        .get(&format!("/api/channels/{id}/messages"))
+        .post(
+            "/api/channels/messages/list",
+            json!({ "channel": id, "kinds": [] }),
+        )
         .await
         .unwrap();
     assert!(
@@ -98,7 +110,7 @@ async fn recover_rebuilds_worktree_and_resumes() {
 
     // A recovered session is a normal live session again: it shows in the fleet
     // without the archived opt-in.
-    let fleet = client.get("/api/sessions").await.unwrap();
+    let fleet = client.post("/api/sessions/list", json!({})).await.unwrap();
     assert!(
         fleet
             .as_array()
@@ -120,7 +132,7 @@ async fn stale_adopt_after_archive_points_to_recovery() {
     let client = &ts.client;
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "archive adopt race", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -128,11 +140,11 @@ async fn stale_adopt_after_archive_points_to_recovery() {
     let id = sess["id"].as_str().unwrap();
 
     client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     let error = client
-        .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+        .post("/api/sessions/adopt", json!({ "session": id }))
         .await
         .unwrap_err();
     let message = error.to_string();
@@ -140,11 +152,14 @@ async fn stale_adopt_after_archive_points_to_recovery() {
     assert!(!message.contains("no longer exists on disk"), "{message}");
 
     let recovered = client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(recovered["status"], "running");
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 #[serial]
@@ -154,7 +169,7 @@ async fn transition_stage_is_visible_in_detail_and_fleet_views() {
     let sess = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "show lifecycle progress", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -166,7 +181,11 @@ async fn transition_stage_is_visible_in_detail_and_fleet_views() {
             .unwrap()
     );
 
-    let detail = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let detail = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(detail["status"], "running");
     assert_eq!(detail["transition"]["kind"], "archiving");
     assert_eq!(detail["transition"]["step"], "Removing worktree");
@@ -175,7 +194,11 @@ async fn transition_stage_is_visible_in_detail_and_fleet_views() {
         .unwrap()
         .is_empty());
 
-    let fleet = ts.client.get("/api/sessions/summary").await.unwrap();
+    let fleet = ts
+        .client
+        .post("/api/sessions/summary/list", json!({}))
+        .await
+        .unwrap();
     let summary = fleet
         .as_array()
         .unwrap()
@@ -189,7 +212,7 @@ async fn transition_stage_is_visible_in_detail_and_fleet_views() {
         .await
         .unwrap();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -205,7 +228,7 @@ async fn recover_repairs_an_archived_row_with_a_live_terminal() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "still running", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -221,7 +244,7 @@ async fn recover_repairs_an_archived_row_with_a_live_terminal() {
     assert!(backend::has_session(&term_session).await);
 
     let recovered = client
-        .post(&format!("/api/sessions/{id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(recovered["status"], "running");
@@ -239,7 +262,7 @@ async fn failed_recovery_rolls_back_to_a_fully_archived_session() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "cannot recover", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -250,7 +273,7 @@ async fn failed_recovery_rolls_back_to_a_fully_archived_session() {
     let work_dir = sess["work_dir"].as_str().unwrap().to_string();
 
     client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     weaver_core::git::delete_branch(ts.repo_path(), &branch)
@@ -259,12 +282,15 @@ async fn failed_recovery_rolls_back_to_a_fully_archived_session() {
 
     assert!(
         client
-            .post(&format!("/api/sessions/{id}/recover"), json!({}))
+            .post("/api/sessions/recover", json!({ "session": id }))
             .await
             .is_err(),
         "a deleted kept branch makes recovery fail"
     );
-    let view = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["status"], "archived");
     assert!(!Path::new(&work_dir).exists());
     assert!(!backend::has_session(&term_session).await);
@@ -297,7 +323,7 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
 
     let recoverable = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "recover lifetime",
                 "cwd": ts.cwd(),
@@ -308,7 +334,7 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .unwrap();
     let adoptable = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "adopt lifetime",
                 "cwd": ts.cwd(),
@@ -350,14 +376,14 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .unwrap();
     assert_eq!(rotated["lifetime"], profile["lifetime"]);
     client
-        .post(&format!("/api/sessions/{recover_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": recover_id }))
         .await
         .unwrap();
     backend::kill_session(adopt_term).await.unwrap();
     client
-        .patch(
-            &format!("/api/sessions/{adopt_id}"),
-            json!({ "status": "error" }),
+        .post(
+            "/api/sessions/update",
+            json!({ "session": adopt_id, "status": "error" }),
         )
         .await
         .unwrap();
@@ -370,25 +396,25 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .unwrap();
 
     let recovered = client
-        .post(&format!("/api/sessions/{recover_id}/recover"), json!({}))
+        .post("/api/sessions/recover", json!({ "session": recover_id }))
         .await
         .unwrap();
     assert_eq!(recovered["profile_lifetime"], profile["lifetime"]);
     let adopted = client
-        .post(&format!("/api/sessions/{adopt_id}/adopt"), json!({}))
+        .post("/api/sessions/adopt", json!({ "session": adopt_id }))
         .await
         .unwrap();
     assert_eq!(adopted["profile_lifetime"], profile["lifetime"]);
 
     client
-        .post(&format!("/api/sessions/{recover_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": recover_id }))
         .await
         .unwrap();
     backend::kill_session(adopt_term).await.unwrap();
     client
-        .patch(
-            &format!("/api/sessions/{adopt_id}"),
-            json!({ "status": "error" }),
+        .post(
+            "/api/sessions/update",
+            json!({ "session": adopt_id, "status": "error" }),
         )
         .await
         .unwrap();
@@ -405,13 +431,13 @@ async fn respawn_accepts_same_profile_lifetime_and_rejects_recreate() {
         .await
         .unwrap();
 
-    for path in [
-        format!("/api/sessions/{recover_id}/recover"),
-        format!("/api/sessions/{adopt_id}/adopt"),
+    for (path, session) in [
+        ("/api/sessions/recover", recover_id),
+        ("/api/sessions/adopt", adopt_id),
     ] {
         let response = reqwest::Client::new()
             .post(format!("http://{}{}", ts.addr, path))
-            .json(&json!({}))
+            .json(&json!({ "session": session }))
             .send()
             .await
             .unwrap();
@@ -454,7 +480,7 @@ async fn archive_takes_over_a_transition_whose_owner_is_gone() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "stuck archiving", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -464,11 +490,14 @@ async fn archive_takes_over_a_transition_whose_owner_is_gone() {
     plant_abandoned_transition(&ts, &id, "archiving", "Stopping agent").await;
 
     client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
 
-    let detail = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let detail = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(detail["status"], "archived");
     assert!(detail["transition"].is_null(), "{detail}");
     assert!(
@@ -476,7 +505,10 @@ async fn archive_takes_over_a_transition_whose_owner_is_gone() {
         "the take-over archive should still tear the worktree down"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// The same recovery runs on the monitor's cadence, so a session left mid-archive
@@ -489,7 +521,7 @@ async fn reconciliation_finishes_an_abandoned_archive_without_a_restart() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "abandoned mid-archive", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -499,11 +531,17 @@ async fn reconciliation_finishes_an_abandoned_archive_without_a_restart() {
 
     loom::lifecycle::reconcile_interrupted_transitions(&ts.state).await;
 
-    let detail = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let detail = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(detail["status"], "archived");
     assert!(detail["transition"].is_null(), "{detail}");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// A transition this process still owns is live work: a concurrent archive must
@@ -516,7 +554,7 @@ async fn archive_still_refuses_a_transition_owned_by_this_server() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "busy transitioning", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -529,7 +567,7 @@ async fn archive_still_refuses_a_transition_owned_by_this_server() {
     );
 
     let error = client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("already archiving"), "{error}");
@@ -537,5 +575,8 @@ async fn archive_still_refuses_a_transition_owned_by_this_server() {
     loom::session::clear_transition(&ts.state.db, &id, "archiving")
         .await
         .unwrap();
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }

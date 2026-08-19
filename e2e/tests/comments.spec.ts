@@ -78,18 +78,22 @@ test.describe("staged artifact reviews", () => {
     const alphaGate = new Promise<void>((resolve) => {
       releaseAlpha = resolve;
     });
-    await page.route(
-      `**/api/sessions/${session.id}/artifacts/alpha`,
-      async (route) => {
-        await alphaGate;
-        await route.continue();
-      },
-      { times: 1 },
-    );
+    // `artifacts.get` names the artifact in its operands, not its path, so the
+    // gate reads the body and releases only the first `alpha` read.
+    let alphaGateUsed = false;
+    await page.route("**/api/artifacts/get", async (route) => {
+      const operands = route.request().postDataJSON() as { name?: string };
+      if (operands?.name !== "alpha" || alphaGateUsed) return route.fallback();
+      alphaGateUsed = true;
+      await alphaGate;
+      await route.continue();
+    });
     const alphaResponse = page.waitForResponse(
       (response) =>
-        response.request().method() === "GET" &&
-        response.url().endsWith(`/api/sessions/${session.id}/artifacts/alpha`),
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/artifacts/get" &&
+        (response.request().postDataJSON() as { name?: string })?.name ===
+          "alpha",
     );
     await page.locator('[data-artifact="alpha"]').click();
     await expect(page.getByText("loading…")).toBeVisible();
@@ -103,7 +107,8 @@ test.describe("staged artifact reviews", () => {
     const completedAlphaResponse = await alphaResponse;
     await completedAlphaResponse.finished();
     await page.evaluate(
-      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
     );
     await expect(page.locator(".markdown-body h1")).toContainText(
       "Beta identity",
@@ -127,12 +132,19 @@ test.describe("staged artifact reviews", () => {
     const firstComment = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        /\/api\/reviews\/\d+\/comments$/.test(response.url()),
+        new URL(response.url()).pathname === "/api/reviews/comments/create",
     );
     await composer.getByRole("button", { name: "Add pending comment" }).click();
     await firstComment;
-    const initialReviews = await page.request.get(
-      `${weaver.baseUrl}/api/sessions/${session.id}/reviews?subject_kind=artifact&subject_key=design`,
+    const initialReviews = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/list`,
+      {
+        data: {
+          subject_kind: "artifact",
+          subject_key: "design",
+          session: session.id,
+        },
+      },
     );
     const initialDraft = (
       (await initialReviews.json()) as Array<{
@@ -141,9 +153,10 @@ test.describe("staged artifact reviews", () => {
       }>
     )[0];
     const secondComment = await page.request.post(
-      `${weaver.baseUrl}/api/reviews/${initialDraft.id}/comments`,
+      `${weaver.baseUrl}/api/reviews/comments/create`,
       {
         data: {
+          id: initialDraft.id,
           expected_revision: initialDraft.draft_revision,
           subject_version: "1",
           anchor_kind: "text",
@@ -189,8 +202,8 @@ test.describe("staged artifact reviews", () => {
     const note = page.getByTestId("review-overall-note");
     const initialSave = page.waitForResponse(
       (response) =>
-        response.request().method() === "PATCH" &&
-        /\/api\/reviews\/\d+$/.test(response.url()),
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/reviews/update",
     );
     await note.fill("Initial overall guidance.");
     await note.blur();
@@ -207,16 +220,24 @@ test.describe("staged artifact reviews", () => {
         .filter({ hasText: "Explain prefix and suffix recovery." }),
     ).toHaveCount(1);
 
-    const listed = await page.request.get(
-      `${weaver.baseUrl}/api/sessions/${session.id}/reviews?subject_kind=artifact&subject_key=design`,
+    const listed = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/list`,
+      {
+        data: {
+          subject_kind: "artifact",
+          subject_key: "design",
+          session: session.id,
+        },
+      },
     );
     const draft = (
       (await listed.json()) as Array<{ id: number; draft_revision: number }>
     )[0];
-    const external = await page.request.patch(
-      `${weaver.baseUrl}/api/reviews/${draft.id}`,
+    const external = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/update`,
       {
         data: {
+          id: draft.id,
           expected_revision: draft.draft_revision,
           summary: "Newer server-side guidance.",
         },
@@ -227,7 +248,7 @@ test.describe("staged artifact reviews", () => {
     const conflict = page.waitForResponse(
       (response) =>
         response.status() === 409 &&
-        /\/api\/reviews\/\d+$/.test(response.url()),
+        new URL(response.url()).pathname === "/api/reviews/update",
     );
     await page
       .getByTestId("review-overall-note")
@@ -243,8 +264,8 @@ test.describe("staged artifact reviews", () => {
 
     const finalSave = page.waitForResponse(
       (response) =>
-        response.request().method() === "PATCH" &&
-        /\/api\/reviews\/\d+$/.test(response.url()),
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/reviews/update",
     );
     await page
       .getByTestId("review-overall-note")
@@ -276,7 +297,7 @@ test.describe("staged artifact reviews", () => {
     const submit = page.waitForRequest(
       (request) =>
         request.method() === "POST" &&
-        /\/api\/reviews\/\d+\/submit$/.test(request.url()),
+        new URL(request.url()).pathname === "/api/reviews/submit",
     );
     await page.getByTestId("submit-review").click();
     await submit;
@@ -311,8 +332,9 @@ test.describe("staged artifact reviews", () => {
     const createGate = deferred();
     const createStarted = deferred();
     let createGated = false;
-    await page.route(`**/api/sessions/${session.id}/reviews`, async (route) => {
-      if (route.request().method() !== "POST" || createGated) {
+    await page.route("**/api/reviews/create", async (route) => {
+      const operands = route.request().postDataJSON() as { session?: string };
+      if (operands?.session !== session.id || createGated) {
         await route.continue();
         return;
       }
@@ -339,7 +361,7 @@ test.describe("staged artifact reviews", () => {
     const create = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
-        response.url().endsWith(`/api/sessions/${session.id}/reviews`),
+        new URL(response.url()).pathname === "/api/reviews/create",
     );
     await page.getByTestId("artifact-pop").click();
     await createStarted.promise;
@@ -388,7 +410,7 @@ test.describe("staged artifact reviews", () => {
         page
           .getByTestId("artifact-scroll")
           .evaluate((element) => element.scrollTop),
-    )
+      )
       .toBeGreaterThan(before.max * 0.7);
     await expect(page.getByText("Final review target")).toBeInViewport();
 
@@ -404,7 +426,9 @@ test.describe("staged artifact reviews", () => {
     await expect(page).toHaveURL(
       `${weaver.baseUrl}/s/${session.id}/artifacts/design`,
     );
-    await expect(page.locator(".markdown-body h1")).toContainText("Long design");
+    await expect(page.locator(".markdown-body h1")).toContainText(
+      "Long design",
+    );
 
     await selectPhrase(page, "Final review target at the end.");
     await page.getByTestId("review-selection-button").click();
@@ -438,14 +462,20 @@ test.describe("staged artifact reviews", () => {
     await selectPhrase(page, "Final review target at the end.");
     await page.getByTestId("review-selection-button").click();
     await pendingComposer.locator("textarea").fill("Saved comment body.");
-    await pendingComposer.getByRole("button", { name: "Add pending comment" }).click();
+    await pendingComposer
+      .getByRole("button", { name: "Add pending comment" })
+      .click();
     const commentCard = page.locator("[data-review-card]").first();
-    await commentCard.getByRole("button", { name: "Edit", exact: true }).click();
+    await commentCard
+      .getByRole("button", { name: "Edit", exact: true })
+      .click();
     const commentEdit = commentCard.getByTestId("review-comment-edit");
     await commentEdit.fill("Unsaved existing-comment edit.");
     await page.getByTestId("artifact-pop").click();
     await expect(page.getByTestId("artifact-pop")).toContainText("Split");
-    await expect(commentCard.getByRole("alert")).toContainText("Save or cancel this comment edit");
+    await expect(commentCard.getByRole("alert")).toContainText(
+      "Save or cancel this comment edit",
+    );
     await expect(commentEdit).toBeFocused();
 
     let submitAttempted = false;
@@ -464,8 +494,15 @@ test.describe("staged artifact reviews", () => {
     await expect(commentEdit).toBeFocused();
     expect(submitAttempted).toBe(false);
 
-    const reviewsResponse = await page.request.get(
-      `${weaver.baseUrl}/api/sessions/${session.id}/reviews?subject_kind=artifact&subject_key=design`,
+    const reviewsResponse = await page.request.post(
+      `${weaver.baseUrl}/api/reviews/list`,
+      {
+        data: {
+          subject_kind: "artifact",
+          subject_key: "design",
+          session: session.id,
+        },
+      },
     );
     const reviews = (await reviewsResponse.json()) as Array<{
       id: number;
@@ -474,9 +511,10 @@ test.describe("staged artifact reviews", () => {
     }>;
     const review = reviews.find((candidate) => candidate.status === "draft")!;
     const submitResponse = await page.request.post(
-      `${weaver.baseUrl}/api/reviews/${review.id}/submit`,
+      `${weaver.baseUrl}/api/reviews/submit`,
       {
         data: {
+          id: review.id,
           expected_revision: review.draft_revision,
           acknowledge_outdated: false,
         },
@@ -485,7 +523,9 @@ test.describe("staged artifact reviews", () => {
     expect(submitResponse.ok()).toBe(true);
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     await expect(commentEdit).toHaveCount(0);
-    await expect(commentCard.getByRole("button", { name: "Resolve" })).toBeVisible();
+    await expect(
+      commentCard.getByRole("button", { name: "Resolve" }),
+    ).toBeVisible();
     await page.getByTestId("artifact-pop").click();
     await expect(page.getByTestId("artifact-pop")).toContainText("Dock");
     await page.getByTestId("artifact-pop").click();
@@ -495,12 +535,8 @@ test.describe("staged artifact reviews", () => {
     const patchGate = deferred();
     let failPatches = true;
     let firstFailedPatch = true;
-    await page.route("**/api/reviews/*", async (route) => {
-      if (
-        route.request().method() !== "PATCH" ||
-        !/\/api\/reviews\/\d+$/.test(route.request().url()) ||
-        !failPatches
-      ) {
+    await page.route("**/api/reviews/update", async (route) => {
+      if (!failPatches) {
         await route.continue();
         return;
       }
@@ -537,8 +573,8 @@ test.describe("staged artifact reviews", () => {
     failPatches = false;
     const successfulSave = page.waitForResponse(
       (response) =>
-        response.request().method() === "PATCH" &&
-        /\/api\/reviews\/\d+$/.test(response.url()),
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === "/api/reviews/update",
     );
     await reviewNote.fill("Route feedback survives app-rail navigation.");
     await page.locator('[data-rail="issues"]').click();

@@ -148,7 +148,7 @@ Manage the rest in **Settings → People & security** or over the API (set
 users default to the normal `user` role):
 
 ```sh
-curl -X POST {base}/api/auth/users -H 'Authorization: Bearer $LOOM_TOKEN' \
+curl -X POST {base}/api/auth/users/create -H 'Authorization: Bearer $LOOM_TOKEN' \
   -H 'content-type: application/json' \
   -d '{"username":"octocat","github_login":"octocat"}'
 ```
@@ -205,7 +205,7 @@ two ways:
   App:
 
   ```sh
-  curl -X POST {base}/api/repos -H 'Authorization: Bearer $LOOM_TOKEN' \
+  curl -X POST {base}/api/repos/register -H 'Authorization: Bearer $LOOM_TOKEN' \
     -H 'content-type: application/json' -d '{"repo":"owner/name"}'
   ```
 

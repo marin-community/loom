@@ -43,7 +43,7 @@ async fn create_lists_and_tears_down() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "integration test goal",
                 "cwd": ts.cwd(),
@@ -74,10 +74,16 @@ async fn create_lists_and_tears_down() {
         ws["tracking_issue"].is_null(),
         "ordinary launch uses its default channel, got {ws}"
     );
-    let channel = client.get(&format!("/api/channels/{id}")).await.unwrap();
+    let channel = client
+        .post("/api/channels/get", json!({ "channel": id }))
+        .await
+        .unwrap();
     assert_eq!(channel["session_id"], id);
     let messages = client
-        .get(&format!("/api/channels/{id}/messages"))
+        .post(
+            "/api/channels/messages/list",
+            json!({ "channel": id, "kinds": [] }),
+        )
         .await
         .unwrap();
     assert_eq!(messages[0]["kind"], "goal");
@@ -90,7 +96,7 @@ async fn create_lists_and_tears_down() {
     let list = client.get("/api/sessions").await.unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
 
-    let recent = client.get("/api/repos/recent").await.unwrap();
+    let recent = client.post("/api/repos/recent", json!({})).await.unwrap();
     let recent = recent.as_array().unwrap();
     assert_eq!(
         recent.len(),
@@ -101,7 +107,10 @@ async fn create_lists_and_tears_down() {
     assert_eq!(recent[0]["active_branches"], 1);
 
     // Deleting the session tears down the terminal session and the DB row.
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
     assert!(
         !backend::has_session(&session).await,
         "terminal session was not killed"
@@ -110,7 +119,7 @@ async fn create_lists_and_tears_down() {
     assert_eq!(list.as_array().unwrap().len(), 0);
 
     // The repo outlives its sessions, now with no active branches.
-    let recent = client.get("/api/repos/recent").await.unwrap();
+    let recent = client.post("/api/repos/recent", json!({})).await.unwrap();
     let recent = recent.as_array().unwrap();
     assert_eq!(recent.len(), 1, "recent repo should outlive its sessions");
     assert_eq!(recent[0]["repo_root"], repo_root);
@@ -132,7 +141,7 @@ async fn session_creation_waits_for_the_repository_launch_gate() {
     let launch = tokio::spawn(async move {
         client
             .post(
-                "/api/sessions",
+                "/api/sessions/launch",
                 json!({
                     "goal": "wait for repository",
                     "cwd": cwd,
@@ -159,7 +168,7 @@ async fn session_creation_waits_for_the_repository_launch_gate() {
         .unwrap();
     let id = session["id"].as_str().unwrap();
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -184,7 +193,7 @@ async fn real_agent_without_github_access_is_rejected_before_provisioning() {
 
     let err = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "needs credentials",
                 "cwd": ts.cwd(),
@@ -247,7 +256,7 @@ async fn interactive_session_uses_the_launching_users_account_token() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "use my GitHub identity",
                 "cwd": ts.cwd(),
@@ -262,10 +271,10 @@ async fn interactive_session_uses_the_launching_users_account_token() {
     );
 
     ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": session["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }
@@ -319,7 +328,7 @@ async fn interactive_profile_brokers_its_current_github_repository() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "use brokered credentials",
                 "cwd": ts.cwd(),
@@ -337,7 +346,7 @@ async fn interactive_profile_brokers_its_current_github_repository() {
             .unwrap();
     assert_eq!(repositories, r#"["marin-community/marin"]"#);
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -368,7 +377,7 @@ async fn launch_forks_from_fresh_origin_default() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "fork from fresh main", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -379,7 +388,10 @@ async fn launch_forks_from_fresh_origin_default() {
     );
 
     let id = ws["id"].as_str().unwrap().to_string();
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 #[serial]
@@ -416,7 +428,7 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     let alpha = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "alpha search target", "cwd": ts.cwd(), "agent": "shell", "name": "alpha" }),
         )
         .await
@@ -427,7 +439,7 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     let beta = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "beta other work", "cwd": ts.cwd(), "agent": "shell", "name": "beta" }),
         )
         .await
@@ -436,7 +448,7 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     let ops = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "automated ops work",
                 "cwd": ts.cwd(),
@@ -466,11 +478,14 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     // Archive beta — it leaves the active fleet.
     client
-        .post(&format!("/api/sessions/{beta_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": beta_id }))
         .await
         .unwrap();
 
-    // Default: only the live session, archived hidden.
+    // Default: only the live session, archived hidden. `sessions.list` is not a
+    // substitute here — it is the operation twin of `search_sessions`, which
+    // always widens to automation-class rows, so this stays on the legacy
+    // `list_sessions` route (no operation covers its automation/managed defaults).
     let list = client.get("/api/sessions").await.unwrap();
     let ids: Vec<&str> = list
         .as_array()
@@ -500,7 +515,7 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     // The SPA's polling contract carries only row-level fields. Large launch
     // and goal context stays behind the per-session detail route.
     let summaries = client
-        .get("/api/sessions/summary?archived=true")
+        .post("/api/sessions/summary/list", json!({ "archived": true }))
         .await
         .unwrap();
     let summaries = summaries.as_array().unwrap();
@@ -533,7 +548,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     let miss = client.get("/api/sessions?q=nope-nothing").await.unwrap();
     assert!(miss.as_array().unwrap().is_empty(), "no match ⇒ empty");
     let compact_hit = client
-        .get("/api/sessions/summary?q=alpha%20search%20target")
+        .post(
+            "/api/sessions/summary/list",
+            json!({ "q": "alpha search target" }),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -553,9 +571,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         ("other-users", vec![beta_id.as_str()]),
     ] {
         let scoped = client
-            .get(&format!(
-                "/api/sessions/summary?archived=true&creator={creator}"
-            ))
+            .post(
+                "/api/sessions/summary/list",
+                json!({ "archived": true, "creator": creator }),
+            )
             .await
             .unwrap();
         let mut ids: Vec<&str> = scoped
@@ -589,9 +608,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     // Renaming a session (the title PATCH the `loom session rename` CLI wraps)
     // claims the label for the user and is reflected in qualified fleet search.
     let renamed_view = client
-        .patch(
-            &format!("/api/sessions/{alpha_id}"),
+        .post(
+            "/api/sessions/update",
             json!({
+                "session": alpha_id,
                 "title": "renamed-zeta",
                 "expected_title": "alpha search target",
                 "expected_title_provenance": "derived",
@@ -602,7 +622,7 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     assert_eq!(renamed_view["branch"]["title_provenance"], "user");
     assert_eq!(renamed_view["title_generation"]["status"], "protected");
     let renamed = client
-        .get("/api/sessions/search?q=Inbox%20%2F%20renamed-zeta")
+        .post("/api/sessions/list", json!({ "q": "Inbox / renamed-zeta" }))
         .await
         .unwrap();
     assert_eq!(
@@ -614,8 +634,9 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     // A second tab editing the old value cannot overwrite the user-owned title.
     let stale = reqwest::Client::new()
-        .patch(format!("http://{}/api/sessions/{alpha_id}", ts.addr))
+        .post(format!("http://{}/api/sessions/update", ts.addr))
         .json(&json!({
+            "session": alpha_id,
             "title": "late-overwrite",
             "expected_title": "alpha search target",
             "expected_title_provenance": "derived",
@@ -629,15 +650,15 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
     assert_eq!(stale["branch"]["title_provenance"], "user");
 
     client
-        .delete(&format!("/api/sessions/{alpha_id}"))
+        .post("/api/sessions/delete", json!({ "session": alpha_id }))
         .await
         .unwrap();
     client
-        .delete(&format!("/api/sessions/{beta_id}"))
+        .post("/api/sessions/delete", json!({ "session": beta_id }))
         .await
         .unwrap();
     client
-        .delete(&format!("/api/sessions/{ops_id}"))
+        .post("/api/sessions/delete", json!({ "session": ops_id }))
         .await
         .unwrap();
 }
@@ -651,7 +672,7 @@ async fn bare_session_has_no_goal() {
 
     let bare = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "title": "no goal here",
@@ -665,7 +686,7 @@ async fn bare_session_has_no_goal() {
 
     let bare_id = bare["id"].as_str().unwrap().to_string();
     client
-        .delete(&format!("/api/sessions/{bare_id}"))
+        .post("/api/sessions/delete", json!({ "session": bare_id }))
         .await
         .unwrap();
 }
@@ -680,7 +701,7 @@ async fn adopt_recreates_killed_session() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "adopt me",
                 "cwd": ts.cwd(),
@@ -699,7 +720,7 @@ async fn adopt_recreates_killed_session() {
     );
 
     let adopted = client
-        .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+        .post("/api/sessions/adopt", json!({ "session": id }))
         .await
         .unwrap();
     // A shell runtime is hookless, so adopt brings it straight back `running`
@@ -716,13 +737,16 @@ async fn adopt_recreates_killed_session() {
     );
     assert!(
         client
-            .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+            .post("/api/sessions/adopt", json!({ "session": id }))
             .await
             .is_err(),
         "adopting a live session should fail"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// A session records the principal that launched it (`created_by`) — attribution
@@ -744,7 +768,7 @@ async fn session_records_its_creating_principal() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "attributed work", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -767,10 +791,16 @@ async fn session_records_its_creating_principal() {
     assert_eq!(row["created_by"].as_str(), Some(who.as_str()));
 
     // …and on a get-by-id.
-    let got = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let got = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(got["created_by"].as_str(), Some(who.as_str()));
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// A delegated launch records its launcher as the session's tree parent
@@ -786,7 +816,7 @@ async fn session_records_its_launcher_as_tree_parent() {
     // A top-level (human) launch has no parent.
     let parent = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "parent work", "cwd": cwd, "agent": "shell", "name": "parent" }),
         )
         .await
@@ -801,7 +831,7 @@ async fn session_records_its_launcher_as_tree_parent() {
     // A delegated launch names the parent branch; its session points back at it.
     let child = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "child work",
                 "cwd": cwd,
@@ -840,14 +870,14 @@ async fn session_records_its_launcher_as_tree_parent() {
 
     client
         .post(
-            &format!("/api/sessions/{parent_session_id}/archive"),
-            json!({}),
+            "/api/sessions/archive",
+            json!({ "session": parent_session_id }),
         )
         .await
         .unwrap();
     let replacement = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "replacement parent generation",
                 "cwd": cwd,
@@ -861,7 +891,7 @@ async fn session_records_its_launcher_as_tree_parent() {
     let replacement_id = replacement["id"].as_str().unwrap().to_string();
     let second_child = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "child of replacement generation",
                 "cwd": cwd,
@@ -877,11 +907,11 @@ async fn session_records_its_launcher_as_tree_parent() {
     assert_eq!(second_child["parent_session_id"], replacement["id"]);
 
     client
-        .delete(&format!("/api/sessions/{replacement_id}"))
+        .post("/api/sessions/delete", json!({ "session": replacement_id }))
         .await
         .unwrap();
     let after_parent_delete = client
-        .get(&format!("/api/sessions/{second_child_id}"))
+        .post("/api/sessions/get", json!({ "session": second_child_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -895,25 +925,28 @@ async fn session_records_its_launcher_as_tree_parent() {
         .await
         .unwrap();
     let legacy = client
-        .get(&format!("/api/sessions/{second_child_id}"))
+        .post("/api/sessions/get", json!({ "session": second_child_id }))
         .await
         .unwrap();
     assert!(legacy["parent_session_id"].is_null());
     assert_eq!(legacy["parent_id"], parent["branch"]["id"]);
 
     client
-        .delete(&format!("/api/sessions/{child_id}"))
+        .post("/api/sessions/delete", json!({ "session": child_id }))
         .await
         .unwrap();
     client
-        .delete(&format!("/api/sessions/{second_child_id}"))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": second_child_id }),
+        )
         .await
         .unwrap();
 }
 
-/// `GET /api/sessions/{key}/url` — the link an agent hands a human. It resolves
-/// by any session key (id or branch id, the `$WEAVER_BRANCH` the agent carries),
-/// and honours the operator's public origin so the URL works off-box.
+/// `sessions.url` — the link an agent hands a human. It resolves by any
+/// session key (id or branch id, the `$WEAVER_BRANCH` the agent carries), and
+/// honours the operator's public origin so the URL works off-box.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_url_resolves_by_key_and_honours_the_public_base() {
@@ -922,7 +955,7 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "link me", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -934,7 +967,7 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
     // for a loopback CLI that is the server it just talked to. Honest, and right
     // for a single-machine loom where the browser is on that same box.
     let derived = client
-        .get(&format!("/api/sessions/{id}/url"))
+        .post("/api/sessions/url", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(
@@ -946,7 +979,7 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
     // The branch id is a session key too — that is what `$WEAVER_BRANCH` holds,
     // so `loom session url` inside a session resolves to the same link.
     let by_branch = client
-        .get(&format!("/api/sessions/{branch_id}/url"))
+        .post("/api/sessions/url", json!({ "session": branch_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -964,7 +997,7 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
         .await
         .unwrap();
     let public = client
-        .get(&format!("/api/sessions/{id}/url"))
+        .post("/api/sessions/url", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(
@@ -1011,7 +1044,10 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// A hand-launched session is stamped `origin: user` / `class: interactive`
@@ -1024,7 +1060,7 @@ async fn session_records_origin_class_without_an_automatic_issue() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "stamped provenance", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -1035,12 +1071,18 @@ async fn session_records_origin_class_without_an_automatic_issue() {
     assert!(ws["tracking_issue"].is_null());
 
     // Stored, not recomputed: the same identity comes back on a get-by-id.
-    let got = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let got = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(got["origin"], "user");
     assert_eq!(got["class"], "interactive");
     assert!(got["tracking_issue"].is_null());
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// An automation-class session is machinery: absent from the default fleet
@@ -1053,7 +1095,7 @@ async fn automation_class_hidden_from_the_default_listing() {
 
     let auto = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "background machinery",
                 "cwd": ts.cwd(),
@@ -1069,6 +1111,10 @@ async fn automation_class_hidden_from_the_default_listing() {
         "the request's class override sticks"
     );
 
+    // No registered operation serves the bare fleet listing (`sessions.list`
+    // hardcodes different automation-visibility defaults than this legacy
+    // route) — this is exactly the behaviour under test, so both calls stay
+    // on the legacy route.
     let list = client.get("/api/sessions").await.unwrap();
     assert!(
         list.as_array()
@@ -1089,7 +1135,7 @@ async fn automation_class_hidden_from_the_default_listing() {
     );
 
     client
-        .delete(&format!("/api/sessions/{auto_id}"))
+        .post("/api/sessions/delete", json!({ "session": auto_id }))
         .await
         .unwrap();
 }
@@ -1105,7 +1151,7 @@ async fn archive_frees_the_branch_for_a_new_session() {
 
     let first = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "first tenant", "cwd": ts.cwd(), "agent": "shell", "name": "slot" }),
         )
         .await
@@ -1114,7 +1160,7 @@ async fn archive_frees_the_branch_for_a_new_session() {
     let branch_ref = first["branch"]["branch"].as_str().unwrap().to_string();
 
     client
-        .post(&format!("/api/sessions/{first_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": first_id }))
         .await
         .unwrap();
 
@@ -1122,7 +1168,7 @@ async fn archive_frees_the_branch_for_a_new_session() {
     // to the kept branch (re-provisioning its worktree).
     let second = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "second tenant",
                 "cwd": ts.cwd(),
@@ -1139,13 +1185,13 @@ async fn archive_frees_the_branch_for_a_new_session() {
     // The branch key resolves to the live tenant, not the archived one.
     let branch_id = second["branch"]["id"].as_str().unwrap().to_string();
     let got = client
-        .get(&format!("/api/sessions/{branch_id}"))
+        .post("/api/sessions/get", json!({ "session": branch_id }))
         .await
         .unwrap();
     assert_eq!(got["id"], second_id.as_str());
 
     client
-        .delete(&format!("/api/sessions/{second_id}"))
+        .post("/api/sessions/delete", json!({ "session": second_id }))
         .await
         .unwrap();
 }
@@ -1171,7 +1217,7 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
 
     let auto = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "background run",
                 "cwd": ts.cwd(),
@@ -1195,17 +1241,17 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
             .any(|i| i["id"].as_i64() == Some(issue))
     };
 
-    let board = client.get("/api/issues").await.unwrap();
+    let board = client.post("/api/issues/board", json!({})).await.unwrap();
     assert!(
         !on_board(board),
         "an issue claimed by a live automation session is hidden by default"
     );
 
     client
-        .post(&format!("/api/sessions/{auto_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": auto_id }))
         .await
         .unwrap();
-    let board = client.get("/api/issues").await.unwrap();
+    let board = client.post("/api/issues/board", json!({})).await.unwrap();
     assert!(
         on_board(board),
         "an archived automation run releases its issue to the visible backlog"
@@ -1214,7 +1260,7 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
     // A person picks the branch back up: the freed slot is re-let interactively.
     let human = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "picked up by hand",
                 "cwd": ts.cwd(),
@@ -1226,14 +1272,14 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
         .unwrap();
     let human_id = human["id"].as_str().unwrap().to_string();
 
-    let board = client.get("/api/issues").await.unwrap();
+    let board = client.post("/api/issues/board", json!({})).await.unwrap();
     assert!(
         on_board(board),
         "an interactive re-let surfaces the branch's issues on the default board"
     );
 
     client
-        .delete(&format!("/api/sessions/{human_id}"))
+        .post("/api/sessions/delete", json!({ "session": human_id }))
         .await
         .unwrap();
 }

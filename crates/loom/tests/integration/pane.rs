@@ -13,7 +13,7 @@ use loom::backend;
 
 use crate::fixtures::TestServer;
 
-/// Submit `text` and poll `GET /preview` until the captured screen contains
+/// Submit `text` and poll `sessions.preview` until the captured screen contains
 /// `marker`, **re-submitting** between polls. The launch script `exec`s the shell
 /// only after the supervisor socket is already up, and shell startup flushes any
 /// input typed during that window — so a command sent right after create can be
@@ -27,7 +27,7 @@ async fn submit_until(ts: &TestServer, id: &str, text: &str, marker: &str) -> St
         loop {
             let res = ts
                 .client
-                .get(&format!("/api/sessions/{id}/preview"))
+                .post("/api/sessions/preview", json!({ "session": id }))
                 .await
                 .unwrap();
             let screen = res["screen"].as_str().unwrap_or("").to_string();
@@ -45,7 +45,7 @@ async fn submit_until(ts: &TestServer, id: &str, text: &str, marker: &str) -> St
         // Not yet — (re)submit. Harmless if the earlier submit already ran.
         let _ = ts
             .client
-            .post(&format!("/api/sessions/{id}/send"), json!({ "text": text }))
+            .post("/api/sessions/send", json!({ "session": id, "text": text }))
             .await;
     }
 }
@@ -59,7 +59,7 @@ async fn send_runs_a_command_and_preview_reads_it() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -71,8 +71,8 @@ async fn send_runs_a_command_and_preview_reads_it() {
     // echoed onto the prompt.
     let sent = client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo PANE_$((6 * 7))" }),
+            "/api/sessions/send",
+            json!({ "session": id, "text": "echo PANE_$((6 * 7))" }),
         )
         .await
         .unwrap();
@@ -81,7 +81,10 @@ async fn send_runs_a_command_and_preview_reads_it() {
     let screen = submit_until(&ts, &id, "echo PANE_$((6 * 7))", "PANE_42").await;
     assert!(screen.contains("PANE_42"), "command output missing");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// `send` with `submit:false` stages input without running it.
@@ -93,7 +96,7 @@ async fn send_without_submit_does_not_execute() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -102,8 +105,8 @@ async fn send_without_submit_does_not_execute() {
 
     let sent = client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo STAGED_$((1 + 1))", "submit": false }),
+            "/api/sessions/send",
+            json!({ "session": id, "text": "echo STAGED_$((1 + 1))", "submit": false }),
         )
         .await
         .unwrap();
@@ -113,7 +116,7 @@ async fn send_without_submit_does_not_execute() {
     // text is on the prompt line, but the evaluated `STAGED_2` is not.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let res = client
-        .get(&format!("/api/sessions/{id}/preview"))
+        .post("/api/sessions/preview", json!({ "session": id }))
         .await
         .unwrap();
     let screen = res["screen"].as_str().unwrap_or("");
@@ -122,7 +125,10 @@ async fn send_without_submit_does_not_execute() {
         "unsubmitted input should not have executed; screen:\n{screen}"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// `interrupt` injects an Escape and reports success.
@@ -134,7 +140,7 @@ async fn interrupt_sends_a_break() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -142,12 +148,15 @@ async fn interrupt_sends_a_break() {
     let id = ws["id"].as_str().unwrap().to_string();
 
     let res = client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(res["interrupted"], true);
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// All three pane endpoints 409 when the session has no live terminal.
@@ -159,7 +168,7 @@ async fn pane_endpoints_reject_a_dead_session() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -174,8 +183,8 @@ async fn pane_endpoints_reject_a_dead_session() {
     assert!(
         client
             .post(
-                &format!("/api/sessions/{id}/send"),
-                json!({ "text": "echo hi" })
+                "/api/sessions/send",
+                json!({ "session": id, "text": "echo hi" })
             )
             .await
             .is_err(),
@@ -183,18 +192,21 @@ async fn pane_endpoints_reject_a_dead_session() {
     );
     assert!(
         client
-            .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+            .post("/api/sessions/interrupt", json!({ "session": id }))
             .await
             .is_err(),
         "interrupt should fail without a live terminal"
     );
     assert!(
         client
-            .get(&format!("/api/sessions/{id}/preview"))
+            .post("/api/sessions/preview", json!({ "session": id }))
             .await
             .is_err(),
         "preview should fail without a live terminal"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }

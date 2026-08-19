@@ -8,11 +8,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::issues as issue_operations;
 use weaver_api::{
-    IssueAction, IssueActionProblem as IssueActionProblemView, IssueActionsResult, IssueView,
-    PatchIssueReq,
+    IssueAction, IssueActionProblem as IssueActionProblemView, IssueActionsResult, IssueTagInput,
+    IssueView, PatchIssueReq,
 };
 use weaver_core::branch as branch_mod;
-use weaver_core::issue::{BulkIssueAction, Issue};
+use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};
 
 use crate::db::Db;
 use crate::events;
@@ -37,6 +37,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<issue_operations::actions::Actions, _, _>(issue_actions_operation),
         register::<issue_operations::backlog::create::Create, _, _>(create_repo_issue_operation),
+        register::<issue_operations::board::Board, _, _>(issue_board_operation),
         register::<issue_operations::close::Close, _, _>(close_issue_operation),
         register::<issue_operations::create::Create, _, _>(create_branch_issue_operation),
         register::<issue_operations::delete::Delete, _, _>(delete_issue_operation),
@@ -45,6 +46,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<issue_operations::reopen::Reopen, _, _>(reopen_issue_operation),
         register::<issue_operations::tags::delete::Delete, _, _>(clear_issue_tag_operation),
         register::<issue_operations::tags::set::Set, _, _>(set_issue_tag_operation),
+        register::<issue_operations::update::Update, _, _>(update_issue_operation),
     ]
 }
 
@@ -82,13 +84,16 @@ pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<Is
     Ok(out)
 }
 
-/// Every issue across every repo — the loom dashboard's cross-repo issue board.
-pub(super) async fn list_all_issues(
-    State(st): State<AppState>,
-    Query(q): Query<AllIssuesQuery>,
-) -> ApiResult<Json<Vec<IssueView>>> {
-    let mut issues = weaver_core::issue::list_all(&st.db, q.all).await?;
-    if !q.automation {
+/// Every issue across every repo, minus the ones an automation-class session
+/// has claimed unless `automation` asks for them. Shared by `issues.board` and
+/// the `GET /issues` route it replaces.
+async fn collect_issue_board(
+    st: &AppState,
+    all: bool,
+    automation: bool,
+) -> ApiResult<Vec<IssueView>> {
+    let mut issues = weaver_core::issue::list_all(&st.db, all).await?;
+    if !automation {
         // Branches whose current claim-holder is an automation-class session,
         // as (repo_root, branch) pairs — issues key their claim by branch name,
         // not branch id. Archived sessions never own work, including historical
@@ -115,7 +120,26 @@ pub(super) async fn list_all_issues(
             None => true,
         });
     }
-    Ok(Json(issue_views(&st.db, issues).await?))
+    issue_views(&st.db, issues).await
+}
+
+/// Every issue across every repo — the loom dashboard's cross-repo issue board.
+pub(super) async fn list_all_issues(
+    State(st): State<AppState>,
+    Query(q): Query<AllIssuesQuery>,
+) -> ApiResult<Json<Vec<IssueView>>> {
+    Ok(Json(collect_issue_board(&st, q.all, q.automation).await?))
+}
+
+/// `issues.board` — ported from [`list_all_issues`]. The route ran no
+/// repo-access check and neither does this: `scope = Global` names no
+/// repository to check against, so a session credential that may read work
+/// items sees the whole board, exactly as it did through `GET /issues`.
+pub(super) async fn issue_board_operation(
+    context: OperationContext,
+    input: issue_operations::board::Input,
+) -> ApiResult<Vec<IssueView>> {
+    collect_issue_board(&context.state, input.all, input.automation).await
 }
 
 /// Issues claimed by this branch — the session's working set.
@@ -254,30 +278,28 @@ pub(super) async fn get_issue_operation(
     Ok(view)
 }
 
-pub(super) async fn patch_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    Json(req): Json<PatchIssueReq>,
-) -> ApiResult<Json<IssueView>> {
-    let existing = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    if req
-        .claimed_branch
-        .as_ref()
-        .and_then(|branch| branch.as_deref())
-        .is_some_and(|branch| !branch.trim().is_empty())
-    {
-        return Err(AppError::bad_request(
-            "claimed_branch can only be cleared; launch a session to claim an issue",
-        ));
+/// Apply an edit to one already-loaded issue and return the refreshed view.
+///
+/// Shared by `issues.update` and the `PATCH /issues/{id}` route it replaces.
+/// Each field is its own statement because each is independently optional, and
+/// the status change runs first so an invalid one aborts before any of the
+/// other edits land.
+async fn apply_issue_edits(
+    st: &AppState,
+    existing: &Issue,
+    title: Option<&str>,
+    body: Option<&str>,
+    status: Option<&str>,
+    github: Option<&str>,
+    unclaim: bool,
+) -> ApiResult<IssueView> {
+    let id = existing.id;
+    if let Some(status) = status {
+        change_issue_status(st, existing, status).await?;
     }
-    if let Some(status) = req.status.as_deref() {
-        change_issue_status(&st, &existing, status).await?;
-    }
-    if req.title.is_some() || req.body.is_some() {
-        let new_title = req.title.as_deref().unwrap_or(&existing.title);
-        let new_body = req.body.as_deref().unwrap_or(&existing.body);
+    if title.is_some() || body.is_some() {
+        let new_title = title.unwrap_or(&existing.title);
+        let new_body = body.unwrap_or(&existing.body);
         sqlx::query("UPDATE issues SET title = ?, body = ?, updated_at = ? WHERE id = ?")
             .bind(new_title)
             .bind(new_body)
@@ -287,7 +309,7 @@ pub(super) async fn patch_issue(
             .await?;
         tracing::info!(issue = id, "issue updated");
     }
-    if let Some(mapping) = req.github.as_deref() {
+    if let Some(mapping) = github {
         let mapping = mapping.trim();
         let parsed = if mapping.is_empty() {
             None
@@ -312,13 +334,74 @@ pub(super) async fn patch_issue(
         .await?;
         tracing::info!(issue = id, github = mapping, "issue GitHub mapping changed");
     }
-    if req.claimed_branch.is_some() {
+    if unclaim {
         weaver_core::issue::set_claim(&st.db, id, None).await?;
     }
     let issue = weaver_core::issue::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
-    Ok(Json(issue_view(&st.db, issue).await?))
+    issue_view(&st.db, issue).await
+}
+
+pub(super) async fn patch_issue(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<PatchIssueReq>,
+) -> ApiResult<Json<IssueView>> {
+    let existing = weaver_core::issue::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    if req
+        .claimed_branch
+        .as_ref()
+        .and_then(|branch| branch.as_deref())
+        .is_some_and(|branch| !branch.trim().is_empty())
+    {
+        return Err(AppError::bad_request(
+            "claimed_branch can only be cleared; launch a session to claim an issue",
+        ));
+    }
+    Ok(Json(
+        apply_issue_edits(
+            &st,
+            &existing,
+            req.title.as_deref(),
+            req.body.as_deref(),
+            req.status.as_deref(),
+            req.github.as_deref(),
+            req.claimed_branch.is_some(),
+        )
+        .await?,
+    ))
+}
+
+/// `issues.update` — ported from [`patch_issue`]. The body's
+/// `claimed_branch: Option<Option<String>>` is now an `unclaim: bool`: `null`
+/// was the only value the route accepted, so the 400 it raised for a non-empty
+/// branch name has nothing left to reject.
+pub(super) async fn update_issue_operation(
+    context: OperationContext,
+    input: issue_operations::update::Input,
+) -> ApiResult<IssueView> {
+    let st = context.state;
+    let issue = weaver_core::issue::get(&st.db, input.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("issue"))?;
+    // The declared scope is `Repository(repo_root)`, but this operation is
+    // addressed by *issue id* — so the repository that matters is the issue's,
+    // not the one the caller named and `authorize()` already checked.
+    // `issues.get` and `issues.actions` check the same way.
+    require_repo_access(&st, &context.principal, &issue.repo_root).await?;
+    apply_issue_edits(
+        &st,
+        &issue,
+        input.title.as_deref(),
+        input.body.as_deref(),
+        input.status.as_deref(),
+        input.github.as_deref(),
+        input.unclaim,
+    )
+    .await
 }
 
 /// Set (upsert) a free-form label on an issue. Issue tags carry no loud
@@ -618,6 +701,39 @@ pub(super) async fn list_repo_issues_operation(
     issue_views(&st.db, issues).await
 }
 
+/// Validate the initial tag set supplied with a new issue.
+///
+/// Rejected rather than silently dropped: a create-issue form stages these, and
+/// a tag that quietly fails to apply is a tag the caller believes is set.
+fn initial_issue_tags(tags: Vec<IssueTagInput>) -> ApiResult<Vec<NewIssueTag>> {
+    let mut seen = std::collections::HashSet::new();
+    tags.into_iter()
+        .map(|tag| {
+            let key = tag.key.trim();
+            let value = tag.value.trim();
+            if key.is_empty() {
+                return Err(AppError::bad_request("tag key is required"));
+            }
+            if value.is_empty() {
+                return Err(AppError::bad_request(format!(
+                    "invalid value for '{key}' — must be non-empty"
+                )));
+            }
+            if !seen.insert(key.to_string()) {
+                return Err(AppError::bad_request(format!(
+                    "duplicate initial tag key '{key}'"
+                )));
+            }
+            Ok(NewIssueTag {
+                key: key.to_string(),
+                value: value.to_string(),
+                note: tag.note.trim().to_string(),
+                set_by: author_or_manual(tag.by.as_deref()),
+            })
+        })
+        .collect()
+}
+
 /// Create an unclaimed repo-level backlog item.
 pub(super) async fn create_repo_issue_operation(
     context: OperationContext,
@@ -631,7 +747,7 @@ pub(super) async fn create_repo_issue_operation(
         return Err(AppError::bad_request("repo_root is required"));
     }
     // No inline repo-access check: `authorize()` already ran it from `Scoped`.
-    let tags = Vec::new();
+    let tags = initial_issue_tags(req.tags.clone())?;
     let issue = weaver_core::issue::add_with_tags(
         &st.db,
         &weaver_core::issue::NewIssue {
@@ -708,6 +824,7 @@ mod tests {
         let issue = create_repo_issue_operation(
             OperationContext::new(st, admin_principal()),
             issue_operations::backlog::create::Input {
+                tags: Vec::new(),
                 repo_root: "/r".to_string(),
                 title: "backlog item".to_string(),
                 body: String::new(),

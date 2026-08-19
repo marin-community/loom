@@ -41,7 +41,7 @@ const OP_RESIZE: u8 = 0x01;
 /// session's terminal supervisor.
 ///
 /// Not an axum handler: `key` arrives as a declared operand, so the extraction
-/// and the registry's authorization live together in `loom::web::streams` and
+/// and the registry's authorization live together in `loom::web::encodings` and
 /// this crate stays a transport.
 pub async fn terminal_ws(
     ws: WebSocketUpgrade,

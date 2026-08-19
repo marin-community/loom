@@ -226,7 +226,11 @@ fn clip(s: &str, max: usize) -> &str {
 pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
     for (m, message) in log.messages.iter_mut().enumerate() {
         for (b, block) in message.blocks.iter_mut().enumerate() {
-            let full = format!("/api/sessions/{session_id}/conversation/blocks/{m}/{b}");
+            // The pointer names the operation and its operands rather than a URL:
+            // `sessions.conversation.block` is reachable by whichever surface the
+            // reader already holds — the API, `loom`, or an MCP tool — and a URL
+            // would have been true for exactly one of them.
+            let full = format!("sessions.conversation.block session={session_id} message={m} block={b}");
             match block {
                 Block::ToolUse { input, .. } => {
                     let rendered = input.to_string();
@@ -247,7 +251,7 @@ pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
                     }
                     let bytes = output.len();
                     *output = format!(
-                        "{}\n[elided {bytes} bytes; GET {full} for the full output]",
+                        "{}\n[elided {bytes} bytes; {full} for the full output]",
                         clip(output, TOOL_PREVIEW_BYTES)
                     );
                 }
@@ -625,7 +629,7 @@ mod tests {
             Block::ToolResult { output, .. } => {
                 assert!(output.starts_with(&"x".repeat(TOOL_PREVIEW_BYTES)));
                 assert!(output.contains("elided 1024 bytes"));
-                assert!(output.contains("/api/sessions/sess1234/conversation/blocks/0/2"));
+                assert!(output.contains("sessions.conversation.block session=sess1234 message=0 block=2"));
             }
             other => panic!("expected tool result, got {other:?}"),
         }
@@ -635,7 +639,7 @@ mod tests {
                 assert_eq!(input["elided"]["bytes"], 1034);
                 assert_eq!(
                     input["elided"]["full"],
-                    "/api/sessions/sess1234/conversation/blocks/0/4"
+                    "sessions.conversation.block session=sess1234 message=0 block=4"
                 );
             }
             other => panic!("expected tool use, got {other:?}"),

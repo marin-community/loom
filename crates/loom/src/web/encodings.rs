@@ -1,11 +1,20 @@
-//! The registered operations whose response is not JSON.
+//! The registered operations whose wire encoding is not JSON.
 //!
-//! `io = Stream` and `io = Duplex` change exactly one thing about an operation:
-//! the response encoding. The declaration, the actor policy, the grants, the
+//! `io` changes exactly one thing about an operation: how the request or the
+//! response is encoded. The declaration, the actor policy, the grants, the
 //! resource scope, and the operands are all read from the registry the same way
 //! a JSON operation's are — these handlers exist because axum needs a concrete
-//! response type for an SSE body or a websocket upgrade, not because the
-//! operation sits outside the model.
+//! response type for an SSE body, a websocket upgrade, or a byte body, not
+//! because the operation sits outside the model.
+//!
+//! Four encodings live here:
+//!
+//! | `io` | why the handler is custom |
+//! |---|---|
+//! | `Stream` | the response is an SSE body |
+//! | `Duplex` | the response is a websocket upgrade |
+//! | `Upload` | the *request* body is the payload's raw bytes |
+//! | `Download` | the *response* body is raw bytes plus a content type |
 //!
 //! Two consequences worth stating, because getting either wrong is how the
 //! previous surface drifted:
@@ -14,7 +23,9 @@
 //!   mounts every non-JSON operation at `spec.path()`. That is why a session
 //!   stream takes `?session=…` rather than a path segment: an operand is an
 //!   operand regardless of encoding, and a path parameter would make the real
-//!   route unequal to the declared one.
+//!   route unequal to the declared one. It is also why every operand of an
+//!   operation mounted here is optional on the wire — the query string is
+//!   extracted before any default-filling could run.
 //! * **Authorization is the dispatcher's, not the handler's.** Every handler
 //!   calls [`super::operations::authorize_declared`], which is the same context
 //!   fill and the same `authorize` the JSON dispatcher runs. Actor policy alone
@@ -22,12 +33,13 @@
 //!   call supplies is the `Scoped` resource check, so a stream cannot quietly
 //!   skip the rule that a session credential reaches only its own session tree.
 
+use axum::body::Bytes;
 use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{FromRef, Query, State};
+use axum::extract::{DefaultBodyLimit, FromRef, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{routing, Extension, Router};
-use weaver_api::operations::{sessions, shell, Operation, Scoped};
+use weaver_api::operations::{artifacts, sessions, shell, Operation, Scoped};
 
 use crate::auth::Principal;
 use crate::{AppState, EditorState};
@@ -40,9 +52,9 @@ use super::ApiResult;
 /// `io = Session` is excluded: those three are JSON-bodied and mounted beside
 /// the auth routes because their response must carry a `Set-Cookie`, which is a
 /// header concern rather than an encoding one. Everything else reaching this
-/// match is a stream or a websocket, and the ids it accepts are the whole list —
-/// `mounted_stream_operations` is that same match read back, so the test below
-/// cannot pass by describing a different one.
+/// match is a stream, a websocket, or a byte body, and the ids it accepts are
+/// the whole list — `mounted_encodings` is that same match read back, so the
+/// test below cannot pass by describing a different one.
 pub(super) fn mount(router: Router<AppState>) -> Router<AppState> {
     mount_inner(router).0
 }
@@ -60,6 +72,13 @@ fn mount_inner(router: Router<AppState>) -> (Router<AppState>, Vec<&'static str>
             "sessions.terminal" => routing::get(session_terminal),
             "sessions.shells.terminal" => routing::get(session_shell_terminal),
             "shell.terminal" => routing::get(shell_terminal),
+            "sessions.raw" => routing::get(session_raw_file),
+            "artifacts.raw" => routing::get(artifact_raw_image),
+            // The body limit is the scratch file cap, not the JSON cap: this is
+            // the one route where a large body is the point.
+            "sessions.scratch.write" => routing::post(write_scratch_file).layer(
+                DefaultBodyLimit::max(crate::scratch::MAX_SCRATCH_FILE_BYTES),
+            ),
             _ => continue,
         };
         let path = operation
@@ -75,7 +94,7 @@ fn mount_inner(router: Router<AppState>) -> (Router<AppState>, Vec<&'static str>
 
 /// The ids [`mount`] actually served, in registry order.
 #[cfg(test)]
-fn mounted_stream_operations() -> Vec<&'static str> {
+fn mounted_encodings() -> Vec<&'static str> {
     mount_inner(Router::new()).1
 }
 
@@ -93,6 +112,43 @@ async fn restart_shell(
 ) -> ApiResult<weaver_api::dto::ShellRestartResult> {
     crate::shell::restart(&context.state).await?;
     Ok(weaver_api::dto::ShellRestartResult { restarted: true })
+}
+
+// ---------------------------------------------------------------------------
+// Byte bodies. `Download` answers an `<img src>` or a download link, `Upload`
+// takes a file as the request body. What belongs here is the operand extraction
+// and the authorization; the bytes themselves are the resource module's job, the
+// same division the websockets below follow.
+// ---------------------------------------------------------------------------
+
+async fn session_raw_file(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<sessions::raw::Input>,
+) -> ApiResult<Response> {
+    let input = authorized::<sessions::raw::Raw>(&st, &principal, input).await?;
+    super::sessions::raw_session_bytes(&st, &input).await
+}
+
+async fn artifact_raw_image(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<artifacts::raw::Input>,
+) -> ApiResult<Response> {
+    let input = authorized::<artifacts::raw::Raw>(&st, &principal, input).await?;
+    super::artifacts::raw_artifact_bytes(&st, &input).await
+}
+
+async fn write_scratch_file(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<sessions::scratch::write::Input>,
+    body: Bytes,
+) -> ApiResult<axum::Json<weaver_api::dto::ScratchWriteResult>> {
+    let input = authorized::<sessions::scratch::write::Write>(&st, &principal, input).await?;
+    super::scratch::write_scratch_bytes(&st, &input, &body)
+        .await
+        .map(axum::Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -164,18 +220,20 @@ where
 #[cfg(test)]
 mod tests {
     use axum::extract::Query;
-    use weaver_api::operations::{events, logs, session_layout, sessions, shell, Operation};
+    use weaver_api::operations::{
+        artifacts, events, logs, session_layout, sessions, shell, Operation,
+    };
 
-    /// A stream's operands arrive in the query string, and axum's `Query` runs
-    /// before any dispatcher default-filling could. So every operand of a
-    /// non-JSON operation must be optional on the wire — otherwise the declared
+    /// A non-JSON operation's operands arrive in the query string, and axum's
+    /// `Query` runs before any dispatcher default-filling could. So every operand
+    /// of one must be optional on the wire — otherwise the declared
     /// route 400s on a request that named nothing, including exactly the request
     /// a session credential makes when it means "my own session".
     ///
     /// Checked through the real extractor rather than through `serde_json`,
     /// because urlencoded and JSON disagree about what a missing field is.
     #[test]
-    fn streams_take_every_operand_from_the_query_string() {
+    fn non_json_operations_take_every_operand_from_the_query_string() {
         fn check<O: Operation>() {
             let uri: axum::http::Uri = "/whatever".parse().expect("static uri");
             Query::<O::Input>::try_from_uri(&uri)
@@ -198,6 +256,9 @@ mod tests {
         check::<sessions::terminal::Terminal>();
         check::<sessions::shells::terminal::Terminal>();
         check::<shell::terminal::Terminal>();
+        check::<sessions::raw::Raw>();
+        check::<sessions::scratch::write::Write>();
+        check::<artifacts::raw::Raw>();
     }
 
     /// The other half: an operand a caller *does* name arrives intact.
@@ -235,20 +296,25 @@ mod tests {
     /// Every non-JSON operation is mounted, at its own derived path.
     ///
     /// `mount` skips an id it does not recognize, which is right for
-    /// `io = Session` and wrong for a stream someone declared and forgot to
+    /// `io = Session` and wrong for an encoding someone declared and forgot to
     /// serve. This is the check that tells them apart — and building the router
-    /// is also what proves no two streams claim one path.
+    /// is also what proves no two of them claim one path.
     #[test]
-    fn every_stream_operation_is_mounted() {
+    fn every_non_json_operation_is_mounted() {
         let declared: Vec<&str> = weaver_api::operations()
-            .filter(|operation| matches!(operation.io.as_str(), "stream" | "duplex"))
+            .filter(|operation| {
+                matches!(
+                    operation.io.as_str(),
+                    "stream" | "duplex" | "upload" | "download"
+                )
+            })
             .map(|operation| operation.id)
             .collect();
-        assert!(!declared.is_empty(), "no stream operations are declared");
+        assert!(!declared.is_empty(), "no non-JSON operations are declared");
         assert_eq!(
             declared,
-            super::mounted_stream_operations(),
-            "declared stream operations that `mount` does not serve"
+            super::mounted_encodings(),
+            "declared non-JSON operations that `mount` does not serve"
         );
     }
 }

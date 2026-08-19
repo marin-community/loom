@@ -407,7 +407,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   export LOOM_TOKEN=loom_xxxxxxxx
   curl -H "Authorization: Bearer $LOOM_TOKEN" \
        -H 'content-type: application/json' \
-       "$WEAVER_API/api/sessions" -d '{"cwd":"/srv/repo","goal":"..."}'
+       "$WEAVER_API/api/sessions/launch" -d '{"cwd":"/srv/repo","goal":"..."}'
   ```
 
 - **Federated workflow tokens** for GitHub Actions and Google workloads. Loom

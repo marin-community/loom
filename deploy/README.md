@@ -351,7 +351,7 @@ Without the App (the classic path), instead:
    host, using a token minted under Settings → Tokens:
 
    ```sh
-   curl -X POST https://<LOOM_DOMAIN>/api/repos \
+   curl -X POST https://<LOOM_DOMAIN>/api/repos/register \
      -H "Authorization: Bearer $LOOM_TOKEN" \
      -H 'content-type: application/json' \
      -d '{"repo":"owner/name"}'

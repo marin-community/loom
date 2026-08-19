@@ -9,7 +9,7 @@ use axum::{
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use weaver_api::operations::artifacts::{delete, get, history, list, threads, url, write};
+use weaver_api::operations::artifacts::{delete, get, history, list, raw, threads, url, write};
 use weaver_api::{
     AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactUpsertReq, ArtifactVersion, ArtifactView,
     ArtifactWriteBody, CommentDto, IssueRefStatus, SessionUrlView, ThreadDto,
@@ -204,20 +204,26 @@ pub(super) async fn get_artifact(
     ))
 }
 
-/// Raw bytes for a standalone image artifact. Markdown documents can use
-/// `![alt](artifact:<name>)`; the renderer maps that source to this route, so
-/// the browser depends only on loom's artifact store (never an agent-local
-/// path). `?rev=N` pins an older image revision; omitted means latest.
-pub(super) async fn raw_artifact_image(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Query(q): Query<RevQuery>,
+/// `artifacts.raw` — an image artifact's decoded bytes for an `<img src>`.
+///
+/// Markdown documents can use `![alt](artifact:<name>)`; the renderer maps that
+/// source to this operation's path, so the browser depends only on loom's
+/// artifact store and never on an agent-local path. `?rev=N` pins an older
+/// image revision; omitted means latest.
+///
+/// Mounted by hand in [`super::encodings`] because `Io::Download` answers with
+/// bytes and a content type rather than a JSON envelope. Authorization is not
+/// hand-written: the caller there runs the same `authorized` path every JSON
+/// operation does, and what is left for this function is the bytes.
+pub(super) async fn raw_artifact_bytes(
+    st: &AppState,
+    input: &raw::Input,
 ) -> ApiResult<Response> {
-    let (_, branch) = require_session(&st.db, &key).await?;
-    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
+    let branch = require_branch(&st.db, &input.branch).await?;
+    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &input.name)
         .await?
         .ok_or_else(|| AppError::not_found("artifact"))?;
-    let version = match q.rev {
+    let version = match input.rev {
         Some(rev) => artifact::version(&st.db, a.id, rev).await?,
         None => artifact::latest_version(&st.db, a.id).await?,
     }

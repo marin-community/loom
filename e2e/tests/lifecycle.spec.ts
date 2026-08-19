@@ -29,8 +29,8 @@ test.describe('session lifecycle actions', () => {
 
     let releaseFailure = () => {};
     let injectFailure = true;
-    await page.route('**/api/auth/tokens/*', async (route) => {
-      if (route.request().method() !== 'DELETE' || !injectFailure) {
+    await page.route('**/api/auth/tokens/revoke', async (route) => {
+      if (!injectFailure) {
         await route.continue();
         return;
       }
@@ -71,7 +71,8 @@ test.describe('session lifecycle actions', () => {
       (response) =>
         response.ok() &&
         response.request().method() === 'POST' &&
-        new URL(response.url()).pathname === `/api/sessions/${archived.id}/archive`,
+        new URL(response.url()).pathname === '/api/sessions/archive' &&
+        (response.request().postDataJSON() as { session?: string })?.session === archived.id,
     );
     await confirm.click();
     await archivedResponse;

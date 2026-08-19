@@ -157,7 +157,7 @@ async fn register_managed_repo(pool: &db::Db, repo_root: &Path) {
 async fn create_shell_session(client: &client::Client, cwd: &Path) -> Value {
     client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "setup test", "cwd": cwd.to_string_lossy(), "agent": "shell" }),
         )
         .await
@@ -165,10 +165,10 @@ async fn create_shell_session(client: &client::Client, cwd: &Path) -> Value {
 }
 
 /// Every `setup` lifecycle event recorded for a session, newest-or-oldest order
-/// as returned by the log endpoint.
+/// as returned by `sessions.events.list`.
 async fn setup_events(client: &client::Client, id: &str) -> Vec<Value> {
     let log = client
-        .get(&format!("/api/sessions/{id}/log"))
+        .post("/api/sessions/events/list", json!({ "session": id }))
         .await
         .unwrap();
     log.as_array()
@@ -237,7 +237,10 @@ async fn setup_failure_marks_session_error() {
     assert_eq!(session.status, "error");
 
     // It raises the loud attention axis so the dashboard flags it.
-    let detail = client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let detail = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     let tags = detail["branch"]["tags"]
         .as_array()
         .cloned()
