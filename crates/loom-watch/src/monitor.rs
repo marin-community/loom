@@ -199,6 +199,10 @@ async fn run_inner(state: AppState) {
         reap_tick += 1;
         if reap_tick >= REAP_EVERY_TICKS {
             reap_tick = 0;
+            // Take over any transition whose owner died mid-teardown. Recovery
+            // also runs at startup; on this cadence a session stops needing a
+            // server restart to be archivable again.
+            crate::lifecycle::reconcile_interrupted_transitions(&state).await;
             let slack_idle_archive_secs = core_config::get(&state.db, "slack.idle_archive_secs")
                 .await
                 .and_then(|value| value.trim().parse::<i64>().ok())
