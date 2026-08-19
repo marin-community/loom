@@ -269,7 +269,7 @@ export interface BranchSummary {
   github_pr: number | null;
 }
 
-/** Compact session projection returned by `GET /sessions/summary`. Opening a
+/** Compact session projection returned by `sessions.summary.list`. Opening a
  * row or session follows with the full `Session` resource on demand. */
 export interface SessionSummary {
   id: string;
@@ -376,7 +376,7 @@ export interface SessionSearchOptions {
 export type AutomationRunStatus =
   'creating' | 'waiting' | 'delivering' | 'running' | 'failed' | 'cancelled' | 'completed';
 
-/** Durable automation launch reservation (`GET /api/runs`). A run normally
+/** Durable automation launch reservation (`runs.list`). A run normally
  *  points at an automation-class Session, but a launch can fail before that
  *  session becomes usable; unmatched failures become typed interventions. */
 export interface AutomationRun {
@@ -436,7 +436,7 @@ export interface ChatBlock {
   created_at: string;
 }
 
-/** `GET /sessions/{id}/chat` — the journal snapshot plus the in-flight turn (the
+/** `sessions.chat` — the journal snapshot plus the in-flight turn (the
  *  turn number of a `session/prompt` still running, else null). */
 export interface ChatSnapshot {
   blocks: ChatBlock[];
@@ -613,7 +613,7 @@ export interface SseQueue {
   pending_prompt: string | null;
 }
 
-/** `POST /sessions/{id}/prompt` 202 body: whether the message queued, plus the
+/** `sessions.prompt.create`'s result: whether the message queued, plus the
  *  turn it belongs to. */
 export interface PromptAck {
   queued: boolean;
@@ -642,7 +642,7 @@ export interface AgentMetadata {
 }
 
 /** An operator-defined custom agent: the shell commands loom runs at each launch
- *  stage. Mirrors `custom_agents::CustomAgent`. Returned by `GET /api/agents`
+ *  stage. Mirrors `custom_agents::CustomAgent`. Returned by `agents.list`
  *  (the `custom` array) and round-tripped by the Agents settings editor. */
 export interface CustomAgent {
   name: string;
@@ -742,7 +742,7 @@ export interface ArtifactMeta {
 }
 
 /** One revision of an artifact (metadata only — the picker lists these; content
- *  is fetched per-rev through the artifact GET with `?rev=`). */
+ *  is fetched per-rev through `artifacts.get`'s `rev` operand). */
 export interface ArtifactVersion {
   rev: number;
   /** `agent` | `user` — who wrote this revision. */
@@ -780,9 +780,9 @@ export interface ArtifactView {
   refs: ArtifactRefs;
 }
 
-/** Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
- *  a new revision (`author: user`). `title`/`kind` update the envelope; omit
- *  them to keep the current values. */
+/** Body for `artifacts.write`: a user edit that appends a new revision
+ *  (`author: user`). `title`/`kind` update the envelope; omit them to keep
+ *  the current values. */
 export interface ArtifactWriteBody {
   content: string;
   title?: string;
@@ -830,16 +830,17 @@ export interface Thread {
   comments: Comment[];
 }
 
-/** Body for `POST /api/sessions/{id}/artifacts/{name}/threads`: open a new
- *  thread anchored to a quoted span, seeded with its first comment. */
+/** Body for opening a new thread anchored to a quoted span, seeded with its
+ *  first comment — the `target: { kind: 'new' }` case of
+ *  `artifacts.threads.comment`. */
 export interface NewThreadBody {
   base_rev: number;
   anchor: Anchor;
   body: string;
 }
 
-/** Body for `POST /api/sessions/{id}/artifacts/{name}/threads/{tid}/comments`:
- *  append a reply to an existing thread. */
+/** Body for appending a reply to an existing thread — the
+ *  `target: { kind: 'reply' }` case of `artifacts.threads.comment`. */
 export interface NewCommentBody {
   body: string;
 }
@@ -1001,7 +1002,7 @@ export interface RecentRepo {
   active_branches: number;
 }
 
-/** A repository registered in the managed repo store (`/api/repos`). The
+/** A repository registered in the managed repo store (`repos.list`). The
  *  slug→(remote, path) mapping doubles as the clone allowlist: only a registered
  *  repo may be cloned for a session. Mirrors loom's `repo::ManagedRepo`. */
 export interface ManagedRepo {
@@ -1021,16 +1022,16 @@ export interface RepoRevisionValidation {
   message: string | null;
 }
 
-/** One per-repo environment variable's metadata (`/api/repos/env`). Mirrors
- *  loom's `repo_env::RepoEnvVar`. The value is **write-only**: it is set via PUT
- *  but never returned (these hold per-repo secrets), so only the name and last
- *  change time appear here. */
+/** One per-repo environment variable's metadata (`repos.env.get`). Mirrors
+ *  loom's `repo_env::RepoEnvVar`. The value is **write-only**: it is set via
+ *  `repos.env.set` but never returned (these hold per-repo secrets), so only
+ *  the name and last change time appear here. */
 export interface RepoEnvVar {
   name: string;
   updated_at: string;
 }
 
-/** Branch listing returned by `/api/repos/branches?cwd=...` — distinct from
+/** Branch listing returned by `repos.branches` — distinct from
  *  the tracked-branch model: this enumerates git branches in a repo on disk. */
 export interface RepoBranch {
   name: string;
@@ -1053,8 +1054,9 @@ export interface ScratchFile {
 }
 
 /** Availability of the per-session embedded editor (code-server). Returned by
- *  `/api/sessions/{id}/ide-info`; the UI uses it to decide between mounting the
- *  editor iframe and showing a "not installed" note. */
+ *  `sessions.ide_info`; the UI uses it to decide between mounting the
+ *  editor iframe (served over the surviving `/api/sessions/{id}/ide*` proxy
+ *  routes) and showing a "not installed" note. */
 export interface IdeInfo {
   /** The `ide.enabled` master switch. */
   enabled: boolean;
@@ -1132,7 +1134,7 @@ export interface Watch {
   updated_at: string;
 }
 
-/** Create payload for `POST /api/watches`. */
+/** Create payload for `watches.create`. */
 export interface WatchCreateInput {
   name: string;
   trigger?: WatchTrigger;
@@ -1147,7 +1149,8 @@ export interface WatchCreateInput {
   enabled?: boolean;
 }
 
-/** Mutable fields accepted by `PATCH /api/watches/{id}`. */
+/** Mutable fields accepted by `watches.update` (which also takes the watch's
+ *  `key`, added separately by the api.ts wrapper). */
 export type WatchUpdateInput = Partial<Omit<WatchCreateInput, 'name'>>;
 
 /** One action a round recorded — a mark, nudge, interrupt, or a stubbed
@@ -1194,14 +1197,14 @@ export interface WatchRun {
   duration_ms: number | null;
 }
 
-/** The reply from `POST /api/watches/{id}/run`. */
+/** The reply from `watches.run`. */
 export interface WatchRunResult {
   run_id: number;
   outcome: string;
   summary: string;
 }
 
-/** One program a watch can run, served by `GET /api/watches/programs`.
+/** One program a watch can run, served by `watches.programs`.
  *  Builtin programs are Python scripts that ship inside the loom binary; the
  *  embedded `source` is rendered read-only in the panel. `defaults` is the
  *  suggested starting config a create form prefills. Mirrors `ProgramView` in
@@ -1272,7 +1275,7 @@ export interface AuthMethods {
   github: boolean;
 }
 
-/** Who the caller is + what the login screen needs (`GET /api/auth/me`).
+/** Who the caller is + what the login screen needs (`auth.me`).
  *  `authenticated: false` means show the login view. Mirrors `MeView`. */
 export interface Me {
   authenticated: boolean;
@@ -1592,7 +1595,7 @@ export interface SlackAccess {
   users: string[];
 }
 
-/** Every link in the Slack trigger path (`GET /api/slack/status`), reported
+/** Every link in the Slack trigger path (`slack.connection_status`), reported
  *  link by link because a live socket is not the same as a working
  *  integration. */
 export interface SlackStatus {
@@ -1607,7 +1610,7 @@ export interface SlackStatus {
 }
 
 // --- Conversation log (iris format) ----------------------------------------
-// The normalized agent conversation served by `GET /sessions/{id}/conversation`.
+// The normalized agent conversation served by `sessions.conversation`.
 // Mirrors `weaver_core::transcript::iris`: a list of role-tagged messages, each
 // an ordered list of content blocks. The Conversation tab renders this.
 
@@ -1635,7 +1638,7 @@ export interface IrisLog {
   messages: IrisMessage[];
 }
 
-/** One provider-neutral record from `GET /sessions/{id}/history[/search]`.
+/** One provider-neutral record from `sessions.history.list`/`.search`.
  * Optional fields are present only when the source transcript supplies them;
  * ACP tool activity, in particular, does not claim invocation arguments. */
 export interface HistoryRecord {
@@ -1738,7 +1741,7 @@ export interface DiagnosticFederation {
   updated_at: string;
 }
 
-/** Redacted admin operational snapshot from `GET /api/diagnostics`. */
+/** Redacted admin operational snapshot from `diagnostics.get`. */
 export interface Diagnostics {
   sessions: DiagnosticSessionCount[];
   profiles: DiagnosticProfileCapacity[];

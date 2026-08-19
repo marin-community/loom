@@ -743,12 +743,6 @@ fn registered_api_router() -> Router<AppState> {
 
 fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
     router
-        .route(
-            "/sessions",
-            get(list_sessions)
-                .post(create_session)
-                .layer(DefaultBodyLimit::max(MAX_SESSION_CREATE_BODY_BYTES)),
-        )
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
         .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))
         .route(

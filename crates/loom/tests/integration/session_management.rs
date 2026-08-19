@@ -255,19 +255,25 @@ async fn admin_inventory_can_see_and_remove_managed_sessions() {
         .await
         .unwrap();
 
-    // No registered operation exposes the operator `managed` escape hatch
-    // (`sessions.list` always resolves with `managed = false`, matching
-    // `search_sessions`) — this pair of calls stays on the legacy route.
+    // `managed` is the operator escape hatch, off unless asked for: a warm
+    // session an engine owns is invisible to an ordinary listing even with
+    // automation and history widened all the way open.
     let ordinary = ts
         .client
-        .get("/api/sessions?automation=true&archived=true")
+        .post(
+            "/api/sessions/list",
+            json!({ "automation": true, "history": true }),
+        )
         .await
         .unwrap();
     assert!(ordinary.as_array().unwrap().is_empty());
 
     let admin = ts
         .client
-        .get("/api/sessions?automation=true&archived=true&managed=true")
+        .post(
+            "/api/sessions/list",
+            json!({ "automation": true, "history": true, "managed": true }),
+        )
         .await
         .unwrap();
     assert_eq!(admin.as_array().unwrap().len(), 1);

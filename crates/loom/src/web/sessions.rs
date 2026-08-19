@@ -2583,7 +2583,6 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
         scratch: input.scratch,
         expected_profile_revision: input.expected_profile_revision,
         expected_resolver_revision: input.expected_resolver_revision,
-        ..Default::default()
     };
     if let Some(repo_input) = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         ensure_repo_registered(&st.db, repo_input).await?;

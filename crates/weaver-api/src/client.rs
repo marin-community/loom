@@ -732,16 +732,18 @@ impl Client {
     /// Atomically replace every tag authored by `by` on a session. Exact
     /// `(key, value)` entries in `clear` are removed in the same transaction.
     ///
-    /// The only method still on a hand-written route: the operation surface has
-    /// no author-scoped bulk replacement, and `sessions.tags.set`/`.delete`
-    /// per key would drop both the atomicity and the "remove what this author
-    /// set and no longer wants" half that the status watch depends on.
+    /// `sessions.tags.replace`. Per-key `set`/`delete` calls are not a
+    /// substitute: they would drop both the atomicity and the "remove what this
+    /// author set and no longer wants" half that the status watch depends on,
+    /// which is why the bulk form is its own declared operation.
     pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
-        self.send_typed(
-            Method::PUT,
-            &format!("/api/sessions/{}/tags", Self::seg(key)),
-            Some(req),
-        )
+        use crate::operations::sessions::tags::replace;
+        self.invoke::<replace::Replace>(&replace::Input {
+            tags: req.tags.clone(),
+            clear: req.clear.clone(),
+            by: req.by.clone(),
+            session: key.to_string(),
+        })
         .await
     }
 
