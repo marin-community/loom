@@ -1,5 +1,10 @@
 //! Built-in MCP adapter for restricted GitHub sessions.
 //!
+//! TODO(registry): not yet ported — the `github.*` operations are not in the
+//! operation registry yet, so this adapter keeps its own hand-written
+//! schemas, dispatch loop, and capability sets rather than
+//! `super::dispatch::bind`.
+//!
 //! Claude sees these fixed tools instead of `Bash`. The bridge carries only the
 //! session-scoped Loom token and forwards each call to Loom's REST API; the
 //! GitHub credential remains in Loom's profile/user-token store and never enters

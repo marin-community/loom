@@ -1,4 +1,8 @@
 //! Session lifecycle and normalized history projected from Loom's REST API.
+//!
+//! TODO(registry): not yet ported — `sessions.*` has no operation registry
+//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
+//! loop, and capability sets rather than `super::dispatch::bind`.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

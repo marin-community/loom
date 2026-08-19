@@ -7,11 +7,16 @@
 //! definition of the wire contract the server serializes and these consumers
 //! deserialize (and that `frontend/types.ts` mirrors).
 
+// The operation derives emit `::weaver_api::` paths so they work identically
+// inside this crate and outside it.
+extern crate self as weaver_api;
+
 pub mod capability;
 pub mod client;
 pub mod dto;
 pub mod endpoint;
 pub mod operations;
+pub mod render;
 
 pub use capability::{require, CapabilityError};
 pub use client::Client;
@@ -20,8 +25,8 @@ pub use operations::{
     all_session_capabilities, mcp_tools, mcp_tools_ordered, operation, operation_bundles,
     operation_for_mcp, operation_for_request, operation_input_schema, operation_views, operations,
     operations_for_bundle, session_capabilities_from_mcp, validate_operation_registry, ActorPolicy,
-    ApiMetaView, ApiOperation, ArgumentDefault, ArgumentKind, ArgumentSpec, ArgumentView,
-    HttpBinding, McpProjection, McpProjectionView, OperationBundle, OperationBundleFactory,
-    OperationRequest, OperationRisk, OperationScope, OperationSpec, OperationView,
-    OPERATION_BUNDLE_FACTORIES,
+    ApiMetaView, CliProjection, ContextField, ContextSource, ContextValues, Io, McpProjection,
+    McpProjectionView, NoView, Operands, Operation, OperationBundle, OperationBundleFactory,
+    OperationRisk, OperationScope, OperationSpec, OperationView, Render, ScopeRef, Scoped,
+    ViewFlags, OPERATION_BUNDLE_FACTORIES,
 };

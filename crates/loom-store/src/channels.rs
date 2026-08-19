@@ -299,6 +299,10 @@ async fn channel_view(db: &Db, row: ChannelRow, subject: &Subject) -> Result<Cha
             Some(message) => Some(message_view(db, message).await?),
             None => None,
         },
+        // Populated by the server handler, which knows how to resolve
+        // delivery bindings (session targets, the Slack origin thread); this
+        // row-mapper only has the channel's own columns.
+        bindings: Vec::new(),
     })
 }
 

@@ -1,5 +1,9 @@
 //! Built-in session self-history MCP adapter.
 //!
+//! TODO(registry): not yet ported — session history has no operation registry
+//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
+//! loop, and capability sets rather than `super::dispatch::bind`.
+//!
 //! This is deliberately only a facade: the REST history resources own source
 //! normalization, pagination, filtering, literal search, and authorization.
 //! The tool surface has no session selector; it resolves `LOOM_SESSION_ID` and

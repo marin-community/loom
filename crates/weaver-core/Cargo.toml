@@ -8,6 +8,9 @@ name = "weaver_core"
 path = "src/lib.rs"
 
 [dependencies]
+# Domain types embedded in wire DTOs need a derivable schema so the registry can
+# describe operations that carry them.
+schemars = "1"
 anyhow = "1"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

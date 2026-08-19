@@ -1,4 +1,8 @@
 //! Current caller context as a small, typed REST projection.
+//!
+//! TODO(registry): not yet ported — this tool has no operation registry entry
+//! yet, so this adapter keeps its own hand-written schema and capability sets
+//! rather than `super::dispatch::bind`.
 
 use anyhow::{bail, Result};
 use serde_json::Value;

@@ -1,19 +1,32 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+//! The executable half of the operation registry.
+//!
+//! Binding a handler is what makes an operation exist on the server. There is no
+//! later parity pass and no "declared but implemented elsewhere" state: a
+//! descriptor without a [`register`] call fails startup validation, and a
+//! `register` call without a descriptor does not compile.
+//!
+//! Authorization happens here, once, from typed input — actor, grants, and the
+//! resource named by [`Scoped`]. The registry this replaces evaluated authority
+//! twice on two different models, the second of which matched a URL string that
+//! the operation's handler no longer served.
 
-use axum::{extract::Path, extract::State, http::StatusCode, Extension, Json, Router};
+use std::{collections::BTreeMap, future::Future, pin::Pin, sync::Arc};
+
+use axum::{extract::State, http::StatusCode, Extension, Json, Router};
 use serde_json::Value;
-use weaver_api::operations::permissions as permission_operations;
-use weaver_api::{ApiMetaView, ApiOperation, HttpBinding, OperationSpec, OperationView};
+use weaver_api::operations::{
+    ActorPolicy, ApiMetaView, Operation, OperationSpec, OperationView, ScopeRef, Scoped,
+};
 
-use crate::{auth::Principal, AppState};
+use crate::auth::Principal;
+use crate::AppState;
 
 use super::{ApiResult, AppError};
 
-/// Owned server context supplied to typed operation implementations.
+/// Owned server context handed to a bound operation.
 ///
-/// Keeping this owned makes async handler futures `'static`, which allows the
-/// binding checker to accept ordinary async functions without higher-ranked
-/// borrowed-future machinery.
+/// Owned rather than borrowed so handler futures stay `'static`, which lets the
+/// binding accept ordinary `async fn`s without higher-ranked lifetime machinery.
 #[derive(Clone)]
 pub(super) struct OperationContext {
     pub state: AppState,
@@ -27,203 +40,200 @@ impl OperationContext {
 }
 
 type OperationFuture = Pin<Box<dyn Future<Output = ApiResult<Value>> + Send>>;
-type OperationInvoker = Arc<dyn Fn(OperationContext, Value) -> OperationFuture + Send + Sync>;
+type Invoker = Arc<dyn Fn(OperationContext, Value) -> OperationFuture + Send + Sync>;
 
-/// One entry in Loom's executable operation registry.
-///
-/// A routine operation owns its descriptor and its type-erased implementation in
-/// the same value.  The erasure happens only at the JSON transport boundary:
-/// `register_operation` still compile-checks the concrete input, output, and async
-/// handler signature.  Custom entries describe the deliberately bespoke Axum
-/// routes used for streams, files, atomic bulk endpoints, and other shapes that
-/// do not fit the ordinary JSON operation contract.
+/// One executable entry: a descriptor and the implementation it names.
 #[derive(Clone)]
-pub(super) struct RegisteredOperation {
+pub(super) struct Bound {
     pub operation: &'static OperationSpec,
-    invoke: Option<OperationInvoker>,
+    invoke: Invoker,
 }
 
-impl RegisteredOperation {
-    fn custom(operation: &'static OperationSpec) -> Self {
-        assert_eq!(
-            operation.http_binding,
-            HttpBinding::Custom,
-            "generated operation {} must bind an implementation",
-            operation.id
-        );
-        Self {
-            operation,
-            invoke: None,
-        }
-    }
-
-    pub(super) fn is_bound(&self) -> bool {
-        self.invoke.is_some()
-    }
-
-    fn api_path(&self) -> String {
-        format!("/{}", self.operation.id.replace('.', "/"))
-    }
-
-    fn view(&self) -> OperationView {
+impl Bound {
+    pub(super) fn view(&self) -> OperationView {
         OperationView::from(self.operation)
     }
-
-    async fn invoke(&self, context: OperationContext, input: Value) -> ApiResult<Value> {
-        let invoke = self.invoke.as_ref().ok_or_else(|| {
-            AppError::new(
-                StatusCode::METHOD_NOT_ALLOWED,
-                "operation uses a custom HTTP adapter",
-            )
-        })?;
-        invoke(context, input).await
-    }
 }
 
-/// Bind a typed operation descriptor and its implementation as one registry
-/// entry.  There is no later parity pass: a routine operation does not exist on the
-/// server unless this function has produced its executable registration.
-pub(super) fn register_operation<O, F, Fut>(handler: F) -> RegisteredOperation
+/// Bind a descriptor to its implementation.
+///
+/// The type parameters do the checking: `O::Input` and `O::Output` are the
+/// operation's own types, so a handler cannot accept or return something the
+/// declaration does not promise. JSON erasure happens only at this boundary.
+pub(super) fn register<O, F, Fut>(handler: F) -> Bound
 where
-    O: ApiOperation,
+    O: Operation,
+    O::Input: Scoped,
     F: Fn(OperationContext, O::Input) -> Fut + Copy + Send + Sync + 'static,
     Fut: Future<Output = ApiResult<O::Output>> + Send + 'static,
 {
-    assert_eq!(
-        O::SPEC.http_binding,
-        HttpBinding::Generated,
-        "custom operation {} must use an explicit HTTP adapter",
-        O::SPEC.id
-    );
-    RegisteredOperation {
+    Bound {
         operation: O::SPEC,
-        invoke: Some(Arc::new(move |context, input| {
+        invoke: Arc::new(move |context, input| {
             let decoded = serde_json::from_value::<O::Input>(input);
             Box::pin(async move {
                 let input = decoded.map_err(|error| {
                     AppError::bad_request(format!("invalid arguments for {}: {error}", O::SPEC.id))
                 })?;
-                // Reuse the semantic route's scope authorization before
-                // entering application code. The canonical operation endpoint
-                // therefore has the branch/session/repository boundary declared
-                // by the typed contract.
-                let request = O::authorization_request(&input).map_err(|error| {
-                    AppError::bad_request(format!("invalid arguments for {}: {error}", O::SPEC.id))
-                })?;
-                let method =
-                    axum::http::Method::from_bytes(request.method.as_bytes()).map_err(|error| {
-                        AppError::internal("registered operation has an invalid method", error)
-                    })?;
-                if !super::auth::grant_allows(
-                    &context.state,
-                    &context.principal,
-                    &method,
-                    &request.path,
-                )
-                .await
-                {
-                    return Err(AppError::new(
-                        StatusCode::FORBIDDEN,
-                        "credential lacks this operation's registered capability or scope",
-                    ));
-                }
+                authorize(&context, O::SPEC, input.scope_ref()).await?;
                 let output = handler(context, input).await?;
                 serde_json::to_value(output).map_err(|error| {
                     AppError::internal(format!("failed to encode result for {}", O::SPEC.id), error)
                 })
             })
-        })),
+        }),
     }
 }
 
-fn register_custom_operation(id: &'static str) -> RegisteredOperation {
-    RegisteredOperation::custom(
-        weaver_api::operation(id)
-            .unwrap_or_else(|| panic!("custom operation {id} has no descriptor")),
-    )
+/// The single authorization decision for a registered operation.
+///
+/// Every transport reaches this same function with the same typed input, so an
+/// adapter cannot widen authority by choosing a different door.
+async fn authorize(
+    context: &OperationContext,
+    operation: &'static OperationSpec,
+    scope: ScopeRef<'_>,
+) -> ApiResult<()> {
+    if !actor_allows(&context.principal, operation) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "credential may not call this operation",
+        ));
+    }
+    if !grants_allow(&context.principal, operation) {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "credential lacks this operation's registered capability",
+        ));
+    }
+    scope_allows(context, scope).await
 }
 
-fn register_custom_bundle(bundle: &'static str) -> impl Iterator<Item = RegisteredOperation> {
-    weaver_api::operations_for_bundle(bundle).map(RegisteredOperation::custom)
+fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
+    use crate::auth::Grant;
+    match &principal.grant {
+        Grant::Admin => true,
+        Grant::User => matches!(
+            operation.actor,
+            ActorPolicy::SessionSelf | ActorPolicy::User
+        ),
+        Grant::Automation { .. } => operation.actor == ActorPolicy::Internal,
+        Grant::Session { .. } => operation.actor == ActorPolicy::SessionSelf,
+    }
 }
 
-/// The single server-side operation registry. Bound operations and intentional
-/// custom adapters share one catalogue; discovery, authorization, OpenAPI, and
-/// generic invocation all enumerate this value.
-pub(super) fn registry() -> Vec<RegisteredOperation> {
-    // These resource groups still use specialized HTTP adapters. Naming them
-    // here is the explicit escape hatch; adding a descriptor elsewhere does
-    // not silently turn it into a server operation.
-    let mut registered = register_custom_bundle("sessions")
-        .chain(register_custom_bundle("channels"))
-        .chain(register_custom_bundle("artifacts"))
-        .collect::<Vec<_>>();
-
-    registered.extend(super::issues::registered_operations());
-    registered.push(register_custom_operation("issues.actions"));
-
-    registered.extend(super::permission_requests::registered_operations());
-    registered.push(register_operation::<permission_operations::Explain, _, _>(
-        explain_operation,
-    ));
-    registered.extend(
-        [
-            "permissions.requests.approve",
-            "permissions.requests.deny",
-            "permissions.github.grant",
-            "permissions.github.revoke",
-            "permissions.github.token",
-            "permissions.github.restricted.invoke",
-        ]
-        .into_iter()
-        .map(register_custom_operation),
-    );
-
-    registered.sort_by_key(|registration| registration.operation.id);
-    assert!(
-        registered
-            .windows(2)
-            .all(|pair| pair[0].operation.id != pair[1].operation.id),
-        "server operation registry contains duplicate ids"
-    );
-    registered
-}
-
-pub(super) fn registered_operation(id: &str) -> Option<RegisteredOperation> {
-    registry()
-        .into_iter()
-        .find(|registration| registration.operation.id == id)
-}
-
-pub(super) fn bound_operation_for_request(
-    method: &axum::http::Method,
-    path: &str,
-) -> Option<RegisteredOperation> {
-    (*method == axum::http::Method::POST).then_some(())?;
-    registry().into_iter().find(|registration| {
-        if !registration.is_bound() {
-            return false;
-        }
-        let operation_path = registration.api_path();
-        path == operation_path || path == format!("/api{operation_path}")
+fn grants_allow(principal: &Principal, operation: &OperationSpec) -> bool {
+    use crate::auth::Grant;
+    let Grant::Session { capabilities, .. } = &principal.grant else {
+        return true;
+    };
+    // `None` is the compatibility form minted before capability-bound
+    // credentials; it is unrestricted by construction.
+    capabilities.as_ref().is_none_or(|granted| {
+        operation
+            .grants
+            .iter()
+            .all(|required| granted.iter().any(|held| held == required))
     })
 }
 
-/// Mount every routine operation from the executable registry.  Adding a
-/// bound registration creates its API route; there is no second router table
-/// to update.
-pub(super) fn mount_registered_operations(mut router: Router<AppState>) -> Router<AppState> {
-    for registration in registry().into_iter().filter(RegisteredOperation::is_bound) {
-        let path = registration.api_path();
+async fn scope_allows(context: &OperationContext, scope: ScopeRef<'_>) -> ApiResult<()> {
+    let denied = || AppError::new(StatusCode::FORBIDDEN, "credential cannot reach this resource");
+    match scope {
+        ScopeRef::Global => Ok(()),
+        ScopeRef::Repository(repo_root) => {
+            super::require_repo_access(&context.state, &context.principal, repo_root)
+                .await
+                .map_err(|_| denied())
+        }
+        ScopeRef::Branch(branch) => {
+            super::require_branch_access(&context.state, &context.principal, branch)
+                .await
+                .map_err(|_| denied())
+        }
+        ScopeRef::Session(session) => {
+            super::require_session_access(&context.state, &context.principal, session)
+                .await
+                .map_err(|_| denied())
+        }
+    }
+}
+
+/// The server's operation registry.
+///
+/// Every bundle contributes its bound operations here. Startup asserts that this
+/// set exactly matches the descriptors in `weaver_api`, so a declared-but-unbound
+/// operation is a boot failure rather than a 404 discovered in production.
+pub(super) fn registry() -> Vec<Bound> {
+    let mut bound = Vec::new();
+    bound.extend(super::issues::bound_operations());
+    bound.sort_by_key(|entry| entry.operation.id);
+    bound
+}
+
+fn by_id() -> BTreeMap<&'static str, Bound> {
+    registry()
+        .into_iter()
+        .map(|entry| (entry.operation.id, entry))
+        .collect()
+}
+
+/// Assert that declarations and implementations are the same set.
+///
+/// This is the invariant that makes the registry trustworthy: it is impossible
+/// to ship a descriptor that nothing serves, or to serve something undeclared.
+pub(super) fn assert_registry_is_complete() {
+    weaver_api::validate_operation_registry().expect("operation registry is structurally invalid");
+
+    let bound = by_id();
+    let declared = weaver_api::operations()
+        .filter(|operation| operation.io.is_json())
+        .map(|operation| operation.id)
+        .collect::<Vec<_>>();
+
+    let missing = declared
+        .iter()
+        .filter(|id| !bound.contains_key(**id))
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "declared operations with no handler: {missing:?}"
+    );
+
+    let undeclared = bound
+        .keys()
+        .filter(|id| weaver_api::operation(id).is_none())
+        .collect::<Vec<_>>();
+    assert!(
+        undeclared.is_empty(),
+        "bound operations with no descriptor: {undeclared:?}"
+    );
+}
+
+/// Mount every bound operation at its derived route.
+///
+/// Adding a registration creates its route; there is no second router table.
+pub(super) fn mount(mut router: Router<AppState>) -> Router<AppState> {
+    for entry in registry() {
+        let path = entry
+            .operation
+            .path()
+            .strip_prefix("/api")
+            .unwrap_or_default()
+            .to_string();
         router = router.route(
             &path,
             axum::routing::post({
-                let registration = registration.clone();
-                move |State(st): State<AppState>,
+                let entry = entry.clone();
+                move |State(state): State<AppState>,
                       Extension(principal): Extension<Principal>,
                       Json(input): Json<Value>| {
-                    let registration = registration.clone();
-                    async move { invoke_registration(registration, st, principal, input).await }
+                    let entry = entry.clone();
+                    async move {
+                        (entry.invoke)(OperationContext::new(state, principal), input)
+                            .await
+                            .map(Json)
+                    }
                 }
             }),
         );
@@ -235,65 +245,14 @@ pub(super) async fn api_meta() -> Json<ApiMetaView> {
     Json(ApiMetaView {
         product: "loom".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        operation_registry_version: 4,
+        operation_registry_version: 5,
         operations_url: "/api/operations".to_string(),
         openapi_url: "/api/openapi.json".to_string(),
     })
 }
 
 pub(super) async fn list_operations() -> Json<Vec<OperationView>> {
-    Json(registry().iter().map(RegisteredOperation::view).collect())
-}
-
-pub(super) async fn explain_operation(
-    _: OperationContext,
-    input: permission_operations::ExplainInput,
-) -> ApiResult<OperationView> {
-    registered_operation(&input.operation)
-        .map(|registration| registration.view())
-        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "operation not found"))
-}
-
-pub(super) async fn get_operation(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<OperationView>> {
-    explain_operation(
-        OperationContext::new(st, principal),
-        permission_operations::ExplainInput { operation: id },
-    )
-    .await
-    .map(Json)
-}
-
-async fn invoke_registration(
-    registration: RegisteredOperation,
-    st: AppState,
-    principal: Principal,
-    input: Value,
-) -> ApiResult<Json<Value>> {
-    if !super::auth::operation_grant_allows(&principal, registration.operation) {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "credential lacks this operation's registered capability or scope",
-        ));
-    }
-    registration
-        .invoke(OperationContext::new(st, principal), input)
-        .await
-        .map(Json)
-}
-
-pub(super) async fn openapi() -> Json<Value> {
-    let operations = registry()
-        .iter()
-        .map(RegisteredOperation::view)
-        .collect::<Vec<_>>();
-    Json(weaver_api::operations::openapi_document_for_views(
-        env!("CARGO_PKG_VERSION"),
-        &operations,
-    ))
+    Json(weaver_api::operation_views())
 }
 
 #[cfg(test)]
@@ -301,14 +260,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_distinguishes_bound_operations_from_explicit_custom_adapters() {
-        let list = registered_operation("issues.list").unwrap();
-        assert!(list.is_bound());
-        assert_eq!(list.view().method, "POST");
-        assert_eq!(list.view().path, "/api/issues/list");
+    fn declarations_and_implementations_are_the_same_set() {
+        assert_registry_is_complete();
+    }
 
-        let bulk = registered_operation("issues.actions").unwrap();
-        assert!(!bulk.is_bound());
-        assert_eq!(bulk.view().path, "/api/issues/actions");
+    #[test]
+    fn routes_come_from_identity() {
+        let list = weaver_api::operation("issues.list").unwrap();
+        assert_eq!(list.path(), "/api/issues/list");
+        // The defect this replaces: the descriptor declared `GET
+        // /api/repos/issues`, a route the server had already stopped serving,
+        // and authorization still keyed off that string.
+        assert_eq!(list.method(), "POST");
     }
 }

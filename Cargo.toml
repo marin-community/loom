@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/smartdoc",
     "crates/weaver-core",
+    "crates/loom-api-macros",
     "crates/weaver-api",
     "crates/loom-ctx",
     "crates/loom-store",

@@ -1,8 +1,11 @@
 //! Effective access and approval requests projected from Loom operations.
+//!
+//! TODO(registry): not yet ported — `permissions.*` has no operation registry
+//! bundle yet, so this adapter keeps its own hand-written capability sets and
+//! `project_input`/`present` pair rather than `super::dispatch::bind`.
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use weaver_api::operations::permissions as permission_operations;
 use weaver_api::{CreatePermissionRequestReq, OperationView};
 
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
@@ -57,38 +60,9 @@ fn tools() -> Value {
 }
 
 async fn project_input(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
-    match name {
-        "show" => serde_json::to_value(permission_operations::SessionInput {
-            session: super::resolve_session_argument(client, &arguments).await?,
-        })
-        .map_err(Into::into),
-        "requests" => serde_json::to_value(permission_operations::ListRequestsInput {
-            session: super::resolve_session_argument(client, &arguments).await?,
-            state: arguments
-                .get("state")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-        })
-        .map_err(Into::into),
-        "request" => serde_json::to_value(permission_operations::CreateRequestInput {
-            session: super::resolve_session_argument(client, &arguments).await?,
-            request: CreatePermissionRequestReq {
-                kind: "github_repository".to_string(),
-                repository: super::required_string_argument(&arguments, "repository")?.to_string(),
-                mode: arguments
-                    .get("mode")
-                    .and_then(Value::as_str)
-                    .unwrap_or("write")
-                    .to_string(),
-                reason: super::required_string_argument(&arguments, "reason")?.to_string(),
-            },
-        })
-        .map_err(Into::into),
-        "explain" => Ok(arguments),
-        _ => Ok(arguments),
-    }
+    let _ = client;
+    Ok(arguments)
 }
-
 fn present(name: &str, input: &Value, output: Value) -> Result<Value> {
     match name {
         "show" => super::structured_result("effective Loom permissions", &output),

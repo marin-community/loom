@@ -18,7 +18,7 @@ use sqlx::FromRow;
 /// is the time associated with the current `head_sha`; the poller preserves it
 /// while the head is unchanged so unrelated PR metadata does not make code look
 /// newly pushed.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, schemars::JsonSchema)]
 pub struct GithubStatus {
     pub pr_number: i64,
     pub pr_url: String,

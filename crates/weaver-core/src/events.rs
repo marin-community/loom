@@ -20,7 +20,7 @@ pub fn is_system(branch_id: &str) -> bool {
     branch_id == SYSTEM_BRANCH
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Event {
     pub id: i64,
     pub branch_id: String,

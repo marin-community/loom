@@ -10,23 +10,18 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::operations::{
-    issues as issue_operations, permissions as permission_operations, ApiMetaView, ApiOperation,
-    OperationView,
-};
+use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
     AutomationTokenReq, AutomationTokenView, BranchStatusReq, BranchView, ChannelBindingView,
     ChannelMessageView, ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto,
-    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateIssueReq,
-    CreatePermissionRequestReq, CreateRepoIssueReq, CreateReq, CreateReviewReq,
+    CreateChannelMessageReq, CreateChannelReq, CreateEventReq, CreateReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
     CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeleteSessionGroupReq,
-    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView,
-    EffectivePermissionsView, EffectiveProfileView, EnsureResumptionCueReq,
+    DeleteSessionSpaceReq, DeploymentReq, DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq,
     ExpectedReviewRevisionReq, FederationReq, FederationView, GithubTokenView, HandoffReq,
-    HistoryPageView, IssueActionsReq, IssueActionsResult, IssueView, McpRegistryView,
+    HistoryPageView, IssueView, McpRegistryView,
     MoveSessionsReq, NewCommentBody, NewThreadBody, PatchIssueReq, PatchSessionReq, PatchWatchReq,
     PermissionRequestView, ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
     ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq, ResolveReviewCommentReq,
@@ -81,7 +76,7 @@ impl Client {
     /// an absolute path full of `/`, which would otherwise split into extra
     /// path segments the router never matches.
     fn seg(s: &str) -> String {
-        crate::operations::encode_path_segment(s)
+        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
     }
 
     // -- Untyped JSON transport -------------------------------------------
@@ -176,17 +171,9 @@ impl Client {
 
     /// Invoke one code-registered operation through Loom's canonical JSON boundary
     /// and deserialize the associated output type.
-    pub async fn invoke<O: ApiOperation>(&self, input: &O::Input) -> Result<O::Output> {
+    pub async fn invoke<O: Operation>(&self, input: &O::Input) -> Result<O::Output> {
         let value = serde_json::to_value(input)?;
-        let path = format!(
-            "/api/{}",
-            O::SPEC
-                .id
-                .split('.')
-                .map(Self::seg)
-                .collect::<Vec<_>>()
-                .join("/")
-        );
+        let path = O::SPEC.path();
         let value = self.invoke_value(O::SPEC.id, value).await?;
         serde_json::from_value(value)
             .map_err(|error| anyhow!("decoding response from {path}: {error}"))
@@ -219,12 +206,6 @@ impl Client {
         self.get_typed("/api/operations").await
     }
 
-    pub async fn operation(&self, id: &str) -> Result<OperationView> {
-        self.invoke::<permission_operations::Explain>(&permission_operations::ExplainInput {
-            operation: id.to_string(),
-        })
-        .await
-    }
 
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
         self.send_typed::<Value, GithubTokenView>(
@@ -259,43 +240,8 @@ impl Client {
         .await
     }
 
-    pub async fn effective_permissions(
-        &self,
-        session_id: &str,
-    ) -> Result<EffectivePermissionsView> {
-        self.invoke::<permission_operations::EffectiveGet>(&permission_operations::SessionInput {
-            session: session_id.to_string(),
-        })
-        .await
-    }
 
-    pub async fn permission_requests(
-        &self,
-        session_id: &str,
-        state: Option<&str>,
-    ) -> Result<Vec<PermissionRequestView>> {
-        self.invoke::<permission_operations::RequestsList>(
-            &permission_operations::ListRequestsInput {
-                session: session_id.to_string(),
-                state: state.map(str::to_string),
-            },
-        )
-        .await
-    }
 
-    pub async fn create_permission_request(
-        &self,
-        session_id: &str,
-        request: &CreatePermissionRequestReq,
-    ) -> Result<PermissionRequestView> {
-        self.invoke::<permission_operations::RequestsCreate>(
-            &permission_operations::CreateRequestInput {
-                session: session_id.to_string(),
-                request: request.clone(),
-            },
-        )
-        .await
-    }
 
     pub async fn decide_permission_request(
         &self,
@@ -1285,43 +1231,9 @@ impl Client {
 
     // -- Issues ---------------------------------------------------------------
 
-    /// Create an issue claimed by a branch (`POST /api/issues/create`).
-    pub async fn create_branch_issue(&self, key: &str, req: &CreateIssueReq) -> Result<IssueView> {
-        self.invoke::<issue_operations::Create>(&issue_operations::CreateInput {
-            branch: key.to_string(),
-            request: req.clone(),
-        })
-        .await
-    }
 
-    /// Create an unclaimed repo-level backlog item
-    /// (`POST /api/issues/backlog/create`).
-    pub async fn create_repo_issue(&self, req: &CreateRepoIssueReq) -> Result<IssueView> {
-        self.invoke::<issue_operations::CreateBacklog>(req).await
-    }
 
-    /// Every issue in a repo (`scope: "repo"`), or just the unclaimed backlog
-    /// (`scope: "backlog"`) — the one fetch every `loom issues list` view
-    /// partitions client-side (`POST /api/issues/list`).
-    pub async fn list_repo_issues(
-        &self,
-        repo_root: &str,
-        scope: &str,
-        all: bool,
-    ) -> Result<Vec<IssueView>> {
-        self.invoke::<issue_operations::List>(&issue_operations::ListInput {
-            repo_root: repo_root.to_string(),
-            scope: scope.parse().map_err(anyhow::Error::msg)?,
-            all,
-        })
-        .await
-    }
 
-    /// Get one issue by id (`POST /api/issues/get`).
-    pub async fn get_issue(&self, id: i64) -> Result<IssueView> {
-        self.invoke::<issue_operations::Get>(&issue_operations::IdInput { id })
-            .await
-    }
 
     /// Patch an issue's title/body/status (`PATCH /api/issues/{id}`).
     pub async fn patch_issue(&self, id: i64, req: &PatchIssueReq) -> Result<IssueView> {
@@ -1329,65 +1241,11 @@ impl Client {
             .await
     }
 
-    /// Apply one command to a set of issues (`POST /api/issues/actions`).
-    ///
-    /// The server validates every id and precondition before applying the
-    /// command atomically. Validation failure changes nothing.
-    pub async fn issue_actions(&self, req: &IssueActionsReq) -> Result<IssueActionsResult> {
-        self.invoke::<issue_operations::Actions>(req).await
-    }
 
-    /// Close one issue through its semantic operation.
-    pub async fn close_issue(&self, id: i64) -> Result<IssueView> {
-        self.invoke::<issue_operations::Close>(&issue_operations::IdInput { id })
-            .await
-    }
 
-    /// Reopen one issue through its semantic operation.
-    pub async fn reopen_issue(&self, id: i64) -> Result<IssueView> {
-        self.invoke::<issue_operations::Reopen>(&issue_operations::IdInput { id })
-            .await
-    }
 
-    /// Delete an issue (`POST /api/issues/delete`).
-    pub async fn delete_issue(&self, id: i64) -> Result<Value> {
-        let deleted = self
-            .invoke::<issue_operations::Delete>(&issue_operations::IdInput { id })
-            .await?;
-        Ok(serde_json::to_value(deleted)?)
-    }
 
-    /// Set (upsert) a free-form label on an issue
-    /// (`POST /api/issues/tags/set`). Issue tags carry no
-    /// `attention`/`triage` ladder — every key is a quiet annotation.
-    pub async fn set_issue_tag(
-        &self,
-        id: i64,
-        key: &str,
-        value: &str,
-        note: &str,
-        by: &str,
-    ) -> Result<IssueView> {
-        self.invoke::<issue_operations::SetTag>(&issue_operations::SetTagInput {
-            id,
-            key: key.to_string(),
-            request: TagReq {
-                value: value.to_string(),
-                note: note.to_string(),
-                by: Some(by.to_string()),
-            },
-        })
-        .await
-    }
 
-    /// Clear a label on an issue (`POST /api/issues/tags/delete`).
-    pub async fn clear_issue_tag(&self, id: i64, key: &str) -> Result<IssueView> {
-        self.invoke::<issue_operations::DeleteTag>(&issue_operations::DeleteTagInput {
-            id,
-            key: key.to_string(),
-        })
-        .await
-    }
 
     // -- Settings -------------------------------------------------------------
 

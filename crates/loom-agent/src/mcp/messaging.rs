@@ -1,5 +1,9 @@
 //! Built-in session messaging MCP adapter.
 //!
+//! TODO(registry): not yet ported — messaging has no operation registry
+//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
+//! loop, and capability sets rather than `super::dispatch::bind`.
+//!
 //! Both operations are facades over Loom's existing session-scoped REST
 //! routes. Credentials, branch/thread routing, durable status events, and
 //! GitHub/Slack mirroring remain server-side.

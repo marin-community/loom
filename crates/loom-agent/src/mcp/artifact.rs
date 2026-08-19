@@ -1,4 +1,8 @@
 //! Versioned artifact operations projected from Loom's REST API.
+//!
+//! TODO(registry): not yet ported — `artifacts.*` has no operation registry
+//! bundle yet, so this adapter keeps its own hand-written schemas, argument
+//! projection, and capability sets rather than `super::dispatch::bind`.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

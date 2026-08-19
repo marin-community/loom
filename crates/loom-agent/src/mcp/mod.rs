@@ -18,15 +18,21 @@ use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
+// TODO(registry): not yet ported — their operations are not in the registry
+// yet, so they keep their own hand-written schemas, argument projection, and
+// capability sets rather than `dispatch::bind`.
 pub(crate) mod artifact;
 pub(crate) mod channel;
 pub(crate) mod context;
 pub mod github;
 pub(crate) mod history;
-pub(crate) mod issue;
 pub(crate) mod messaging;
 pub(crate) mod permission;
 pub(crate) mod session;
+
+// Fully converted: served by the generic registry dispatcher below.
+pub(crate) mod dispatch;
+pub(crate) mod issue;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
@@ -126,10 +132,6 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
         )),
         None => Ok(None),
     }
-}
-
-pub(crate) fn required_string_argument<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
-    string_argument(arguments, key)?.with_context(|| format!("{key} must be a non-empty string"))
 }
 
 pub(crate) async fn resolve_session_argument(
@@ -857,67 +859,67 @@ mod tests {
             ),
             (
                 "loom/context/read@v1",
-                "sha256:33214f2c5f8893bfd265f9ed95543de8e11bab2011b0a017891a1d19db573f33",
+                "sha256:267b07a04f242f0cfae0601dc671d1e545f7c6d146e579a3e7e0ee5a86c17cde",
             ),
             (
                 "mcp/context/read@v1",
-                "sha256:6679d0abe8870e5b5c5e47467497335deaefe9e2770f1e90cb76ea126914a21a",
+                "sha256:730dfd75e29a4802def457da752aff0bebe4df1cd00259e19e691b8fd9c303d3",
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:c934b7ca47ad7f722d21c51cb0151c399794d591e367090fdc2e66514a7c0f87",
+                "sha256:256e58a4ba152e18a0cd3a2cff5280df509283c45dd44482a43c70e01e28b9d0",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:08137846e0c8432ab6d1559216a27392497b932b64164742b0958ae782dbef59",
+                "sha256:c60a9ef0f3a8e161644469c9b767c1ba336eec51d4cb1bac0061dbb3b6da48bd",
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:7c3a3677b592f456f4e5d452d630db436e59eeeca495cdc7e92dfdd99be16a5c",
+                "sha256:8e0aaa5aa62d047e71ed60f93ce28145cfd94ca083b148e9a6732951756a3d4d",
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:6bd1bbafa1e2faa027f0c91f7422c57ea2d522b3953eec92b15996a294789a2f",
+                "sha256:b3b372fe1dedacf681436cb0e4e8c26cc279b82ada84f968d8a5ce905b994c36",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:172f77e14a2b524a74929e17de05366970e1898a57959d7e2db9b4c7f77fd5f3",
+                "sha256:e08dfd3c426a2e140fb35dc79e912dbe7fe2a778c489ec954f5968b89ab378d9",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:0ee20dc115eb64e24521bc09415b47caa6e650498b0a3fb2bf438a16a2fc68f9",
+                "sha256:fb22a3052915911facad9d5149599488e138d61d0870a1d2a8a428758372a15f",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:9c40da46bf5e05e9e9c5c95a47c35aff74c23e730ddba869a05aea3e51b1e6de",
+                "sha256:0c9a05b7b947dd701160c3aeb2ef2c465c6bf4bdfeedb150a5d40a5339596ade",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:62dc5764fb10efcc4012695a5da78db2c2c85849d9341378aea770a2f7df0925",
+                "sha256:e63731bd5e4dbd6e82a59086987ee1ca081072b41592e183c80c8540840ad30b",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:8c5dc52c5f8de69572d0875c833e7b61da79e066e934538d45933a1dfe24c45a",
+                "sha256:7d9c80c9387e2fe0536d544859237e525e5293ab0c4cee439287d93c572928ce",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:f9985ad6e2102a394b0ab5c9f25dd9b77de4278b6f9eaa207672ba27033a5898",
+                "sha256:2b804511893b001775c4e22d37fa430a930b20a9d79071d46179f4d48d01ef2d",
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:42ddd7ec1bef2eb902673af4874c0915fcbc1f05aa8ad6b3d12297df929bdb7f",
+                "sha256:953d645382b19e57c4b594d14590c5a8e4cc1b47c8d5ad6d8b264ca3cd756468",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:95e5c8dd47258cca69044c02d68d112ead60ae79f1af1e5ea5d9c70ea85eb63f",
+                "sha256:4da539fad4645d5eb0a1483f88612d23784f3efa4d056bd177b76accd484c5e7",
             ),
             (
                 "mcp/session/read@v1",
-                "sha256:c9afb64abcc069a94410f0a402163b754e99917bb521d319169f97f0bdea09b7",
+                "sha256:bf0540c5743cb3b57128871d5db4af6ae26844d26b91aca06bea9a9afac75ae0",
             ),
             (
                 "mcp/session/status@v1",
-                "sha256:a9a46f1877397102cc8fbaddb51cfd327d2a4d202a59a2872ce624ed2bb850ac",
+                "sha256:7f23ff2bd1a1e0c68c7f4e01776b11e5f28e759b55c6bf66c6c1d8b09f9891b2",
             ),
             (
                 "mcp/history/self@v1",
@@ -933,11 +935,11 @@ mod tests {
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:1e90e579bc0778b5d309eb1bb3a4731b49159a4837ed059722613c180e842968",
+                "sha256:a27288df3e294bbceabb04bfe693b999396e68a648914c9c38c9e95b6d558b06",
             ),
             (
                 "loom/permissions/request@v1",
-                "sha256:bb5d2bf3efa472d30668c5cce2001ea5e7f222c39e0f6199754182e296e6ef20",
+                "sha256:1cc1e36de9d7563301cebc1c565aa4a99409cd7fdc007ac5803c257357a6a73e",
             ),
         ]
         .into_iter()

@@ -11,6 +11,7 @@
 //! here, so `loom::session`, `loom::AppState` and friends keep stable paths.
 
 pub mod agent_cli;
+pub mod cli;
 pub mod client;
 pub mod endpoint;
 pub mod server;

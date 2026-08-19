@@ -9,7 +9,12 @@ path = "src/lib.rs"
 
 [dependencies]
 weaver-core = { path = "../weaver-core" }
+loom-api-macros = { path = "../loom-api-macros" }
 anyhow = "1"
+# Not optional: the CLI projection is part of an operation's contract, so a
+# build that can describe an operation can always also expose it.
+clap = { version = "4", features = ["derive", "env"] }
+schemars = "1"
 percent-encoding = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
