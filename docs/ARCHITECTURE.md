@@ -370,11 +370,24 @@ rather than left to judgement:
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
-That file is the ledger, and it is a ratchet. Every hand-mounted route is in one
-of three lists: a declared transport (the above), a route an operation already
-supersedes (still mounted for a caller that has not moved yet), or a route with
-no operation at all. The last list is the registry being incomplete, which is
-counted separately because it is a different problem from being duplicated.
+That file is the ledger, and it is a ratchet in both directions — it fails if
+`web/mod.rs` mounts a route the ledger does not name, and if the ledger names a
+route nobody mounts any more. Every hand-mounted route is in one of three lists:
+a declared transport (the above), a route an operation already supersedes (still
+mounted for a caller that has not moved yet), or a route with no operation at
+all. The last list is the registry being *incomplete*, which is counted
+separately because it is a different problem from being duplicated, and it is the
+one that has to reach zero. It is down to two, and both survivors are about a
+wire encoding `Io` has no variant for rather than a shape the DSL cannot express.
+
+The same file also checks the *other* half of the authority model. `grant_allows`
+in `crates/loom/src/web/auth.rs` decides raw paths, and since a registered
+operation's authority comes from its declaration instead, that function now
+applies only to routes which are not operations. So an entry naming a route that
+has been deleted is dead — and for the session-credential allowlist it is worse
+than dead, because it pre-authorizes whatever gets mounted at that path next.
+`no_session_allowlist_path_is_unmounted` and `no_user_denylist_path_is_unmounted`
+scan the two lists and assert every path literal is still served.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
