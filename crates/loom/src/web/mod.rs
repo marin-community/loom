@@ -558,7 +558,7 @@ pub(crate) fn author_or_manual(by: Option<&str>) -> String {
 /// truncates assets past the 16 MB cap. The middleware sees the nest-stripped
 /// `/sessions/…` form, but we strip an optional leading `/api` too so the
 /// exclusion survives if that layer is ever hoisted to the outer router.
-fn is_ide_proxy_path(path: &str) -> bool {
+pub(super) fn is_ide_proxy_path(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     let Some(rest) = path.strip_prefix("/sessions/") else {
         return false;

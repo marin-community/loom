@@ -8,7 +8,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
 use weaver_api::operations::auth::{
     automation_token, federations, github_config, github_token, me, set_password, tokens, users,
 };
@@ -88,179 +87,79 @@ pub(super) async fn branch_belongs_to_session_tree(
     .unwrap_or(false)
 }
 
-async fn issue_belongs_to_session(st: &AppState, branch_id: &str, issue_id: &str) -> bool {
-    let Ok(issue_id) = issue_id.parse::<i64>() else {
-        return false;
-    };
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-           SELECT 1 FROM issues i JOIN branches b ON b.id = ?
-           WHERE i.id = ? AND i.repo_root = b.repo_root
-         )",
-    )
-    .bind(branch_id)
-    .bind(issue_id)
-    .fetch_one(&st.db)
-    .await
-    .unwrap_or(false)
-}
-
-async fn channel_belongs_to_session_tree(st: &AppState, ancestor: &str, channel_id: &str) -> bool {
-    let row = sqlx::query(
-        "SELECT c.session_id,
-                EXISTS(
-                  SELECT 1 FROM channel_subscriptions sub
-                  WHERE sub.channel_id = c.id
-                    AND sub.subject_kind = 'session'
-                    AND sub.subject_id = ?
-                ) AS subscribed
-         FROM channels c WHERE c.id = ?",
-    )
-    .bind(ancestor)
-    .bind(channel_id)
-    .fetch_optional(&st.db)
-    .await;
-    let Ok(Some(row)) = row else {
-        return false;
-    };
-    if row.get::<bool, _>("subscribed") {
-        return true;
-    }
-    match row.get::<Option<String>, _>("session_id") {
-        Some(session_id) => is_session_descendant(st, ancestor, &session_id).await,
-        None => false,
-    }
-}
-
-async fn automation_owns_session(st: &AppState, subject: &str, session_id: &str) -> bool {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM sessions
-         WHERE id = ? AND creator_kind = 'automation' AND creator_subject = ?)",
-    )
-    .bind(session_id)
-    .bind(subject)
-    .fetch_one(&st.db)
-    .await
-    .unwrap_or(false)
-}
-
 /// Whether `principal`'s grant permits `method raw_path`. The router runs this
 /// over every request.
 ///
-/// For a registered operation this is the actor-policy half of the decision and
-/// nothing more; `grants` and the `Scoped` resource check happen at the
-/// dispatcher, where the typed input is available. The path allowlist below is
-/// the legacy model, kept only for the routes that are not operations yet.
+/// Almost every request is a registered operation, and an operation's authority
+/// is complete without help from here: `actor` decides who may call it, and
+/// `authorize()` at the dispatcher decides the grants and the resource its
+/// `Scoped` input names. So this function's whole job is the *handful* of
+/// authenticated routes that are not operations.
+///
+/// It used to be much more than that: a parallel authority model keyed off URL
+/// shapes, running *in addition* to the registry. Two consequences, both of
+/// which happened. A newly declared operation was refused until someone also
+/// added its URL to a list here — that is what 403'd
+/// `permissions.requests.create` for the session it was declared for. And an
+/// entry naming a route that no longer existed stayed a standing
+/// pre-authorization for whatever got mounted at that path next.
+///
+/// What was left when the routes went away is the IDE proxy (a raw byte proxy
+/// into a container, not an operation and never going to be one) and the
+/// registry's own self-description. The resource check for the proxy is still
+/// real, so it is still here — but it is now the only one, and it is checked
+/// against the session id in the path because that proxy has no typed input to
+/// check instead.
 pub(super) async fn grant_allows(
     st: &AppState,
     principal: &Principal,
     method: &axum::http::Method,
     raw_path: &str,
 ) -> bool {
-    if principal.is_admin() {
-        return true;
-    }
-    // A registered operation carries its own authority, and it is complete:
-    // `actor` here, then `grants` and the resource named by `Scoped` inside
-    // `authorize()` at the dispatcher. The path allowlist below is the *legacy*
-    // model. Running both means every newly declared operation is refused until
-    // someone also adds its URL to a hand-maintained list — which is exactly the
-    // duplicated authority this registry exists to remove, and it is what made
-    // `permissions.requests.create` return 403 to the session it was declared
-    // for.
     if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
         return operation_grant_allows(principal, operation);
     }
+    if principal.is_admin() {
+        return true;
+    }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    // The registry describing itself. Readable by anything holding a
+    // credential: an agent discovers the operation surface through it, and it
+    // reports only what `/api/operations` would report to any caller.
+    let discovery = *method == axum::http::Method::GET
+        && (matches!(path, "/meta" | "/operations" | "/openapi.json")
+            || path.starts_with("/operations/"));
     match &principal.grant {
-        // No credential reaches a raw path. Anonymous operations are permitted
-        // by `operation_grant_allows` on the strength of their declaration, not
-        // by a path prefix.
         Grant::Anonymous => false,
         Grant::Admin => true,
-        Grant::User => user_grant_allows(method, path),
-        Grant::Automation { subject, .. } => {
-            if path == "/runs" || path.starts_with("/runs/") {
+        Grant::User => discovery || super::is_ide_proxy_path(path),
+        // An automation credential exists to report runs, which is exactly what
+        // `runs.create`'s `actor = Internal` admits it to. It reaches no raw
+        // path at all — narrower than the allowlist this replaces, which let it
+        // GET any session it had created.
+        Grant::Automation { .. } => false,
+        Grant::Session { session_id, .. } => {
+            if discovery {
                 return true;
             }
-            if *method == axum::http::Method::GET && segments.first() == Some(&"sessions") {
-                if let Some(session_id) = segments.get(1) {
-                    return automation_owns_session(st, subject, session_id).await;
-                }
-            }
-            false
-        }
-        Grant::Session {
-            session_id,
-            branch_id,
-            ..
-        } => {
-            if *method == axum::http::Method::GET
-                && matches!(path, "/meta" | "/operations" | "/openapi.json")
-            {
-                return true;
-            }
-            if *method == axum::http::Method::GET && path.starts_with("/operations/") {
-                return true;
-            }
-            if *method == axum::http::Method::GET && path == "/self" {
-                return true;
-            }
-            if *method == axum::http::Method::POST && path == "/sessions" {
-                return true;
-            }
-            // `loom session launch` performs this read-only canonical preflight
-            // before POSTing `/sessions`. Session principals already have the
-            // right to delegate a child launch; letting them resolve the exact
-            // template snapshot does not grant another read or write surface.
-            if *method == axum::http::Method::POST && path == "/session-launches/resolve" {
-                return true;
-            }
-            if path == "/channels" {
-                return matches!(*method, axum::http::Method::GET | axum::http::Method::POST);
-            }
-            if segments.first() == Some(&"channels") && segments.len() >= 2 {
-                return channel_belongs_to_session_tree(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"sessions") && segments.len() >= 2 {
-                return is_session_descendant(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"branches") && segments.len() >= 2 {
-                return branch_belongs_to_session_tree(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"issues") && segments.len() >= 2 {
-                if segments[1] == "actions" && *method == axum::http::Method::POST {
-                    return true;
-                }
-                return issue_belongs_to_session(st, branch_id, segments[1]).await;
-            }
-            // Bare collection reads a session may perform. Each entry must be a
-            // route this file still mounts, and
-            // `no_session_allowlist_path_is_unmounted` in
-            // `tests/surface_parity.rs` is what enforces that. Three entries had
-            // already gone stale: `/settings` and `/profiles`, whose routes were
-            // deleted in favour of `settings.get` and `profiles.list` (both
-            // `actor = SessionSelf`, so the permission survives in the
-            // declaration), and `/repos/issues`, unmounted since #309.
-            //
-            // A stale entry is worse than dead code. It pre-authorizes a path
-            // nothing serves, so whatever gets mounted there next is readable by
-            // every session credential in the fleet before anyone decides it
-            // should be.
-            *method == axum::http::Method::GET
-                && matches!(
-                    path,
-                    "/sessions"
-                        | "/branches"
-                        | "/issues"
-                        | "/agents"
-                        | "/repos"
-                        | "/repos/recent"
-                        | "/repos/branches"
-                )
+            let Some(target) = ide_proxy_session(path) else {
+                return false;
+            };
+            is_session_descendant(st, session_id, target).await
         }
     }
+}
+
+/// The session id an IDE-proxy path addresses, if it is one.
+///
+/// [`super::is_ide_proxy_path`] answers the same question without the id, and
+/// this shares its shape deliberately: a path that one accepts and the other
+/// parses differently would be a hole.
+fn ide_proxy_session(path: &str) -> Option<&str> {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    let rest = path.strip_prefix("/sessions/")?;
+    let (id, after) = rest.split_once('/')?;
+    (after == "ide" || after.starts_with("ide/")).then_some(id)
 }
 
 /// Enforce the operation registry at the API boundary. CLI and MCP adapters
@@ -294,35 +193,6 @@ pub(super) fn operation_grant_allows(
             })
         }
     }
-}
-
-/// Which raw paths an `Admin`-less human may reach.
-///
-/// Like the session allowlist above, this only decides routes that are *not*
-/// registered operations; for an operation, `actor = Admin` says the same thing
-/// in the declaration and this function never runs. So an entry here whose route
-/// became an operation is dead, and several were: `/deployment/reconcile`,
-/// `/shell/terminal`, `/shell/restart`, `/settings`, `/env`, `/profiles` and
-/// `/mcps/custom` all named routes this file no longer mounts. Each is now
-/// `actor = Admin` on its operation, so removing the entry changed nothing —
-/// which is exactly why it had to be checked rather than assumed.
-fn user_grant_allows(method: &axum::http::Method, path: &str) -> bool {
-    if path == "/auth/users"
-        || path.starts_with("/auth/users/")
-        || path == "/auth/github/config"
-        || path == "/auth/automation-token"
-        || path == "/auth/federations"
-        || path.starts_with("/auth/federations/")
-    {
-        return false;
-    }
-    if matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD) {
-        return true;
-    }
-    !(path == "/agents/custom"
-        || path.starts_with("/agents/custom/")
-        || path == "/watches"
-        || path.starts_with("/watches/"))
 }
 
 /// Pull the token out of an `Authorization: Bearer <token>` header.
