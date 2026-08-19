@@ -273,12 +273,10 @@ pub fn app_for_allowlist<'a>(
 /// one session. Automation profiles intentionally retain their complete list
 /// for cross-repository work.
 ///
-/// An interactive session receives its own repository unconditionally. Such a
-/// session already selects the launching user's Account PAT first, which
-/// reaches every repository that user can write; gating the narrower, audited,
-/// per-repository App token on a profile allowlist only ever withheld the
-/// safer credential for the one repository the session was created in.
-/// Expanding *beyond* it still needs a human decision or a matching pattern.
+/// An interactive session is stamped with its own repository, whether or not
+/// the profile lists it, plus the profile's `owner/*` patterns. The profile's
+/// concrete entries govern nothing here: reaching any other repository is an
+/// expansion, granted by a human decision or by a matching pattern.
 pub fn session_github_repositories(
     class: &str,
     configured: &[String],
