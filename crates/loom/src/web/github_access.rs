@@ -26,11 +26,15 @@ fn require_human(principal: &Principal) -> ApiResult<()> {
     }
 }
 
+/// The concrete repositories one session's App token may be scoped to. Any
+/// `owner/*` entry in the launch policy is dropped here: a pattern authorizes
+/// expansion, it is not itself a token scope.
 pub(super) async fn effective_repositories(
     db: &crate::Db,
     session: &crate::session::Session,
 ) -> anyhow::Result<Vec<String>> {
-    let mut repositories: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    let policy: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    let mut repositories = crate::runtime::concrete_repositories(&policy);
     for grant in crate::github_access::list(db, &session.id).await? {
         repositories.retain(|candidate| candidate != &grant.repository);
         if grant.mode == crate::github_access::Mode::Write {
@@ -40,6 +44,15 @@ pub(super) async fn effective_repositories(
     repositories.sort();
     repositories.dedup();
     Ok(repositories)
+}
+
+/// The `owner/*` entries stamped on one session's launch policy — the owners it
+/// may expand into without a human decision.
+pub(super) fn policy_repository_patterns(
+    session: &crate::session::Session,
+) -> anyhow::Result<Vec<String>> {
+    let policy: Vec<String> = serde_json::from_str(&session.policy_github_repositories)?;
+    Ok(crate::runtime::repository_patterns(&policy))
 }
 
 /// Validate that a prospective repository expansion can be represented by one

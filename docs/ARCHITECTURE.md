@@ -689,11 +689,25 @@ a Slack conversation.
 
 ## GitHub integration
 
-An agent can request access to an additional repository when a live task
-expands beyond its launch policy. A human grants or revokes that session-only
-access from `loom github access` or Session Details, without restarting it.
-Loom validates write access against the GitHub App installation before storing
-the audited override.
+A session's own repository is its baseline App scope — it is stamped at launch
+whether or not the profile allowlists it, because an interactive session
+already selects the launching user's far broader Account PAT first.
+
+Expanding *beyond* that repository goes through
+`loom permissions request github-repository <owner/repo> --reason "…"`. That
+raises the session's attention tag, posts to its channel, and mirrors the
+status to Slack; a human approves or denies from Session Details in the SPA or
+with `loom permissions approve|deny`, and can grant or revoke directly with
+`loom permissions grant|revoke github-repository`. An agent must never ask a
+person to run a CLI command — the request operation is the whole mechanism, and
+a human operator can act on it from a browser.
+
+When the launch profile carries an `owner/*` allowlist entry, a matching
+request is applied immediately instead of waiting on a person: the pattern is a
+standing decision for that owner. The grant is still validated against the App
+installation, still recorded, and still revocable, and the token is still
+scoped only to the repositories actually asked for. Loom validates write access
+against the GitHub App installation before storing any audited override.
 
 When the GitHub App is configured, loom keeps a per-branch pull-request
 snapshot alongside the session. A second background loop

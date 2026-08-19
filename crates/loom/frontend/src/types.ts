@@ -106,6 +106,9 @@ export interface EffectivePermissions {
   actor: string;
   operations: string[];
   github_repositories: string[];
+  /** `owner/*` launch-policy entries: owners this session may expand into
+   *  without a human decision. */
+  github_repository_patterns: string[];
   pending_requests: PermissionRequest[];
 }
 

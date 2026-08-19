@@ -570,7 +570,7 @@ async fn handoff_session_inner(
             .map_err(|error| HandoffError::bad_request(error.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
-    let github_app = (!session_github_repositories.is_empty())
+    let github_app = runtime::scopes_an_app_token(&session_github_repositories)
         .then(|| st.trigger.app())
         .flatten();
     if current_github_repo.is_some()

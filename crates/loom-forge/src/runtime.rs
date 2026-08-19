@@ -205,10 +205,70 @@ pub async fn configure_session_github_auth(
     stamp_github_auth_mode(env, github_app, restricted, user_token_applied).await
 }
 
+/// The owner an `owner/*` allowlist entry covers, or `None` for a concrete
+/// `owner/name` entry. A pattern scopes no token on its own: it declares which
+/// repositories a session may expand into without a human decision, so a
+/// brokered token stays narrow to what was actually asked for.
+pub fn pattern_owner(entry: &str) -> Option<&str> {
+    entry
+        .split_once('/')
+        .filter(|(owner, name)| *name == "*" && !owner.is_empty())
+        .map(|(owner, _)| owner)
+}
+
+pub fn is_repository_pattern(entry: &str) -> bool {
+    pattern_owner(entry).is_some()
+}
+
+/// The concrete `owner/name` entries of an allowlist — the only ones that can
+/// scope a GitHub App installation token.
+pub fn concrete_repositories(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| !is_repository_pattern(entry))
+        .cloned()
+        .collect()
+}
+
+/// The `owner/*` entries of an allowlist.
+pub fn repository_patterns(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| is_repository_pattern(entry))
+        .cloned()
+        .collect()
+}
+
+/// Whether an allowlist's patterns already cover `repository`. GitHub owners
+/// are case-insensitive and these patterns are hand-authored, so the owner
+/// comparison is too.
+pub fn pattern_allows(entries: &[String], repository: &str) -> bool {
+    let Some((owner, _)) = repository.split_once('/') else {
+        return false;
+    };
+    entries
+        .iter()
+        .filter_map(|entry| pattern_owner(entry))
+        .any(|candidate| candidate.eq_ignore_ascii_case(owner))
+}
+
+/// Whether a stamped allowlist can scope a GitHub App token at all. Patterns
+/// authorize expansion but name no repository, so an allowlist holding only
+/// patterns selects no App credential.
+pub fn scopes_an_app_token(entries: &[String]) -> bool {
+    entries.iter().any(|entry| !is_repository_pattern(entry))
+}
+
 /// Resolve a profile's App-token allowlist into the repositories stamped on
 /// one session. Automation profiles intentionally retain their complete list
-/// for cross-repository work. Interactive sessions receive only their current
-/// repository, and only when the profile explicitly allowlists it.
+/// for cross-repository work.
+///
+/// An interactive session receives its own repository unconditionally. Such a
+/// session already selects the launching user's Account PAT first, which
+/// reaches every repository that user can write; gating the narrower, audited,
+/// per-repository App token on a profile allowlist only ever withheld the
+/// safer credential for the one repository the session was created in.
+/// Expanding *beyond* it still needs a human decision or a matching pattern.
 pub fn session_github_repositories(
     class: &str,
     configured: &[String],
@@ -217,10 +277,9 @@ pub fn session_github_repositories(
     if class != "interactive" {
         return configured.to_vec();
     }
-    current_repo
-        .filter(|repo| configured.iter().any(|candidate| candidate == repo))
-        .map(|repo| vec![repo.to_string()])
-        .unwrap_or_default()
+    let mut stamped: Vec<String> = current_repo.map(str::to_string).into_iter().collect();
+    stamped.extend(repository_patterns(configured));
+    stamped
 }
 
 /// A GitHub repository may be launched only when Loom can provide either the
@@ -425,12 +484,15 @@ mod tests {
             session_github_repositories("interactive", &configured, Some("marin-community/marin")),
             ["marin-community/marin"]
         );
-        assert!(session_github_repositories(
-            "interactive",
-            &configured,
-            Some("marin-community/loom")
-        )
-        .is_empty());
+        // The session's own repository no longer has to appear in the profile
+        // allowlist: it is the baseline scope for the repository the session
+        // was created in.
+        assert_eq!(
+            session_github_repositories("interactive", &configured, Some("marin-community/loom")),
+            ["marin-community/loom"]
+        );
+        assert!(session_github_repositories("interactive", &configured, None).is_empty());
+        assert!(session_github_repositories("interactive", &[], None).is_empty());
         assert_eq!(
             session_github_repositories("automation", &configured, None),
             configured
@@ -438,6 +500,52 @@ mod tests {
         assert!(user_github_token_allowed("interactive", false));
         assert!(!user_github_token_allowed("automation", false));
         assert!(!user_github_token_allowed("interactive", true));
+    }
+
+    #[test]
+    fn owner_patterns_travel_with_the_session_but_never_scope_a_token() {
+        let configured = vec![
+            "marin-community/*".to_string(),
+            "marin-community/marin".to_string(),
+        ];
+        // An interactive session carries its own repository plus the patterns
+        // that let it expand without a human.
+        assert_eq!(
+            session_github_repositories("interactive", &configured, Some("marin-community/loom")),
+            ["marin-community/loom", "marin-community/*"]
+        );
+        assert_eq!(
+            session_github_repositories("automation", &configured, None),
+            configured
+        );
+
+        let stamped = session_github_repositories("interactive", &configured, Some("owner/repo"));
+        assert_eq!(concrete_repositories(&stamped), ["owner/repo"]);
+        assert_eq!(repository_patterns(&stamped), ["marin-community/*"]);
+
+        assert_eq!(pattern_owner("marin-community/*"), Some("marin-community"));
+        assert_eq!(pattern_owner("marin-community/marin"), None);
+        assert_eq!(pattern_owner("/*"), None);
+        assert!(is_repository_pattern("marin-community/*"));
+        assert!(!is_repository_pattern("marin-community/marin"));
+        assert!(!is_repository_pattern("/*"));
+
+        // An allowlist of patterns alone names no repository, so it selects no
+        // App credential.
+        assert!(scopes_an_app_token(&stamped));
+        assert!(!scopes_an_app_token(&["marin-community/*".to_string()]));
+        assert!(!scopes_an_app_token(&[]));
+
+        assert!(pattern_allows(&configured, "marin-community/vllm"));
+        // Owners are case-insensitive on GitHub.
+        assert!(pattern_allows(&configured, "Marin-Community/vllm"));
+        assert!(!pattern_allows(&configured, "Open-Athena/marinmirror"));
+        // An exact entry is not a pattern, so it grants no wildcard expansion.
+        assert!(!pattern_allows(
+            &["marin-community/marin".to_string()],
+            "marin-community/vllm"
+        ));
+        assert!(!pattern_allows(&configured, "no-slash"));
     }
 
     #[tokio::test]

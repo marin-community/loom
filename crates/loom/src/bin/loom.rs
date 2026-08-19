@@ -1844,6 +1844,15 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                 for repository in view.github_repositories {
                     println!("  {repository}");
                 }
+                if !view.github_repository_patterns.is_empty() {
+                    println!(
+                        "GitHub owners grantable without review ({}):",
+                        view.github_repository_patterns.len()
+                    );
+                    for pattern in view.github_repository_patterns {
+                        println!("  {pattern}");
+                    }
+                }
                 println!("pending requests ({}):", view.pending_requests.len());
                 for request in view.pending_requests {
                     println!(

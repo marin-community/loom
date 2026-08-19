@@ -21,8 +21,8 @@ use crate::{
 
 use super::{
     channels::{append_and_deliver, record_channel_message_event},
-    effective_repositories, register_operation, require_session, validate_github_write, ApiResult,
-    AppError, AppState, OperationContext, RegisteredOperation,
+    effective_repositories, policy_repository_patterns, register_operation, require_session,
+    validate_github_write, ApiResult, AppError, AppState, OperationContext, RegisteredOperation,
 };
 
 pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
@@ -96,6 +96,8 @@ pub(super) async fn effective_permissions_operation(
     let github_repositories = effective_repositories(&st.db, &session)
         .await
         .map_err(|error| AppError::internal("could not resolve GitHub access", error))?;
+    let github_repository_patterns = policy_repository_patterns(&session)
+        .map_err(|error| AppError::internal("could not resolve GitHub access", error))?;
     let pending_requests =
         permission_requests::list(&st.db, &session.id, Some(permission_requests::PENDING))
             .await?
@@ -122,6 +124,7 @@ pub(super) async fn effective_permissions_operation(
         actor: "session_self".to_string(),
         operations,
         github_repositories,
+        github_repository_patterns,
         pending_requests,
     })
 }
@@ -139,6 +142,65 @@ pub(super) async fn list_permission_requests_operation(
         .into_iter()
         .map(view)
         .collect())
+}
+
+/// Apply an expansion the launch policy already authorizes. Same durable
+/// record and audit trail as a human decision, minus the wait: the session
+/// channel gets an ordinary informational message and no attention is raised.
+async fn apply_policy_grant(
+    st: &AppState,
+    session: &crate::session::Session,
+    branch_id: &str,
+    request: permission_requests::PermissionRequest,
+    pattern: &str,
+) -> ApiResult<PermissionRequestView> {
+    let decided_by = format!("policy:{pattern}");
+    let decision_reason = format!("launch policy allowlists {pattern}");
+    if !permission_requests::approve_github(&st.db, &request.id, &decided_by, &decision_reason)
+        .await?
+    {
+        return Err(AppError::conflict("permission request is already resolved"));
+    }
+    let decided = permission_requests::get(&st.db, &request.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("permission request"))?;
+    let author = Subject::new(SubjectKind::Session, &session.id);
+    crate::channels::append(
+        &st.db,
+        &session.id,
+        NewMessage {
+            kind: MessageKind::System,
+            urgency: Urgency::Normal,
+            author: &author,
+            body: &format!(
+                "GitHub write access granted for {} by launch policy ({pattern}).",
+                decided.repository
+            ),
+            payload: &json!({
+                "permission_request_id": decided.id,
+                "decision": "approve",
+                "repository": decided.repository,
+                "pattern": pattern,
+            }),
+            reply_to: None,
+            idempotency_key: Some(&format!("permission-decision:{}", decided.id)),
+        },
+    )
+    .await?;
+    crate::events::record(
+        &st.db,
+        &st.bus,
+        branch_id,
+        "permission_decision",
+        json!({
+            "request_id": decided.id,
+            "decision": "approve",
+            "repository": decided.repository,
+            "by": decided_by,
+        }),
+    )
+    .await?;
+    Ok(view(decided))
 }
 
 pub(super) async fn create_permission_request_operation(
@@ -191,6 +253,30 @@ pub(super) async fn create_permission_request_operation(
         &requested_by,
     )
     .await?;
+
+    // An `owner/*` entry on the launch policy is a standing human decision for
+    // that owner, so a matching request is applied now instead of parking the
+    // session on a human who may not be at a terminal. The App installation is
+    // still validated, and the grant is still recorded and revocable. If the
+    // App cannot actually grant it, fall through to the human path — a person
+    // can install the App and then approve.
+    let patterns = policy_repository_patterns(&session)
+        .map_err(|error| AppError::internal("could not resolve GitHub access", error))?;
+    if let Some(pattern) = patterns
+        .iter()
+        .find(|pattern| crate::runtime::pattern_allows(std::slice::from_ref(pattern), &repository))
+    {
+        match validate_github_write(&st, &session, &repository).await {
+            Ok(()) => {
+                return apply_policy_grant(&st, &session, &branch.id, request, pattern).await;
+            }
+            Err(error) => tracing::warn!(
+                session = %session.id, %repository, pattern = %pattern, detail = %error.message,
+                "launch policy allows this expansion but the GitHub App cannot grant it; \
+                 falling back to human approval"
+            ),
+        }
+    }
 
     let message = format!("GitHub write access requested for {repository}: {reason}");
     branch_mod::set_description(&st.db, &branch.id, &message).await?;

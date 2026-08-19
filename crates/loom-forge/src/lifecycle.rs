@@ -90,7 +90,7 @@ pub async fn resume_environment(
     let github_repositories =
         serde_json::from_str::<Vec<String>>(&session.policy_github_repositories)
             .unwrap_or_default();
-    let github_app = (!github_repositories.is_empty())
+    let github_app = crate::runtime::scopes_an_app_token(&github_repositories)
         .then(|| st.trigger.app())
         .flatten();
     configure_session_github_auth(
@@ -780,7 +780,7 @@ pub async fn create_warm_session(
     .await?;
     let session_token =
         crate::auth::create_session_token(&st.db, None, &session_id, &branch.id).await?;
-    let github_app = (!github_repositories.is_empty())
+    let github_app = crate::runtime::scopes_an_app_token(&github_repositories)
         .then(|| st.trigger.app())
         .flatten();
     stamp_github_auth_mode(&mut extra_env, github_app, launch_profile.restricted, false).await;
