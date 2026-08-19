@@ -50,25 +50,6 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct IssueListQuery {
-    #[serde(default)]
-    all: bool,
-}
-
-/// Query for the cross-repo board: `all` as above, plus the automation opt-in
-/// mirroring `GET /api/sessions?automation=true`.
-#[derive(Debug, Deserialize)]
-pub(super) struct AllIssuesQuery {
-    #[serde(default)]
-    all: bool,
-    /// Include issues claimed by an automation-class session's branch. Defaults
-    /// to `false` — the board shows the work of the interactive fleet, not the
-    /// trackers its machinery opens for itself.
-    #[serde(default)]
-    automation: bool,
-}
-
 /// Build an [`IssueView`] for an issue, gathering its tags (a separate query).
 async fn issue_view(db: &Db, issue: Issue) -> ApiResult<IssueView> {
     let tags = weaver_core::issue::list_tags(db, issue.id).await?;
@@ -123,14 +104,6 @@ async fn collect_issue_board(
     issue_views(&st.db, issues).await
 }
 
-/// Every issue across every repo — the loom dashboard's cross-repo issue board.
-pub(super) async fn list_all_issues(
-    State(st): State<AppState>,
-    Query(q): Query<AllIssuesQuery>,
-) -> ApiResult<Json<Vec<IssueView>>> {
-    Ok(Json(collect_issue_board(&st, q.all, q.automation).await?))
-}
-
 /// `issues.board` — ported from [`list_all_issues`]. The route ran no
 /// repo-access check and neither does this: `scope = Global` names no
 /// repository to check against, so a session credential that may read work
@@ -140,19 +113,6 @@ pub(super) async fn issue_board_operation(
     input: issue_operations::board::Input,
 ) -> ApiResult<Vec<IssueView>> {
     collect_issue_board(&context.state, input.all, input.automation).await
-}
-
-/// Issues claimed by this branch — the session's working set.
-pub(super) async fn list_branch_issues(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<IssueListQuery>,
-) -> ApiResult<Json<Vec<IssueView>>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let issues =
-        weaver_core::issue::list_for_branch(&st.db, &branch.repo_root, &branch.branch, q.all)
-            .await?;
-    Ok(Json(issue_views(&st.db, issues).await?))
 }
 
 /// Create an issue claimed by this branch.
@@ -341,38 +301,6 @@ async fn apply_issue_edits(
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     issue_view(&st.db, issue).await
-}
-
-pub(super) async fn patch_issue(
-    State(st): State<AppState>,
-    Path(id): Path<i64>,
-    Json(req): Json<PatchIssueReq>,
-) -> ApiResult<Json<IssueView>> {
-    let existing = weaver_core::issue::get(&st.db, id)
-        .await?
-        .ok_or_else(|| AppError::not_found("issue"))?;
-    if req
-        .claimed_branch
-        .as_ref()
-        .and_then(|branch| branch.as_deref())
-        .is_some_and(|branch| !branch.trim().is_empty())
-    {
-        return Err(AppError::bad_request(
-            "claimed_branch can only be cleared; launch a session to claim an issue",
-        ));
-    }
-    Ok(Json(
-        apply_issue_edits(
-            &st,
-            &existing,
-            req.title.as_deref(),
-            req.body.as_deref(),
-            req.status.as_deref(),
-            req.github.as_deref(),
-            req.claimed_branch.is_some(),
-        )
-        .await?,
-    ))
 }
 
 /// `issues.update` — ported from [`patch_issue`]. The body's
@@ -845,7 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn patch_issue_changes_and_clears_github_mapping() {
+    async fn update_changes_and_clears_the_github_mapping() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let st = test_state(db.clone());
         let issue = weaver_core::issue::add(
@@ -859,37 +787,35 @@ mod tests {
         .await
         .unwrap();
 
-        let mapped = patch_issue(
-            State(st.clone()),
-            Path(issue.id),
-            Json(PatchIssueReq {
+        let mapped = update_issue_operation(
+            OperationContext::new(st.clone(), admin_principal()),
+            issue_operations::update::Input {
+                id: issue.id,
                 github: Some("acme/widgets#17".to_string()),
                 ..Default::default()
-            }),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(mapped.github_repo.as_deref(), Some("acme/widgets"));
         assert_eq!(mapped.github_issue, Some(17));
 
-        let cleared = patch_issue(
-            State(st),
-            Path(issue.id),
-            Json(PatchIssueReq {
+        let cleared = update_issue_operation(
+            OperationContext::new(st, admin_principal()),
+            issue_operations::update::Input {
+                id: issue.id,
                 github: Some(String::new()),
                 ..Default::default()
-            }),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(cleared.github_repo, None);
         assert_eq!(cleared.github_issue, None);
     }
 
     #[tokio::test]
-    async fn patch_issue_clears_claim_but_cannot_assign_one() {
+    async fn update_clears_a_claim_and_has_no_way_to_assign_one() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let st = test_state(db.clone());
         let issue = weaver_core::issue::add(
@@ -904,30 +830,27 @@ mod tests {
         .await
         .unwrap();
 
-        let cleared = patch_issue(
-            State(st.clone()),
-            Path(issue.id),
-            Json(PatchIssueReq {
-                claimed_branch: Some(None),
+        let cleared = update_issue_operation(
+            OperationContext::new(st.clone(), admin_principal()),
+            issue_operations::update::Input {
+                id: issue.id,
+                unclaim: true,
                 ..Default::default()
-            }),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(cleared.claimed_branch, None);
 
-        let err = patch_issue(
-            State(st),
-            Path(issue.id),
-            Json(PatchIssueReq {
-                claimed_branch: Some(Some("weaver/other".to_string())),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        // Assigning a claim is not expressible at all now. The route took
+        // `claimed_branch: Option<Option<String>>` and 400'd every inhabitant
+        // but `Some(None)`; `unclaim: bool` says the same thing in a type that
+        // cannot hold the rejected case, so there is nothing left to reject.
+        let schema = (weaver_api::operation("issues.update").expect("declared").schema)();
+        assert!(
+            schema["properties"].get("claimed_branch").is_none(),
+            "a claim is made by launching against an item, not by editing it: {schema}"
+        );
     }
 
     #[tokio::test]

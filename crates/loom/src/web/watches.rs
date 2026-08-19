@@ -58,12 +58,6 @@ async fn watch_view(db: &Db, o: &Watch) -> ApiResult<WatchView> {
     Ok(WatchView::from_parts(o, last_outcome))
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct RunsQuery {
-    /// How many recent rounds to return; defaults to 50.
-    limit: Option<i64>,
-}
-
 /// Reject a capability set that isn't a subset of the known ladder, naming the
 /// offender. Returns the cleaned set on success.
 fn validate_capabilities(caps: &[String]) -> ApiResult<()> {
@@ -108,12 +102,6 @@ fn program_views() -> Vec<ProgramView> {
     crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
 }
 
-/// `GET /api/watches/programs` — the builtin program registry: what the
-/// create form offers and the panel's read-only script viewer renders.
-pub(super) async fn list_programs() -> Json<Vec<ProgramView>> {
-    Json(program_views())
-}
-
 /// `watches.programs`.
 pub(super) async fn programs_operation(
     _context: OperationContext,
@@ -135,10 +123,6 @@ async fn list_watches_core(st: &AppState) -> ApiResult<Vec<WatchView>> {
         out.push(watch_view(&st.db, &o).await?);
     }
     Ok(out)
-}
-
-pub(super) async fn list_watches(State(st): State<AppState>) -> ApiResult<Json<Vec<WatchView>>> {
-    Ok(Json(list_watches_core(&st).await?))
 }
 
 /// `watches.list`.
@@ -206,13 +190,6 @@ async fn create_watch_core(st: &AppState, req: CreateWatchReq) -> ApiResult<Watc
     watch_view(&st.db, &o).await
 }
 
-pub(super) async fn create_watch(
-    State(st): State<AppState>,
-    Json(req): Json<CreateWatchReq>,
-) -> ApiResult<Json<WatchView>> {
-    Ok(Json(create_watch_core(&st, req).await?))
-}
-
 /// `watches.create`.
 pub(super) async fn create_watch_operation(
     context: OperationContext,
@@ -258,13 +235,6 @@ async fn reconcile_trigger(st: &AppState, program: &str, params: &Value, fallbac
 async fn get_watch_core(st: &AppState, key: &str) -> ApiResult<WatchView> {
     let o = require_watch(&st.db, key).await?;
     watch_view(&st.db, &o).await
-}
-
-pub(super) async fn get_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<WatchView>> {
-    Ok(Json(get_watch_core(&st, &key).await?))
 }
 
 /// `watches.get`.
@@ -323,14 +293,6 @@ async fn patch_watch_core(st: &AppState, key: &str, req: PatchWatchReq) -> ApiRe
     watch_view(&st.db, &o).await
 }
 
-pub(super) async fn patch_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<PatchWatchReq>,
-) -> ApiResult<Json<WatchView>> {
-    Ok(Json(patch_watch_core(&st, &key, req).await?))
-}
-
 /// `watches.update`.
 pub(super) async fn update_watch_operation(
     context: OperationContext,
@@ -361,14 +323,6 @@ async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteRes
     })
 }
 
-pub(super) async fn delete_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let result = delete_watch_core(&st, &key).await?;
-    Ok(Json(json!({ "deleted": result.deleted })))
-}
-
 /// `watches.delete`.
 pub(super) async fn delete_watch_operation(
     context: OperationContext,
@@ -396,19 +350,6 @@ async fn run_watch_core(st: &AppState, key: &str, dry_run: bool) -> ApiResult<Wa
         outcome,
         summary,
     })
-}
-
-pub(super) async fn run_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<RunWatchReq>,
-) -> ApiResult<Json<Value>> {
-    let result = run_watch_core(&st, &key, req.dry_run).await?;
-    Ok(Json(json!({
-        "run_id": result.run_id,
-        "outcome": result.outcome,
-        "summary": result.summary,
-    })))
 }
 
 /// `watches.run`. Not exercised here — this handler fires a watch round for
@@ -481,23 +422,6 @@ async fn agent_oneshot_core(
         .await)
 }
 
-/// `POST /agent/oneshot` — the legacy route `agents.oneshot` now also serves.
-pub(super) async fn agent_oneshot(
-    State(st): State<AppState>,
-    Json(req): Json<AgentOneshotReq>,
-) -> ApiResult<Json<Value>> {
-    let output = agent_oneshot_core(
-        &st,
-        &req.prompt,
-        &req.profile,
-        &req.agent,
-        &req.model,
-        &req.effort,
-    )
-    .await?;
-    Ok(Json(json!({ "output": output })))
-}
-
 /// `agents.oneshot` — the twin of [`agent_oneshot`].
 async fn agent_oneshot_operation(
     context: OperationContext,
@@ -537,14 +461,6 @@ async fn watch_runs_core(
     let limit = limit.unwrap_or(50).clamp(1, 1000);
     let runs = watch_store::recent_runs(&st.db, &o.id, limit).await?;
     Ok(runs.into_iter().map(WatchRunView::from).collect())
-}
-
-pub(super) async fn watch_runs(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<RunsQuery>,
-) -> ApiResult<Json<Vec<WatchRunView>>> {
-    Ok(Json(watch_runs_core(&st, &key, q.limit).await?))
 }
 
 /// `watches.runs`.

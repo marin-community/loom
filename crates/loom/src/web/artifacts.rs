@@ -33,11 +33,6 @@ use super::{ApiResult, AppError, AppState};
 // the same join. Structure in the doc, state in the DB. See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-pub(super) struct RevQuery {
-    rev: Option<i64>,
-}
-
 const MAX_ARTIFACT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Pull a standalone image data URI out of artifact content. New writes store
@@ -98,17 +93,6 @@ pub(super) fn artifact_meta(a: &Artifact) -> ArtifactMeta {
         created_at: a.created_at.clone(),
         updated_at: a.updated_at.clone(),
     }
-}
-
-/// List the artifacts visible from a session: its branch's plus the repo-shared
-/// ones, latest rev each (a branch-scoped name shadows a shared one).
-pub(super) async fn list_artifacts(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<Vec<ArtifactMeta>>> {
-    let (_, branch) = require_session(&st.db, &key).await?;
-    let artifacts = artifact::list_for_session(&st.db, &branch.repo_root, &branch.id).await?;
-    Ok(Json(artifacts.iter().map(artifact_meta).collect()))
 }
 
 /// Resolve an artifact's content references to their live status, as the wire
@@ -188,22 +172,6 @@ async fn artifact_view(
     })
 }
 
-/// One artifact, content + projected refs, resolving branch-scoped before
-/// repo-shared. `?rev=N` selects a revision; the default is latest.
-pub(super) async fn get_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Query(q): Query<RevQuery>,
-) -> ApiResult<Json<ArtifactView>> {
-    let (_, branch) = require_session(&st.db, &key).await?;
-    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
-        .await?
-        .ok_or_else(|| AppError::not_found("artifact"))?;
-    Ok(Json(
-        artifact_view(&st.db, &branch.repo_root, &a, q.rev).await?,
-    ))
-}
-
 /// `artifacts.raw` — an image artifact's decoded bytes for an `<img src>`.
 ///
 /// Markdown documents can use `![alt](artifact:<name>)`; the renderer maps that
@@ -246,102 +214,6 @@ pub(super) async fn raw_artifact_bytes(
     Ok(response)
 }
 
-/// Write a new revision of an artifact (a user edit, `author: user`), returning
-/// the refreshed view at the new latest revision. The artifact must already
-/// exist in the session's view; the write targets the resolved scope (its own
-/// branch-scoped row, else the repo-shared one).
-pub(super) async fn write_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Json(body): Json<ArtifactWriteBody>,
-) -> ApiResult<Json<ArtifactView>> {
-    let (_, branch) = require_session(&st.db, &key).await?;
-    let existing = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
-        .await?
-        .ok_or_else(|| AppError::not_found("artifact"))?;
-    // Optimistic-concurrency guard: a caller that read a specific revision
-    // and supplies `base_rev` gets rejected if someone else has written since
-    // — rather than silently clobbering that newer revision. Omitting
-    // `base_rev` force-writes, same as before this guard existed.
-    if let Some(b) = body.base_rev {
-        if b != existing.rev {
-            return Err(AppError::conflict("stale").with_fields(json!({ "latest": existing.rev })));
-        }
-    }
-    // Keep the existing kind/title unless the body overrides them.
-    let kind = body.kind.unwrap_or_else(|| existing.kind.clone());
-    let title = body.title.unwrap_or_else(|| existing.title.clone());
-    // Write into the same scope the artifact resolved to (a shared artifact
-    // edited from a session writes a new shared revision, not a branch copy).
-    let scope = existing.branch_id.as_deref();
-    let a = artifact::write(
-        &st.db,
-        &artifact::NewRevision {
-            repo_root: &branch.repo_root,
-            branch_id: scope,
-            name: &name,
-            kind: &kind,
-            title: &title,
-            content: &body.content,
-            author: "user",
-        },
-    )
-    .await?;
-    // `goal` is the canonical goal artifact — keep the denormalized
-    // `branches.goal` cache column in sync with what was just written.
-    if a.name == "goal" {
-        branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
-    }
-    tracing::info!(artifact = %a.name, rev = a.rev, "artifact updated");
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "artifact_written",
-        json!({ "name": a.name, "rev": a.rev, "title": a.title }),
-    )
-    .await
-    .ok();
-    // A wired thread's status card links the session's documents — refresh it so
-    // a new doc appears there without waiting for a status write.
-    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
-    Ok(Json(
-        artifact_view(&st.db, &branch.repo_root, &a, None).await?,
-    ))
-}
-
-/// Delete an artifact and its whole revision history. Resolves the name the way
-/// the session sees it (its own branch-scoped row, else the repo-shared one — the
-/// single row the list shows for that name), so deleting from the UI removes
-/// exactly the artifact displayed. Broadcasts `artifact_deleted` for live refresh.
-pub(super) async fn delete_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    let (_, branch) = require_session(&st.db, &key).await?;
-    let a = artifact::get(&st.db, &branch.repo_root, &branch.id, &name)
-        .await?
-        .ok_or_else(|| AppError::not_found("artifact"))?;
-    // FKs are off on the pool, so `ON DELETE CASCADE` doesn't fire — clean up
-    // the artifact's discussion threads/comments explicitly before/with it.
-    discussion::delete_for_artifact(&st.db, a.id).await?;
-    artifact::delete(&st.db, a.id).await?;
-    tracing::info!(artifact = %a.name, "artifact deleted");
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "artifact_deleted",
-        json!({ "name": a.name, "branch_id": a.branch_id }),
-    )
-    .await
-    .ok();
-    // A wired thread's status card lists the session's documents — refresh it so
-    // a deleted doc stops appearing there.
-    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
-    Ok(Json(json!({ "deleted": true, "name": a.name })))
-}
-
 // ---------------------------------------------------------------------------
 // Branch-scoped artifacts — the twin of the session-scoped routes above, for
 // a `loom artifacts` target with no live session. `PUT` here creates the
@@ -349,183 +221,6 @@ pub(super) async fn delete_artifact(
 // since that route is a *user edit* of something the dashboard is already
 // showing); `author` defaults to `agent`, the CLI's writer.
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct ArtifactScopeQuery {
-    #[serde(default)]
-    repo: bool,
-}
-
-pub(super) async fn list_branch_artifacts(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<ArtifactScopeQuery>,
-) -> ApiResult<Json<Vec<ArtifactMeta>>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let artifacts = if q.repo {
-        artifact::list_for_repo(&st.db, &branch.repo_root).await?
-    } else {
-        artifact::list_for_session(&st.db, &branch.repo_root, &branch.id).await?
-    };
-    Ok(Json(artifacts.iter().map(artifact_meta).collect()))
-}
-
-#[derive(Debug, Deserialize, Default)]
-pub(super) struct ArtifactGetQuery {
-    rev: Option<i64>,
-    #[serde(default)]
-    repo: bool,
-}
-
-pub(super) async fn get_branch_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Query(q): Query<ArtifactGetQuery>,
-) -> ApiResult<Json<ArtifactView>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let a = if q.repo {
-        artifact::get_shared(&st.db, &branch.repo_root, &name).await?
-    } else {
-        artifact::get(&st.db, &branch.repo_root, &branch.id, &name).await?
-    }
-    .ok_or_else(|| AppError::not_found("artifact"))?;
-    Ok(Json(
-        artifact_view(&st.db, &branch.repo_root, &a, q.rev).await?,
-    ))
-}
-
-pub(super) async fn write_branch_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Json(body): Json<ArtifactUpsertReq>,
-) -> ApiResult<Json<ArtifactView>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let existing = if body.repo {
-        artifact::get_shared(&st.db, &branch.repo_root, &name).await?
-    } else {
-        artifact::get(&st.db, &branch.repo_root, &branch.id, &name).await?
-    };
-    if let Some(base_rev) = body.base_rev {
-        let latest = existing.as_ref().map_or(0, |artifact| artifact.rev);
-        if base_rev != latest {
-            return Err(AppError::conflict("stale").with_fields(json!({ "latest": latest })));
-        }
-    }
-    let kind = body
-        .kind
-        .clone()
-        .or_else(|| existing.as_ref().map(|a| a.kind.clone()))
-        .unwrap_or_else(|| "markdown".to_string());
-    let title = body
-        .title
-        .clone()
-        .or_else(|| existing.as_ref().map(|a| a.title.clone()))
-        .unwrap_or_default();
-    let author = body.author.as_deref().unwrap_or("agent").to_string();
-    // `repo: true` writes the repo-shared scope explicitly; otherwise write
-    // into whatever scope the name already resolved to (a shared artifact
-    // edited from a branch writes a new shared revision, not a branch copy),
-    // defaulting to this branch's own scope for a brand-new name.
-    let scope: Option<String> = if body.repo {
-        None
-    } else {
-        existing
-            .as_ref()
-            .and_then(|a| a.branch_id.clone())
-            .or_else(|| Some(branch.id.clone()))
-    };
-    let a = artifact::write(
-        &st.db,
-        &artifact::NewRevision {
-            repo_root: &branch.repo_root,
-            branch_id: scope.as_deref(),
-            name: &name,
-            kind: &kind,
-            title: &title,
-            content: &body.content,
-            author: &author,
-        },
-    )
-    .await?;
-    // `goal` is the canonical goal artifact — keep the denormalized
-    // `branches.goal` cache column in sync with what was just written.
-    if a.name == "goal" {
-        branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
-    }
-    if existing.is_none() {
-        tracing::info!(artifact = %a.name, rev = a.rev, "artifact created");
-    } else {
-        tracing::info!(artifact = %a.name, rev = a.rev, "artifact updated");
-    }
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "artifact_written",
-        json!({ "name": a.name, "rev": a.rev, "title": a.title }),
-    )
-    .await
-    .ok();
-    // Same card refresh as the session-scoped write route above.
-    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
-    Ok(Json(
-        artifact_view(&st.db, &branch.repo_root, &a, None).await?,
-    ))
-}
-
-/// `GET /api/branches/{key}/artifacts/{name}/url` — the dashboard deep-link for
-/// an artifact.
-///
-/// The twin of `session_url_route`: the agent that just wrote the artifact holds
-/// only the loopback (or wildcard) `$WEAVER_API` it was handed, and a
-/// `http://0.0.0.0:7878/…` link printed after a write is useless to whoever
-/// reads it. Only the server knows the externally-visible origin (the operator's
-/// `auth.base_url`, else the request's own Host), so resolving it is the
-/// server's job — see `loom artifacts write`.
-pub(super) async fn branch_artifact_url_route(
-    State(st): State<AppState>,
-    headers: header::HeaderMap,
-    Path((key, name)): Path<(String, String)>,
-) -> ApiResult<Json<Value>> {
-    // Resolve the branch so a bad key 404s rather than minting a link to
-    // nothing; the URL itself keys off the caller's `key` (the `$WEAVER_BRANCH`
-    // the SPA router resolves), exactly as the write output always has.
-    require_branch(&st.db, &key).await?;
-    let base = super::auth::public_base(&st, &headers).await;
-    Ok(Json(
-        json!({ "url": crate::links::artifact_url(&base, &key, &name) }),
-    ))
-}
-
-pub(super) async fn delete_branch_artifact(
-    State(st): State<AppState>,
-    Path((key, name)): Path<(String, String)>,
-    Query(q): Query<ArtifactScopeQuery>,
-) -> ApiResult<Json<Value>> {
-    let branch = require_branch(&st.db, &key).await?;
-    let a = if q.repo {
-        artifact::get_shared(&st.db, &branch.repo_root, &name).await?
-    } else {
-        artifact::get(&st.db, &branch.repo_root, &branch.id, &name).await?
-    }
-    .ok_or_else(|| AppError::not_found("artifact"))?;
-    discussion::delete_for_artifact(&st.db, a.id).await?;
-    artifact::delete(&st.db, a.id).await?;
-    tracing::info!(artifact = %a.name, "artifact deleted");
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "artifact_deleted",
-        json!({ "name": a.name, "branch_id": a.branch_id }),
-    )
-    .await
-    .ok();
-    // A wired thread's status card lists the session's documents — refresh it so
-    // a deleted doc stops appearing there.
-    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
-    Ok(Json(json!({ "deleted": true, "name": a.name })))
-}
 
 // ---------------------------------------------------------------------------
 // Operation registry — `artifacts.*` and `artifacts.threads.*`, bound onto
@@ -920,7 +615,28 @@ async fn url_operation(context: OperationContext, input: url::Input) -> ApiResul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::{AuthVia, Grant, Principal};
     use crate::db::Db;
+
+    /// A session credential, because `artifacts.write` derives the revision's
+    /// author from it rather than from a body field — the legacy branch route
+    /// took `author` from the request, so any caller could claim to be anyone.
+    fn session_context(state: AppState, branch_id: &str) -> OperationContext {
+        OperationContext::new(
+            state,
+            Principal {
+                username: "agent".to_string(),
+                github_login: None,
+                via: AuthVia::Token,
+                grant: Grant::Session {
+                    session_id: "session".to_string(),
+                    branch_id: branch_id.to_string(),
+                    capabilities: None,
+                },
+                automation_context: None,
+            },
+        )
+    }
 
     fn test_state(db: Db) -> AppState {
         AppState {
@@ -961,66 +677,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_branch_artifact_creates_then_appends_a_revision() {
+    async fn write_creates_then_appends_a_guarded_revision() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let st = test_state(db.clone());
         let branch = branch_mod::upsert(&db, "/r", "weaver/a", "main")
             .await
             .unwrap();
 
-        let view = write_branch_artifact(
-            State(st.clone()),
-            Path((branch.id.clone(), "plan".to_string())),
-            Json(ArtifactUpsertReq {
+        let view = write_operation(
+            session_context(st.clone(), &branch.id),
+            write::Input {
+                name: "plan".to_string(),
                 content: "v1".to_string(),
                 title: Some("The Plan".to_string()),
                 kind: None,
-                author: None,
-                repo: false,
                 base_rev: None,
-            }),
+                repo: false,
+                branch: branch.id.clone(),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(view.content, "v1");
         assert_eq!(view.meta.rev, 1);
         assert_eq!(view.meta.branch_id.as_deref(), Some(branch.id.as_str()));
 
-        // A second write with no author appends a revision, defaulting the
-        // author to `agent` (the CLI's writer) — not the session route's
-        // hardcoded `user`.
-        let view = write_branch_artifact(
-            State(st.clone()),
-            Path((branch.id.clone(), "plan".to_string())),
-            Json(ArtifactUpsertReq {
+        // A second write appends a revision, attributed to `agent` because the
+        // credential is a session — there is no `author` field to disagree with.
+        let view = write_operation(
+            session_context(st.clone(), &branch.id),
+            write::Input {
+                name: "plan".to_string(),
                 content: "v2".to_string(),
                 title: None,
                 kind: None,
-                author: None,
-                repo: false,
                 base_rev: Some(1),
-            }),
+                repo: false,
+                branch: branch.id.clone(),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(view.content, "v2");
         assert_eq!(view.meta.rev, 2);
         assert_eq!(view.meta.title, "The Plan", "title carries over unset");
         assert_eq!(view.versions[0].author, "agent");
 
-        let stale = write_branch_artifact(
-            State(st),
-            Path((branch.id, "plan".to_string())),
-            Json(ArtifactUpsertReq {
+        let stale = write_operation(
+            session_context(st, &branch.id),
+            write::Input {
+                name: "plan".to_string(),
                 content: "stale edit".to_string(),
                 title: None,
                 kind: None,
-                author: None,
-                repo: false,
                 base_rev: Some(1),
-            }),
+                repo: false,
+                branch: branch.id,
+            },
         )
         .await
         .unwrap_err();

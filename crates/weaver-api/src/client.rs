@@ -68,15 +68,6 @@ impl Client {
 
     // -- URL construction ---------------------------------------------------
 
-    /// Percent-encode a value embedded as a single URL path segment. Needed
-    /// only by [`Client::set_tags`], the one method left on a hand-written
-    /// route: a session key can be `repo_root:branch`, and a real repo root is
-    /// an absolute path full of `/`, which would otherwise split into extra
-    /// path segments the router never matches.
-    fn seg(s: &str) -> String {
-        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
-    }
-
     // -- Untyped JSON transport -------------------------------------------
 
     async fn send(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
@@ -154,22 +145,6 @@ impl Client {
     }
 
     // -- Typed helpers ----------------------------------------------------
-
-    /// Send a typed body and deserialize a typed reply, surfacing a serde error
-    /// as an `anyhow` error rather than panicking.
-    async fn send_typed<B: Serialize, R: DeserializeOwned>(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<&B>,
-    ) -> Result<R> {
-        let body = match body {
-            Some(b) => Some(serde_json::to_value(b)?),
-            None => None,
-        };
-        let value = self.send(method, path, body).await?;
-        serde_json::from_value(value).map_err(|e| anyhow!("decoding response from {path}: {e}"))
-    }
 
     async fn get_typed<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
         let value = self.get(path).await?;

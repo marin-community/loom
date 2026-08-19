@@ -425,16 +425,6 @@ async fn metric_snapshot(db: &Db) -> Result<DiagnosticsView> {
     })
 }
 
-pub(super) async fn diagnostics(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<DiagnosticsView>> {
-    if !principal.is_human() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "human grant required"));
-    }
-    Ok(Json(snapshot(&st.db).await?))
-}
-
 /// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`. Its
 /// sibling `diagnostics.status` is bound in `web/logview.rs`, next to the
 /// legacy `server_status` handler it ports.

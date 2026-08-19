@@ -65,23 +65,6 @@ pub(super) async fn list_tasks(
         .collect())
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct LogsQuery {
-    /// Most-recent lines to return. Defaults to 500; clamped to the buffer size.
-    limit: Option<usize>,
-}
-
-/// `GET /api/logs` — a snapshot of the most recent server log lines, oldest
-/// first. The UI loads this once, then follows [`logs_stream`] for new lines.
-pub(super) async fn logs_snapshot(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Query(q): Query<LogsQuery>,
-) -> ApiResult<Json<Vec<LogLine>>> {
-    let lines = logs_snapshot_core(&st, &principal, q.limit.map(|limit| limit as i64)).await?;
-    Ok(Json(lines))
-}
-
 /// Shared by [`logs_snapshot`] and `logs.list`: the redacted tail of recent
 /// log lines, oldest first.
 async fn logs_snapshot_core(
@@ -221,22 +204,10 @@ fn status_view() -> diagnostics_operations::status::Output {
     }
 }
 
-/// `GET /api/status` — build and process identity for human users.
-pub(super) async fn server_status() -> Json<diagnostics_operations::status::Output> {
-    Json(status_view())
-}
-
 /// `diagnostics.status` — the twin of [`server_status`].
 async fn status_operation(
     _context: OperationContext,
     _input: diagnostics_operations::status::Input,
 ) -> ApiResult<diagnostics_operations::status::Output> {
     Ok(status_view())
-}
-
-/// `GET /api/tasks` — recent detached background tasks (the GitHub-trigger
-/// launches that run off the webhook request), newest first. Human-only, same as
-/// the log endpoints — a task label names a repo/issue a user can act on.
-pub(super) async fn tasks_snapshot() -> Json<Vec<TaskRecord>> {
-    Json(tasks::registry().snapshot())
 }

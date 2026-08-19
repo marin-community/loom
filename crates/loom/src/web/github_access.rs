@@ -18,17 +18,6 @@ use crate::auth::Principal;
 use super::operations::OperationContext;
 use super::{require_session, ApiResult, AppError, AppState};
 
-fn require_human(principal: &Principal) -> ApiResult<()> {
-    if principal.is_human() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "GitHub repository access must be granted by a human operator",
-        ))
-    }
-}
-
 pub(super) async fn effective_repositories(
     db: &crate::Db,
     session: &crate::session::Session,
@@ -80,26 +69,6 @@ pub(super) async fn validate_github_write(
             )
         })?;
     Ok(())
-}
-
-pub(super) async fn list_github_access(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<SessionGithubAccessView>>> {
-    require_human(&principal)?;
-    let (session, _) = require_session(&st.db, &key).await?;
-    let grants = crate::github_access::list(&st.db, &session.id)
-        .await?
-        .into_iter()
-        .map(|grant| SessionGithubAccessView {
-            repository: grant.repository,
-            mode: grant.mode.as_str().to_string(),
-            granted_by: grant.granted_by,
-            granted_at: grant.granted_at,
-        })
-        .collect();
-    Ok(Json(grants))
 }
 
 /// `sessions.github.access.list` — ported from [`list_github_access`]. Its
@@ -215,9 +184,7 @@ pub(super) async fn revoke_github_access_operation(
 mod tests {
     use std::sync::Arc;
 
-    use super::{
-        effective_repositories, grant_github_access_operation, require_human, OperationContext,
-    };
+    use super::{effective_repositories, grant_github_access_operation, OperationContext};
     use crate::auth::{AuthVia, Grant, Principal};
 
     fn principal(grant: Grant) -> Principal {
@@ -230,16 +197,23 @@ mod tests {
         }
     }
 
+    /// The rule the deleted `require_human` used to hold, asserted where it now
+    /// lives. `actor = User` is not documentation: `authorize()` reads it, so a
+    /// session credential is turned away before any handler in this file runs.
     #[test]
     fn only_humans_can_change_github_access() {
-        assert!(require_human(&principal(Grant::Admin)).is_ok());
-        assert!(require_human(&principal(Grant::User)).is_ok());
-        assert!(require_human(&principal(Grant::Session {
-            session_id: "session".to_string(),
-            branch_id: "branch".to_string(),
-            capabilities: None,
-        }))
-        .is_err());
+        for id in [
+            "permissions.github.grant",
+            "permissions.github.revoke",
+            "sessions.github.access.list",
+        ] {
+            let spec = weaver_api::operation(id).expect(id);
+            assert_eq!(
+                spec.actor,
+                weaver_api::ActorPolicy::User,
+                "{id} must stay human-only"
+            );
+        }
     }
 
     #[tokio::test]

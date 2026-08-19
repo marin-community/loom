@@ -635,111 +635,13 @@ fn token_view(info: auth::TokenInfo) -> TokenView {
     }
 }
 
-/// `GET /api/auth/tokens` — the user-managed API tokens.
-pub(super) async fn list_tokens(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<TokenView>>> {
-    let tokens = auth::list_tokens(&st.db, &principal.username).await?;
-    Ok(Json(tokens.into_iter().map(token_view).collect()))
-}
-
-/// `POST /api/auth/tokens` — mint a token, returning the plaintext once.
-pub(super) async fn create_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<CreateTokenReq>,
-) -> ApiResult<Json<CreatedTokenView>> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(AppError::bad_request("a token name is required"));
-    }
-    if body
-        .expires_in_days
-        .is_some_and(|days| days > 0 && weaver_core::db::iso_in_days(days).is_none())
-    {
-        return Err(AppError::bad_request(
-            "token expiry is outside the supported range",
-        ));
-    }
-    let (token, info) =
-        auth::create_token(&st.db, &principal.username, name, body.expires_in_days).await?;
-    tracing::info!(username = %principal.username, id = %info.id, name = %info.name, "api token created");
-    Ok(Json(CreatedTokenView {
-        token,
-        info: token_view(info),
-    }))
-}
-
-/// `DELETE /api/auth/tokens/{id}` — revoke a token.
-pub(super) async fn revoke_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if auth::revoke_token(&st.db, &principal.username, &id).await? {
-        tracing::info!(username = %principal.username, id = %id, "api token revoked");
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::not_found("token"))
-    }
-}
-
 // -- Account + users ---------------------------------------------------------
-
-/// `POST /api/auth/password` — set/change the caller's own password.
-pub(super) async fn set_own_password(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<SetPasswordReq>,
-) -> ApiResult<StatusCode> {
-    if body.new_password.len() < 8 {
-        return Err(AppError::bad_request(
-            "password must be at least 8 characters",
-        ));
-    }
-    auth::set_password(&st.db, &principal.username, Some(&body.new_password)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 // -- Per-user GitHub token ---------------------------------------------------
 // Loom stores the caller's fine-grained PAT and injects it only into ordinary
 // interactive sessions they launch. It is the sole direct credential source;
 // sessions without one use their profile-approved GitHub App credential.
 // Self-service and write-only: no endpoint ever returns the token value.
-
-#[derive(Debug, Deserialize)]
-pub(super) struct SetGithubTokenReq {
-    token: String,
-}
-
-pub(super) async fn get_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<user_token::TokenStatus>> {
-    Ok(Json(user_token::status(&st.db, &principal.username).await?))
-}
-
-pub(super) async fn set_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<SetGithubTokenReq>,
-) -> ApiResult<Json<user_token::TokenStatus>> {
-    let token = body.token.trim();
-    if token.is_empty() {
-        return Err(AppError::bad_request("a token is required"));
-    }
-    user_token::set(&st.db, &principal.username, token).await?;
-    Ok(Json(user_token::status(&st.db, &principal.username).await?))
-}
-
-pub(super) async fn delete_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<StatusCode> {
-    user_token::remove(&st.db, &principal.username).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 fn user_view(u: auth::User) -> UserView {
     let has_password = u.has_password();
@@ -766,91 +668,6 @@ fn user_role_input(role: UserRole) -> auth::UserRole {
     }
 }
 
-/// `GET /api/auth/users` — the approved-operator allowlist.
-pub(super) async fn list_users(State(st): State<AppState>) -> ApiResult<Json<Vec<UserView>>> {
-    let users = auth::list_users(&st.db).await?;
-    Ok(Json(users.into_iter().map(user_view).collect()))
-}
-
-/// `POST /api/auth/users` — approve a new operator.
-pub(super) async fn add_user(
-    State(st): State<AppState>,
-    Json(body): Json<AddUserReq>,
-) -> ApiResult<Json<UserView>> {
-    let username = body.username.trim();
-    if username.is_empty() {
-        return Err(AppError::bad_request("a username is required"));
-    }
-    let github = body
-        .github_login
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let password = body.password.as_deref().filter(|s| !s.is_empty());
-    if github.is_none() && password.is_none() {
-        return Err(AppError::bad_request(
-            "set a GitHub login or a password so the user can sign in",
-        ));
-    }
-    if let Some(p) = password {
-        if p.len() < 8 {
-            return Err(AppError::bad_request(
-                "password must be at least 8 characters",
-            ));
-        }
-    }
-    auth::add_user(
-        &st.db,
-        username,
-        github,
-        password,
-        user_role_input(body.role),
-    )
-    .await
-    .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
-    tracing::info!(username, "operator added");
-    let user = auth::get_user(&st.db, username)
-        .await?
-        .ok_or_else(|| AppError::not_found("user"))?;
-    Ok(Json(user_view(user)))
-}
-
-/// `PUT /api/auth/users/{username}/role` — update one human role. Existing
-/// cookies and personal tokens observe the change on their next request.
-pub(super) async fn set_user_role(
-    State(st): State<AppState>,
-    Path(username): Path<String>,
-    Json(body): Json<SetUserRoleReq>,
-) -> ApiResult<Json<UserView>> {
-    auth::set_user_role(&st.db, &username, user_role_input(body.role))
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    tracing::info!(username, role = ?body.role, "user role updated");
-    let user = auth::get_user(&st.db, &username)
-        .await?
-        .ok_or_else(|| AppError::not_found("user"))?;
-    Ok(Json(user_view(user)))
-}
-
-/// `DELETE /api/auth/users/{username}` — remove an approved operator.
-pub(super) async fn remove_user(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(username): Path<String>,
-) -> ApiResult<StatusCode> {
-    if username == principal.username {
-        return Err(AppError::bad_request("you cannot remove yourself"));
-    }
-    match auth::remove_user(&st.db, &username).await {
-        Ok(true) => {
-            tracing::info!(username = %username, "operator removed");
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Ok(false) => Err(AppError::not_found("user")),
-        Err(e) => Err(AppError::bad_request(e.to_string())),
-    }
-}
-
 // -- GitHub App / sign-in config ---------------------------------------------
 // One GitHub App backs loom: its OAuth client powers sign-in (`configured` /
 // `client_id`), and the same App's id + private key power the `@loom` trigger
@@ -874,38 +691,6 @@ async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
             .await
             .unwrap_or_default(),
     })
-}
-
-/// `GET /api/auth/github/config` — the GitHub sign-in setup (secret withheld).
-pub(super) async fn get_github_config(
-    State(st): State<AppState>,
-) -> ApiResult<Json<GithubConfigView>> {
-    Ok(Json(github_config_view(&st).await?))
-}
-
-/// `PUT /api/auth/github/config` — set the sign-in OAuth client id (and,
-/// optionally, its secret).
-pub(super) async fn put_github_config(
-    State(st): State<AppState>,
-    Json(body): Json<SetGithubConfigReq>,
-) -> ApiResult<Json<GithubConfigView>> {
-    let mut changes: Vec<config::Change> = vec![(
-        auth::GH_CLIENT_ID_KEY.to_string(),
-        Some(body.client_id.trim().to_string()),
-    )];
-    // The secret is write-only: a value sets it, an empty string clears it, and
-    // omitting the field leaves the stored secret untouched.
-    let secret_provided = body.client_secret.is_some();
-    if let Some(secret) = body.client_secret {
-        let secret = secret.trim().to_string();
-        changes.push((
-            auth::GH_CLIENT_SECRET_KEY.to_string(),
-            (!secret.is_empty()).then_some(secret),
-        ));
-    }
-    config::apply(&st.db, &changes).await?;
-    tracing::info!(secret_provided, "github oauth config updated");
-    Ok(Json(github_config_view(&st).await?))
 }
 
 // ===========================================================================

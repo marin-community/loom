@@ -65,48 +65,6 @@ pub(super) async fn federate(
     Ok(Json(token))
 }
 
-pub(super) async fn mint_automation_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<AutomationTokenReq>,
-) -> ApiResult<Json<AutomationTokenView>> {
-    if !principal.is_admin() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
-    }
-    Ok(Json(
-        crate::automation::mint(&st.db, &req.subject, req.profiles, req.ttl_secs, None)
-            .await
-            .map_err(|error| AppError::bad_request(error.to_string()))?,
-    ))
-}
-
-pub(super) async fn list_federations(
-    State(st): State<AppState>,
-) -> ApiResult<Json<Vec<FederationView>>> {
-    Ok(Json(crate::automation::federation_list(&st.db).await?))
-}
-
-pub(super) async fn add_federation(
-    State(st): State<AppState>,
-    Json(req): Json<FederationReq>,
-) -> ApiResult<(StatusCode, Json<FederationView>)> {
-    let mapping = crate::automation::federation_add(&st.db, &req)
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    Ok((StatusCode::CREATED, Json(mapping)))
-}
-
-pub(super) async fn remove_federation(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if crate::automation::federation_remove(&st.db, &id).await? {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::not_found("federation mapping"))
-    }
-}
-
 /// The requesting identity for `runs.create`, `actor = Internal`:
 /// `authorize()` has already refused anything but `Grant::Admin` or
 /// `Grant::Automation` by the time this runs (`Grant::User`/`Grant::Session`
@@ -525,55 +483,6 @@ async fn create_run_core(
 // the `runs.*` operations use, so there is one implementation behind two doors,
 // and they retire when those callers move to `/api/runs/create` and friends.
 // ---------------------------------------------------------------------------
-
-pub(super) async fn create_run_route(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<RunReq>,
-) -> ApiResult<Json<RunView>> {
-    let profile = req.profile.trim().to_string();
-    let (subject, profiles) = run_identity(&principal, &profile)?;
-    Ok(Json(
-        create_run_core(&st, &principal, req, subject, profiles).await?,
-    ))
-}
-
-/// Unlike `runs.list` (`actor = User`), this route keeps the behaviour an
-/// automation credential relies on: it lists that subject's own runs.
-pub(super) async fn list_runs_route(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<RunView>>> {
-    let subject = match &principal.grant {
-        Grant::Admin | Grant::User => None,
-        Grant::Automation { subject, .. } => Some(subject.as_str()),
-        Grant::Session { .. } | Grant::Anonymous => {
-            return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))
-        }
-    };
-    Ok(Json(
-        crate::runs::list_for(&st.db, subject)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    ))
-}
-
-pub(super) async fn get_run_route(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> ApiResult<Json<RunView>> {
-    let run = crate::runs::get(&st.db, &id)
-        .await?
-        .ok_or_else(|| AppError::not_found("automation run"))?;
-    if matches!(&principal.grant, Grant::Automation { subject, .. } if subject != &run.actor_subject)
-    {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
-    }
-    Ok(Json(run.into()))
-}
 
 /// `runs.create`. `actor = Internal` means `authorize()` has already
 /// narrowed the reachable grants to `Admin`/`Automation` before this runs

@@ -491,9 +491,12 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
         .await
         .unwrap();
 
-    // Default: only the live session, archived hidden.
+    // Default: only the live session, archived and automation-class hidden.
+    // `automation` defaults to `true` on `sessions.list` (a fleet listing means
+    // "every session"), so it must be requested off explicitly here to isolate
+    // the archived-visibility behaviour under test.
     let list = client
-        .post("/api/sessions/list", json!({}))
+        .post("/api/sessions/list", json!({ "automation": false }))
         .await
         .unwrap();
     let ids: Vec<&str> = list
@@ -506,7 +509,10 @@ async fn list_keeps_active_fleet_disjoint_from_archived_history_and_searches() {
 
     // Opt in: both, beta marked archived.
     let all = client
-        .post("/api/sessions/list", json!({ "history": true }))
+        .post(
+            "/api/sessions/list",
+            json!({ "history": true, "automation": false }),
+        )
         .await
         .unwrap();
     let all = all.as_array().unwrap();

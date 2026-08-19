@@ -331,11 +331,6 @@ fn provision_error(error: crate::provision::ProvisionError) -> AppError {
 
 pub(crate) type ApiResult<T> = Result<T, AppError>;
 
-/// JSON base64 expands a valid 50 MiB Scratch batch by roughly one third.
-/// Keep this route envelope above that encoded payload while retaining the
-/// smaller protected-router default for unrelated endpoints.
-const MAX_SESSION_CREATE_BODY_BYTES: usize = 72 * 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // View payloads
 //
