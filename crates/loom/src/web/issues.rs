@@ -21,25 +21,31 @@ use crate::git;
 use crate::{auth::Grant, auth::Principal};
 
 use super::{author_or_manual, require_branch};
-use super::{
-    register_operation, ApiResult, AppError, AppState, OperationContext, RegisteredOperation,
-};
+use super::operations::{register, Bound, OperationContext};
+use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
 // Issues
 // ---------------------------------------------------------------------------
 
-pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
+/// Every `issues.*` operation, bound to the code that serves it.
+///
+/// One line per operation, in the order the ids sort. `assert_registry_is_complete`
+/// fails startup if a declared operation is missing from this list, so the
+/// bundle cannot drift back into the state where `issues.actions` was declared
+/// and served while three other operations were declared and were not.
+pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register_operation::<issue_operations::List, _, _>(list_repo_issues_operation),
-        register_operation::<issue_operations::Get, _, _>(get_issue_operation),
-        register_operation::<issue_operations::Create, _, _>(create_branch_issue_operation),
-        register_operation::<issue_operations::CreateBacklog, _, _>(create_repo_issue_operation),
-        register_operation::<issue_operations::Close, _, _>(close_issue_operation),
-        register_operation::<issue_operations::Reopen, _, _>(reopen_issue_operation),
-        register_operation::<issue_operations::Delete, _, _>(delete_issue_operation),
-        register_operation::<issue_operations::SetTag, _, _>(set_issue_tag_operation),
-        register_operation::<issue_operations::DeleteTag, _, _>(clear_issue_tag_operation),
+        register::<issue_operations::actions::Actions, _, _>(issue_actions_operation),
+        register::<issue_operations::backlog::create::Create, _, _>(create_repo_issue_operation),
+        register::<issue_operations::close::Close, _, _>(close_issue_operation),
+        register::<issue_operations::create::Create, _, _>(create_branch_issue_operation),
+        register::<issue_operations::delete::Delete, _, _>(delete_issue_operation),
+        register::<issue_operations::get::Get, _, _>(get_issue_operation),
+        register::<issue_operations::list::List, _, _>(list_repo_issues_operation),
+        register::<issue_operations::reopen::Reopen, _, _>(reopen_issue_operation),
+        register::<issue_operations::tags::delete::Delete, _, _>(clear_issue_tag_operation),
+        register::<issue_operations::tags::set::Set, _, _>(set_issue_tag_operation),
     ]
 }
 
@@ -158,25 +164,25 @@ pub(super) async fn list_branch_issues(
 /// Create an issue claimed by this branch.
 pub(super) async fn create_branch_issue_operation(
     context: OperationContext,
-    input: issue_operations::CreateInput,
+    input: issue_operations::create::Input,
 ) -> ApiResult<IssueView> {
     let st = context.state;
-    let key = input.branch;
-    let req = input.request;
-    if req.title.trim().is_empty() {
+    if input.title.trim().is_empty() {
         return Err(AppError::bad_request("issue title is required"));
     }
-    let tags = initial_issue_tags(req.tags)?;
-    let branch = require_branch(&st.db, &key).await?;
+    // The old request carried a `tags` list that both callers always sent
+    // empty; a new issue starts untagged and `issues.tags.set` labels it.
+    let tags = Vec::new();
+    let branch = require_branch(&st.db, &input.branch).await?;
     let issue = weaver_core::issue::add_with_tags(
         &st.db,
         &weaver_core::issue::NewIssue {
             repo_root: branch.repo_root.clone(),
             source_branch: Some(branch.branch.clone()),
             claimed_branch: Some(branch.branch.clone()),
-            title: req.title.trim().to_string(),
-            body: req.body,
-            github_issue: req.github_issue,
+            title: input.title.trim().to_string(),
+            body: input.body,
+            github_issue: input.github_issue,
             ..Default::default()
         },
         &tags,
@@ -240,7 +246,7 @@ async fn change_issue_status(st: &AppState, issue: &Issue, status: &str) -> ApiR
 
 pub(super) async fn get_issue_operation(
     context: OperationContext,
-    input: issue_operations::IdInput,
+    input: issue_operations::get::Input,
 ) -> ApiResult<IssueView> {
     let st = context.state;
     let id = input.id;
@@ -346,21 +352,28 @@ pub(super) async fn patch_issue(
 /// so its session feed refreshes.
 pub(super) async fn set_issue_tag_operation(
     context: OperationContext,
-    input: issue_operations::SetTagInput,
+    input: issue_operations::tags::set::Input,
 ) -> ApiResult<IssueView> {
     let id = input.id;
     let tag_key = input.key.trim().to_string();
-    let req = input.request;
+    // `by` is derived from the credential, not taken from the body. The old
+    // request let a caller name whoever it liked as the setter, and the tag is
+    // shown in the dashboard as provenance.
+    let by = Some(super::author_or_manual(
+        context.principal.is_human().then_some("manual"),
+    ));
+    let repo_root = input.repo_root.clone();
     let result = issue_actions_operation(
         context,
-        IssueActionsReq {
+        issue_operations::actions::Input {
             ids: vec![id],
             action: IssueAction::Tag {
                 key: tag_key,
-                value: req.value,
-                note: req.note,
-                by: req.by,
+                value: input.value,
+                note: input.note,
+                by,
             },
+            repo_root,
         },
     )
     .await?;
@@ -375,16 +388,18 @@ pub(super) async fn set_issue_tag_operation(
 /// MCP and bulk CLI calls. A missing tag is reported as a conflict.
 pub(super) async fn clear_issue_tag_operation(
     context: OperationContext,
-    input: issue_operations::DeleteTagInput,
+    input: issue_operations::tags::delete::Input,
 ) -> ApiResult<IssueView> {
     let id = input.id;
+    let repo_root = input.repo_root.clone();
     let result = issue_actions_operation(
         context,
-        IssueActionsReq {
+        issue_operations::actions::Input {
             ids: vec![id],
             action: IssueAction::Untag {
                 key: input.key.trim().to_string(),
             },
+            repo_root,
         },
     )
     .await?;
@@ -397,17 +412,17 @@ pub(super) async fn clear_issue_tag_operation(
 
 pub(super) async fn delete_issue_operation(
     context: OperationContext,
-    input: issue_operations::IdInput,
-) -> ApiResult<DeleteIssueResult> {
+    input: issue_operations::delete::Input,
+) -> ApiResult<IssueActionsResult> {
     issue_actions_operation(
         context,
-        IssueActionsReq {
-            ids: vec![input.id],
+        issue_operations::actions::Input {
+            ids: input.ids,
             action: IssueAction::Delete,
+            repo_root: input.repo_root,
         },
     )
-    .await?;
-    Ok(DeleteIssueResult { deleted: true })
+    .await
 }
 
 fn validate_issue_action(action: &IssueAction) -> ApiResult<()> {
@@ -452,7 +467,7 @@ fn domain_issue_action(action: &IssueAction) -> BulkIssueAction {
 /// structured error details; no requested issue changes.
 pub(super) async fn issue_actions_operation(
     context: OperationContext,
-    req: IssueActionsReq,
+    req: issue_operations::actions::Input,
 ) -> ApiResult<IssueActionsResult> {
     let st = context.state;
     let principal = context.principal;
@@ -527,52 +542,34 @@ pub(super) async fn issue_actions_operation(
     })
 }
 
-pub(super) async fn issue_actions(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<IssueActionsReq>,
-) -> ApiResult<Json<IssueActionsResult>> {
-    issue_actions_operation(OperationContext::new(st, principal), req)
-        .await
-        .map(Json)
-}
-
 pub(super) async fn close_issue_operation(
     context: OperationContext,
-    input: issue_operations::IdInput,
-) -> ApiResult<IssueView> {
-    let result = issue_actions_operation(
+    input: issue_operations::close::Input,
+) -> ApiResult<IssueActionsResult> {
+    issue_actions_operation(
         context,
-        IssueActionsReq {
-            ids: vec![input.id],
+        issue_operations::actions::Input {
+            ids: input.ids,
             action: IssueAction::Close,
+            repo_root: input.repo_root,
         },
     )
-    .await?;
-    result
-        .issues
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::not_found("issue"))
+    .await
 }
 
 pub(super) async fn reopen_issue_operation(
     context: OperationContext,
-    input: issue_operations::IdInput,
-) -> ApiResult<IssueView> {
-    let result = issue_actions_operation(
+    input: issue_operations::reopen::Input,
+) -> ApiResult<IssueActionsResult> {
+    issue_actions_operation(
         context,
-        IssueActionsReq {
-            ids: vec![input.id],
+        issue_operations::actions::Input {
+            ids: input.ids,
             action: IssueAction::Reopen,
+            repo_root: input.repo_root,
         },
     )
-    .await?;
-    result
-        .issues
-        .into_iter()
-        .next()
-        .ok_or_else(|| AppError::not_found("issue"))
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -621,23 +618,20 @@ async fn require_repo_access(
     }
 }
 
-/// The repo-wide issue board: every issue in a repo, or just the unclaimed
-/// backlog with `?scope=backlog`.
+/// The repo-wide issue board, or just the unclaimed backlog with `backlog: true`.
+///
+/// The repo-access check the old handler ran inline is gone: `authorize()` does
+/// it once from `Scoped`, before this is ever called.
 pub(super) async fn list_repo_issues_operation(
     context: OperationContext,
-    input: issue_operations::ListInput,
+    input: issue_operations::list::Input,
 ) -> ApiResult<Vec<IssueView>> {
     let st = context.state;
-    let principal = context.principal;
     let repo_root = resolve_repo_root(Some(&input.repo_root), None).await?;
-    require_repo_access(&st, &principal, &repo_root).await?;
-    let issues = match input.scope {
-        issue_operations::ListScope::Backlog => {
-            weaver_core::issue::list_backlog(&st.db, &repo_root, input.all).await?
-        }
-        issue_operations::ListScope::Repo => {
-            weaver_core::issue::list_for_repo(&st.db, &repo_root, input.all).await?
-        }
+    let issues = if input.backlog {
+        weaver_core::issue::list_backlog(&st.db, &repo_root, input.all).await?
+    } else {
+        weaver_core::issue::list_for_repo(&st.db, &repo_root, input.all).await?
     };
     issue_views(&st.db, issues).await
 }
@@ -645,25 +639,24 @@ pub(super) async fn list_repo_issues_operation(
 /// Create an unclaimed repo-level backlog item.
 pub(super) async fn create_repo_issue_operation(
     context: OperationContext,
-    req: CreateRepoIssueReq,
+    req: issue_operations::backlog::create::Input,
 ) -> ApiResult<IssueView> {
     let st = context.state;
-    let principal = context.principal;
     if req.title.trim().is_empty() {
         return Err(AppError::bad_request("issue title is required"));
     }
     if req.repo_root.trim().is_empty() {
         return Err(AppError::bad_request("repo_root is required"));
     }
-    require_repo_access(&st, &principal, req.repo_root.trim()).await?;
-    let tags = initial_issue_tags(req.tags)?;
+    // No inline repo-access check: `authorize()` already ran it from `Scoped`.
+    let tags = Vec::new();
     let issue = weaver_core::issue::add_with_tags(
         &st.db,
         &weaver_core::issue::NewIssue {
             repo_root: req.repo_root.clone(),
             source_branch: req.source_branch.clone(),
             title: req.title.trim().to_string(),
-            body: req.body,
+            body: req.body.clone(),
             github_issue: req.github_issue,
             ..Default::default()
         },

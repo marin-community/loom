@@ -11,14 +11,20 @@ use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;
 use weaver_api::{
-    AddUserReq, AuthMethods, CreateTokenReq, CreatedTokenView, GithubConfigView, LoginReq, MeView,
-    SetGithubConfigReq, SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
+    AddUserReq, AuthMethods, AutomationTokenView, CreateTokenReq, CreatedTokenView, FederationReq,
+    FederationView, GithubConfigView, GithubTokenStatusView, LoginReq, MeView,
+    RemoveFederationResult, RemoveUserResult, RevokeTokenResult, SetGithubConfigReq,
+    SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
+};
+use weaver_api::operations::auth::{
+    automation_token, federations, github_config, github_token, me, set_password, tokens, users,
 };
 
 use crate::auth::{self, Grant, Principal};
 use crate::config;
 use crate::user_token;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 // ===========================================================================
@@ -163,6 +169,10 @@ pub(super) async fn grant_allows(
         return true;
     }
     match &principal.grant {
+        // No credential reaches a raw path. Anonymous operations are permitted
+        // by `operation_grant_allows` on the strength of their declaration, not
+        // by a path prefix.
+        Grant::Anonymous => false,
         Grant::Admin => true,
         Grant::User => user_grant_allows(method, path),
         Grant::Automation { subject, .. } => {
@@ -245,15 +255,24 @@ pub(super) fn operation_grant_allows(
     principal: &Principal,
     operation: &weaver_api::OperationSpec,
 ) -> bool {
+    if operation.actor == weaver_api::ActorPolicy::Anonymous {
+        return true;
+    }
     match &principal.grant {
-        Grant::Admin => true,
+        Grant::Anonymous => false,
+        // `SessionOnly` returns session credential material, so an operator may
+        // not stand in for the session the way `SessionSelf` allows.
+        Grant::Admin => operation.actor != weaver_api::ActorPolicy::SessionOnly,
         Grant::User => matches!(
             operation.actor,
             weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == weaver_api::ActorPolicy::Internal,
         Grant::Session { capabilities, .. } => {
-            operation.actor == weaver_api::ActorPolicy::SessionSelf
+            matches!(
+                operation.actor,
+                weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::SessionOnly
+            )
                 && capabilities.as_ref().is_none_or(|granted| {
                     operation
                         .grants
@@ -888,6 +907,419 @@ pub(super) async fn put_github_config(
     config::apply(&st.db, &changes).await?;
     tracing::info!(secret_provided, "github oauth config updated");
     Ok(Json(github_config_view(&st).await?))
+}
+
+// ===========================================================================
+// Operation registry bindings
+//
+// `auth.login`, `auth.logout`, and `auth.federate` are declared in
+// `weaver_api::operations::auth` but are deliberately NOT bound here — see the
+// doc comment on each below. Every other operation in the bundle is bound.
+// ===========================================================================
+
+/// `auth.me` — who the caller is. Unlike the legacy `GET /api/auth/me` above
+/// (which this leaves untouched), this operation is only ever reached once
+/// `require_auth` has already resolved a [`Principal`] — the registry's
+/// `actor = User` bars an anonymous caller before the handler runs — so it
+/// always answers `authenticated: true`. The "is anyone logged in yet" check
+/// the SPA needs before that point stays served by the legacy route.
+async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView> {
+    let methods = auth_methods(&context.state).await;
+    let p = context.principal;
+    Ok(MeView {
+        authenticated: true,
+        role: p.user_role().map(user_role_view),
+        username: Some(p.username),
+        github_login: p.github_login,
+        via: Some(p.via.as_str().to_string()),
+        methods,
+    })
+}
+
+/// `auth.automation_token` — mint a short-lived automation credential for
+/// another subject. `actor = Admin` on the descriptor now does what the old
+/// handler's `principal.is_admin()` check did by hand; that inline check is
+/// deleted rather than ported.
+async fn automation_token_op(
+    context: OperationContext,
+    input: automation_token::Input,
+) -> ApiResult<AutomationTokenView> {
+    crate::automation::mint(
+        &context.state.db,
+        &input.subject,
+        input.profiles,
+        input.ttl_secs,
+        None,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+/// `auth.set_password` — set/change the caller's own password. There is no
+/// `username` in the input at all: the operation can only ever touch
+/// `context.principal`'s own account, which is the ownership guarantee the
+/// old handler enforced by construction (it never took a `username` either).
+async fn set_password_op(
+    context: OperationContext,
+    input: set_password::Input,
+) -> ApiResult<UserView> {
+    if input.new_password.len() < 8 {
+        return Err(AppError::bad_request(
+            "password must be at least 8 characters",
+        ));
+    }
+    auth::set_password(
+        &context.state.db,
+        &context.principal.username,
+        Some(&input.new_password),
+    )
+    .await?;
+    let user = auth::get_user(&context.state.db, &context.principal.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.tokens.list` — the caller's own personal tokens (metadata only).
+/// Scoped to `context.principal.username` by construction, same as before.
+async fn list_tokens_op(
+    context: OperationContext,
+    _input: tokens::list::Input,
+) -> ApiResult<Vec<TokenView>> {
+    let tokens = auth::list_tokens(&context.state.db, &context.principal.username).await?;
+    Ok(tokens.into_iter().map(token_view).collect())
+}
+
+/// `auth.tokens.create` — mint a personal token owned by the caller. The
+/// plaintext is returned exactly once, here; nothing else ever hands it back.
+async fn create_token_op(
+    context: OperationContext,
+    input: tokens::create::Input,
+) -> ApiResult<CreatedTokenView> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("a token name is required"));
+    }
+    if input
+        .expires_in_days
+        .is_some_and(|days| days > 0 && weaver_core::db::iso_in_days(days).is_none())
+    {
+        return Err(AppError::bad_request(
+            "token expiry is outside the supported range",
+        ));
+    }
+    let (token, info) = auth::create_token(
+        &context.state.db,
+        &context.principal.username,
+        name,
+        input.expires_in_days,
+    )
+    .await?;
+    tracing::info!(username = %context.principal.username, id = %info.id, name = %info.name, "api token created");
+    Ok(CreatedTokenView {
+        token,
+        info: token_view(info),
+    })
+}
+
+/// `auth.tokens.revoke` — revoke one of the caller's own tokens.
+/// `auth::revoke_token`'s query is `WHERE id = ? AND username = ?`: a caller
+/// cannot name another user's token id and revoke it, because no row matches.
+/// That ownership check lives in the query, not a separate `if`, and is
+/// preserved unchanged here (see point 4 in the report).
+async fn revoke_token_op(
+    context: OperationContext,
+    input: tokens::revoke::Input,
+) -> ApiResult<RevokeTokenResult> {
+    if auth::revoke_token(&context.state.db, &context.principal.username, &input.id).await? {
+        tracing::info!(username = %context.principal.username, id = %input.id, "api token revoked");
+        Ok(RevokeTokenResult {
+            revoked: true,
+            id: input.id,
+        })
+    } else {
+        Err(AppError::not_found("token"))
+    }
+}
+
+/// `auth.federations.list` — the registered workload-identity mappings.
+async fn list_federations_op(
+    context: OperationContext,
+    _input: federations::list::Input,
+) -> ApiResult<Vec<FederationView>> {
+    Ok(crate::automation::federation_list(&context.state.db).await?)
+}
+
+/// Best-effort name when the caller omits one, per the operation's own doc
+/// comment: "Omitted legacy calls derive one from the identity fields below."
+/// `crate::automation::federation_add` upserts on `name` and requires it to
+/// pass `crate::profile::validate_name` (starts with a letter; then letters,
+/// digits, `-`, `_`; at most 64 bytes), so the chosen identity field is
+/// slugified into that shape rather than passed through raw.
+fn derive_federation_name(input: &federations::create::Input) -> String {
+    let seed = match input.provider.trim().to_ascii_lowercase().as_str() {
+        "google" => input
+            .service_account
+            .as_deref()
+            .or(input.subject.as_deref()),
+        _ => input
+            .repository_id
+            .as_deref()
+            .or(input.workflow_ref.as_deref()),
+    }
+    .unwrap_or(input.service_tag.as_str());
+    let slug: String = seed
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let mut name = format!("{}-{slug}", input.provider.trim().to_ascii_lowercase());
+    name.truncate(64);
+    if !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        name = format!("f-{name}");
+        name.truncate(64);
+    }
+    name
+}
+
+/// `auth.federations.create` — register or reconcile a workload-identity
+/// mapping.
+async fn create_federation_op(
+    context: OperationContext,
+    input: federations::create::Input,
+) -> ApiResult<FederationView> {
+    let name = match input.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => derive_federation_name(&input),
+    };
+    let req = FederationReq {
+        name,
+        provider: input.provider,
+        issuer: input.issuer,
+        audience: input.audience,
+        subject: input.subject,
+        service_account: input.service_account,
+        service_tag: input.service_tag,
+        repository_id: input.repository_id,
+        workflow_ref: input.workflow_ref,
+        event_name: input.event_name,
+        ref_pattern: input.ref_pattern,
+        profiles: input.profiles,
+    };
+    crate::automation::federation_add(&context.state.db, &req)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+/// `auth.federations.remove` — remove a workload-identity mapping.
+async fn remove_federation_op(
+    context: OperationContext,
+    input: federations::remove::Input,
+) -> ApiResult<RemoveFederationResult> {
+    if crate::automation::federation_remove(&context.state.db, &input.id).await? {
+        Ok(RemoveFederationResult {
+            removed: true,
+            id: input.id,
+        })
+    } else {
+        Err(AppError::not_found("federation mapping"))
+    }
+}
+
+/// `auth.users.list` — the approved-operator allowlist.
+async fn list_users_op(
+    context: OperationContext,
+    _input: users::list::Input,
+) -> ApiResult<Vec<UserView>> {
+    let users = auth::list_users(&context.state.db).await?;
+    Ok(users.into_iter().map(user_view).collect())
+}
+
+/// `auth.users.create` — approve a new operator.
+async fn add_user_op(context: OperationContext, input: users::create::Input) -> ApiResult<UserView> {
+    let username = input.username.trim();
+    if username.is_empty() {
+        return Err(AppError::bad_request("a username is required"));
+    }
+    let github = input
+        .github_login
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let password = input.password.as_deref().filter(|s| !s.is_empty());
+    if github.is_none() && password.is_none() {
+        return Err(AppError::bad_request(
+            "set a GitHub login or a password so the user can sign in",
+        ));
+    }
+    if let Some(p) = password {
+        if p.len() < 8 {
+            return Err(AppError::bad_request(
+                "password must be at least 8 characters",
+            ));
+        }
+    }
+    auth::add_user(
+        &context.state.db,
+        username,
+        github,
+        password,
+        user_role_input(input.role),
+    )
+    .await
+    .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
+    tracing::info!(username, "operator added");
+    let user = auth::get_user(&context.state.db, username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.users.set_role` — change an operator's role. Admin-only via
+/// `actor = Admin`; any admin may change any user's role, including their
+/// own, matching the old handler (which took no principal at all). The
+/// "don't demote the last administrator" business rule lives inside
+/// `auth::set_user_role` and is preserved unchanged.
+async fn set_user_role_op(
+    context: OperationContext,
+    input: users::set_role::Input,
+) -> ApiResult<UserView> {
+    auth::set_user_role(&context.state.db, &input.username, user_role_input(input.role))
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    tracing::info!(username = %input.username, role = ?input.role, "user role updated");
+    let user = auth::get_user(&context.state.db, &input.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.users.remove` — remove an approved operator. The "you cannot remove
+/// yourself" check is business state (self-removal would strand the acting
+/// admin, or worse, be used to strand others), not an authority check
+/// `authorize()` could express, so it is kept exactly as before (point 4).
+async fn remove_user_op(
+    context: OperationContext,
+    input: users::remove::Input,
+) -> ApiResult<RemoveUserResult> {
+    if input.username == context.principal.username {
+        return Err(AppError::bad_request("you cannot remove yourself"));
+    }
+    match auth::remove_user(&context.state.db, &input.username).await {
+        Ok(true) => {
+            tracing::info!(username = %input.username, "operator removed");
+            Ok(RemoveUserResult {
+                removed: true,
+                username: input.username,
+            })
+        }
+        Ok(false) => Err(AppError::not_found("user")),
+        Err(e) => Err(AppError::bad_request(e.to_string())),
+    }
+}
+
+fn token_status_view(status: user_token::TokenStatus) -> GithubTokenStatusView {
+    GithubTokenStatusView {
+        set: status.set,
+        updated_at: status.updated_at,
+    }
+}
+
+/// `auth.github_token.get` — whether the caller has a personal GitHub token
+/// on file. Scoped to `context.principal.username`; the value itself is
+/// never returned by this or any other operation.
+async fn get_github_token_op(
+    context: OperationContext,
+    _input: github_token::get::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_token.set` — set the caller's own personal GitHub token.
+async fn set_github_token_op(
+    context: OperationContext,
+    input: github_token::set::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    let token = input.token.trim();
+    if token.is_empty() {
+        return Err(AppError::bad_request("a token is required"));
+    }
+    user_token::set(&context.state.db, &context.principal.username, token).await?;
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_token.remove` — clear the caller's own personal GitHub token.
+async fn remove_github_token_op(
+    context: OperationContext,
+    _input: github_token::remove::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    user_token::remove(&context.state.db, &context.principal.username).await?;
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_config.get` — the GitHub sign-in / App setup (secret
+/// withheld). Reuses the same `github_config_view` the legacy handler above
+/// builds its response from.
+async fn get_github_config_op(
+    context: OperationContext,
+    _input: github_config::get::Input,
+) -> ApiResult<GithubConfigView> {
+    github_config_view(&context.state).await
+}
+
+/// `auth.github_config.set` — set the GitHub sign-in OAuth client id (and,
+/// optionally, its secret).
+async fn set_github_config_op(
+    context: OperationContext,
+    input: github_config::set::Input,
+) -> ApiResult<GithubConfigView> {
+    let mut changes: Vec<config::Change> = vec![(
+        auth::GH_CLIENT_ID_KEY.to_string(),
+        Some(input.client_id.trim().to_string()),
+    )];
+    let secret_provided = input.client_secret.is_some();
+    if let Some(secret) = input.client_secret {
+        let secret = secret.trim().to_string();
+        changes.push((
+            auth::GH_CLIENT_SECRET_KEY.to_string(),
+            (!secret.is_empty()).then_some(secret),
+        ));
+    }
+    config::apply(&context.state.db, &changes).await?;
+    tracing::info!(secret_provided, "github oauth config updated");
+    github_config_view(&context.state).await
+}
+
+/// The `auth` bundle's operation bindings. `auth.login`, `auth.logout`, and
+/// `auth.federate` are intentionally absent — see the doc comments on
+/// [`me_op`] and the module-level report for why they cannot go through this
+/// path without either bypassing authentication or inventing new transport
+/// plumbing this registry doesn't have.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<me::Me, _, _>(me_op),
+        register::<automation_token::AutomationToken, _, _>(automation_token_op),
+        register::<set_password::SetPassword, _, _>(set_password_op),
+        register::<tokens::list::List, _, _>(list_tokens_op),
+        register::<tokens::create::Create, _, _>(create_token_op),
+        register::<tokens::revoke::Revoke, _, _>(revoke_token_op),
+        register::<federations::list::List, _, _>(list_federations_op),
+        register::<federations::create::Create, _, _>(create_federation_op),
+        register::<federations::remove::Remove, _, _>(remove_federation_op),
+        register::<users::list::List, _, _>(list_users_op),
+        register::<users::create::Create, _, _>(add_user_op),
+        register::<users::set_role::SetRole, _, _>(set_user_role_op),
+        register::<users::remove::Remove, _, _>(remove_user_op),
+        register::<github_token::get::Get, _, _>(get_github_token_op),
+        register::<github_token::set::Set, _, _>(set_github_token_op),
+        register::<github_token::remove::Remove, _, _>(remove_github_token_op),
+        register::<github_config::get::Get, _, _>(get_github_config_op),
+        register::<github_config::set::Set, _, _>(set_github_config_op),
+    ]
 }
 
 #[cfg(test)]

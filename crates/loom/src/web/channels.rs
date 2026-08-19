@@ -42,7 +42,12 @@ pub(super) fn principal_subject(principal: &Principal) -> Subject {
     match &principal.grant {
         Grant::Session { session_id, .. } => Subject::new(SubjectKind::Session, session_id),
         Grant::Automation { subject, .. } => Subject::new(SubjectKind::Automation, subject),
-        Grant::Admin | Grant::User => Subject::new(SubjectKind::User, &principal.username),
+        // `Anonymous` reaches nothing that authors or reads a channel — every
+        // `channels.*` operation declares an actor policy that excludes it
+        // (see `operations::actor_allows`) — but the match must stay total.
+        Grant::Admin | Grant::User | Grant::Anonymous => {
+            Subject::new(SubjectKind::User, &principal.username)
+        }
     }
 }
 

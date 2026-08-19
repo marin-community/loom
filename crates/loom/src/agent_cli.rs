@@ -752,6 +752,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
         .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
             repo_root: b.repo_root.clone(),
             all: false,
+            backlog: false,
         })
         .await
         .unwrap_or_default();
@@ -1374,6 +1375,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
                     repo_root: b.repo_root.clone(),
                     all,
+                    backlog: false,
                 })
                 .await?;
             if repo {

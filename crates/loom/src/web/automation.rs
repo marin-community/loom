@@ -18,11 +18,17 @@ use super::{ApiResult, AppError, AppState};
 /// ops scripts, Grafana alerts). Federation/token minting (`federate`,
 /// `mint_automation_token`, `list_federations`, `add_federation`,
 /// `remove_federation`) below are a different bundle and are untouched here.
+///
+/// The legacy `/runs`, `/runs/{id}` axum routes in `web/mod.rs` still point at
+/// `list_runs`/`get_run`/`create_run` below (unchanged) — route deletion is a
+/// coordinated pass, not this agent's to make — so the operation-registry
+/// handlers below are named `*_operation` and share their core logic with the
+/// legacy handlers rather than replacing them in place.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<run_operations::list::List, _, _>(list_runs),
-        register::<run_operations::get::Get, _, _>(get_run),
-        register::<run_operations::create::Create, _, _>(create_run),
+        register::<run_operations::list::List, _, _>(list_runs_operation),
+        register::<run_operations::get::Get, _, _>(get_run_operation),
+        register::<run_operations::create::Create, _, _>(create_run_operation),
     ]
 }
 
@@ -104,13 +110,43 @@ pub(super) async fn remove_federation(
     }
 }
 
-/// The requesting identity's subject and allowed profile set. `runs.create` is
-/// declared `actor = Internal`, so `authorize()` has already refused anything
-/// but `Grant::Admin` or `Grant::Automation` by the time a handler runs
-/// (`Grant::User`/`Grant::Session` never reach here); the automation grant's
-/// own profile allowlist is per-token business state, not something the
-/// central actor/scope check can see, so it stays.
+/// The requesting identity's subject and allowed profile set, for the legacy
+/// `/runs` route: `Grant::Admin`/`Grant::User` both act as themselves, naming
+/// any profile; `Grant::Automation` is restricted to its own minted profile
+/// set; nothing else may create a run.
 fn run_identity(
+    principal: &Principal,
+    requested_profile: &str,
+) -> ApiResult<(String, Vec<String>)> {
+    match &principal.grant {
+        Grant::Admin | Grant::User => Ok((
+            principal.username.clone(),
+            vec![requested_profile.to_string()],
+        )),
+        Grant::Automation { subject, profiles } => {
+            if !profiles.iter().any(|profile| profile == requested_profile) {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    format!("automation grant does not allow profile '{requested_profile}'"),
+                ));
+            }
+            Ok((subject.clone(), profiles.clone()))
+        }
+        Grant::Anonymous | Grant::Session { .. } => Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "session credentials cannot create automation runs",
+        )),
+    }
+}
+
+/// The requesting identity for `runs.create`, `actor = Internal`:
+/// `authorize()` has already refused anything but `Grant::Admin` or
+/// `Grant::Automation` by the time this runs (`Grant::User`/`Grant::Session`
+/// cannot reach here — unlike the legacy `/runs` route above, which still
+/// treats `Grant::User` the same as `Grant::Admin`; see the port report). The
+/// automation grant's own profile allowlist is per-token business state, not
+/// something the central actor/scope check can see, so it stays.
+fn create_run_identity(
     principal: &Principal,
     requested_profile: &str,
 ) -> ApiResult<(String, Vec<String>)> {
@@ -348,23 +384,18 @@ async fn dispatch_channel_run(
     }
 }
 
-pub(super) async fn create_run(
-    context: OperationContext,
-    input: run_operations::create::Input,
+/// Shared body of `POST /runs` (legacy) and `runs.create` (operation
+/// registry): everything after identity resolution, which is the one piece
+/// that differs between the two routes (see `run_identity` vs
+/// `create_run_identity`).
+async fn create_run_core(
+    st: &AppState,
+    principal: &Principal,
+    mut req: RunReq,
+    subject: String,
+    profiles: Vec<String>,
 ) -> ApiResult<RunView> {
-    let st = context.state;
-    let principal = context.principal;
-    let mut req = RunReq {
-        profile: input.profile,
-        idempotency_key: input.idempotency_key,
-        source: input.source,
-        watch_id: input.watch_id,
-        channel: input.channel,
-        slack: input.slack,
-        session: input.session,
-    };
     let profile = req.profile.trim().to_string();
-    let (subject, profiles) = run_identity(&principal, &profile)?;
     if !matches!(req.source.as_str(), "actions" | "ops" | "grafana") {
         return Err(AppError::bad_request(
             "run source must be 'actions', 'ops', or 'grafana'",
@@ -490,7 +521,7 @@ pub(super) async fn create_run(
             }
             crate::runs::Reservation::Existing(run) | crate::runs::Reservation::Created(run) => run,
         };
-        return dispatch_channel_run(&st, subject, profiles, run).await;
+        return dispatch_channel_run(st, subject, profiles, run).await;
     }
     let run = match reservation {
         crate::runs::Reservation::Existing(run) => {
@@ -513,15 +544,75 @@ pub(super) async fn create_run(
         }
         crate::runs::Reservation::Created(run) => run,
     };
-    launch_run(&st, req, subject, profiles, run, LaunchFailure::Final).await
+    launch_run(st, req, subject, profiles, run, LaunchFailure::Final).await
+}
+
+/// `POST /runs` — the legacy axum route, unchanged, still reachable by
+/// `Grant::User` per `web/auth.rs`'s `user_grant_allows`. Kept in place
+/// alongside `create_run_operation` until the coordinator's route-deletion
+/// pass; see `bound_operations`.
+pub(super) async fn create_run(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<RunReq>,
+) -> ApiResult<Json<RunView>> {
+    let profile = req.profile.trim().to_string();
+    let (subject, profiles) = run_identity(&principal, &profile)?;
+    Ok(Json(
+        create_run_core(&st, &principal, req, subject, profiles).await?,
+    ))
+}
+
+/// `runs.create` — the operation-registry handler. `actor = Internal` means
+/// `authorize()` has already narrowed the reachable grants to
+/// `Admin`/`Automation` (see `create_run_identity`) before this runs.
+pub(super) async fn create_run_operation(
+    context: OperationContext,
+    input: run_operations::create::Input,
+) -> ApiResult<RunView> {
+    let req = RunReq {
+        profile: input.profile,
+        idempotency_key: input.idempotency_key,
+        source: input.source,
+        watch_id: input.watch_id,
+        channel: input.channel,
+        slack: input.slack,
+        session: input.session,
+    };
+    let profile = req.profile.trim().to_string();
+    let (subject, profiles) = create_run_identity(&context.principal, &profile)?;
+    create_run_core(&context.state, &context.principal, req, subject, profiles).await
+}
+
+/// `GET /runs` — the legacy axum route, unchanged. Still reachable by
+/// `Grant::Automation`, filtered to that credential's own subject; see
+/// `list_runs_operation` for why the new operation cannot preserve that.
+pub(super) async fn list_runs(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> ApiResult<Json<Vec<RunView>>> {
+    let subject = match &principal.grant {
+        Grant::Admin | Grant::User => None,
+        Grant::Automation { subject, .. } => Some(subject.as_str()),
+        Grant::Anonymous | Grant::Session { .. } => {
+            return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))
+        }
+    };
+    Ok(Json(
+        crate::runs::list_for(&st.db, subject)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect(),
+    ))
 }
 
 /// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`
 /// ever reach this handler (`Grant::Automation` and `Grant::Session` are
-/// refused by `authorize()` before the body runs), and the old handler showed
-/// both of those every run unfiltered — so there is no subject to filter by
-/// here any more.
-pub(super) async fn list_runs(
+/// refused by `authorize()` before the body runs, unlike the legacy route
+/// above), so unlike `list_runs` there is no subject to filter by — this is a
+/// narrowing versus the legacy route worth flagging; see the port report.
+pub(super) async fn list_runs_operation(
     context: OperationContext,
     _input: run_operations::list::Input,
 ) -> ApiResult<Vec<RunView>> {
@@ -532,10 +623,28 @@ pub(super) async fn list_runs(
         .collect())
 }
 
-/// `runs.get` is declared `actor = User`, same reasoning as `runs.list`: only
-/// `Grant::Admin`/`Grant::User` reach here, so the old handler's
-/// `Grant::Automation`-subject-match check is now unreachable and dropped.
+/// `GET /runs/{id}` — the legacy axum route, unchanged. Still reachable by
+/// `Grant::Automation`, gated to runs it owns.
 pub(super) async fn get_run(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<RunView>> {
+    let run = crate::runs::get(&st.db, &id)
+        .await?
+        .ok_or_else(|| AppError::not_found("automation run"))?;
+    if matches!(&principal.grant, Grant::Automation { subject, .. } if subject != &run.actor_subject)
+    {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
+    }
+    Ok(Json(run.into()))
+}
+
+/// `runs.get` is declared `actor = User`, same reasoning as
+/// `list_runs_operation`: only `Grant::Admin`/`Grant::User` reach here, so
+/// the legacy handler's `Grant::Automation`-subject-match check above is
+/// unreachable through this path and dropped.
+pub(super) async fn get_run_operation(
     context: OperationContext,
     input: run_operations::get::Input,
 ) -> ApiResult<RunView> {

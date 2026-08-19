@@ -22,17 +22,19 @@ use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, config, custom_agents, db, events, git, github, repo};
+use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, PatchSessionReq,
+    BranchView, CreateReq, EnsureResumptionCueReq, HandoffReq, HistoryPageView, PatchSessionReq,
     ResumptionCueView, SearchSessionsOptions, SendReq, SessionCreatorFilter,
-    SessionSearchAttention, SessionSearchStatus, SessionSummaryView, SessionView, SetTagsReq,
-    SetTitleGenerationReq, TagReq,
+    SessionInterruptResult, SessionPreviewResult, SessionSearchAttention, SessionSearchStatus,
+    SessionSendResult, SessionSummaryView, SessionView, SetTagsReq, SetTitleGenerationReq, TagReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
 use weaver_core::tags;
 use weaver_core::watch::{self as watch_store};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{
     author_or_manual, require_branch, require_session, session_summary_view, session_view,
 };
@@ -574,6 +576,8 @@ pub(super) async fn create_session(
                 "automation credentials create sessions through /api/runs",
             ));
         }
+        // Unreachable: `from_principal` above already returned `None`.
+        crate::auth::Grant::Anonymous => {}
         crate::auth::Grant::Admin | crate::auth::Grant::User => {}
     }
     let created = crate::provision::create(st.clone(), req, actor)

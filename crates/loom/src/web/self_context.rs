@@ -37,6 +37,7 @@ pub(super) async fn get_self_context(
     Ok(Json(SelfContextView {
         session_id: session.id.clone(),
         branch_id: branch.id.clone(),
+        branch_name: branch.branch.clone(),
         repo_root: branch.repo_root,
         channel_id: session.id.clone(),
         session_url: crate::links::session_url(&base, &session.id),

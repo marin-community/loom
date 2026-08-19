@@ -985,7 +985,6 @@ fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/branches/{id}/issues", get(list_branch_issues))
         .route("/issues", get(list_all_issues))
-        .route("/issues/actions", post(issue_actions))
         .route("/issues/{id}", axum::routing::patch(patch_issue))
 }
 
@@ -1132,8 +1131,6 @@ pub fn router(state: AppState) -> Router {
             get(list_federations).post(add_federation),
         )
         .route("/auth/federations/{id}", delete(remove_federation))
-        .route("/runs", get(list_runs).post(create_run))
-        .route("/runs/{id}", get(get_run))
         .route("/auth/password", post(set_own_password))
         .route(
             "/auth/github-token",
