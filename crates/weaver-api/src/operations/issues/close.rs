@@ -10,6 +10,7 @@ use super::prelude::*;
     cli = "issues close",
 
     mcp = "loom_issue::close",
+    render = custom,
 )]
 pub struct Close;
 

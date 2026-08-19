@@ -91,6 +91,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut input_ty = None;
     let mut output_ty = None;
     let mut view_ty = None;
+    let mut custom_render = false;
 
     for entry in &args.entries {
         match entry.key.to_string().as_str() {
@@ -109,6 +110,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "input" => input_ty = Some(as_ident(&entry.value)?),
             "output" => output_ty = Some(as_ident(&entry.value)?),
             "view" => view_ty = Some(as_ident(&entry.value)?),
+            "render" => custom_render = as_ident(&entry.value)? == "custom",
             other => {
                 return Err(syn::Error::new_spanned(
                     &entry.key,
@@ -205,6 +207,16 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let attrs = &item.attrs;
     let vis = &item.vis;
 
+    // A JSON renderer for free. `render = custom` opts out so a bundle can
+    // write a real one without a conflicting impl.
+    let render_impl = if custom_render {
+        quote!()
+    } else {
+        quote! {
+            impl ::weaver_api::operations::Render for #name {}
+        }
+    };
+
     Ok(quote! {
         #(#attrs)*
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,5 +243,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     context: <#input_ty as ::weaver_api::operations::Operands>::CONTEXT,
                 };
         }
+
+        #render_impl
     })
 }

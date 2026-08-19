@@ -10,6 +10,7 @@ use super::prelude::*;
     cli = "issues reopen",
 
     mcp = "loom_issue::reopen",
+    render = custom,
 )]
 pub struct Reopen;
 

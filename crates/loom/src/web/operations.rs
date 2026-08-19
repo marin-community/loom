@@ -184,15 +184,22 @@ async fn scope_allows(context: &OperationContext, scope: ScopeRef<'_>) -> ApiRes
 /// operation is a boot failure rather than a 404 discovered in production.
 pub(super) fn registry() -> Vec<Bound> {
     let mut bound = Vec::new();
+    bound.extend(super::agents::bound_operations());
     bound.extend(super::artifacts::bound_operations());
     bound.extend(super::auth::bound_operations());
     bound.extend(super::automation::bound_operations());
+    bound.extend(super::branches::bound_operations());
     bound.extend(super::channels::bound_operations());
+    bound.extend(super::deployment::bound_operations());
     bound.extend(super::issues::bound_operations());
     bound.extend(super::logview::bound_operations());
+    bound.extend(super::mcps::bound_operations());
     bound.extend(super::permission_requests::bound_operations());
+    bound.extend(super::profiles::bound_operations());
+    bound.extend(super::repos::bound_operations());
     bound.extend(super::self_context::bound_operations());
     bound.extend(super::sessions::bound_operations());
+    bound.extend(super::settings::bound_operations());
     bound.extend(super::watches::bound_operations());
     bound.sort_by_key(|entry| entry.operation.id);
     bound

@@ -9,6 +9,7 @@ use super::prelude::*;
     grants = ["loom/issues/write@v1"],
     cli = "issues backlog add",
     mcp = "loom_issue::backlog_add",
+    render = custom,
 )]
 pub struct Create;
 

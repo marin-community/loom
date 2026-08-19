@@ -19,6 +19,7 @@ use crate::auth::Principal;
 use crate::events;
 use crate::session::Session;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{require_session, ApiResult, AppError, AppState};
 
 #[derive(Debug, Deserialize)]
@@ -862,6 +863,156 @@ pub(super) async fn submit_review(
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
     Ok(Json(durable_review_dto(&st, &refreshed).await?))
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `reviews.*`, bound onto `weaver_api::operations::reviews`.
+// These are the operation-typed twins of three of the legacy routes in this
+// file: `add_review_comment`, `submit_review`, and `retry_review_delivery`.
+// The ownership/business-state checks those handlers perform
+// (`creator_review`, `submitted_operator_review`, the draft/submitted status
+// guards) stay — per the porting rules, those are checks about which review
+// this credential may act on, not about the credential's authority in
+// general, so they are not something `register`'s central `authorize()` can
+// express. The legacy routes stay live and untouched until the coordinated
+// route deletion pass.
+// ---------------------------------------------------------------------------
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<weaver_api::operations::reviews::comments::create::Create, _, _>(
+            comments_create_operation,
+        ),
+        register::<weaver_api::operations::reviews::submit::Submit, _, _>(submit_operation),
+        register::<weaver_api::operations::reviews::retry_delivery::RetryDelivery, _, _>(
+            retry_delivery_operation,
+        ),
+    ]
+}
+
+/// `reviews.comments.create` — the twin of [`add_review_comment`].
+async fn comments_create_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::comments::create::Input,
+) -> ApiResult<weaver_api::operations::reviews::comments::create::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
+    if item.status != "draft" {
+        return Err(submitted_draft_conflict(&st, &item).await);
+    }
+    let (anchor, subject_version) = require_anchor(
+        &st,
+        &item,
+        &input.subject_version,
+        input.anchor_kind,
+        &input.anchor,
+    )
+    .await?;
+    let updated = match review::add_comment(
+        &st.db,
+        item.id,
+        &principal.username,
+        input.expected_revision,
+        &review::NewComment {
+            subject_version: &subject_version,
+            anchor: &anchor,
+            body: &input.body,
+        },
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
+    };
+    durable_review_dto(&st, &updated).await
+}
+
+/// `reviews.submit` — the twin of [`submit_review`].
+async fn submit_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::submit::Input,
+) -> ApiResult<weaver_api::operations::reviews::submit::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
+    let current = current_review_version(&st, &item).await?;
+    let result = if item.subject_kind == "changes" {
+        let current = current
+            .as_deref()
+            .ok_or_else(|| AppError::conflict("current change-set version is unavailable"))?;
+        review::submit_at_version(
+            &st.db,
+            item.id,
+            &principal.username,
+            input.expected_revision,
+            input.acknowledge_outdated,
+            current,
+        )
+        .await
+    } else {
+        review::submit(
+            &st.db,
+            item.id,
+            &principal.username,
+            input.expected_revision,
+            input.acknowledge_outdated,
+        )
+        .await
+    };
+    let submission = match result {
+        Ok(submission) => submission,
+        Err(error) => {
+            if error
+                .to_string()
+                .contains("acknowledge the reviewed revision")
+            {
+                let fresh = review::get(&st.db, item.id).await?.unwrap_or(item);
+                let current = current_review_version(&st, &fresh)
+                    .await?
+                    .unwrap_or_else(|| fresh.subject_version.clone());
+                return Err(AppError::conflict(error.to_string()).with_details(json!({
+                    "review": review_dto(&fresh, &current),
+                })));
+            }
+            return Err(draft_mutation_error(&st, &item, error).await);
+        }
+    };
+    if let Some(event) = submission.event {
+        st.bus.publish(event);
+    }
+    if let Err(error) = crate::review_delivery::deliver_review(&st, item.id).await {
+        tracing::warn!(review = item.id, %error, "initial review delivery attempt failed");
+    }
+    let refreshed = review::get(&st.db, item.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("review"))?;
+    durable_review_dto(&st, &refreshed).await
+}
+
+/// `reviews.retry_delivery` — the twin of [`retry_review_delivery`].
+async fn retry_delivery_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::retry_delivery::Input,
+) -> ApiResult<weaver_api::operations::reviews::retry_delivery::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = submitted_operator_review(&st, &principal, input.id).await?;
+    if item.delivery_state != "failed" {
+        return Err(AppError::conflict(
+            "only failed review deliveries can be retried",
+        ));
+    }
+    review::retry_delivery(&st.db, item.id)
+        .await
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    if let Err(error) = crate::review_delivery::deliver_review(&st, item.id).await {
+        tracing::warn!(review = item.id, %error, "manual review delivery retry failed");
+    }
+    let refreshed = review::get(&st.db, item.id)
+        .await?
+        .ok_or_else(|| AppError::not_found("review"))?;
+    durable_review_dto(&st, &refreshed).await
 }
 
 pub(super) async fn retry_review_delivery(

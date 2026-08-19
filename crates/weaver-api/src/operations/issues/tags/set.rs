@@ -9,6 +9,7 @@ use super::prelude::*;
     grants = ["loom/issues/write@v1"],
     cli = "issues tag set",
     mcp = "loom_issue::tag_set",
+    render = custom,
 )]
 pub struct Set;
 

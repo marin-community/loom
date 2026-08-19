@@ -18,6 +18,7 @@ use super::prelude::*;
     grants = ["loom/issues/write@v1"],
     cli = "issues actions",
     mcp = "loom_issue::actions",
+    render = custom,
 )]
 pub struct Actions;
 

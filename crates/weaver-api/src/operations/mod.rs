@@ -43,7 +43,9 @@ pub mod mcps;
 pub mod profiles;
 pub mod permissions;
 pub mod repos;
+pub mod reviews;
 pub mod runs;
+pub mod session_layout;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
@@ -63,6 +65,7 @@ pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[issues::bun
     watches::bundle, runs::bundle, tasks::bundle,
     settings::bundle, profiles::bundle, deployment::bundle, mcps::bundle, auth::bundle,
     agents::bundle, branches::bundle, repos::bundle,
+    reviews::bundle, session_layout::bundle,
 ];
 
 pub fn operation_bundles() -> impl Iterator<Item = OperationBundle> {

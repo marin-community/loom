@@ -17,6 +17,7 @@ use super::prelude::*;
     cli_alias = "ls",
     mcp = "loom_issue::list",
     view = View,
+    render = custom,
 )]
 pub struct List;
 

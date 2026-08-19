@@ -10,6 +10,7 @@ use super::prelude::*;
     cli = "issues get",
     cli_alias = "show",
     mcp = "loom_issue::get",
+    render = custom,
 )]
 pub struct Get;
 

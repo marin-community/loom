@@ -17,9 +17,12 @@ use weaver_api::{
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
+use weaver_api::operations::session_layout::{get, groups, r#move, reorder, restore, spaces};
+
 use crate::auth::Principal;
 use crate::session_layout::{self, MutationError};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 fn require_human(principal: &Principal) -> ApiResult<()> {

@@ -10,6 +10,7 @@ use super::prelude::*;
     cli = "issues delete",
     cli_alias = "rm",
     mcp = "loom_issue::delete",
+    render = custom,
 )]
 pub struct Delete;
 

@@ -354,7 +354,18 @@ pub enum ScopeRef<'a> {
 
 /// Text presentation, shared by the CLI and MCP so one operation renders one way.
 pub trait Render: Operation {
-    fn text(output: &Self::Output, view: &Self::View) -> String;
+    /// How the CLI prints this operation's result.
+    ///
+    /// The default is the operation's own JSON, which is honest and complete for
+    /// the long tail of administrative commands. Bundles a human reads all day —
+    /// `issues list`, `sessions list` — override it. The point of the default is
+    /// that adding an operation never requires writing a renderer before the
+    /// command works, which is how the old surface ended up advertising commands
+    /// that did not exist.
+    fn text(output: &Self::Output, _view: &Self::View) -> String {
+        serde_json::to_string_pretty(output)
+            .unwrap_or_else(|error| format!("could not render result: {error}"))
+    }
 }
 
 /// Remove dispatcher-supplied fields from a derived schema.
