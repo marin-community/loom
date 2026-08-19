@@ -20,6 +20,10 @@ use serial_test::serial;
 use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
 
+#[path = "support/tapestry.rs"]
+mod support;
+use support::tapestry_bin;
+
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
         .args(args)
@@ -27,14 +31,6 @@ fn sh(dir: &Path, program: &str, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
     assert!(status.success(), "{program} {args:?} failed");
-}
-
-fn tapestry_bin() -> PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    exe.parent()
-        .and_then(Path::parent)
-        .expect("target dir")
-        .join("tapestry")
 }
 
 /// Best-effort: kill every supervisor under `sock_dir` so detached terminals

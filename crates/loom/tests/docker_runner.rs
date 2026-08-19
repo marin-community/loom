@@ -13,6 +13,10 @@ use std::process::Command;
 
 use serial_test::serial;
 
+#[path = "support/tapestry.rs"]
+mod support;
+use support::tapestry_bin;
+
 const CHILD_FLAG: &str = "LOOM_DOCKER_RUNNER_CHILD";
 const ROOT_ENV: &str = "LOOM_DOCKER_RUNNER_TEST_ROOT";
 const SESSION_ENV: &str = "LOOM_DOCKER_RUNNER_TEST_SESSION";
@@ -60,15 +64,6 @@ fn configure(root: &Path, session: &str) {
     std::env::set_var("WEAVER_HOME", root.join(".weaver"));
     std::env::set_var("WEAVER_TAPESTRY_DIR", root.join(".weaver/sock"));
     std::env::set_var(SESSION_ENV, session);
-}
-
-fn tapestry_bin() -> PathBuf {
-    std::env::current_exe()
-        .unwrap()
-        .parent()
-        .and_then(Path::parent)
-        .unwrap()
-        .join("tapestry")
 }
 
 async fn wait_for_screen(session: &str, markers: &[&str]) -> String {

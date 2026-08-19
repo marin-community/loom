@@ -16,6 +16,10 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
 
+#[path = "support/tapestry.rs"]
+mod support;
+use support::tapestry_bin;
+
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
         .args(args)
@@ -23,17 +27,6 @@ fn sh(dir: &Path, program: &str, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
     assert!(status.success(), "{program} {args:?} failed");
-}
-
-/// The `tapestry` supervisor binary built beside this test binary (two levels up
-/// from `target/<profile>/deps/<bin>`). loom's `backend` reads
-/// `WEAVER_TAPESTRY_BIN` to launch it.
-fn tapestry_bin() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    exe.parent()
-        .and_then(Path::parent)
-        .expect("target dir")
-        .join("tapestry")
 }
 
 /// Best-effort: kill every supervisor whose socket lives under `sock_dir` with a
