@@ -38,11 +38,13 @@ pub mod auth;
 pub mod branches;
 pub mod channels;
 pub mod deployment;
+pub mod diagnostics;
 pub mod events;
 pub mod issues;
 pub mod logs;
 pub mod mcps;
 pub mod permissions;
+pub mod preferences;
 pub mod profiles;
 pub mod repos;
 pub mod reviews;
@@ -51,6 +53,7 @@ pub mod session_layout;
 pub mod sessions;
 pub mod settings;
 pub mod shell;
+pub mod slack;
 pub mod tasks;
 pub mod watches;
 
@@ -86,6 +89,9 @@ pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[
     events::bundle,
     logs::bundle,
     shell::bundle,
+    diagnostics::bundle,
+    slack::bundle,
+    preferences::bundle,
 ];
 
 pub fn operation_bundles() -> impl Iterator<Item = OperationBundle> {

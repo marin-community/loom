@@ -2447,6 +2447,22 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::ide_info::IdeInfo, _, _>(op_ide_info),
         register::<ops::shells::list::List, _, _>(op_shells_list),
         register::<ops::shells::delete::Delete, _, _>(op_shells_delete),
+        register::<ops::update::Update, _, _>(op_update),
+        register::<ops::delete::Delete, _, _>(op_delete),
+        register::<ops::config::set::Set, _, _>(op_config_set),
+        register::<ops::conversation::block::Block, _, _>(op_conversation_block),
+        register::<ops::github::refresh::Refresh, _, _>(op_github_refresh),
+        register::<ops::github::set::Set, _, _>(op_github_set),
+        register::<ops::github::clear::Clear, _, _>(op_github_clear),
+        register::<ops::github::labels::add::Add, _, _>(op_github_labels_add),
+        register::<ops::handoff::resolve::Resolve, _, _>(op_handoff_resolve),
+        register::<ops::prompt::create::Create, _, _>(op_prompt_create),
+        register::<ops::prompt::retract::Retract, _, _>(op_prompt_retract),
+        register::<ops::resumption_cue::get::Get, _, _>(op_resumption_cue_get),
+        register::<ops::resumption_cue::ensure::Ensure, _, _>(op_resumption_cue_ensure),
+        register::<ops::permissions::answer::Answer, _, _>(op_permissions_answer),
+        register::<ops::title::regenerate::Regenerate, _, _>(op_title_regenerate),
+        register::<ops::title::generation::set::Set, _, _>(op_title_generation_set),
     ];
     bound.extend(super::session_summary::bound_operations());
     bound.extend(super::changes::bound_operations());
@@ -3246,4 +3262,463 @@ async fn op_shells_delete(
     let (session, _) = require_session(&context.state.db, &input.session).await?;
     crate::shell::kill_debug(&session.id, input.index).await;
     Ok(crate::shell::list_debug(&session.id).await)
+}
+
+/// `sessions.update` — ported from [`patch_session`]. The legacy body's
+/// `park`/`sort_order` compatibility fields (always rejected with a fixed
+/// error) are not part of this operation's input at all: they existed only so
+/// an old frontend payload failed loudly instead of being silently ignored,
+/// and a caller of this operation never sends them.
+async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (initial_session, _) = require_session(&st.db, &input.session).await?;
+    let _source_permit = st.launch_gate.acquire_session(&initial_session.id).await;
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+    let Some((session, branch)) = session_mod::with_branch(&st.db, &initial_session.id).await?
+    else {
+        return Err(AppError::conflict(
+            "session changed while the update was waiting; review it again",
+        ));
+    };
+    if let Some(title) = &input.title {
+        let title = branch_mod::sanitize_user_title(title)
+            .ok_or_else(|| AppError::bad_request("title must not be empty"))?;
+        let expected_title = input.expected_title.as_deref().ok_or_else(|| {
+            AppError::bad_request("expected_title is required when renaming a session")
+        })?;
+        let expected_provenance = input
+            .expected_title_provenance
+            .as_deref()
+            .ok_or_else(|| {
+                AppError::bad_request(
+                    "expected_title_provenance is required when renaming a session",
+                )
+            })?
+            .parse::<TitleProvenance>()
+            .map_err(AppError::bad_request)?;
+        match branch_mod::replace_title(
+            &st.db,
+            &branch.id,
+            expected_title,
+            expected_provenance,
+            &title,
+            TitleProvenance::User,
+        )
+        .await?
+        {
+            TitleUpdate::Applied(_) => {
+                crate::channels::update_branch_channel_names(&st.db, &branch.id, &title).await?;
+            }
+            TitleUpdate::Stale(current) => {
+                return Err(AppError::conflict(
+                    "the task label changed while it was being edited; review it and retry",
+                )
+                .with_fields(json!({ "branch": super::branch_view(&st.db, &current).await? })));
+            }
+            TitleUpdate::Missing => return Err(AppError::not_found("branch")),
+        }
+    }
+    if let Some(goal) = &input.goal {
+        branch_mod::set_goal(&st.db, &branch.id, goal, "user").await?;
+        session_mod::bump_mutation_revision(&st.db, &session.id).await?;
+        crate::channels::update_session_goal(&st.db, &session.id, goal).await?;
+        tokio::fs::write(db::run_dir(&session.id).join("goal.txt"), goal)
+            .await
+            .ok();
+    }
+    if let Some(description) = &input.description {
+        branch_mod::set_description(&st.db, &branch.id, description).await?;
+    }
+    if let Some(status) = &input.status {
+        if !session_mod::STATUSES.contains(&status.as_str()) {
+            return Err(AppError::bad_request(format!("invalid status '{status}'")));
+        }
+        session_mod::set_status(&st.db, &session.id, status).await?;
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "status",
+            json!({ "status": status, "source": "manual" }),
+        )
+        .await
+        .ok();
+    }
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.delete` — ported from [`delete_session`].
+async fn op_delete(
+    context: OperationContext,
+    input: ops::delete::Input,
+) -> ApiResult<ops::delete::DeleteResult> {
+    let st = &context.state;
+    let (session, branch) = match require_session(&st.db, &input.session).await {
+        Ok(found) => found,
+        Err(error) if error.is_not_found() => {
+            return op_delete_launch_attempt(st, &input.session).await;
+        }
+        Err(error) => return Err(error),
+    };
+    let warnings = remove(st, &session, &branch, input.keep_branch).await?;
+    Ok(ops::delete::DeleteResult {
+        deleted: true,
+        kind: "session".to_string(),
+        warnings,
+    })
+}
+
+/// The `sessions.delete` counterpart of [`delete_launch_attempt`]: same
+/// escape hatch [`op_archive_launch_attempt`] uses for `sessions.archive`,
+/// wired to this operation's own result type.
+async fn op_delete_launch_attempt(
+    st: &AppState,
+    session_id: &str,
+) -> ApiResult<ops::delete::DeleteResult> {
+    if crate::runs::list_for_session(&st.db, session_id)
+        .await?
+        .is_empty()
+    {
+        return Err(AppError::not_found("session"));
+    }
+    crate::runs::cancel_for_session_with_summary(
+        &st.db,
+        session_id,
+        "launch attempt removed by user",
+    )
+    .await?;
+    let warnings = crate::session_manager::teardown_reserved_runtime(session_id).await;
+    st.ide.kill(session_id);
+    crate::auth::revoke_session_tokens(&st.db, session_id)
+        .await
+        .ok();
+    crate::runs::delete_for_session(&st.db, session_id).await?;
+    Ok(ops::delete::DeleteResult {
+        deleted: true,
+        kind: "launch_attempt".to_string(),
+        warnings,
+    })
+}
+
+/// `sessions.config.set` — ported from [`set_config_option`].
+async fn op_config_set(
+    context: OperationContext,
+    input: ops::config::set::Input,
+) -> ApiResult<ops::config::set::ConfigOptionResult> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(st, &session)?;
+    let metadata = handle
+        .set_config_option(input.config_id.clone(), input.value.clone())
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    Ok(ops::config::set::ConfigOptionResult {
+        config_id: input.config_id,
+        value: input.value,
+        metadata: AcpMetadataView {
+            commands: metadata.commands,
+            config_options: metadata.config_options,
+            modes: metadata.modes,
+            steering_supported: metadata.steering_supported,
+        },
+    })
+}
+
+/// `sessions.conversation.block` — ported from [`conversation_block`].
+async fn op_conversation_block(
+    context: OperationContext,
+    input: ops::conversation::block::Input,
+) -> ApiResult<weaver_core::transcript::iris::Block> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let log = crate::chatlog::conversation(&st.db, &session, &branch)
+        .await
+        .ok_or_else(|| AppError::not_found("conversation"))?;
+    log.messages
+        .get(input.message as usize)
+        .and_then(|m| m.blocks.get(input.block as usize))
+        .cloned()
+        .ok_or_else(|| AppError::not_found("conversation block"))
+}
+
+/// `sessions.github.refresh` — ported from [`refresh_github_session`].
+async fn op_github_refresh(
+    context: OperationContext,
+    input: ops::github::refresh::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    github::refresh(st, &session, &branch, false)
+        .await
+        .map_err(|e| github_request_error("refresh this pull request", e))?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.github.set` — ported from [`set_github_session`].
+async fn op_github_set(
+    context: OperationContext,
+    input: ops::github::set::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    if input.pr_number <= 0 {
+        return Err(AppError::bad_request("PR number must be positive"));
+    }
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let snap = github::fetch_pr(st, &repo_root, input.pr_number)
+        .await
+        .map_err(|e| github_request_error("find this pull request", e))?
+        .ok_or_else(|| {
+            AppError::bad_request(format!("pull request #{} was not found", input.pr_number))
+        })?;
+    github::set_mapping(&st.db, &branch.id, input.pr_number).await?;
+    github::apply_snapshot(st, &session, &branch, &snap, false).await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.github.clear` — ported from [`clear_github_session`].
+async fn op_github_clear(
+    context: OperationContext,
+    input: ops::github::clear::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    github::clear_mapping(&st.db, &branch.id).await?;
+    github::clear_status(&st.db, &branch.id).await?;
+    if let Err(e) = github::refresh(st, &session, &branch, false).await {
+        tracing::debug!(branch = %branch.branch, error = %e, "automatic PR refresh after clearing mapping failed");
+    }
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.github.labels.add` — ported from [`add_github_session_labels`].
+async fn op_github_labels_add(
+    context: OperationContext,
+    input: ops::github::labels::add::Input,
+) -> ApiResult<ops::github::labels::add::AddLabelsResult> {
+    let st = &context.state;
+    let (_, branch) = require_session(&st.db, &input.session).await?;
+    if input.labels.is_empty() || input.labels.len() > 10 {
+        return Err(AppError::bad_request(
+            "GitHub labels must contain between 1 and 10 entries",
+        ));
+    }
+    let labels = input
+        .labels
+        .into_iter()
+        .map(|label| label.trim().to_string())
+        .collect::<Vec<_>>();
+    if labels
+        .iter()
+        .any(|label| label.is_empty() || label.len() > 100)
+    {
+        return Err(AppError::bad_request(
+            "each GitHub label must contain between 1 and 100 bytes",
+        ));
+    }
+    let status = github::get_status(&st.db, &branch.id)
+        .await?
+        .ok_or_else(|| AppError::bad_request("session has no associated pull request"))?;
+    let repo_root = PathBuf::from(&branch.repo_root);
+    let slug = crate::repo::github_slug_for_root(&st.db, &repo_root)
+        .await?
+        .ok_or_else(|| AppError::bad_request("session repository has no GitHub identity"))?;
+    let repo = crate::repo::parse_slug(&slug)
+        .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
+    let app = super::configured_github_app(st).await?;
+    app.add_thread_labels(&repo, status.pr_number, &labels)
+        .await
+        .map_err(|e| github_request_error("label this pull request", e))?;
+    Ok(ops::github::labels::add::AddLabelsResult {
+        number: status.pr_number,
+        labels,
+    })
+}
+
+/// `sessions.handoff.resolve` — ported from [`resolve_session_handoff`].
+async fn op_handoff_resolve(
+    context: OperationContext,
+    input: ops::handoff::resolve::Input,
+) -> ApiResult<ResolvedLaunchView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    crate::handoff::resolve_session_handoff(st, &session, &input.selection)
+        .await
+        .map_err(map_handoff_error)
+}
+
+/// `sessions.prompt.create` — ported from [`prompt_session`]. `by` is not
+/// read from the caller — see the operation's own doc comment. Provenance is
+/// derived from the credential the same way `set_issue_tag_operation` in
+/// `web/issues.rs` derives its `by`: `manual` for a human operator, `agent`
+/// otherwise.
+async fn op_prompt_create(
+    context: OperationContext,
+    input: ops::prompt::create::Input,
+) -> ApiResult<ops::prompt::create::PromptResult> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(st, &session)?;
+    let by = if context.principal.is_human() {
+        "manual"
+    } else {
+        "agent"
+    }
+    .to_string();
+    let audit_text = if input.force_queued {
+        session_mod::read_pending_prompt(&st.db, &session.id).await?
+    } else {
+        input.text.clone()
+    };
+    let ack = if input.force_queued {
+        handle.force_pending(Some(by.clone())).await
+    } else {
+        let resources = prompt_resources(&session.work_dir, &input.files).await?;
+        if input.send_now {
+            handle
+                .stop_and_send(input.text.clone(), Some(by.clone()), resources)
+                .await
+        } else {
+            handle
+                .prompt(input.text.clone(), Some(by.clone()), resources)
+                .await
+        }
+    }
+    .map_err(|e| AppError::conflict(e.to_string()))?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "nudge",
+        json!({
+            "by": by,
+            "text": audit_text,
+            "send_now": input.send_now,
+            "promoted_queue": input.force_queued,
+        }),
+    )
+    .await
+    .ok();
+    Ok(ops::prompt::create::PromptResult {
+        queued: ack.queued,
+        turn: ack.turn,
+    })
+}
+
+/// `sessions.prompt.retract` — ported from [`retract_queued_prompt`].
+async fn op_prompt_retract(
+    context: OperationContext,
+    input: ops::prompt::retract::Input,
+) -> ApiResult<ops::prompt::retract::RetractResult> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(st, &session)?;
+    let text = handle
+        .retract_pending()
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?;
+    Ok(ops::prompt::retract::RetractResult { text })
+}
+
+/// `sessions.resumption_cue.get` — ported from [`get_resumption_cue`].
+async fn op_resumption_cue_get(
+    context: OperationContext,
+    input: ops::resumption_cue::get::Input,
+) -> ApiResult<ResumptionCueView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    Ok(crate::metadata_assist::current_cue(&st.db, &session, &branch).await?)
+}
+
+/// `sessions.resumption_cue.ensure` — ported from [`ensure_resumption_cue`].
+async fn op_resumption_cue_ensure(
+    context: OperationContext,
+    input: ops::resumption_cue::ensure::Input,
+) -> ApiResult<ResumptionCueView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    Ok(crate::metadata_assist::ensure_cue(&st.db, &st.acp, &session, &branch, input.force).await?)
+}
+
+/// `sessions.permissions.answer` — ported from [`answer_permission`]. The
+/// legacy handler's `principal.is_human()` refusal is now `actor = User` on
+/// the declaration; the inline check is deleted rather than ported, matching
+/// `auth::automation_token_op`'s treatment of its own former `is_admin` check.
+async fn op_permissions_answer(
+    context: OperationContext,
+    input: ops::permissions::answer::Input,
+) -> ApiResult<ops::permissions::answer::AnswerPermissionResult> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    require_acp(&session)?;
+    let handle = require_acp_task(st, &session)?;
+    let by = author_or_manual(input.by.as_deref());
+    match handle
+        .answer_permission(
+            input.request_id.clone(),
+            input.option_id.clone(),
+            by.clone(),
+        )
+        .await
+        .map_err(|e| AppError::conflict(e.to_string()))?
+    {
+        crate::acp::PermAnswer::Ok => {
+            events::record(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                "permission",
+                json!({ "by": by, "request_id": input.request_id, "option_id": input.option_id }),
+            )
+            .await
+            .ok();
+            Ok(ops::permissions::answer::AnswerPermissionResult {
+                resolved: true,
+                option_id: input.option_id,
+            })
+        }
+        crate::acp::PermAnswer::NotFound => Err(AppError::not_found("permission request")),
+        crate::acp::PermAnswer::AlreadyResolved => {
+            Err(AppError::conflict("permission request already resolved"))
+        }
+    }
+}
+
+/// `sessions.title.regenerate` — ported from [`regenerate_session_title`].
+async fn op_title_regenerate(
+    context: OperationContext,
+    input: ops::title::regenerate::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    crate::metadata_assist::spawn_title_generation(
+        st.db.clone(),
+        st.bus.clone(),
+        st.acp.clone(),
+        session.clone(),
+        branch,
+        true,
+    )
+    .await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.title.generation.set` — ported from [`set_session_title_generation`].
+async fn op_title_generation_set(
+    context: OperationContext,
+    input: ops::title::generation::set::Input,
+) -> ApiResult<SessionView> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    crate::metadata_assist::set_title_enabled(&st.db, &session.id, input.enabled).await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_view(&st.db, &session, &branch).await
 }

@@ -1,5 +1,6 @@
 use axum::{extract::State, Extension, Json};
 use serde_json::{json, Value};
+use weaver_api::operations::preferences as preferences_operations;
 use weaver_api::operations::settings as settings_operations;
 use weaver_api::{SettingsEnvelope, UserPreferenceView, UserPreferencesEnvelope};
 
@@ -136,12 +137,22 @@ pub(super) async fn patch_settings(
     ))
 }
 
-/// `settings.patch` — the twin of [`patch_settings`]. `changes` arrives
-/// already typed (`Option<String>` per key, from the frozen operation
-/// contract), so the JSON-shape coercion the legacy body did (bool/number ->
-/// string) doesn't apply here. The allowlist survives unchanged: a key must
-/// be a registered setting (`config::spec`) or one of the four legacy
-/// `agent.*` compatibility keys, exactly as [`patch_settings`] enforces.
+/// A setting value as a caller writes it, reduced to the string it is stored as.
+///
+/// `None` (a JSON `null`) clears the key. An array or an object is not a setting
+/// value and is refused by key rather than stringified into nonsense.
+fn setting_value(raw: Option<Value>) -> Result<Option<String>, &'static str> {
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text)),
+        Some(Value::Bool(flag)) => Ok(Some(flag.to_string())),
+        Some(Value::Number(number)) => Ok(Some(number.to_string())),
+        Some(_) => Err("value must be a string, number, boolean, or null"),
+    }
+}
+
+/// `settings.patch`. A key must be a registered setting (`config::spec`) or one
+/// of the four legacy `agent.*` compatibility keys.
 pub(super) async fn patch_settings_operation(
     context: OperationContext,
     input: settings_operations::patch::Input,
@@ -150,7 +161,7 @@ pub(super) async fn patch_settings_operation(
     let mut legacy_agent_changes: Vec<config::Change> = Vec::new();
     let mut errors = serde_json::Map::new();
 
-    for (key, value) in input.changes {
+    for (key, raw) in input.changes {
         let legacy_agent = matches!(
             key.as_str(),
             "agent.default" | "agent.model" | "agent.effort" | "agent.mode"
@@ -159,6 +170,13 @@ pub(super) async fn patch_settings_operation(
             errors.insert(key, json!("unknown setting"));
             continue;
         }
+        let value = match setting_value(raw) {
+            Ok(value) => value,
+            Err(why) => {
+                errors.insert(key, json!(why));
+                continue;
+            }
+        };
         if !legacy_agent {
             if let Some(value) = &value {
                 if let Err(why) = config::validate(&key, value) {
@@ -222,6 +240,16 @@ pub(super) async fn get_preferences(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<UserPreferencesEnvelope>> {
     preferences_envelope(&st.db, &principal.username).await
+}
+
+/// `preferences.get` — the twin of [`get_preferences`].
+async fn get_preferences_operation(
+    context: OperationContext,
+    _input: preferences_operations::get::Input,
+) -> ApiResult<UserPreferencesEnvelope> {
+    Ok(preferences_envelope(&context.state.db, &context.principal.username)
+        .await?
+        .0)
 }
 
 pub(super) async fn patch_preferences(
@@ -315,6 +343,11 @@ async fn apply_legacy_agent_patch(db: &Db, changes: &[config::Change]) -> anyhow
 // `weaver_api::operations::settings`. `settings.env.*` handlers live in
 // `web/env.rs` (the file that already owns the default profile's environment
 // facade); this bundle just registers them alongside `settings.get`/`.patch`.
+// `preferences.get` is a separate bundle (per-operator overrides, not
+// server-wide configuration) but its handler sits here, next to
+// `get_preferences`/`patch_preferences`, which it ports the read half of —
+// `preferences.patch` is not registered; see `operations::preferences`'s
+// module doc for why.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -330,5 +363,6 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<settings_operations::env::delete::Delete, _, _>(
             super::env::delete_settings_env_operation,
         ),
+        register::<preferences_operations::get::Get, _, _>(get_preferences_operation),
     ]
 }

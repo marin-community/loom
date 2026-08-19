@@ -307,6 +307,7 @@ pub(super) fn registry() -> Vec<Bound> {
     bound.extend(super::branches::bound_operations());
     bound.extend(super::channels::bound_operations());
     bound.extend(super::deployment::bound_operations());
+    bound.extend(super::diagnostics::bound_operations());
     bound.extend(super::issues::bound_operations());
     bound.extend(super::logview::bound_operations());
     bound.extend(super::mcps::bound_operations());

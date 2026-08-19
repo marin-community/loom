@@ -20,12 +20,14 @@ pub(super) use super::prelude;
 
 pub mod custom;
 pub mod list;
+pub mod oneshot;
 
 static OPERATIONS: &[&OperationSpec] = &[
     <list::List as Operation>::SPEC,
     <custom::create::Create as Operation>::SPEC,
     <custom::update::Update as Operation>::SPEC,
     <custom::delete::Delete as Operation>::SPEC,
+    <oneshot::Oneshot as Operation>::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

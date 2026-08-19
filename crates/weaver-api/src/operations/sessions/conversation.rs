@@ -1,5 +1,11 @@
 use super::prelude::*;
 
+// `sessions.conversation.block` serves the untruncated content one elided
+// block points at, and lives in `conversation/block.rs`, so the id keeps
+// naming the file.
+pub(super) use super::prelude;
+pub mod block;
+
 /// The session's agent conversation as a normalized iris log — the live
 /// transcript when present, else the capture archived alongside it. Oversized
 /// tool payloads are elided to a preview pointing at the full-content route.

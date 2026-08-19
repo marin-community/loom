@@ -9,9 +9,10 @@ use std::convert::Infallible;
 use axum::extract::{Query, State};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::{Extension, Json};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
+use weaver_api::operations::diagnostics as diagnostics_operations;
 use weaver_api::operations::logs as log_operations;
 use weaver_api::operations::tasks as task_operations;
 use weaver_api::TaskView;
@@ -24,10 +25,18 @@ use crate::tasks::{self, TaskRecord};
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppState};
 
-/// The `tasks` bundle: one read-only operation over the in-memory background
-/// task ring buffer.
+/// The `tasks` bundle (one read-only operation over the in-memory background
+/// task ring buffer) plus two operations bound here alongside the legacy
+/// handlers they port: `logs.list` (the snapshot counterpart of
+/// `logs.stream`) and `diagnostics.status` (next to `server_status`; its
+/// sibling `diagnostics.get` is bound in `web/diagnostics.rs`, next to the
+/// `diagnostics` handler it ports).
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![register::<task_operations::list::List, _, _>(list_tasks)]
+    vec![
+        register::<task_operations::list::List, _, _>(list_tasks),
+        register::<log_operations::list::List, _, _>(list_logs_operation),
+        register::<diagnostics_operations::status::Status, _, _>(status_operation),
+    ]
 }
 
 /// `tasks.list`, `crates/weaver-api/src/operations/tasks/list.rs`. [`TaskView`]
@@ -69,14 +78,43 @@ pub(super) async fn logs_snapshot(
     Extension(principal): Extension<Principal>,
     Query(q): Query<LogsQuery>,
 ) -> ApiResult<Json<Vec<LogLine>>> {
-    let limit = q.limit.unwrap_or(500).clamp(1, 2000);
-    let redactor = log_redactor(&st.db, &principal).await?;
-    let lines = logs::buffer()
+    let lines = logs_snapshot_core(&st, &principal, q.limit.map(|limit| limit as i64)).await?;
+    Ok(Json(lines))
+}
+
+/// Shared by [`logs_snapshot`] and `logs.list`: the redacted tail of recent
+/// log lines, oldest first.
+async fn logs_snapshot_core(
+    st: &AppState,
+    principal: &Principal,
+    limit: Option<i64>,
+) -> ApiResult<Vec<LogLine>> {
+    let limit = limit.unwrap_or(500).clamp(1, 2000) as usize;
+    let redactor = log_redactor(&st.db, principal).await?;
+    Ok(logs::buffer()
         .snapshot(limit)
         .into_iter()
         .map(|line| redact_line(&redactor, line))
-        .collect();
-    Ok(Json(lines))
+        .collect())
+}
+
+fn log_line_view(line: LogLine) -> log_operations::list::LogLineView {
+    log_operations::list::LogLineView {
+        seq: line.seq,
+        ts: line.ts,
+        level: line.level,
+        target: line.target,
+        message: line.message,
+    }
+}
+
+/// `logs.list` — the twin of [`logs_snapshot`].
+async fn list_logs_operation(
+    context: OperationContext,
+    input: log_operations::list::Input,
+) -> ApiResult<log_operations::list::Output> {
+    let lines = logs_snapshot_core(&context.state, &context.principal, input.limit).await?;
+    Ok(lines.into_iter().map(log_line_view).collect())
 }
 
 /// The `logs.stream` operation — server log lines as they are emitted (SSE).
@@ -168,32 +206,32 @@ fn secret_environment_name(name: &str) -> bool {
 
 /// A small "what am I looking at" status blob for the debug panel: build and
 /// image identity plus process identity, so both deploys and restarts are
-/// attributable.
-#[derive(Debug, Serialize)]
-pub(super) struct ServerStatus {
-    version: &'static str,
-    build_revision: &'static str,
-    build_profile: &'static str,
-    /// Digest-pinned image reference when a container deployment supplies one.
-    image: Option<String>,
-    pid: u32,
-    /// When this process started capturing logs (≈ process start), RFC3339.
-    started_at: String,
-}
-
-/// `GET /api/status` — build and process identity for human users.
-pub(super) async fn server_status() -> Json<ServerStatus> {
-    Json(ServerStatus {
-        version: env!("CARGO_PKG_VERSION"),
-        build_revision: env!("LOOM_BUILD_REVISION"),
-        build_profile: env!("LOOM_BUILD_PROFILE"),
+/// attributable. Shared by [`server_status`] and `diagnostics.status`.
+fn status_view() -> diagnostics_operations::status::Output {
+    diagnostics_operations::status::Output {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        build_revision: env!("LOOM_BUILD_REVISION").to_string(),
+        build_profile: env!("LOOM_BUILD_PROFILE").to_string(),
         image: std::env::var("LOOM_IMAGE")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty()),
         pid: std::process::id(),
         started_at: logs::buffer().started_at().to_string(),
-    })
+    }
+}
+
+/// `GET /api/status` — build and process identity for human users.
+pub(super) async fn server_status() -> Json<diagnostics_operations::status::Output> {
+    Json(status_view())
+}
+
+/// `diagnostics.status` — the twin of [`server_status`].
+async fn status_operation(
+    _context: OperationContext,
+    _input: diagnostics_operations::status::Input,
+) -> ApiResult<diagnostics_operations::status::Output> {
+    Ok(status_view())
 }
 
 /// `GET /api/tasks` — recent detached background tasks (the GitHub-trigger

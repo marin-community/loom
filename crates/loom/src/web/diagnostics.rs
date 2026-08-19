@@ -16,6 +16,7 @@ use axum::{
     Extension, Json,
 };
 use sqlx::FromRow;
+use weaver_api::operations::diagnostics as diagnostics_operations;
 use weaver_api::{
     DiagnosticFederation, DiagnosticProblemSummary, DiagnosticProfileCapacity, DiagnosticRunCount,
     DiagnosticRunFailure, DiagnosticRunSummary, DiagnosticSessionCount, DiagnosticsView,
@@ -25,6 +26,7 @@ use weaver_api::{
 use crate::auth::Principal;
 use crate::db::Db;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 const LOCAL_RUNNER_POOL: &str = "local";
@@ -431,6 +433,27 @@ pub(super) async fn diagnostics(
         return Err(AppError::new(StatusCode::FORBIDDEN, "human grant required"));
     }
     Ok(Json(snapshot(&st.db).await?))
+}
+
+/// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`. Its
+/// sibling `diagnostics.status` is bound in `web/logview.rs`, next to the
+/// legacy `server_status` handler it ports.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<diagnostics_operations::get::Get, _, _>(
+        diagnostics_operation,
+    )]
+}
+
+/// `diagnostics.get` — the twin of [`diagnostics`]. `actor = User` already
+/// excludes every non-human principal, so the inline `is_human()` check the
+/// legacy handler makes is not repeated here (same as `auth.automation_token`
+/// dropping its inline `is_admin()` check once `actor = Admin` said the same
+/// thing structurally).
+async fn diagnostics_operation(
+    context: OperationContext,
+    _input: diagnostics_operations::get::Input,
+) -> ApiResult<DiagnosticsView> {
+    Ok(snapshot(&context.state.db).await?)
 }
 
 fn append_help(output: &mut String, name: &str, help: &str, metric_type: &str) {

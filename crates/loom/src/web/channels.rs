@@ -801,5 +801,18 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::subscription::set::Set, _, _>(set_channel_subscription_operation),
         register::<ops::read_marker::set::Set, _, _>(set_channel_read_marker_operation),
         register::<ops::wait::Wait, _, _>(wait_for_channel_message_operation),
+        register::<ops::bindings::list::List, _, _>(list_channel_bindings_operation),
     ]
+}
+
+/// `channels.bindings.list` — the twin of [`list_channel_bindings`].
+pub(super) async fn list_channel_bindings_operation(
+    context: OperationContext,
+    input: ops::bindings::list::Input,
+) -> ApiResult<Vec<ChannelBindingView>> {
+    let st = context.state;
+    let principal = context.principal;
+    let channel_id = resolve_channel_id(&principal, &input.channel)?;
+    let channel = require_channel(&st, &channel_id).await?;
+    channel_bindings(&st, &channel_id, &channel).await
 }

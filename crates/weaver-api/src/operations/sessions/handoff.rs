@@ -1,5 +1,10 @@
 use super::prelude::*;
 
+// `sessions.handoff.resolve` is the read-only preview half of this operation
+// and lives in `handoff/resolve.rs`, so the id keeps naming the file.
+pub(super) use super::prelude;
+pub mod resolve;
+
 /// Replace the provider behind an idle ACP session while preserving Loom's
 /// stable session/branch/worktree identity and canonical journal.
 #[operation(

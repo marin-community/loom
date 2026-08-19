@@ -5,6 +5,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use weaver_api::operations::branches as ops;
+use weaver_api::operations::slack as slack_operations;
 use weaver_api::{BranchStatusReq, BranchView, CreateChannelMessageReq, CreateEventReq, TagReq};
 use weaver_core::branch::{TitleProvenance, TitleUpdate};
 use weaver_core::{branch as branch_mod, config, tags};
@@ -347,8 +348,21 @@ pub(super) async fn slack_reply(
     Ok(Json(json!({ "posted": true, "ts": ts })))
 }
 
-/// `GET /api/slack/status` — the state of every link in the Slack trigger path,
-/// for the Connections settings pane.
+/// `state`'s wire name, matching `SocketState`'s own `#[serde(rename_all =
+/// "snake_case")]` — reproduced by hand because `loom_deliver::slack` does
+/// not derive `Deserialize`/`JsonSchema` on it, so it cannot be `weaver-api`'s
+/// operation `Output` type directly (see [`slack_connection_status_view`]).
+fn socket_state_str(state: crate::slack::SocketState) -> &'static str {
+    match state {
+        crate::slack::SocketState::Idle => "idle",
+        crate::slack::SocketState::Connecting => "connecting",
+        crate::slack::SocketState::Connected => "connected",
+        crate::slack::SocketState::Failed => "failed",
+    }
+}
+
+/// The state of every link in the Slack trigger path, for the Connections
+/// settings pane. Shared by [`slack_status`] and `slack.connection_status`.
 ///
 /// One `connected` boolean is not enough to run this integration: a deployment
 /// can hold a live socket and still discard every mention — because the bot
@@ -356,7 +370,9 @@ pub(super) async fn slack_reply(
 /// a different app than the bot belongs to, because no repository is set, or
 /// because the access list excludes everyone. Each link is reported separately
 /// so the pane can name the one that is broken instead of reporting health.
-pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+async fn slack_connection_status_view(
+    st: &AppState,
+) -> slack_operations::connection_status::Output {
     let app_token_set = !crate::slack::app_token(&st.db).await.is_empty();
     let bot_token_set = !crate::slack::bot_token(&st.db).await.is_empty();
     let enabled = crate::slack::is_enabled(&st.db).await;
@@ -365,37 +381,84 @@ pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<s
     // including whether the token belongs to the app or to a person.
     let identity = match crate::slack::SlackWeb::from_db(&st.db).await {
         Some(web) => match web.auth_test().await {
-            Ok(id) => json!({
-                "user_id": id.user_id,
-                "team_id": id.team_id,
-                "token_kind": if id.is_bot() { "bot" } else { "user" },
-                "error": serde_json::Value::Null,
+            Ok(id) => {
+                let token_kind = if id.is_bot() { "bot" } else { "user" }.to_string();
+                Some(slack_operations::connection_status::SlackIdentityView {
+                    user_id: Some(id.user_id),
+                    team_id: Some(id.team_id),
+                    token_kind: Some(token_kind),
+                    error: None,
+                })
+            }
+            Err(e) => Some(slack_operations::connection_status::SlackIdentityView {
+                user_id: None,
+                team_id: None,
+                token_kind: None,
+                error: Some(e.to_string()),
             }),
-            Err(e) => json!({ "error": e.to_string() }),
         },
-        None => serde_json::Value::Null,
+        None => None,
     };
 
     let access = match crate::slack::access(&st.db).await {
-        crate::slack::Access::Workspace => json!({ "mode": "workspace", "users": [] }),
-        crate::slack::Access::Listed(users) => json!({ "mode": "listed", "users": users }),
+        crate::slack::Access::Workspace => slack_operations::connection_status::SlackAccessView {
+            mode: "workspace".to_string(),
+            users: Vec::new(),
+        },
+        crate::slack::Access::Listed(users) => {
+            slack_operations::connection_status::SlackAccessView {
+                mode: "listed".to_string(),
+                users,
+            }
+        }
     };
 
-    Ok(Json(json!({
-        "enabled": enabled,
-        "app_token_set": app_token_set,
-        "bot_token_set": bot_token_set,
-        "configured": app_token_set && bot_token_set,
-        "identity": identity,
-        "access": access,
-        "default_repo": config::get(&st.db, "slack.default_repo")
+    // What the supervisor is actually doing, as opposed to what a fresh
+    // credential probe suggests it could do.
+    let health = crate::slack::health();
+    let socket = slack_operations::connection_status::SlackSocketView {
+        state: socket_state_str(health.state).to_string(),
+        app_id: health.app_id,
+        connected_at: health.connected_at,
+        last_error: health.last_error,
+        last_event_at: health.last_event_at,
+        events_received: health.events_received,
+        sessions_launched: health.sessions_launched,
+        followups_routed: health.followups_routed,
+        last_skip: health.last_skip,
+        last_skip_at: health.last_skip_at,
+    };
+
+    slack_operations::connection_status::Output {
+        enabled,
+        app_token_set,
+        bot_token_set,
+        configured: app_token_set && bot_token_set,
+        identity,
+        access,
+        default_repo: config::get(&st.db, "slack.default_repo")
             .await
             .unwrap_or_default()
-            .trim(),
-        // What the supervisor is actually doing, as opposed to what a fresh
-        // credential probe suggests it could do.
-        "socket": crate::slack::health(),
-    })))
+            .trim()
+            .to_string(),
+        socket,
+    }
+}
+
+/// `GET /api/slack/status` — the legacy route `slack.connection_status` now
+/// also serves.
+pub(super) async fn slack_status(State(st): State<AppState>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::to_value(
+        slack_connection_status_view(&st).await,
+    )?))
+}
+
+/// `slack.connection_status` — the twin of [`slack_status`].
+async fn slack_connection_status_operation(
+    context: OperationContext,
+    _input: slack_operations::connection_status::Input,
+) -> ApiResult<slack_operations::connection_status::Output> {
+    Ok(slack_connection_status_view(&context.state).await)
 }
 
 /// Append a raw event row to a branch's log — the escape hatch for an event
@@ -511,6 +574,9 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::tags::set::Set, _, _>(tags_set_operation),
         register::<ops::tags::delete::Delete, _, _>(tags_delete_operation),
         register::<ops::issues::list::List, _, _>(issues_list_operation),
+        register::<slack_operations::connection_status::ConnectionStatus, _, _>(
+            slack_connection_status_operation,
+        ),
     ]
 }
 

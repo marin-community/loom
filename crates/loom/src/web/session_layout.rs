@@ -18,7 +18,7 @@ use weaver_api::{
 };
 
 use weaver_api::operations::session_layout::{
-    events, get, groups, r#move, reorder, restore, spaces,
+    defaults, events, get, groups, r#move, reorder, restore, spaces,
 };
 
 use crate::auth::Principal;
@@ -236,14 +236,17 @@ pub(super) async fn session_layout_events(
 // ---------------------------------------------------------------------------
 // Operation registry — `session_layout.*`, bound onto
 // `weaver_api::operations::session_layout`. These are the operation-typed
-// twins of six of the legacy routes above (every mutation but the per-item
-// PATCH/DELETE and default-selector routes; `session_layout.events` is
-// registered too, but as `io = Stream`, so `web::streams` serves it). Every
+// twins of every route above, including the per-item PATCH/DELETE and
+// default-selector routes (`session_layout.events` is registered too, but as
+// `io = Stream`, so `web::streams` serves it). Every revision-guarded
 // mutation still funnels through `mutation_response`/`mutation_result`, so
 // the optimistic-concurrency conflict shape — refetch the current layout and
 // hand it back alongside the 409 — is identical between the legacy routes and
-// these operations. The legacy routes stay live and untouched until the
-// coordinated route deletion pass.
+// these operations. `session_layout.groups.preference.set` is the one
+// exception, and was already an exception in the legacy handler: a collapse
+// toggle carries no `expected_revision`, so there is nothing to conflict on.
+// The legacy routes stay live and untouched until the coordinated route
+// deletion pass.
 // ---------------------------------------------------------------------------
 
 /// The operation-typed twin of [`mutation_response`], returning the bare
@@ -262,10 +265,17 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<get::Get, _, _>(get_operation),
         register::<spaces::create::Create, _, _>(spaces_create_operation),
+        register::<spaces::update::Update, _, _>(spaces_update_operation),
+        register::<spaces::delete::Delete, _, _>(spaces_delete_operation),
         register::<groups::create::Create, _, _>(groups_create_operation),
+        register::<groups::update::Update, _, _>(groups_update_operation),
+        register::<groups::delete::Delete, _, _>(groups_delete_operation),
+        register::<groups::preference::set::Set, _, _>(groups_preference_set_operation),
         register::<r#move::Move, _, _>(move_operation),
         register::<reorder::Reorder, _, _>(reorder_operation),
         register::<restore::Restore, _, _>(restore_operation),
+        register::<defaults::set::Set, _, _>(defaults_set_operation),
+        register::<defaults::delete::Delete, _, _>(defaults_delete_operation),
     ]
 }
 
@@ -289,6 +299,36 @@ async fn spaces_create_operation(
     mutation_result(&st, &username, result).await
 }
 
+/// `session_layout.spaces.update` — the twin of [`update_session_space`].
+async fn spaces_update_operation(
+    context: OperationContext,
+    input: spaces::update::Input,
+) -> ApiResult<spaces::update::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = UpdateSessionSpaceReq {
+        name: input.name,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::update_space(&st.db, &username, &input.id, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.spaces.delete` — the twin of [`delete_session_space`].
+async fn spaces_delete_operation(
+    context: OperationContext,
+    input: spaces::delete::Input,
+) -> ApiResult<spaces::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = DeleteSessionSpaceReq {
+        destination_group_id: input.destination_group_id,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::delete_space(&st.db, &username, &input.id, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
 /// `session_layout.groups.create` — the twin of [`create_session_group`].
 async fn groups_create_operation(
     context: OperationContext,
@@ -303,6 +343,54 @@ async fn groups_create_operation(
     };
     let result = session_layout::create_group(&st.db, &username, &req).await;
     mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.groups.update` — the twin of [`update_session_group`].
+async fn groups_update_operation(
+    context: OperationContext,
+    input: groups::update::Input,
+) -> ApiResult<groups::update::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = UpdateSessionGroupReq {
+        name: input.name,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::update_group(&st.db, &username, &input.id, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.groups.delete` — the twin of [`delete_session_group`].
+async fn groups_delete_operation(
+    context: OperationContext,
+    input: groups::delete::Input,
+) -> ApiResult<groups::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = DeleteSessionGroupReq {
+        destination_group_id: input.destination_group_id,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::delete_group(&st.db, &username, &input.id, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.groups.preference.set` — the twin of
+/// [`set_session_group_preference`]. Unlike the rest of this bundle it does
+/// not go through `mutation_result`: the legacy route never did either,
+/// because a collapse toggle carries no `expected_revision` to conflict on.
+async fn groups_preference_set_operation(
+    context: OperationContext,
+    input: groups::preference::set::Input,
+) -> ApiResult<groups::preference::set::Output> {
+    session_layout::set_preference(
+        &context.state.db,
+        &context.principal.username,
+        &input.id,
+        input.collapsed,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
 /// `session_layout.move` — the twin of [`move_session_layout`].
@@ -352,5 +440,42 @@ async fn restore_operation(
         expected_revision: input.expected_revision,
     };
     let result = session_layout::restore_groups(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.defaults.set` — the twin of
+/// [`set_session_placement_default`].
+async fn defaults_set_operation(
+    context: OperationContext,
+    input: defaults::set::Input,
+) -> ApiResult<defaults::set::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let req = SetSessionPlacementDefaultReq {
+        selector_kind: input.selector_kind,
+        selector_value: input.selector_value,
+        group_id: input.group_id,
+        expected_revision: input.expected_revision,
+    };
+    let result = session_layout::set_default(&st.db, &username, &req).await;
+    mutation_result(&st, &username, result).await
+}
+
+/// `session_layout.defaults.delete` — the twin of
+/// [`delete_session_placement_default`].
+async fn defaults_delete_operation(
+    context: OperationContext,
+    input: defaults::delete::Input,
+) -> ApiResult<defaults::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::delete_default(
+        &st.db,
+        &username,
+        input.selector_kind,
+        &input.selector_value,
+        input.expected_revision,
+    )
+    .await;
     mutation_result(&st, &username, result).await
 }

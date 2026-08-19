@@ -9,10 +9,10 @@ use axum::{
 use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use weaver_api::operations::artifacts::{delete, get, history, list, threads, write};
+use weaver_api::operations::artifacts::{delete, get, history, list, threads, url, write};
 use weaver_api::{
     AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactUpsertReq, ArtifactVersion, ArtifactView,
-    ArtifactWriteBody, CommentDto, IssueRefStatus, ThreadDto,
+    ArtifactWriteBody, CommentDto, IssueRefStatus, SessionUrlView, ThreadDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch as branch_mod;
@@ -543,6 +543,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<threads::list::List, _, _>(threads_list_operation),
         register::<threads::comment::Comment, _, _>(threads_comment_operation),
         register::<threads::resolve::Resolve, _, _>(threads_resolve_operation),
+        register::<url::Url, _, _>(url_operation),
     ]
 }
 
@@ -891,6 +892,23 @@ async fn threads_resolve_operation(
         .await?
         .ok_or_else(|| AppError::not_found("thread"))?;
     Ok(thread_dto(&resolved))
+}
+
+/// `artifacts.url` — the twin of [`branch_artifact_url_route`]. The dispatcher
+/// hands handlers typed input, not a request, so — same as `sessions.url` —
+/// this can only resolve the configured `auth.base_url` or the address the
+/// server is bound to, not a browser's own Host the way the REST route it
+/// mirrors can.
+async fn url_operation(context: OperationContext, input: url::Input) -> ApiResult<SessionUrlView> {
+    let st = context.state;
+    // Resolve first so a bad key 404s rather than minting a link to nothing,
+    // and so the link always keys off the canonical branch id even when the
+    // caller named the branch some other way `require_branch` also accepts.
+    let branch = require_branch(&st.db, &input.branch).await?;
+    let base = super::auth::public_base(&st, &header::HeaderMap::new()).await;
+    Ok(SessionUrlView {
+        url: crate::links::artifact_url(&base, &branch.id, &input.name),
+    })
 }
 
 #[cfg(test)]

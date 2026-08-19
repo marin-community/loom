@@ -15,6 +15,7 @@ use super::OperationBundle;
 
 pub(super) use super::prelude;
 
+pub mod defaults;
 pub mod events;
 pub mod get;
 pub mod groups;
@@ -26,10 +27,17 @@ pub mod spaces;
 static OPERATIONS: &[&OperationSpec] = &[
     <get::Get as Operation>::SPEC,
     <spaces::create::Create as Operation>::SPEC,
+    <spaces::update::Update as Operation>::SPEC,
+    <spaces::delete::Delete as Operation>::SPEC,
     <groups::create::Create as Operation>::SPEC,
+    <groups::update::Update as Operation>::SPEC,
+    <groups::delete::Delete as Operation>::SPEC,
+    <groups::preference::set::Set as Operation>::SPEC,
     <r#move::Move as Operation>::SPEC,
     <reorder::Reorder as Operation>::SPEC,
     <restore::Restore as Operation>::SPEC,
+    <defaults::set::Set as Operation>::SPEC,
+    <defaults::delete::Delete as Operation>::SPEC,
     <events::Events as Operation>::SPEC,
 ];
 

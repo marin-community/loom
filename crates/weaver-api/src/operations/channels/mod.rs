@@ -10,6 +10,7 @@ use super::OperationBundle;
 
 pub(super) use super::prelude;
 
+pub mod bindings;
 pub mod create;
 pub mod get;
 pub mod list;
@@ -27,6 +28,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     <subscription::set::Set as Operation>::SPEC,
     <read_marker::set::Set as Operation>::SPEC,
     <wait::Wait as Operation>::SPEC,
+    <bindings::list::List as Operation>::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

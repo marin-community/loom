@@ -200,6 +200,38 @@ mod tests {
         check::<shell::terminal::Terminal>();
     }
 
+    /// The other half: an operand a caller *does* name arrives intact.
+    ///
+    /// "Every field is optional" is satisfied by a struct that silently ignores
+    /// everything, so optionality alone proves nothing. These are the exact URLs
+    /// the frontend and the integration tests build, including the one operand
+    /// that is not a string — `index` on a debug shell has to survive the
+    /// urlencoded round trip as a `u32`, and it is the only non-string operand on
+    /// any stream.
+    #[test]
+    fn a_named_operand_reaches_the_handler() {
+        let uri: axum::http::Uri = "/api/sessions/terminal?session=abc123"
+            .parse()
+            .expect("static uri");
+        let Query(input) = Query::<sessions::terminal::Input>::try_from_uri(&uri)
+            .expect("a session id in the query string");
+        assert_eq!(input.session, "abc123");
+
+        let uri: axum::http::Uri = "/api/sessions/shells/terminal?session=abc123&index=2"
+            .parse()
+            .expect("static uri");
+        let Query(input) = Query::<sessions::shells::terminal::Input>::try_from_uri(&uri)
+            .expect("a session id and a shell index in the query string");
+        assert_eq!((input.session.as_str(), input.index), ("abc123", 2));
+
+        let uri: axum::http::Uri = "/api/events/stream?topics=layout,logs,session:abc"
+            .parse()
+            .expect("static uri");
+        let Query(input) = Query::<events::stream::Input>::try_from_uri(&uri)
+            .expect("a comma-separated topic list");
+        assert_eq!(input.topics, "layout,logs,session:abc");
+    }
+
     /// Every non-JSON operation is mounted, at its own derived path.
     ///
     /// `mount` skips an id it does not recognize, which is right for

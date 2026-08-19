@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
 use weaver_api::{
     AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchDeleteResult,
@@ -24,12 +25,14 @@ use super::{ApiResult, AppError, AppState};
 // Watches — the operator + authoring surface (server-owned state)
 // ---------------------------------------------------------------------------
 //
-// `agent_oneshot` below (`POST /agent/oneshot`) is a different, not-yet-ported
-// operation and is left untouched. Every other handler here has a
-// `*_operation` counterpart registered below; the legacy axum handler under
-// its original name stays in place (and now delegates to a shared `*_core`
-// function) because `web/mod.rs`'s routes still call it by that name and
-// route deletion is a separate, coordinated pass.
+// Every handler here has a `*_operation` counterpart registered below —
+// including `agent_oneshot` (`POST /agent/oneshot`), which is `agents.oneshot`
+// rather than a `watches.*` id, since it is a general one-shot ACP primitive
+// watch programs happen to be the first caller of, not watch-specific state.
+// The legacy axum handler under its original name stays in place (and now
+// delegates to a shared `*_core` function) because `web/mod.rs`'s routes
+// still call it by that name and route deletion is a separate, coordinated
+// pass.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<watches_operations::list::List, _, _>(list_watches_operation),
@@ -40,6 +43,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<watches_operations::delete::Delete, _, _>(delete_watch_operation),
         register::<watches_operations::run::Run, _, _>(run_watch_operation),
         register::<watches_operations::runs::Runs, _, _>(watch_runs_operation),
+        register::<agents_operations::oneshot::Oneshot, _, _>(agent_oneshot_operation),
     ]
 }
 
@@ -417,28 +421,32 @@ pub(super) async fn run_watch_operation(
     run_watch_core(&context.state, &input.key, input.dry_run).await
 }
 
-/// Run a one-shot ACP prompt and return `{output}` — the judgement primitive
+/// Run a one-shot ACP prompt and return its text — the judgement primitive
 /// watch programs call. Best-effort by contract: an absent or failing runtime
-/// returns `{output: null}` rather than an error, so callers degrade to their
-/// deterministic fallback.
-pub(super) async fn agent_oneshot(
-    State(st): State<AppState>,
-    Json(req): Json<AgentOneshotReq>,
-) -> ApiResult<Json<Value>> {
-    if req.prompt.trim().is_empty() {
+/// returns `None` rather than an error, so callers degrade to their
+/// deterministic fallback. Shared by the legacy handler and `agents.oneshot`.
+async fn agent_oneshot_core(
+    st: &AppState,
+    prompt: &str,
+    profile_name: &str,
+    agent_name: &str,
+    model: &str,
+    effort: &str,
+) -> ApiResult<Option<String>> {
+    if prompt.trim().is_empty() {
         return Err(AppError::bad_request("prompt must be non-empty"));
     }
     let budget = ov_engine::get_int(&st.db, "watch.default_timeout_secs", 600)
         .await
         .max(1) as u64;
-    let profile = if req.profile.trim().is_empty() {
+    let profile = if profile_name.trim().is_empty() {
         None
     } else {
         Some(
-            crate::profile::get(&st.db, req.profile.trim())
+            crate::profile::get(&st.db, profile_name.trim())
                 .await?
                 .ok_or_else(|| {
-                    AppError::bad_request(format!("unknown profile '{}'", req.profile.trim()))
+                    AppError::bad_request(format!("unknown profile '{}'", profile_name.trim()))
                 })?,
         )
     };
@@ -450,7 +458,7 @@ pub(super) async fn agent_oneshot(
             )));
         }
     }
-    let runtime = req.agent.trim();
+    let runtime = agent_name.trim();
     let runtime = profile
         .as_ref()
         .map(|profile| profile.agent_kind.as_str())
@@ -461,17 +469,50 @@ pub(super) async fn agent_oneshot(
                 runtime
             }
         });
-    let output = agent::AgentManager::new(&st.db, &st.acp)
+    Ok(agent::AgentManager::new(&st.db, &st.acp)
         .run_oneshot(
             runtime,
-            &req.prompt,
-            &req.model,
-            &req.effort,
+            prompt,
+            model,
+            effort,
             profile.as_ref(),
             std::time::Duration::from_secs(budget),
         )
-        .await;
+        .await)
+}
+
+/// `POST /agent/oneshot` — the legacy route `agents.oneshot` now also serves.
+pub(super) async fn agent_oneshot(
+    State(st): State<AppState>,
+    Json(req): Json<AgentOneshotReq>,
+) -> ApiResult<Json<Value>> {
+    let output = agent_oneshot_core(
+        &st,
+        &req.prompt,
+        &req.profile,
+        &req.agent,
+        &req.model,
+        &req.effort,
+    )
+    .await?;
     Ok(Json(json!({ "output": output })))
+}
+
+/// `agents.oneshot` — the twin of [`agent_oneshot`].
+async fn agent_oneshot_operation(
+    context: OperationContext,
+    input: agents_operations::oneshot::Input,
+) -> ApiResult<agents_operations::oneshot::Output> {
+    let output = agent_oneshot_core(
+        &context.state,
+        &input.prompt,
+        &input.profile,
+        &input.agent,
+        &input.model,
+        &input.effort,
+    )
+    .await?;
+    Ok(agents_operations::oneshot::Output { output })
 }
 
 async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
