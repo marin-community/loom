@@ -82,9 +82,6 @@ pub(super) async fn delete_repo_env(
     repo_env_envelope(&st.db, &repo_root).await
 }
 
-/// `POST /api/shell/restart` — reset the operator scratch shell, killing the
-/// current supervisor and spawning a fresh one. Handy after editing operator env
-/// vars (the new shell picks them up) or to clear a wedged session.
 // ---------------------------------------------------------------------------
 // Operation registry — `repos.env.*`, bound onto
 // `weaver_api::operations::repos::env`. Folded into `repos::bound_operations()`

@@ -244,7 +244,6 @@ enum Cmd {
 fn generic_bindings() -> Vec<loom::cli::CliBinding> {
     loom::cli::bindings()
         .into_iter()
-        .into_iter()
         .filter(|binding| {
             // Skip only when the hand-written surface already offers this exact
             // invocation. A group it shares (`loom issues`) is merged into, not

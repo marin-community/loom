@@ -72,7 +72,7 @@ pub async fn terminal_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let session = match session::resolve_key(&st.db, &key).await {
+    let session = match session::resolve_key(&st.db, key).await {
         Ok(Some((s, _))) => s,
         _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
@@ -144,7 +144,7 @@ pub async fn session_shell_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let (session, _) = match session::resolve_key(&st.db, &key).await {
+    let (session, _) = match session::resolve_key(&st.db, key).await {
         Ok(Some(pair)) => pair,
         _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };

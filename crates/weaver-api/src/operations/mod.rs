@@ -392,25 +392,6 @@ pub fn validate_operation_registry() -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn registry_is_structurally_valid() {
-        validate_operation_registry().unwrap();
-    }
-
-    #[test]
-    fn every_operation_resolves_from_its_own_route() {
-        for operation in operations() {
-            let found = operation_for_request(operation.method(), &operation.path())
-                .unwrap_or_else(|| panic!("{} does not resolve from its route", operation.id));
-            assert_eq!(found.id, operation.id);
-        }
-    }
-}
-
 // -- OpenAPI projection ------------------------------------------------------
 
 /// Render the registry as an OpenAPI 3.1 document.
@@ -460,4 +441,23 @@ pub fn openapi_document(version: &str) -> Value {
         "info": { "title": "Loom API", "version": version },
         "paths": paths,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_is_structurally_valid() {
+        validate_operation_registry().unwrap();
+    }
+
+    #[test]
+    fn every_operation_resolves_from_its_own_route() {
+        for operation in operations() {
+            let found = operation_for_request(operation.method(), &operation.path())
+                .unwrap_or_else(|| panic!("{} does not resolve from its route", operation.id));
+            assert_eq!(found.id, operation.id);
+        }
+    }
 }
