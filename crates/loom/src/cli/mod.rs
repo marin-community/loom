@@ -45,6 +45,9 @@ mod tests {
             .map(|operation| operation.id)
             .filter(|id| !bound.contains(id))
             .collect();
-        assert!(missing.is_empty(), "operations advertise a CLI but have no binding: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "operations advertise a CLI but have no binding: {missing:?}"
+        );
     }
 }

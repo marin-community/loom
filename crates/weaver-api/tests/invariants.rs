@@ -320,3 +320,29 @@ fn session_only_operations_are_pinned() {
          Widening it hands session credential material to operators."
     );
 }
+
+/// Operations served off the generic dispatcher are pinned.
+///
+/// `io = Session` is the escape hatch for the two things a JSON response cannot
+/// do — establish and clear an HttpOnly session cookie. An escape hatch nobody
+/// counts is how the previous registry accumulated operations that were declared
+/// in one place and served in another, so this counts them.
+#[test]
+fn transport_specific_operations_are_pinned() {
+    let special: BTreeMap<&str, &str> = operations::operations()
+        .filter(|operation| !operation.io.is_json())
+        .map(|operation| (operation.id, operation.io.as_str()))
+        .collect();
+    let expected: BTreeMap<&str, &str> = [
+        ("auth.login", "session"),
+        ("auth.logout", "session"),
+        ("auth.federate", "session"),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        special, expected,
+        "the set of operations NOT served by the generic dispatcher changed. \
+         Every addition is an operation that has to be kept in sync by hand."
+    );
+}

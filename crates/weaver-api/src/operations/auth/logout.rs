@@ -8,6 +8,7 @@ use super::prelude::*;
 #[operation(
     id = "auth.logout",
     actor = User,
+    io = Session,
     scope = Global,
     risk = Write,
     grants = [],

@@ -13,6 +13,7 @@ use super::prelude::*;
 #[operation(
     id = "auth.login",
     actor = Anonymous,
+    io = Session,
     scope = Global,
     risk = Write,
     grants = [],

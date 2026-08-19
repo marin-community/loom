@@ -151,7 +151,12 @@ fn grants_allow(principal: &Principal, operation: &OperationSpec) -> bool {
 }
 
 async fn scope_allows(context: &OperationContext, scope: ScopeRef<'_>) -> ApiResult<()> {
-    let denied = || AppError::new(StatusCode::FORBIDDEN, "credential cannot reach this resource");
+    let denied = || {
+        AppError::new(
+            StatusCode::FORBIDDEN,
+            "credential cannot reach this resource",
+        )
+    };
     match scope {
         ScopeRef::Global => Ok(()),
         ScopeRef::Repository(repo_root) => {

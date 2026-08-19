@@ -17,7 +17,11 @@ use super::{require_session, ApiResult, AppError, AppState};
 /// the id, route, CLI (`loom context`), and MCP (`loom_context::get`)
 /// projections are all independent of that.
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![register::<weaver_api::operations::sessions::context::Get, _, _>(context_get)]
+    vec![register::<
+        weaver_api::operations::sessions::context::Get,
+        _,
+        _,
+    >(context_get)]
 }
 
 async fn context_get(

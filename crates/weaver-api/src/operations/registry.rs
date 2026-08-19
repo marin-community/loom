@@ -133,6 +133,19 @@ pub enum Io {
     /// client-side affordance. Getting this backwards silently deletes an MCP
     /// tool, because a non-JSON operation may not have one.
     Upload,
+    /// JSON body plus a browser session-cookie effect.
+    ///
+    /// Logging in and out are ordinary operations in every respect a caller can
+    /// see — they have schemas, they appear in the surface, they are authorized
+    /// the same way — but their *response* has to carry a `Set-Cookie` an
+    /// HttpOnly session depends on, and a JSON body cannot express that. So they
+    /// are served by a transport-specific route mounted at the same derived path
+    /// rather than by the generic dispatcher.
+    ///
+    /// The point of naming it is that "this operation is not on the generic
+    /// path" becomes a declared fact with a test behind it, instead of a route
+    /// someone forgot to migrate.
+    Session,
 }
 
 impl Io {
@@ -142,6 +155,7 @@ impl Io {
             Self::Stream => "stream",
             Self::Duplex => "duplex",
             Self::Upload => "upload",
+            Self::Session => "session",
         }
     }
 
@@ -307,7 +321,7 @@ impl OperationSpec {
 
     pub fn method(&self) -> &'static str {
         match self.io {
-            Io::Json | Io::Upload => "POST",
+            Io::Json | Io::Upload | Io::Session => "POST",
             Io::Stream | Io::Duplex => "GET",
         }
     }

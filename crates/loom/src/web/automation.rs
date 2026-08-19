@@ -353,10 +353,7 @@ async fn dispatch_channel_run(
     }
 }
 
-/// Shared body of `POST /runs` (legacy) and `runs.create` (operation
-/// registry): everything after identity resolution, which is the one piece
-/// that differs between the two routes (see `run_identity` vs
-/// `create_run_identity`).
+/// Everything after identity resolution for `runs.create`.
 async fn create_run_core(
     st: &AppState,
     principal: &Principal,
@@ -516,26 +513,10 @@ async fn create_run_core(
     launch_run(st, req, subject, profiles, run, LaunchFailure::Final).await
 }
 
-/// `POST /runs` — the legacy axum route, unchanged, still reachable by
-/// `Grant::User` per `web/auth.rs`'s `user_grant_allows`. Kept in place
-/// alongside `create_run_operation` until the coordinator's route-deletion
-/// pass; see `bound_operations`.
+/// `runs.create`. `actor = Internal` means `authorize()` has already
+/// narrowed the reachable grants to `Admin`/`Automation` before this runs
+/// (see `run_identity`).
 pub(super) async fn create_run(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<RunReq>,
-) -> ApiResult<Json<RunView>> {
-    let profile = req.profile.trim().to_string();
-    let (subject, profiles) = run_identity(&principal, &profile)?;
-    Ok(Json(
-        create_run_core(&st, &principal, req, subject, profiles).await?,
-    ))
-}
-
-/// `runs.create` — the operation-registry handler. `actor = Internal` means
-/// `authorize()` has already narrowed the reachable grants to
-/// `Admin`/`Automation` (see `create_run_identity`) before this runs.
-pub(super) async fn create_run_operation(
     context: OperationContext,
     input: run_operations::create::Input,
 ) -> ApiResult<RunView> {
@@ -549,39 +530,17 @@ pub(super) async fn create_run_operation(
         session: input.session,
     };
     let profile = req.profile.trim().to_string();
-    let (subject, profiles) = create_run_identity(&context.principal, &profile)?;
+    let (subject, profiles) = run_identity(&context.principal, &profile)?;
     create_run_core(&context.state, &context.principal, req, subject, profiles).await
-}
-
-/// `GET /runs` — the legacy axum route, unchanged. Still reachable by
-/// `Grant::Automation`, filtered to that credential's own subject; see
-/// `list_runs_operation` for why the new operation cannot preserve that.
-pub(super) async fn list_runs(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<RunView>>> {
-    let subject = match &principal.grant {
-        Grant::Admin | Grant::User => None,
-        Grant::Automation { subject, .. } => Some(subject.as_str()),
-        Grant::Anonymous | Grant::Session { .. } => {
-            return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"))
-        }
-    };
-    Ok(Json(
-        crate::runs::list_for(&st.db, subject)
-            .await?
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-    ))
 }
 
 /// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`
 /// ever reach this handler (`Grant::Automation` and `Grant::Session` are
-/// refused by `authorize()` before the body runs, unlike the legacy route
-/// above), so unlike `list_runs` there is no subject to filter by — this is a
-/// narrowing versus the legacy route worth flagging; see the port report.
-pub(super) async fn list_runs_operation(
+/// refused by `authorize()` before the body runs). The old handler this
+/// replaces additionally let `Grant::Automation` list runs filtered to its
+/// own subject — that path is gone now that `Grant::Automation` cannot reach
+/// an `actor = User` operation at all; see the port report.
+pub(super) async fn list_runs(
     context: OperationContext,
     _input: run_operations::list::Input,
 ) -> ApiResult<Vec<RunView>> {
@@ -592,28 +551,10 @@ pub(super) async fn list_runs_operation(
         .collect())
 }
 
-/// `GET /runs/{id}` — the legacy axum route, unchanged. Still reachable by
-/// `Grant::Automation`, gated to runs it owns.
+/// `runs.get`, same reasoning as `runs.list`: only `Grant::Admin`/
+/// `Grant::User` reach here, so the old handler's `Grant::Automation`
+/// subject-match check is unreachable and dropped.
 pub(super) async fn get_run(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-) -> ApiResult<Json<RunView>> {
-    let run = crate::runs::get(&st.db, &id)
-        .await?
-        .ok_or_else(|| AppError::not_found("automation run"))?;
-    if matches!(&principal.grant, Grant::Automation { subject, .. } if subject != &run.actor_subject)
-    {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "run access forbidden"));
-    }
-    Ok(Json(run.into()))
-}
-
-/// `runs.get` is declared `actor = User`, same reasoning as
-/// `list_runs_operation`: only `Grant::Admin`/`Grant::User` reach here, so
-/// the legacy handler's `Grant::Automation`-subject-match check above is
-/// unreachable through this path and dropped.
-pub(super) async fn get_run_operation(
     context: OperationContext,
     input: run_operations::get::Input,
 ) -> ApiResult<RunView> {

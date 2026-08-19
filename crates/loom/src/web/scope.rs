@@ -48,7 +48,9 @@ pub(crate) async fn require_repo_access(
     if own.as_deref() == Some(repo_root) {
         Ok(())
     } else {
-        Err(denied("session credentials are limited to their repository"))
+        Err(denied(
+            "session credentials are limited to their repository",
+        ))
     }
 }
 
@@ -100,6 +102,8 @@ pub(crate) async fn require_session_access(
     if resolved.as_deref() == Some(own) {
         Ok(())
     } else {
-        Err(denied("session credentials are limited to their own session"))
+        Err(denied(
+            "session credentials are limited to their own session",
+        ))
     }
 }

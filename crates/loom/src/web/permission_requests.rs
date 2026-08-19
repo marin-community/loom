@@ -14,9 +14,9 @@ use crate::{
 use super::operations::{register, Bound, OperationContext};
 use super::{
     channels::{append_and_deliver, record_channel_message_event},
-    effective_repositories, github_token_operation, grant_github_access_operation,
-    require_session, restricted_github_invoke_operation, revoke_github_access_operation,
-    validate_github_write, ApiResult, AppError, AppState,
+    effective_repositories, github_token_operation, grant_github_access_operation, require_session,
+    restricted_github_invoke_operation, revoke_github_access_operation, validate_github_write,
+    ApiResult, AppError, AppState,
 };
 
 pub(super) fn bound_operations() -> Vec<Bound> {

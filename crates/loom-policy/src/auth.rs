@@ -67,6 +67,11 @@ pub enum AuthVia {
     Token,
     /// A valid browser session cookie.
     Session,
+    /// No credential was presented at all.
+    ///
+    /// Only reaches operations declaring `actor = Anonymous`; see
+    /// [`Grant::Anonymous`].
+    Nothing,
 }
 
 impl AuthVia {
@@ -75,6 +80,7 @@ impl AuthVia {
             AuthVia::Loopback => "loopback",
             AuthVia::Token => "token",
             AuthVia::Session => "session",
+            AuthVia::Nothing => "none",
         }
     }
 }
@@ -119,6 +125,22 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// The caller that presented nothing.
+    ///
+    /// Constructed by the auth middleware only for a request whose target
+    /// operation declares `actor = Anonymous`, so that logging in reaches the
+    /// same `authorize()` as everything else instead of living on a router that
+    /// skips it.
+    pub fn anonymous() -> Self {
+        Self {
+            username: String::new(),
+            github_login: None,
+            via: AuthVia::Nothing,
+            grant: Grant::Anonymous,
+            automation_context: None,
+        }
+    }
+
     pub fn is_admin(&self) -> bool {
         matches!(self.grant, Grant::Admin)
     }

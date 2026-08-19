@@ -8,7 +8,8 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use weaver_api::CreateReq;
+use weaver_api::operations::repos as ops;
+use weaver_api::{CreateReq, RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
 
 use crate::backend;
 use crate::git;
@@ -18,6 +19,7 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 use crate::lifecycle::auto_archive;
 
@@ -786,4 +788,142 @@ pub(super) async fn validate_repo_revision(
         repo_root: repo_root.display().to_string(),
         message,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `repos.*`, bound onto `weaver_api::operations::repos`.
+// Each handler below is the twin of a legacy axum handler above: same domain
+// calls, resolved from an operation's typed `Input` instead of a query/body.
+// Authorization (`actor = User`, `scope = Global`) now happens once,
+// centrally, in `web/operations.rs`. The legacy routes above stay live and
+// untouched until the coordinated route deletion pass.
+//
+// `repos.env.*` binds handlers that live in `repo_env.rs` (the legacy
+// `/api/repos/env*` routes are there too) — its `bound_operations()` is
+// folded into this bundle's, since the coordinator only calls
+// `repos::bound_operations()`.
+// ---------------------------------------------------------------------------
+
+fn repo_view(r: repo::ManagedRepo) -> RepoView {
+    RepoView {
+        slug: r.slug,
+        remote_url: r.remote_url,
+        path: r.path,
+        created_at: r.created_at,
+    }
+}
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    let mut bound = vec![
+        register::<ops::list::List, _, _>(list_operation),
+        register::<ops::register::Register, _, _>(register_operation),
+        register::<ops::recent::Recent, _, _>(recent_operation),
+        register::<ops::branches::List, _, _>(branches_operation),
+        register::<ops::revisions::validate::Validate, _, _>(revisions_validate_operation),
+    ];
+    bound.extend(super::repo_env::bound_operations());
+    bound
+}
+
+/// `repos.list` — the twin of [`list_repos`].
+async fn list_operation(
+    context: OperationContext,
+    _input: ops::list::Input,
+) -> ApiResult<ops::list::Output> {
+    let st = context.state;
+    let repos = repo::list_registered(&st.db).await?;
+    Ok(repos.into_iter().map(repo_view).collect())
+}
+
+/// `repos.register` — the twin of [`register_repo`].
+async fn register_operation(
+    context: OperationContext,
+    input: ops::register::Input,
+) -> ApiResult<ops::register::Output> {
+    let st = context.state;
+    let slug = repo::parse_slug(&input.repo).map_err(AppError::bad_request)?;
+    let remote_url = repo::remote_url_for(&input.repo, &slug);
+    let path = slug.path(&repo::repos_dir());
+    let managed =
+        repo::register(&st.db, &slug.slug(), &remote_url, &path.to_string_lossy()).await?;
+    Ok(repo_view(managed))
+}
+
+/// `repos.recent` — the twin of [`recent_repos`].
+async fn recent_operation(
+    context: OperationContext,
+    input: ops::recent::Input,
+) -> ApiResult<ops::recent::Output> {
+    let st = context.state;
+    let limit = input.limit.unwrap_or(10).clamp(1, 50);
+    let repos = repo::recent(&st.db, limit).await?;
+    Ok(repos
+        .into_iter()
+        .map(|r| RecentRepoView {
+            repo_root: r.repo_root,
+            last_used_at: r.last_used_at,
+            active_branches: r.active_branches,
+        })
+        .collect())
+}
+
+/// `repos.branches` — the twin of [`repo_branches`]. Server-local: `cwd` is a
+/// filesystem path the server process can read, not a session's own scope, so
+/// this ignores `context` entirely (`scope = Global`, `actor = User`).
+async fn branches_operation(
+    _context: OperationContext,
+    input: ops::branches::Input,
+) -> ApiResult<ops::branches::Output> {
+    let cwd = PathBuf::from(&input.cwd);
+    let repo_root = git::repo_root(&cwd)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let current = git::current_branch(&repo_root).await.ok();
+    let names = git::list_branches(&repo_root).await?;
+    let mut out: Vec<RepoBranchView> = Vec::with_capacity(names.len());
+    for name in names {
+        let worktree = git::worktree_for_branch(&repo_root, &name)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.display().to_string());
+        let is_current = current.as_deref() == Some(name.as_str());
+        out.push(RepoBranchView {
+            name,
+            worktree,
+            current: is_current,
+        });
+    }
+    out.sort_by(|a, b| {
+        let rank = |b: &RepoBranchView| {
+            if b.current {
+                0
+            } else if b.worktree.is_some() {
+                1
+            } else {
+                2
+            }
+        };
+        rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(out)
+}
+
+/// `repos.revisions.validate` — the twin of [`validate_repo_revision`].
+async fn revisions_validate_operation(
+    _context: OperationContext,
+    input: ops::revisions::validate::Input,
+) -> ApiResult<ops::revisions::validate::Output> {
+    let cwd = PathBuf::from(&input.cwd);
+    let repo_root = git::repo_root(&cwd)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    let revision = input.revision.trim();
+    let valid = git::resolve_base(&repo_root, revision).await.is_some();
+    let message = (!valid).then(|| git::missing_revision_message(&repo_root, revision));
+    Ok(RepoRevisionValidationView {
+        valid,
+        repo_root: repo_root.display().to_string(),
+        message,
+    })
 }

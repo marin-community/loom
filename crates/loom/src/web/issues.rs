@@ -20,8 +20,8 @@ use crate::events;
 use crate::git;
 use crate::{auth::Grant, auth::Principal};
 
-use super::{author_or_manual, require_branch};
 use super::operations::{register, Bound, OperationContext};
+use super::{author_or_manual, require_branch};
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------

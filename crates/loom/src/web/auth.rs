@@ -10,14 +10,14 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::Row;
+use weaver_api::operations::auth::{
+    automation_token, federations, github_config, github_token, me, set_password, tokens, users,
+};
 use weaver_api::{
     AddUserReq, AuthMethods, AutomationTokenView, CreateTokenReq, CreatedTokenView, FederationReq,
     FederationView, GithubConfigView, GithubTokenStatusView, LoginReq, MeView,
     RemoveFederationResult, RemoveUserResult, RevokeTokenResult, SetGithubConfigReq,
     SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
-};
-use weaver_api::operations::auth::{
-    automation_token, federations, github_config, github_token, me, set_password, tokens, users,
 };
 
 use crate::auth::{self, Grant, Principal};
@@ -272,13 +272,12 @@ pub(super) fn operation_grant_allows(
             matches!(
                 operation.actor,
                 weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::SessionOnly
-            )
-                && capabilities.as_ref().is_none_or(|granted| {
-                    operation
-                        .grants
-                        .iter()
-                        .all(|required| granted.iter().any(|value| value == required))
-                })
+            ) && capabilities.as_ref().is_none_or(|granted| {
+                operation
+                    .grants
+                    .iter()
+                    .all(|required| granted.iter().any(|value| value == required))
+            })
         }
     }
 }
@@ -390,7 +389,20 @@ pub(super) async fn require_auth(
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
-        None => unauthorized("authentication required").into_response(),
+        // No credential. An operation that declares `actor = Anonymous` is
+        // reachable anyway — that declaration is what opens the door, and
+        // `authorize()` still runs, against `Grant::Anonymous`. Everything else
+        // is refused here as before.
+        None => {
+            let anonymous_target =
+                weaver_api::operation_for_request(req.method().as_str(), req.uri().path())
+                    .is_some_and(|operation| operation.actor == weaver_api::ActorPolicy::Anonymous);
+            if !anonymous_target {
+                return unauthorized("authentication required").into_response();
+            }
+            req.extensions_mut().insert(Principal::anonymous());
+            next.run(req).await
+        }
     }
 }
 
@@ -1137,7 +1149,10 @@ async fn list_users_op(
 }
 
 /// `auth.users.create` — approve a new operator.
-async fn add_user_op(context: OperationContext, input: users::create::Input) -> ApiResult<UserView> {
+async fn add_user_op(
+    context: OperationContext,
+    input: users::create::Input,
+) -> ApiResult<UserView> {
     let username = input.username.trim();
     if username.is_empty() {
         return Err(AppError::bad_request("a username is required"));
@@ -1185,9 +1200,13 @@ async fn set_user_role_op(
     context: OperationContext,
     input: users::set_role::Input,
 ) -> ApiResult<UserView> {
-    auth::set_user_role(&context.state.db, &input.username, user_role_input(input.role))
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    auth::set_user_role(
+        &context.state.db,
+        &input.username,
+        user_role_input(input.role),
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
     tracing::info!(username = %input.username, role = ?input.role, "user role updated");
     let user = auth::get_user(&context.state.db, &input.username)
         .await?

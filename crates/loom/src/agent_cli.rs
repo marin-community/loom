@@ -1344,13 +1344,15 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
             let i = if repo {
                 client
-                    .invoke::<issue_ops::backlog::create::Create>(&issue_ops::backlog::create::Input {
-                        title: title.clone(),
-                        body: body.unwrap_or_default(),
-                        github_issue: github,
-                        repo_root: b.repo_root.clone(),
-                        source_branch: Some(b.branch.clone()),
-                    })
+                    .invoke::<issue_ops::backlog::create::Create>(
+                        &issue_ops::backlog::create::Input {
+                            title: title.clone(),
+                            body: body.unwrap_or_default(),
+                            github_issue: github,
+                            repo_root: b.repo_root.clone(),
+                            source_branch: Some(b.branch.clone()),
+                        },
+                    )
                     .await?
             } else {
                 client

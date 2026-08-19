@@ -16,6 +16,7 @@ use super::prelude::*;
 #[operation(
     id = "auth.federate",
     actor = Anonymous,
+    io = Session,
     scope = Global,
     risk = Write,
     grants = [],

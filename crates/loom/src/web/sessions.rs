@@ -564,8 +564,10 @@ pub(super) async fn create_session(
     // `None` means the credential cannot launch anything at all. `authorize()`
     // already refuses an anonymous grant here, so this fails closed rather than
     // depending on that.
-    let actor = crate::provision::Actor::from_principal(&principal, delegated)
-        .ok_or_else(|| AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session"))?;
+    let actor =
+        crate::provision::Actor::from_principal(&principal, delegated).ok_or_else(|| {
+            AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session")
+        })?;
     match &principal.grant {
         crate::auth::Grant::Session { .. } => {
             req.parent_branch = actor.bound_parent_branch().map(str::to_string);
@@ -2391,11 +2393,15 @@ pub(super) async fn set_mode(
 // Operation registry bindings
 //
 // The `sessions` bundle: 17 operations under `weaver_api::operations::sessions`.
-// `sessions.context` and `sessions.summary.get` live in their own sibling
-// files (`self_context.rs`, `session_summary.rs`) and are folded in below;
-// every other handler lives here, beside the legacy axum handler it was
-// ported from (which stays mounted — see `web/mod.rs` — until the coordinator
-// removes it in one pass).
+// `sessions.summary.get` lives in the sibling `session_summary.rs` and is
+// folded in below. `sessions.context` also lives in a sibling file
+// (`self_context.rs`), but `registry()` (`web/operations.rs`, coordinator-owned)
+// already wires `self_context::bound_operations()` in on its own — it predates
+// `context` moving into this bundle and still treats it as independent — so it
+// is deliberately NOT re-added here; doing so would register `sessions.context`
+// twice and panic the router on startup. Every other handler lives here,
+// beside the legacy axum handler it was ported from (which stays mounted —
+// see `web/mod.rs` — until the coordinator removes it in one pass).
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -2416,14 +2422,16 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::tags::set::Set, _, _>(op_tags_set),
         register::<ops::tags::delete::Delete, _, _>(op_tags_delete),
     ];
-    bound.extend(super::self_context::bound_operations());
     bound.extend(super::session_summary::bound_operations());
     bound
 }
 
 /// `sessions.list` — ported from [`search_sessions`], which this replaces:
 /// the operation's `Input` is exactly `SearchSessionsOptions`'s field set.
-async fn op_list(context: OperationContext, input: ops::list::Input) -> ApiResult<Vec<SessionView>> {
+async fn op_list(
+    context: OperationContext,
+    input: ops::list::Input,
+) -> ApiResult<Vec<SessionView>> {
     collect_sessions(
         &context.state,
         false,
@@ -2474,6 +2482,15 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
         claim_issue: input.claim_issue,
         issue: input.issue,
         parent_branch: input.parent_branch,
+        name: input.name,
+        existing_branch: input.existing_branch,
+        github_issue: input.github_issue,
+        model: input.model,
+        effort: input.effort,
+        selection: input.selection,
+        scratch: input.scratch,
+        expected_profile_revision: input.expected_profile_revision,
+        expected_resolver_revision: input.expected_resolver_revision,
         ..Default::default()
     };
     if let Some(repo_input) = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
@@ -2487,8 +2504,9 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
     // `authorize()` has already refused an anonymous or automation grant for
     // this `actor = SessionSelf` operation, so `from_principal` cannot
     // actually return `None` here; fail closed rather than depend on that.
-    let actor = crate::provision::Actor::from_principal(&context.principal, delegated)
-        .ok_or_else(|| AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session"))?;
+    let actor = crate::provision::Actor::from_principal(&context.principal, delegated).ok_or_else(
+        || AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session"),
+    )?;
     let created = crate::provision::create(st.clone(), req, actor)
         .await
         .map_err(super::provision_error)?;
@@ -2496,7 +2514,10 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
 }
 
 /// `sessions.send` — ported from [`send_session`].
-async fn op_send(context: OperationContext, input: ops::send::Input) -> ApiResult<SessionSendResult> {
+async fn op_send(
+    context: OperationContext,
+    input: ops::send::Input,
+) -> ApiResult<SessionSendResult> {
     let st = &context.state;
     let (session, branch) = require_session(&st.db, &input.session).await?;
     let submit = input.submit.unwrap_or(true);
@@ -2609,7 +2630,10 @@ async fn op_events_list(
 /// [`create_branch_event`](super::branches) (branches.rs, not ported here):
 /// same escape-hatch semantics, resolved from a session id instead of a
 /// branch key.
-async fn op_events_create(context: OperationContext, input: ops::events::create::Input) -> ApiResult<Event> {
+async fn op_events_create(
+    context: OperationContext,
+    input: ops::events::create::Input,
+) -> ApiResult<Event> {
     let st = &context.state;
     let (_, branch) = require_session(&st.db, &input.session).await?;
     let kind = input.kind.trim();
@@ -2672,14 +2696,20 @@ const CALM_STATUS: &str = "ok";
 /// `sessions.status.get` — the session-scoped read `branches.rs`'s
 /// `get_branch` already serves for a branch key; the attention level and
 /// status message both live on `BranchView` (`tags` and `description`).
-async fn op_status_get(context: OperationContext, input: ops::status::get::Input) -> ApiResult<BranchView> {
+async fn op_status_get(
+    context: OperationContext,
+    input: ops::status::get::Input,
+) -> ApiResult<BranchView> {
     let (_, branch) = require_session(&context.state.db, &input.session).await?;
     super::branch_view(&context.state.db, &branch).await
 }
 
 /// `sessions.status.set` — ported from [`set_branch_status`] (branches.rs),
 /// resolved from a session id instead of a branch key.
-async fn op_status_set(context: OperationContext, input: ops::status::set::Input) -> ApiResult<BranchView> {
+async fn op_status_set(
+    context: OperationContext,
+    input: ops::status::set::Input,
+) -> ApiResult<BranchView> {
     let st = &context.state;
     let (_, branch) = require_session(&st.db, &input.session).await?;
     let level = input.level.trim().to_ascii_lowercase();
@@ -2747,7 +2777,10 @@ async fn op_status_set(context: OperationContext, input: ops::status::set::Input
 
 /// `sessions.tags.list` — session tags live on the branch row, so the view is
 /// `BranchView` (its `tags` field), not a bespoke tag list type.
-async fn op_tags_list(context: OperationContext, input: ops::tags::list::Input) -> ApiResult<BranchView> {
+async fn op_tags_list(
+    context: OperationContext,
+    input: ops::tags::list::Input,
+) -> ApiResult<BranchView> {
     let (_, branch) = require_session(&context.state.db, &input.session).await?;
     super::branch_view(&context.state.db, &branch).await
 }
@@ -2755,7 +2788,10 @@ async fn op_tags_list(context: OperationContext, input: ops::tags::list::Input) 
 /// `sessions.tags.set` — ported from [`set_session_tag`], returning
 /// `BranchView` (the operation's declared `Output`) rather than the full
 /// `SessionView` the old handler returned.
-async fn op_tags_set(context: OperationContext, input: ops::tags::set::Input) -> ApiResult<BranchView> {
+async fn op_tags_set(
+    context: OperationContext,
+    input: ops::tags::set::Input,
+) -> ApiResult<BranchView> {
     let st = &context.state;
     let (_, branch) = require_session(&st.db, &input.session).await?;
     let tag_key = input.key.as_str();

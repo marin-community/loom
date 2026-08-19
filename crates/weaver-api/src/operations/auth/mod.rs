@@ -6,7 +6,7 @@
 //! their own identity — signing in, minting a personal token, setting a
 //! password) or `actor = Admin` (fleet administration — approving operators,
 //! configuring GitHub sign-in, registering federation mappings, minting
-//! automation tokens), except `auth.federate`, which is `actor = Internal`
+//! automation tokens), except `auth.federate`, which is `actor = Anonymous`
 //! because its caller is a CI system exchanging a workload-identity token,
 //! never a human and never an agent session. Because an MCP projection is
 //! rejected on any operation that is not `SessionSelf` (see
