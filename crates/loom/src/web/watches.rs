@@ -6,9 +6,10 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use weaver_api::operations::watches as watches_operations;
 use weaver_api::{
-    AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchRunView,
-    WatchView,
+    AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchDeleteResult,
+    WatchRunResult, WatchRunView, WatchView,
 };
 use weaver_core::watch::{self as watch_store, Watch};
 
@@ -16,11 +17,31 @@ use crate::agent;
 use crate::db::Db;
 use crate::watch as ov_engine;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
 // Watches — the operator + authoring surface (server-owned state)
 // ---------------------------------------------------------------------------
+//
+// `agent_oneshot` below (`POST /agent/oneshot`) is a different, not-yet-ported
+// operation and is left untouched. Every other handler here has a
+// `*_operation` counterpart registered below; the legacy axum handler under
+// its original name stays in place (and now delegates to a shared `*_core`
+// function) because `web/mod.rs`'s routes still call it by that name and
+// route deletion is a separate, coordinated pass.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<watches_operations::list::List, _, _>(list_watches_operation),
+        register::<watches_operations::get::Get, _, _>(get_watch_operation),
+        register::<watches_operations::programs::Programs, _, _>(programs_operation),
+        register::<watches_operations::create::Create, _, _>(create_watch_operation),
+        register::<watches_operations::update::Update, _, _>(update_watch_operation),
+        register::<watches_operations::delete::Delete, _, _>(delete_watch_operation),
+        register::<watches_operations::run::Run, _, _>(run_watch_operation),
+        register::<watches_operations::runs::Runs, _, _>(watch_runs_operation),
+    ]
+}
 
 /// Build an [`WatchView`] for a watch, joining the most recent
 /// round's outcome from the run history.
@@ -79,10 +100,22 @@ fn validate_program(program: &str) -> ApiResult<()> {
     Ok(())
 }
 
+fn program_views() -> Vec<ProgramView> {
+    crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
+}
+
 /// `GET /api/watches/programs` — the builtin program registry: what the
 /// create form offers and the panel's read-only script viewer renders.
 pub(super) async fn list_programs() -> Json<Vec<ProgramView>> {
-    Json(crate::builtins::BUILTINS.iter().map(|b| b.view()).collect())
+    Json(program_views())
+}
+
+/// `watches.programs`.
+pub(super) async fn programs_operation(
+    _context: OperationContext,
+    _input: watches_operations::programs::Input,
+) -> ApiResult<Vec<ProgramView>> {
+    Ok(program_views())
 }
 
 /// Resolve a watch (by id or name) or 404.
@@ -92,18 +125,27 @@ async fn require_watch(db: &Db, key: &str) -> ApiResult<Watch> {
         .ok_or_else(|| AppError::not_found("watch"))
 }
 
-pub(super) async fn list_watches(State(st): State<AppState>) -> ApiResult<Json<Vec<WatchView>>> {
+async fn list_watches_core(st: &AppState) -> ApiResult<Vec<WatchView>> {
     let mut out = Vec::new();
     for o in watch_store::list(&st.db).await? {
         out.push(watch_view(&st.db, &o).await?);
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
-pub(super) async fn create_watch(
-    State(st): State<AppState>,
-    Json(req): Json<CreateWatchReq>,
-) -> ApiResult<Json<WatchView>> {
+pub(super) async fn list_watches(State(st): State<AppState>) -> ApiResult<Json<Vec<WatchView>>> {
+    Ok(Json(list_watches_core(&st).await?))
+}
+
+/// `watches.list`.
+pub(super) async fn list_watches_operation(
+    context: OperationContext,
+    _input: watches_operations::list::Input,
+) -> ApiResult<Vec<WatchView>> {
+    list_watches_core(&context.state).await
+}
+
+async fn create_watch_core(st: &AppState, req: CreateWatchReq) -> ApiResult<WatchView> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("name must not be empty"));
@@ -138,7 +180,7 @@ pub(super) async fn create_watch(
         None => {
             let params_value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
             let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
-            reconcile_trigger(&st, &program, &params_value, &fallback).await
+            reconcile_trigger(st, &program, &params_value, &fallback).await
         }
     };
 
@@ -157,7 +199,35 @@ pub(super) async fn create_watch(
     };
     let o = watch_store::create(&st.db, &new).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch created");
-    Ok(Json(watch_view(&st.db, &o).await?))
+    watch_view(&st.db, &o).await
+}
+
+pub(super) async fn create_watch(
+    State(st): State<AppState>,
+    Json(req): Json<CreateWatchReq>,
+) -> ApiResult<Json<WatchView>> {
+    Ok(Json(create_watch_core(&st, req).await?))
+}
+
+/// `watches.create`.
+pub(super) async fn create_watch_operation(
+    context: OperationContext,
+    input: watches_operations::create::Input,
+) -> ApiResult<WatchView> {
+    let req = CreateWatchReq {
+        name: input.name,
+        trigger: input.trigger,
+        scope: input.scope,
+        program: input.program,
+        params: input.params,
+        capabilities: input.capabilities,
+        profile: input.profile,
+        model: input.model,
+        effort: input.effort,
+        cooldown_secs: input.cooldown_secs,
+        enabled: input.enabled,
+    };
+    create_watch_core(&context.state, req).await
 }
 
 /// The program's default trigger (a builtin's suggested manifest), used as the

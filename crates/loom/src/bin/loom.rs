@@ -13,6 +13,7 @@ use loom::agent_cli::{
     IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd, TagCmd as AgentTagCmd,
 };
 use serde_json::{json, Value};
+use weaver_api::operations::permissions as perm_ops;
 use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, CreatePermissionRequestReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, DecidePermissionRequestReq,
@@ -1766,7 +1767,10 @@ fn run_help(topic: Option<String>, as_json: bool) -> Result<()> {
     if let Some(topic) = topic {
         println!("{topic}\n");
         for operation in operations {
-            let command = operation.cli.unwrap_or("(API only)");
+            let command = operation
+                .cli
+                .map(|cli| cli.invocation())
+                .unwrap_or_else(|| "(API only)".to_string());
             println!("  {command:<58} {}", operation.summary);
             println!(
                 "    id: {} · actor: {} · scope: {} · risk: {} · {} {}",
@@ -1774,8 +1778,8 @@ fn run_help(topic: Option<String>, as_json: bool) -> Result<()> {
                 operation.actor.as_str(),
                 operation.scope.as_str(),
                 operation.risk.as_str(),
-                operation.method,
-                operation.path
+                operation.method(),
+                operation.path()
             );
         }
         return Ok(());
@@ -1832,7 +1836,11 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
     match cmd {
         PermissionsCmd::Show { session, json } => {
             let session = github_access_session(session)?;
-            let view = client.effective_permissions(&session).await?;
+            let view = client
+                .invoke::<perm_ops::effective::get::Get>(&perm_ops::effective::get::Input {
+                    session,
+                })
+                .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&view)?);
             } else {
@@ -1857,9 +1865,12 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
             Ok(())
         }
         PermissionsCmd::Explain { operation } => {
-            let operation = client.operation(&operation).await.with_context(|| {
-                "unknown operation — run `loom help --json` to list operation ids"
-            })?;
+            let operation = client
+                .invoke::<perm_ops::explain::Explain>(&perm_ops::explain::Input { operation })
+                .await
+                .with_context(|| {
+                    "unknown operation — run `loom help --json` to list operation ids"
+                })?;
             println!("{}", serde_json::to_string_pretty(&operation)?);
             Ok(())
         }
@@ -1872,13 +1883,12 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
             } => {
                 let session = github_access_session(session)?;
                 let request = client
-                    .create_permission_request(
-                        &session,
-                        &CreatePermissionRequestReq {
-                            kind: "github_repository".to_string(),
+                    .invoke::<perm_ops::requests::create::Create>(
+                        &perm_ops::requests::create::Input {
                             repository,
-                            mode,
                             reason,
+                            mode,
+                            session,
                         },
                     )
                     .await?;
@@ -1896,7 +1906,10 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
         } => {
             let session = github_access_session(session)?;
             let requests = client
-                .permission_requests(&session, state.as_deref())
+                .invoke::<perm_ops::requests::list::List>(&perm_ops::requests::list::Input {
+                    state,
+                    session,
+                })
                 .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&requests)?);
