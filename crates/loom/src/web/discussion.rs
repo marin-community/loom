@@ -1,17 +1,5 @@
-use axum::{
-    extract::{Path, State},
-    Json,
-};
-use serde_json::{json, Value};
-use weaver_api::{AnchorDto, CommentDto, NewCommentBody, NewThreadBody, ThreadDto};
-use weaver_core::artifact::{self, Artifact};
-use weaver_core::branch::Branch;
-use weaver_core::discussion;
 
-use crate::events;
 
-use super::{require_branch, require_session};
-use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
 // Discussion — resolvable, stand-off comment threads anchored to a quoted span

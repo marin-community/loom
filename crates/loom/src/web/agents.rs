@@ -4,12 +4,6 @@
 //! ([`super::sessions::list_agents`]); these routes add/edit/remove the custom
 //! rows it merges in.
 
-use axum::{
-    extract::{Path, State},
-    Json,
-};
-use serde::Deserialize;
-use serde_json::{json, Value};
 use weaver_api::operations::agents as ops;
 use weaver_api::{
     AgentChoiceView, AgentMetadataView, AgentsView, CustomAgentView, CustomAgentsView,
@@ -19,7 +13,7 @@ use crate::custom_agents::{self, CustomAgent};
 use crate::db::Db;
 
 use super::operations::{register, Bound, OperationContext};
-use super::{ApiResult, AppError, AppState};
+use super::{ApiResult, AppError};
 
 // ---------------------------------------------------------------------------
 // Operation registry — `agents.*`, bound onto `weaver_api::operations::agents`.

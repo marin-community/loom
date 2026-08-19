@@ -1,11 +1,10 @@
 use std::net::{IpAddr, SocketAddr};
 
 use axum::{
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{ConnectInfo, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
-    Extension, Json,
+    response::{IntoResponse, Response}, Json,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -14,10 +13,9 @@ use weaver_api::operations::auth::{
     automation_token, federations, github_config, github_token, me, set_password, tokens, users,
 };
 use weaver_api::{
-    AddUserReq, AuthMethods, AutomationTokenView, CreateTokenReq, CreatedTokenView, FederationReq,
+    AuthMethods, AutomationTokenView, CreatedTokenView, FederationReq,
     FederationView, GithubConfigView, GithubTokenStatusView, LoginReq, MeView,
-    RemoveFederationResult, RemoveUserResult, RevokeTokenResult, SetGithubConfigReq,
-    SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
+    RemoveFederationResult, RemoveUserResult, RevokeTokenResult, TokenView, UserRole, UserView,
 };
 
 use crate::auth::{self, Grant, Principal};

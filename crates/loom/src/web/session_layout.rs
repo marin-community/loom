@@ -1,19 +1,17 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     response::sse::{self, KeepAlive, Sse},
     Extension, Json,
 };
-use serde::Deserialize;
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use weaver_api::{
     CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SetSessionPlacementDefaultReq,
+    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
+    SessionLayoutView, SetSessionPlacementDefaultReq,
     UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 

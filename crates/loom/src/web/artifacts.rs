@@ -1,18 +1,14 @@
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Path, Query, State},
     http::{header, HeaderValue},
     response::{IntoResponse, Response},
-    Json,
 };
 use base64::Engine as _;
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use weaver_api::operations::artifacts::{delete, get, history, list, raw, threads, url, write};
 use weaver_api::{
-    AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactUpsertReq, ArtifactVersion, ArtifactView,
-    ArtifactWriteBody, CommentDto, IssueRefStatus, SessionUrlView, ThreadDto,
+    AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactVersion, ArtifactView, CommentDto, IssueRefStatus, SessionUrlView, ThreadDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch as branch_mod;
@@ -23,7 +19,7 @@ use crate::db::Db;
 use crate::events;
 
 use super::operations::{register, Bound, OperationContext};
-use super::{require_branch, require_session};
+use super::require_branch;
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------

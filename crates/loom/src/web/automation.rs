@@ -1,11 +1,10 @@
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Extension, Json,
+    extract::State,
+    http::StatusCode, Json,
 };
 use weaver_api::operations::runs as run_operations;
 use weaver_api::{
-    AutomationTokenReq, AutomationTokenView, FederateReq, FederationReq, FederationView, RunReq,
+    AutomationTokenView, FederateReq, RunReq,
     RunView, SlackThreadRef,
 };
 

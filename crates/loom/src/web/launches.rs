@@ -1,7 +1,6 @@
 //! REST boundary for canonical session-launch preview.
 
-use axum::{extract::State, Json};
-use weaver_api::{LaunchSelection, ResolveLaunchReq, ResolvedLaunchView};
+use weaver_api::LaunchSelection;
 
 use super::{ApiResult, AppError, AppState};
 

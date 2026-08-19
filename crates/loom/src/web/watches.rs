@@ -1,15 +1,10 @@
 use std::path::PathBuf;
 
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
-use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
 use weaver_api::{
-    AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchDeleteResult,
+    CreateWatchReq, PatchWatchReq, ProgramView, WatchDeleteResult,
     WatchRunResult, WatchRunView, WatchView,
 };
 use weaver_core::watch::{self as watch_store, Watch};

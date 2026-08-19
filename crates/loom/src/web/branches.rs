@@ -1,12 +1,7 @@
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
-use serde::Deserialize;
 use serde_json::json;
 use weaver_api::operations::branches as ops;
 use weaver_api::operations::slack as slack_operations;
-use weaver_api::{BranchStatusReq, BranchView, CreateChannelMessageReq, CreateEventReq, TagReq};
+use weaver_api::{BranchView, CreateChannelMessageReq};
 use weaver_core::branch::{TitleProvenance, TitleUpdate};
 use weaver_core::{branch as branch_mod, config, tags};
 

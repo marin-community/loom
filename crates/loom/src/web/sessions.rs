@@ -12,7 +12,6 @@ use axum::{
     },
     Extension, Json,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
@@ -21,15 +20,14 @@ use crate::auth::Principal;
 use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
-use crate::{agent, backend, config, custom_agents, db, events, git, github, repo};
+use crate::{agent, backend, db, events, git, github, repo};
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq, EnsureResumptionCueReq,
-    HandoffReq, HistoryPageView, PatchSessionReq, ResolvedLaunchView, ResumptionCueView,
-    SearchSessionsOptions, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
+    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq,
+    HandoffReq, HistoryPageView, ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
     SessionFilesView, SessionIdeInfoView, SessionInterruptResult, SessionModeResult,
     SessionPreviewResult, SessionSearchAttention, SessionSearchStatus, SessionSendResult,
-    SessionSummaryView, SessionUrlView, SessionView, SetTitleGenerationReq, TagReq,
+    SessionSummaryView, SessionUrlView, SessionView,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};

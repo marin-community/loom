@@ -1,15 +1,9 @@
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, ChangeAnchorDto, CreateReviewReq,
-    ExpectedReviewRevisionReq, ResolveReviewCommentReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewCommentDto, ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto, SubmitReviewReq,
-    UpdateReviewCommentReq, UpdateReviewReq,
+    ArtifactTextAnchorDto, ChangeAnchorDto, CreateReviewReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewCommentDto, ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch::Branch;

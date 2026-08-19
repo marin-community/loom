@@ -1,9 +1,5 @@
 use std::collections::HashSet;
 
-use axum::{
-    extract::{Path, State},
-    Extension, Json,
-};
 use weaver_api::SessionCatchupView;
 use weaver_core::branch::Branch;
 use weaver_core::{artifact, issue, tags};

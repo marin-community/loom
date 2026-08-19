@@ -12,8 +12,7 @@ use anyhow::Result;
 use axum::{
     extract::State,
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
-    Extension, Json,
+    response::{IntoResponse, Response}, Json,
 };
 use sqlx::FromRow;
 use weaver_api::operations::diagnostics as diagnostics_operations;
@@ -23,11 +22,10 @@ use weaver_api::{
     MigrationStreamView, ReadinessView,
 };
 
-use crate::auth::Principal;
 use crate::db::Db;
 
 use super::operations::{register, Bound, OperationContext};
-use super::{ApiResult, AppError, AppState};
+use super::{ApiResult, AppState};
 
 const LOCAL_RUNNER_POOL: &str = "local";
 const METRICS_CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";

@@ -7,7 +7,6 @@
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 use serde_json::Value;
 
 use crate::operations::{ApiMetaView, Operation, OperationView};

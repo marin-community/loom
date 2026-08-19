@@ -8,8 +8,7 @@ use std::convert::Infallible;
 
 use axum::extract::{Query, State};
 use axum::response::sse::{self, KeepAlive, Sse};
-use axum::{Extension, Json};
-use serde::Deserialize;
+use axum::Extension;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use weaver_api::operations::diagnostics as diagnostics_operations;

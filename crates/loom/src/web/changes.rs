@@ -1,13 +1,9 @@
-use axum::{
-    extract::{Path, State},
-    Json,
-};
 use std::path::Path as FsPath;
 use weaver_api::operations::sessions as ops;
 use weaver_api::ChangeSetDto;
 
 use super::operations::{register, Bound, OperationContext};
-use super::{require_session, ApiResult, AppState};
+use super::{require_session, ApiResult};
 
 /// The `sessions.changes` operation binding, folded into the `sessions`
 /// bundle by [`super::sessions::bound_operations`].

@@ -121,7 +121,6 @@ use operations::*;
 use repos::*;
 use restricted_github::*;
 pub(crate) use scope::{require_branch_access, require_repo_access, require_session_access};
-use sessions::*;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};

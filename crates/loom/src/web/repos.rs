@@ -2,12 +2,10 @@ use std::path::PathBuf;
 
 use axum::{
     body::Bytes,
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::{Deserialize, Serialize};
 use weaver_api::operations::repos as ops;
 use weaver_api::{CreateReq, RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
 

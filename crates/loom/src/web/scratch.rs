@@ -1,13 +1,6 @@
 use std::path::PathBuf;
 
-use axum::{
-    body::Bytes,
-    extract::{Path, Query, State},
-    http::StatusCode,
-    Json,
-};
-use serde::Deserialize;
-use serde_json::{json, Value};
+use axum::http::StatusCode;
 use weaver_api::operations::sessions as ops;
 use weaver_api::{ScratchDeleteResult, ScratchFileView, ScratchLimitsView};
 

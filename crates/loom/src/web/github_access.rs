@@ -3,17 +3,12 @@
 //! Launch policy remains an immutable snapshot. These small overrides are the
 //! audited escape hatch for work that legitimately expands to another repo.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::http::StatusCode;
 use serde_json::json;
 use weaver_api::operations::permissions as permission_operations;
 use weaver_api::operations::sessions as session_operations;
 use weaver_api::SessionGithubAccessView;
 
-use crate::auth::Principal;
 
 use super::operations::OperationContext;
 use super::{require_session, ApiResult, AppError, AppState};

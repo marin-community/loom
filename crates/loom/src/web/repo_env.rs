@@ -1,9 +1,3 @@
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
-use serde::Deserialize;
-use serde_json::{json, Value};
 use weaver_api::operations::repos::env as ops;
 use weaver_api::{RepoEnvVarView, RepoEnvView};
 
@@ -13,7 +7,7 @@ use crate::repo_env;
 
 use super::issues::resolve_repo_root;
 use super::operations::{register, Bound, OperationContext};
-use super::{ApiResult, AppError, AppState};
+use super::{ApiResult, AppError};
 
 // ---------------------------------------------------------------------------
 // Per-repo environment variables

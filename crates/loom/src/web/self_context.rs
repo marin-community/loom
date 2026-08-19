@@ -1,15 +1,12 @@
-use axum::{extract::State, http::HeaderMap, Extension, Json};
+use axum::http::HeaderMap;
 use weaver_api::operations::{artifacts, channels, sessions, Operation};
 use weaver_api::{SelfContextLinks, SelfContextView};
-use weaver_core::branch::{self, Branch};
+use weaver_core::branch::Branch;
 
-use crate::{
-    auth::{Grant, Principal},
-    session::{self, Session},
-};
+use crate::session::Session;
 
 use super::operations::{register, Bound, OperationContext};
-use super::{require_session, ApiResult, AppError, AppState};
+use super::{require_session, ApiResult};
 
 /// The bound `sessions.context` operation.
 ///

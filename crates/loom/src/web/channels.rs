@@ -1,16 +1,13 @@
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    Extension, Json,
+    extract::{Path, State},
+    http::StatusCode, Json,
 };
-use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 use weaver_api::operations::channels as ops;
 use weaver_api::{
     ChannelArchiveResult, ChannelBindingView, ChannelMessageView, ChannelSubscriptionView,
     ChannelView,
-    CreateChannelMessageReq, CreateChannelReq, SendReq, SetChannelReadMarkerReq,
-    SetChannelSubscriptionReq,
+    CreateChannelMessageReq, SendReq,
 };
 
 use crate::{
