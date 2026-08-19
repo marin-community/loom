@@ -17,7 +17,7 @@ use loom::acp::{self, AcpLaunch, AcpPromptEffort, AcpPromptModel, NewOrLoad, Sse
 use loom::backend;
 use loom::session::{self as session_mod, NewSession};
 
-use crate::fixtures::{branch_tag_value, TestServer};
+use crate::fixtures::{age_past_runtime_start_grace, branch_tag_value, TestServer};
 
 /// The relay command that launches the scripted fake ACP agent over stdio.
 fn agent_cmd() -> String {
@@ -3523,6 +3523,7 @@ async fn adopt_can_answer_a_permission_replayed_during_load() {
 
     assert!(ts.state.acp.stop(&id), "the original task was live");
     backend::kill_session_and_wait(&relay).await.unwrap();
+    age_past_runtime_start_grace(&ts.state.db, &id).await;
     poll_view(&ts, &id, Duration::from_secs(15), |view| {
         view["status"] == "orphaned"
     })
@@ -3620,6 +3621,7 @@ async fn adopt_reopens_via_load_without_duplicates() {
     backend::kill_session(&term_session).await.ok();
 
     // The monitor notices the dead terminal and marks the row orphaned.
+    age_past_runtime_start_grace(&ts.state.db, &id).await;
     poll_view(&ts, &id, Duration::from_secs(15), |v| {
         v["status"] == "orphaned"
     })

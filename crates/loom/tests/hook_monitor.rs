@@ -18,7 +18,10 @@ use weaver_core::events::EventBus;
 
 #[path = "support/tapestry.rs"]
 mod support;
+#[path = "support/schema.rs"]
+mod support_schema;
 use support::tapestry_bin;
+use support_schema::seed_migrated_db;
 
 fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -63,6 +66,7 @@ impl Drop for TestHome {
 async fn hook_event_drives_session_status() {
     let home = TestHome(tempfile::tempdir().unwrap());
     std::env::set_var("WEAVER_HOME", home.0.path());
+    seed_migrated_db();
     std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
     std::env::remove_var("LOOM_TOKEN");
     // `seed_owner` no longer defaults to a real login — this test's requests
