@@ -19,11 +19,8 @@ pub mod automation_token {
 
     /// Mint a short-lived automation-only token for a given subject.
     ///
-    /// Operator-only: `user_grant_allows` in `crates/loom/src/web/auth.rs`
-    /// refuses a plain `User` grant on `/auth/automation-token`, and the current
-    /// handler additionally checks `principal.is_admin()` by hand. Minting a
-    /// credential for some other automated subject is fleet administration, not
-    /// a self-service action — `actor = Admin`.
+    /// Operator-only: minting a credential for some other automated subject
+    /// is fleet administration, not a self-service action — `actor = Admin`.
     #[operation(
     id = "auth.automation_token",
     actor = Admin,
@@ -106,9 +103,7 @@ pub mod federations {
         /// mapping — the trust relationship `auth.federate` exchanges an OIDC token
         /// against.
         ///
-        /// Fleet configuration, not a self-service action: `user_grant_allows`
-        /// refuses a plain `User` grant on every mutating `/auth/federations` route,
-        /// so this is `actor = Admin`.
+        /// Fleet configuration, not a self-service action — `actor = Admin`.
         #[operation(
     id = "auth.federations.create",
     actor = Admin,
@@ -161,9 +156,7 @@ pub mod federations {
 
         /// List the registered workload-identity federation mappings.
         ///
-        /// Operator-only, same reasoning as [`create`](super::create):
-        /// `user_grant_allows` refuses a plain `User` grant on every
-        /// `/auth/federations` route.
+        /// Operator-only, same reasoning as [`create`](super::create).
         #[operation(
     id = "auth.federations.list",
     actor = Admin,
@@ -229,8 +222,7 @@ pub mod github_config {
 
         /// Read the GitHub sign-in / App setup (secret withheld).
         ///
-        /// Configuring how the whole fleet signs in is operator-only — `user_grant_allows`
-        /// refuses a plain `User` grant on `/auth/github/config`.
+        /// Configuring how the whole fleet signs in is operator-only.
         #[operation(
     id = "auth.github_config.get",
     actor = Admin,

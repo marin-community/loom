@@ -170,10 +170,8 @@ pub mod patch {
         ///
         /// A value may be a string, a boolean, or a number. Settings are *stored* as
         /// strings, but a caller naturally writes the setting's own type — `false`
-        /// for `auth.trust_loopback`, `300` for a `_secs` key — and requiring
-        /// `"false"` would make this operation stricter than the route it replaces
-        /// for no benefit. Coercion happens once, server-side; anything else (an
-        /// array, an object) is rejected by key.
+        /// for `auth.trust_loopback`, `300` for a `_secs` key. Coercion happens once,
+        /// server-side; anything else (an array, an object) is rejected by key.
         #[operand(json, default = BTreeMap::new())]
         pub changes: BTreeMap<String, Option<Value>>,
     }

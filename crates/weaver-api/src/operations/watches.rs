@@ -201,9 +201,7 @@ pub mod run {
     /// Fire a watch round now, in the daemon, and report its outcome. `dry_run`
     /// stubs every mutating action — the iteration primitive, safe to repeat.
     ///
-    /// Operator-only, same reasoning as `watches.create`: manually firing a round
-    /// is a mutating `/watches/{id}/run` route, which `user_grant_allows` refuses
-    /// a plain `User` grant.
+    /// Operator-only, same reasoning as `watches.create`.
     #[operation(
     id = "watches.run",
     actor = Admin,

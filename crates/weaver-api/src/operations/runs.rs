@@ -107,8 +107,7 @@ pub mod list {
     /// List automation-triggered runs (GitHub Actions / ops / Grafana
     /// deliveries): their status, launched session, and outcome.
     ///
-    /// Available to `User` actors (`user_grant_allows` in `crates/loom/src/web/auth.rs`).
-    /// This is an operator observability read for `Admin`/`User` actors only.
+    /// An operator observability read: `actor = User`, so `Admin`/`User` only.
     #[operation(
     id = "runs.list",
     actor = User,

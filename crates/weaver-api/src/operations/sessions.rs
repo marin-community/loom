@@ -572,9 +572,9 @@ pub mod github {
 
             /// List the repository access a session has been granted.
             ///
-            /// `actor = User` and no grant: this is a human read *about* an agent, and the
-            /// route it replaces called `require_human` for that reason. A session that
-            /// wants to know what it may reach asks GitHub, or fails and reads the error.
+            /// `actor = User` and no grant: this is a human read *about* an agent, not
+            /// something the agent can introspect about itself. A session that wants to
+            /// know what it may reach asks GitHub, or fails and reads the error.
             #[operation(
     id = "sessions.github.access.list",
     actor = User,

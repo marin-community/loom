@@ -488,10 +488,8 @@ pub mod update {
     /// Edit a work item's own fields.
     ///
     /// Claiming is not here: a claim is made by launching a session against an
-    /// item, so the only claim change this expresses is `unclaim`, which returns the
-    /// item to the backlog. The route this replaces spelled that as
-    /// `claimed_branch: null` and rejected every other value with a 400 — an
-    /// `Option<Option<String>>` whose only legal inhabitant was `Some(None)`.
+    /// item, so the only claim change this expresses is `unclaim: bool`, which
+    /// returns the item to the backlog and cannot represent any other transition.
     #[operation(
     id = "issues.update",
     actor = SessionSelf,

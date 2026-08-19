@@ -27,8 +27,8 @@ pub enum ActorPolicy {
     /// right for almost everything: an operator reading a session's issues is
     /// ordinary. It is wrong for operations that hand back *credential
     /// material*, where standing in means one user obtaining another user's
-    /// session token. `permissions.github.token` is that case, and the route it
-    /// replaces refused Admin and User outright.
+    /// session token. `permissions.github.token` is that case: `SessionOnly`
+    /// refuses Admin and User outright, admitting only the session itself.
     SessionOnly,
     User,
     Admin,

@@ -16,8 +16,8 @@ pub mod events {
         /// Append a raw event row to a branch's log — the escape hatch for an event
         /// kind with no dedicated mutating route of its own.
         ///
-        /// The branch-scoped twin of `sessions.events.create`, split off the same
-        /// `GET/POST /branches/{id}/events` route as `branches.events.list`.
+        /// The branch-scoped twin of `sessions.events.create`; `branches.events.list`
+        /// reads the same log this appends to.
         #[operation(
     id = "branches.events.create",
     actor = SessionSelf,

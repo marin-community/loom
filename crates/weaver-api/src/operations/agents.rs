@@ -1,15 +1,11 @@
 //! Agent runtimes: the picker list (builtins + operator-defined custom
 //! agents) and the custom-agent editor's CRUD.
 //!
-//! `GET /api/agents` is a plain fleet-wide read a session credential has
-//! always been able to reach — `grant_allows` in
-//! `crates/loom/src/web/auth.rs` lists bare `/agents` beside `/sessions`,
-//! `/branches`, and `/issues` — so it stays `actor = SessionSelf`. Defining,
-//! editing, and removing a custom agent are different in kind:
-//! `user_grant_allows` explicitly refuses a bare `User` grant on every
-//! mutating `/agents/custom*` route, so only `Admin` may reach them — this is
-//! fleet configuration (which runtimes exist at all), not a per-branch action
-//! a signed-in user takes on their own behalf, exactly like `watches.create`.
+//! `agents.list` is a plain fleet-wide read, `actor = SessionSelf`. Defining,
+//! editing, and removing a custom agent are different in kind — `actor =
+//! Admin` — since this is fleet configuration (which runtimes exist at all),
+//! not a per-branch action a signed-in user takes on their own behalf,
+//! exactly like `watches.create`.
 
 use super::registry::{Operation, OperationSpec};
 use super::OperationBundle;
@@ -25,9 +21,7 @@ pub mod custom {
         /// launch stage — so it appears in the picker beside the builtin
         /// `claude`/`codex` without a code change.
         ///
-        /// Operator-only: a `User` grant is explicitly refused on every mutating
-        /// `/agents/custom` route (`user_grant_allows` in
-        /// `crates/loom/src/web/auth.rs`), so only `Admin` may create one.
+        /// Operator-only: `actor = Admin`, so only `Admin` may create one.
         #[operation(
     id = "agents.custom.create",
     actor = Admin,
