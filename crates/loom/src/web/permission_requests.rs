@@ -144,6 +144,32 @@ pub(super) async fn list_permission_requests_operation(
         .collect())
 }
 
+/// Record the durable audit event for one resolved access request. Both the
+/// human decision and the launch-policy grant land the same event; they differ
+/// only in who decided and how the session is told.
+async fn record_decision_event(
+    st: &AppState,
+    branch_id: &str,
+    decided: &permission_requests::PermissionRequest,
+    decision: &str,
+    by: &str,
+) -> ApiResult<()> {
+    crate::events::record(
+        &st.db,
+        &st.bus,
+        branch_id,
+        "permission_decision",
+        json!({
+            "request_id": decided.id,
+            "decision": decision,
+            "repository": decided.repository,
+            "by": by,
+        }),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Apply an expansion the launch policy already authorizes. Same durable
 /// record and audit trail as a human decision, minus the wait: the session
 /// channel gets an ordinary informational message and no attention is raised.
@@ -187,19 +213,7 @@ async fn apply_policy_grant(
         },
     )
     .await?;
-    crate::events::record(
-        &st.db,
-        &st.bus,
-        branch_id,
-        "permission_decision",
-        json!({
-            "request_id": decided.id,
-            "decision": "approve",
-            "repository": decided.repository,
-            "by": decided_by,
-        }),
-    )
-    .await?;
+    record_decision_event(st, branch_id, &decided, "approve", &decided_by).await?;
     Ok(view(decided))
 }
 
@@ -388,19 +402,7 @@ pub(super) async fn decide_permission_request(
             append_and_deliver(&st, &session.id, &channel, &author, &message).await?;
         record_channel_message_event(&st, &session.id, &author, &message, inserted).await;
     }
-    crate::events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "permission_decision",
-        json!({
-            "request_id": decided.id,
-            "decision": decision,
-            "repository": decided.repository,
-            "by": principal.username,
-        }),
-    )
-    .await?;
+    record_decision_event(&st, &branch.id, &decided, &decision, &principal.username).await?;
     Ok(Json(view(decided)))
 }
 

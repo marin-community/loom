@@ -259,6 +259,16 @@ pub fn scopes_an_app_token(entries: &[String]) -> bool {
     entries.iter().any(|entry| !is_repository_pattern(entry))
 }
 
+/// Select the App credential for a session, given the allowlist stamped on it.
+/// An allowlist that names no repository scopes no token, so it selects no App
+/// however the deployment is configured.
+pub fn app_for_allowlist<'a>(
+    entries: &[String],
+    app: Option<&'a crate::github_app::GithubApp>,
+) -> Option<&'a crate::github_app::GithubApp> {
+    scopes_an_app_token(entries).then_some(app).flatten()
+}
+
 /// Resolve a profile's App-token allowlist into the repositories stamped on
 /// one session. Automation profiles intentionally retain their complete list
 /// for cross-repository work.
