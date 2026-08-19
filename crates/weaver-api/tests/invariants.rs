@@ -190,3 +190,68 @@ fn one_declaration_produces_every_projection() {
         .unwrap()
         .mine);
 }
+
+/// The convention itself, checked: an operation's id is its path on disk.
+///
+/// `issues.tags.set` lives in `operations/issues/tags/set.rs` and nowhere else.
+/// This is what makes the tree navigable without a map — you read an id in a log
+/// line and you know the file. A registry that allows `issues.rs` to quietly
+/// accumulate twelve operations drifts back into the 1096-line module this
+/// replaced.
+#[test]
+fn every_operation_lives_in_the_file_its_id_names() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operations");
+    let mut missing = Vec::new();
+    for operation in operations::operations() {
+        let relative = format!("{}.rs", operation.id.replace('.', "/"));
+        if !root.join(&relative).is_file() {
+            missing.push((operation.id, relative));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "operations whose declaration is not in the file their id names: {missing:#?}"
+    );
+}
+
+/// The other direction: no operation file is orphaned.
+///
+/// A file under `operations/` that declares no registered operation is either a
+/// bundle `mod.rs`, or it is dead code that still compiles — which is how the
+/// previous registry ended up advertising three CLI commands that did not exist.
+#[test]
+fn every_operation_file_declares_a_registered_operation() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operations");
+    let declared: BTreeSet<String> = operations::operations()
+        .map(|operation| format!("{}.rs", operation.id.replace('.', "/")))
+        .collect();
+
+    let mut orphans = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).expect("operations tree is readable") {
+            let path = entry.expect("directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let relative = path
+                .strip_prefix(&root)
+                .expect("path is under the operations tree")
+                .to_string_lossy()
+                .replace('\\', "/");
+            // `mod.rs` files carry bundle wiring; `registry.rs` is the vocabulary.
+            if relative.ends_with("mod.rs") || relative == "registry.rs" {
+                continue;
+            }
+            if !declared.contains(&relative) {
+                orphans.push(relative);
+            }
+        }
+    }
+    orphans.sort();
+    assert!(
+        orphans.is_empty(),
+        "operation files that declare nothing the registry knows about: {orphans:#?}"
+    );
+}

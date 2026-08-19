@@ -737,7 +737,7 @@ fn static_dir() -> PathBuf {
 }
 
 fn registered_api_router() -> Router<AppState> {
-    let router = mount_registered_operations(Router::new());
+    let router = operations::mount(Router::new());
     let router = mount_session_api(router);
     let router = mount_channel_api(router);
     let router = mount_artifact_api(router);

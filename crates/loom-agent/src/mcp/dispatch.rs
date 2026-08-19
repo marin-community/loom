@@ -182,6 +182,7 @@ async fn resolve_context(client: &Client) -> Result<ContextValues> {
     Ok(ContextValues {
         repo_root: context.repo_root,
         branch: context.branch_id,
+        branch_name: context.branch_name,
         session: context.session_id,
     })
 }

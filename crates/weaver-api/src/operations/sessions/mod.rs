@@ -2,7 +2,7 @@
 //!
 //! One file per operation, mirroring the `issues` bundle. `self.get` keeps its
 //! historical id — a caller-facing bootstrap read — but lives in this bundle;
-//! its module is named `self_context` rather than `self` because `self` cannot
+//! its module is named `context` rather than `self` because `self` cannot
 //! be a module name, and it carries an explicit `bundle = "sessions"` so the
 //! id's own `self` prefix does not get inferred as its bundle.
 
@@ -18,14 +18,14 @@ pub mod interrupt;
 pub mod launch;
 pub mod list;
 pub mod preview;
-pub mod self_context;
+pub mod context;
 pub mod send;
 pub mod status;
 pub mod summary;
 pub mod tags;
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <self_context::Get as Operation>::SPEC,
+    <context::Get as Operation>::SPEC,
     <summary::get::Get as Operation>::SPEC,
     <list::List as Operation>::SPEC,
     <get::Get as Operation>::SPEC,

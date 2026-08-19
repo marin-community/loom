@@ -25,7 +25,10 @@ pub struct Input {
     #[operand(context)]
     pub repo_root: String,
     /// The branch that filed this item, for provenance.
-    #[operand(context = "branch")]
+    ///
+    /// The branch *name*, not its id — this is compared against `branch.branch`
+    /// when the CLI decides whether an item was delegated by the current branch.
+    #[operand(context = "branch_name")]
     pub source_branch: Option<String>,
 }
 

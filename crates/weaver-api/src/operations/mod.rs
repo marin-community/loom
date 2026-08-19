@@ -32,13 +32,17 @@ pub mod prelude {
     pub use serde::{Deserialize, Serialize};
 }
 
+pub mod agents;
 pub mod artifacts;
+pub mod auth;
+pub mod branches;
 pub mod channels;
 pub mod deployment;
 pub mod issues;
 pub mod mcps;
 pub mod profiles;
 pub mod permissions;
+pub mod repos;
 pub mod runs;
 pub mod sessions;
 pub mod settings;
@@ -57,7 +61,8 @@ pub type OperationBundleFactory = fn() -> OperationBundle;
 
 pub static OPERATION_BUNDLE_FACTORIES: &[OperationBundleFactory] = &[issues::bundle, artifacts::bundle, channels::bundle, sessions::bundle, permissions::bundle,
     watches::bundle, runs::bundle, tasks::bundle,
-    settings::bundle, profiles::bundle, deployment::bundle, mcps::bundle,
+    settings::bundle, profiles::bundle, deployment::bundle, mcps::bundle, auth::bundle,
+    agents::bundle, branches::bundle, repos::bundle,
 ];
 
 pub fn operation_bundles() -> impl Iterator<Item = OperationBundle> {
@@ -370,4 +375,55 @@ mod tests {
             assert_eq!(found.id, operation.id);
         }
     }
+}
+
+// -- OpenAPI projection ------------------------------------------------------
+
+/// Render the registry as an OpenAPI 3.1 document.
+///
+/// Routes are unique by construction, so this is a straight map over the
+/// registry. The generator it replaces had to merge colliding `path` + `method`
+/// pairs into an `x-loom-operation-ids` array — a symptom of descriptors that
+/// declared their own routes — and it emitted no request schema at all, because
+/// `ArgumentSpec` could not describe one.
+pub fn openapi_document(version: &str) -> Value {
+    let mut paths = serde_json::Map::new();
+    for operation in operations() {
+        let body = json!({
+            "required": true,
+            "content": { "application/json": { "schema": (operation.schema)() } },
+        });
+        let mut definition = json!({
+            "operationId": operation.id,
+            "summary": operation.summary,
+            "tags": [operation.bundle],
+            "x-loom-actor": operation.actor.as_str(),
+            "x-loom-scope": operation.scope.as_str(),
+            "x-loom-risk": operation.risk.as_str(),
+            "x-loom-io": operation.io.as_str(),
+            "x-loom-grants": operation.grants,
+            "responses": { "200": { "description": "success" } },
+        });
+        if let Some(cli) = operation.cli {
+            definition["x-loom-cli"] = json!(cli.invocation());
+        }
+        if let Some(mcp) = operation.mcp {
+            definition["x-loom-mcp"] = json!(format!("{}::{}", mcp.server, mcp.tool));
+        }
+        if operation.method() == "POST" {
+            definition["requestBody"] = body;
+        }
+        let method = operation.method().to_ascii_lowercase();
+        paths
+            .entry(operation.path())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .expect("operation path object")
+            .insert(method, definition);
+    }
+    json!({
+        "openapi": "3.1.0",
+        "info": { "title": "Loom API", "version": version },
+        "paths": paths,
+    })
 }

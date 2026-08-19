@@ -1,15 +1,13 @@
 use super::prelude::*;
 
-/// Resolve this caller's session, branch, repository, channel, and links.
+/// Inspect one branch.
 #[operation(
-    id = "self.get",
-    bundle = "sessions",
+    id = "branches.get",
     actor = SessionSelf,
-    scope = Session,
+    scope = Branch,
     risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "self",
-    mcp = "loom_context::get",
+    grants = ["loom/branches/read@v1"],
+    cli = "branches get",
 )]
 pub struct Get;
 
@@ -17,13 +15,13 @@ pub struct Get;
 pub struct Input {
     /// Resolved from the calling session; not something a caller supplies.
     #[operand(context)]
-    pub session: String,
+    pub branch: String,
 }
 
-pub type Output = SelfContextView;
+pub type Output = BranchView;
 
 impl Scoped for Input {
     fn scope_ref(&self) -> ScopeRef<'_> {
-        ScopeRef::Session(&self.session)
+        ScopeRef::Branch(&self.branch)
     }
 }

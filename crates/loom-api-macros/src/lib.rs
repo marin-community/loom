@@ -155,6 +155,7 @@ fn source_setter(operand: &field::Operand) -> proc_macro2::TokenStream {
     let getter = match source {
         field::ContextSource::RepoRoot => quote!(context.repo_root.clone()),
         field::ContextSource::Branch => quote!(context.branch.clone()),
+        field::ContextSource::BranchName => quote!(context.branch_name.clone()),
         field::ContextSource::Session => quote!(context.session.clone()),
     };
     // Only fill what the caller left empty, so an explicitly supplied override

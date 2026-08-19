@@ -149,9 +149,6 @@ pub(super) async fn grant_allows(
     if principal.is_admin() {
         return true;
     }
-    if let Some(registration) = super::operations::bound_operation_for_request(method, raw_path) {
-        return operation_grant_allows(principal, registration.operation);
-    }
     if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
         if !operation_grant_allows(principal, operation) {
             return false;
@@ -259,7 +256,7 @@ pub(super) fn operation_grant_allows(
             operation.actor == weaver_api::ActorPolicy::SessionSelf
                 && capabilities.as_ref().is_none_or(|granted| {
                     operation
-                        .capabilities
+                        .grants
                         .iter()
                         .all(|required| granted.iter().any(|value| value == required))
                 })

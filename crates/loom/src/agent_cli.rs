@@ -14,9 +14,10 @@ use clap::Subcommand;
 use serde_json::{json, Value};
 use std::sync::OnceLock;
 
+use weaver_api::operations::issues as issue_ops;
 use weaver_api::{
-    ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq,
-    CreateIssueReq, CreateRepoIssueReq, IssueAction, IssueActionsReq, IssueView, ThreadDto,
+    ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq, IssueAction,
+    IssueView, ThreadDto,
 };
 use weaver_core::tags;
 
@@ -460,7 +461,7 @@ pub fn set_client_override(client: Client) -> Result<()> {
         .map_err(|_| anyhow!("Loom client override is already set"))
 }
 
-fn client() -> Client {
+pub(crate) fn client() -> Client {
     CLIENT_OVERRIDE
         .get()
         .cloned()
@@ -748,7 +749,10 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // Intentional work items only: ordinary session delegation is represented
     // by child channels and never appears here.
     let issues = client
-        .list_repo_issues(&b.repo_root, "repo", false)
+        .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
+            repo_root: b.repo_root.clone(),
+            all: false,
+        })
         .await
         .unwrap_or_default();
     let open: Vec<&IssueView> = issues
@@ -1339,26 +1343,22 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
             let i = if repo {
                 client
-                    .create_repo_issue(&CreateRepoIssueReq {
-                        repo_root: b.repo_root.clone(),
+                    .invoke::<issue_ops::backlog::create::Create>(&issue_ops::backlog::create::Input {
                         title: title.clone(),
                         body: body.unwrap_or_default(),
                         github_issue: github,
+                        repo_root: b.repo_root.clone(),
                         source_branch: Some(b.branch.clone()),
-                        tags: Vec::new(),
                     })
                     .await?
             } else {
                 client
-                    .create_branch_issue(
-                        &b.id,
-                        &CreateIssueReq {
-                            title: title.clone(),
-                            body: body.unwrap_or_default(),
-                            github_issue: github,
-                            tags: Vec::new(),
-                        },
-                    )
+                    .invoke::<issue_ops::create::Create>(&issue_ops::create::Input {
+                        title: title.clone(),
+                        body: body.unwrap_or_default(),
+                        github_issue: github,
+                        branch: b.id.clone(),
+                    })
                     .await?
             };
             println!("#{} {}", i.id, i.title);
@@ -1370,7 +1370,12 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             branch,
         } => {
             let target = branch.unwrap_or_else(|| b.branch.clone());
-            let issues = client.list_repo_issues(&b.repo_root, "repo", all).await?;
+            let issues = client
+                .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
+                    repo_root: b.repo_root.clone(),
+                    all,
+                })
+                .await?;
             if repo {
                 print_issue_ls_repo(&issues, &target);
             } else {
@@ -1378,7 +1383,12 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
         }
         IssueCmd::Show { id } => {
-            let i = client.get_issue(id).await?;
+            let i = client
+                .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+                    id,
+                    repo_root: b.repo_root.clone(),
+                })
+                .await?;
             ensure_issue_in_repo(&i, &b.repo_root)?;
             println!("#{} {}", i.id, i.title);
             println!("  status:  {}", i.status);
@@ -1455,27 +1465,30 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         }
         IssueCmd::Close { ids } => {
             let result = client
-                .issue_actions(&IssueActionsReq {
+                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Close,
+                    repo_root: b.repo_root.clone(),
                 })
                 .await?;
             println!("closed {} issue(s)", result.issues.len());
         }
         IssueCmd::Reopen { ids } => {
             let result = client
-                .issue_actions(&IssueActionsReq {
+                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Reopen,
+                    repo_root: b.repo_root.clone(),
                 })
                 .await?;
             println!("reopened {} issue(s)", result.issues.len());
         }
         IssueCmd::Rm { ids } => {
             let result = client
-                .issue_actions(&IssueActionsReq {
+                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Delete,
+                    repo_root: b.repo_root.clone(),
                 })
                 .await?;
             println!("deleted {} issue(s)", result.deleted_ids.len());
@@ -1503,7 +1516,7 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
                 );
             }
             let result = client
-                .issue_actions(&IssueActionsReq {
+                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Tag {
                         key: key.to_string(),
@@ -1511,6 +1524,7 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
                         note: note.to_string(),
                         by: Some(by.to_string()),
                     },
+                    repo_root: repo_root.to_string(),
                 })
                 .await?;
             if note.is_empty() {
@@ -1528,15 +1542,21 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
         IssueTagCmd::Rm { args } => {
             let (ids, key) = parse_issue_tag_delete_args(args)?;
             let result = client
-                .issue_actions(&IssueActionsReq {
+                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Untag { key: key.clone() },
+                    repo_root: repo_root.to_string(),
                 })
                 .await?;
             println!("cleared {key} from {} issue(s)", result.issues.len());
         }
         IssueTagCmd::Ls { id } => {
-            let i = client.get_issue(id).await?;
+            let i = client
+                .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+                    id,
+                    repo_root: repo_root.to_string(),
+                })
+                .await?;
             ensure_issue_in_repo(&i, repo_root)?;
             if i.tags.is_empty() {
                 println!("(no tags)");
@@ -1967,7 +1987,12 @@ async fn cmd_issue_wait(
     interval: u64,
     closed_only: bool,
 ) -> Result<()> {
-    let issue = client.get_issue(id).await?;
+    let issue = client
+        .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+            id,
+            repo_root: repo_root.to_string(),
+        })
+        .await?;
     ensure_issue_in_repo(&issue, repo_root)?;
     if issue.status != "open" {
         println!("issue #{id} is {} — nothing to wait for", issue.status);
@@ -1992,7 +2017,12 @@ async fn cmd_issue_wait(
             None => interval,
         };
         tokio::time::sleep(nap).await;
-        let cur = client.get_issue(id).await?;
+        let cur = client
+            .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+                id,
+                repo_root: repo_root.to_string(),
+            })
+            .await?;
         if cur.status != "open" {
             println!("issue #{id} closed — sub-tree finished");
             return Ok(());

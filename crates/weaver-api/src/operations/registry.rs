@@ -165,7 +165,15 @@ pub struct McpProjection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextSource {
     RepoRoot,
+    /// The branch row's opaque id.
     Branch,
+    /// The branch's human name, e.g. `weaver/loom-fix-thing`.
+    ///
+    /// Distinct from [`ContextSource::Branch`] because they are not
+    /// interchangeable and confusing them is silent: a field annotated `branch`
+    /// that is compared against a name simply never matches. `issues.backlog`
+    /// stores the name for provenance while `issues.create` keys off the id.
+    BranchName,
     Session,
 }
 
@@ -174,6 +182,7 @@ impl ContextSource {
         match self {
             Self::RepoRoot => "repo_root",
             Self::Branch => "branch",
+            Self::BranchName => "branch_name",
             Self::Session => "session",
         }
     }
@@ -193,6 +202,7 @@ pub struct ContextField {
 pub struct ContextValues {
     pub repo_root: String,
     pub branch: String,
+    pub branch_name: String,
     pub session: String,
 }
 
@@ -286,7 +296,7 @@ impl OperationSpec {
 pub trait Operation: Send + Sync + 'static {
     type Input: Operands + Send + Sync + 'static;
     type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
-    type View: ViewFlags;
+    type View: ViewFlags + Send + Sync + 'static;
 
     const SPEC: &'static OperationSpec;
 }

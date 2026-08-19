@@ -255,6 +255,26 @@ pub(super) async fn list_operations() -> Json<Vec<OperationView>> {
     Json(weaver_api::operation_views())
 }
 
+/// One operation's descriptor, by id.
+///
+/// This used to be routed through the `permissions.explain` handler, which meant
+/// a discovery endpoint carried a permission check for a resource it never read.
+/// The descriptor is public information — it is what `/api/operations` already
+/// returns in bulk — so it is served directly.
+pub(super) async fn get_operation(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> ApiResult<Json<OperationView>> {
+    weaver_api::operation(&id)
+        .map(|operation| Json(OperationView::from(operation)))
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "no such operation"))
+}
+
+pub(super) async fn openapi() -> Json<serde_json::Value> {
+    Json(weaver_api::operations::openapi_document(env!(
+        "CARGO_PKG_VERSION"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2288,6 +2288,10 @@ pub struct ChannelDeliveryView {
 pub struct SelfContextView {
     pub session_id: String,
     pub branch_id: String,
+    /// The branch's human name. Carried alongside the id because context fields
+    /// need both and confusing them is silent — see `ContextSource::BranchName`.
+    #[serde(default)]
+    pub branch_name: String,
     pub repo_root: String,
     pub channel_id: String,
     pub session_url: String,

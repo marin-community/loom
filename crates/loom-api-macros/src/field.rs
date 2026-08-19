@@ -44,6 +44,7 @@ impl Kind {
 pub enum ContextSource {
     RepoRoot,
     Branch,
+    BranchName,
     Session,
 }
 
@@ -52,6 +53,7 @@ impl ContextSource {
         match name {
             "repo_root" => Some(Self::RepoRoot),
             "branch" | "branch_id" => Some(Self::Branch),
+            "branch_name" | "source_branch" => Some(Self::BranchName),
             "session" | "session_id" => Some(Self::Session),
             _ => None,
         }
@@ -61,6 +63,7 @@ impl ContextSource {
         match value {
             "repo_root" => Some(Self::RepoRoot),
             "branch" => Some(Self::Branch),
+            "branch_name" => Some(Self::BranchName),
             "session" => Some(Self::Session),
             _ => None,
         }
@@ -70,6 +73,7 @@ impl ContextSource {
         match self {
             Self::RepoRoot => quote!(::weaver_api::operations::ContextSource::RepoRoot),
             Self::Branch => quote!(::weaver_api::operations::ContextSource::Branch),
+            Self::BranchName => quote!(::weaver_api::operations::ContextSource::BranchName),
             Self::Session => quote!(::weaver_api::operations::ContextSource::Session),
         }
     }

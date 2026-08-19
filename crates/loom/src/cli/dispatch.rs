@@ -55,7 +55,7 @@ where
                 });
             Box::pin(async move {
                 let (mut input, view) = parsed?;
-                let client = crate::agent_cli::client()?;
+                let client = crate::agent_cli::client();
                 // Context is resolved once, here — not inside each command, and
                 // not by an extra round-trip per MCP tool as the old adapters did.
                 if !<O::Input as Operands>::CONTEXT.is_empty() {
@@ -74,7 +74,8 @@ async fn resolve_context(client: &Client) -> Result<ContextValues> {
     Ok(ContextValues {
         repo_root: context.repo_root,
         branch: context.branch_id,
-        session: context.session_id.unwrap_or_default(),
+        branch_name: context.branch_name,
+        session: context.session_id,
     })
 }
 
