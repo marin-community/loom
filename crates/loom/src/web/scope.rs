@@ -1,11 +1,9 @@
 //! Resource-scope checks for registered operations.
 //!
-//! An operation declares *which* resource it acts on through
-//! `weaver_api::operations::Scoped`, and
-//! this module answers whether the caller may reach that instance. Splitting the
-//! question in two — actor answers "may you call this at all", scope answers
-//! "may you reach this one" — is what lets authorization be decided from typed
-//! input instead of by matching a URL.
+//! An operation declares which resource it acts on via
+//! `weaver_api::operations::Scoped`. Actor policy checks whether the caller
+//! may call the operation at all; this module checks whether the caller may
+//! reach this specific resource. Both run off typed input, not a URL.
 
 use axum::http::StatusCode;
 

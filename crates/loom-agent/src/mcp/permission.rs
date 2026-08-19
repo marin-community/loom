@@ -7,9 +7,9 @@
 //! the response — no per-tool summary formatting lives here.
 //! `permissions.requests.approve`/`.deny` stay unreachable through this
 //! adapter because they are `actor = User`, not `SessionSelf`: the registry
-//! itself rejects an MCP projection on a non-agent-reachable operation, so
-//! "an agent cannot approve its own permission request" needs no
-//! adapter-side enforcement.
+//! rejects an MCP projection on a non-agent-reachable operation, so this
+//! adapter needs no extra check to keep an agent from approving its own
+//! permission request.
 
 use std::sync::OnceLock;
 
