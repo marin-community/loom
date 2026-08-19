@@ -805,6 +805,12 @@ mod tests {
     /// `loom/permissions/request@v1` (one tool — nothing to reorder) stay
     /// hand-authored and are untouched by this re-pin; see each adapter's own
     /// module doc comment for why.
+    ///
+    /// Re-pinned again for two new operations joining an existing grant:
+    /// `channels.archive` widened `loom/channels/write@v1` (and its legacy twin
+    /// `mcp/channel/write@v1`) by one tool, and `issues.update` widened
+    /// `loom/issues/write@v1` the same way — both previously reachable only
+    /// through a hand-mounted route the operation registry did not describe.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -829,7 +835,7 @@ mod tests {
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:49d600ff81e95ddd18abbf2618ccc4473c397faab81f207da5b71fd520f4b502",
+                "sha256:70a9d1aa505d6f313b2150ac5dbc77513ec6bfd9fe7d6bcd57c64e754cf4d142",
             ),
             (
                 "mcp/channel/read@v1",
@@ -837,7 +843,7 @@ mod tests {
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:b3b372fe1dedacf681436cb0e4e8c26cc279b82ada84f968d8a5ce905b994c36",
+                "sha256:37ff3131f75c304cb3c5a1c5b36aa36396ecb629098eb27bb629fd99f85d414f",
             ),
             (
                 "loom/artifacts/read@v1",
@@ -861,7 +867,7 @@ mod tests {
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:2b804511893b001775c4e22d37fa430a930b20a9d79071d46179f4d48d01ef2d",
+                "sha256:1915faae327f4b1f34356e5330067b416ebf318c44b8e2fdb762e84dbcc7ed9c",
             ),
             (
                 "loom/sessions/read@v1",
