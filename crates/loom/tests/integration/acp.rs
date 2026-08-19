@@ -3998,7 +3998,7 @@ async fn builtin_codex_launches_over_codex_acp() {
         "the opening prompt contains the goal exactly once: {prompt}"
     );
     assert!(
-        prompt.contains("Use `loom summary` to recover context"),
+        prompt.contains("Use `loom summary` after compaction"),
         "summary is offered as recovery: {prompt}"
     );
     assert!(
