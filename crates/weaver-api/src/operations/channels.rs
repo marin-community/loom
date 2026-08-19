@@ -1,0 +1,467 @@
+//! Durable conversation channels.
+//!
+//! Session channels, custom channels, their messages, subscriptions, and read
+//! markers.
+
+use super::registry::{Operation, OperationSpec};
+use super::OperationBundle;
+
+pub(super) use super::prelude;
+pub mod archive {
+    use super::prelude::*;
+
+    /// Archive a custom channel.
+    ///
+    /// Only a custom channel: a session's own channel follows the session's
+    /// lifecycle, and archiving it out from under the session is refused. Who may
+    /// archive is narrower than who may reach the channel, so the handler still
+    /// checks it — a non-human credential may archive only what it opened.
+    #[operation(
+    id = "channels.archive",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Destructive,
+    grants = ["loom/channels/write@v1"],
+    cli = "channels archive",
+)]
+    pub struct Archive;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    pub struct Input {
+        /// A visible channel id.
+        #[operand(positional)]
+        pub channel: String,
+        /// Resolved from the calling session; not something a caller supplies.
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = ChannelArchiveResult;
+
+    impl Scoped for Input {
+        fn scope_ref(&self) -> ScopeRef<'_> {
+            ScopeRef::Branch(&self.branch)
+        }
+    }
+}
+
+pub mod bindings {
+    //! A channel's external delivery bindings: subscribed session inboxes plus,
+    //! if wired, the originating Slack thread.
+    pub(super) use super::prelude;
+    pub mod list {
+        use super::prelude::*;
+
+        /// List a channel's external delivery bindings: subscribed session inboxes,
+        /// plus the originating Slack thread if the branch is wired to one.
+        #[operation(
+    id = "channels.bindings.list",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Read,
+    grants = ["loom/channels/read@v1"],
+)]
+        pub struct List;
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        pub struct Input {
+            /// A visible channel id. Empty means this session's own channel,
+            /// resolved server-side.
+            #[operand(default = String::new())]
+            pub channel: String,
+            /// Resolved from the calling session; not something a caller supplies.
+            #[operand(context)]
+            pub branch: String,
+        }
+
+        pub type Output = Vec<ChannelBindingView>;
+
+        impl Scoped for Input {
+            fn scope_ref(&self) -> ScopeRef<'_> {
+                ScopeRef::Branch(&self.branch)
+            }
+        }
+    }
+}
+
+pub mod create {
+    use super::prelude::*;
+
+    /// Open a custom durable channel.
+    ///
+    /// Scoped to a repository (humans launching from the dashboard specify no branch).
+    /// A session's opening branch is recorded for provenance, not scope.
+    #[operation(
+    id = "channels.create",
+    actor = SessionSelf,
+    scope = Repository,
+    risk = Write,
+    grants = ["loom/channels/write@v1"],
+    cli = "channels open",
+    mcp = "loom_channel::open",
+)]
+    pub struct Create;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    pub struct Input {
+        /// The new channel's name.
+        #[operand(positional)]
+        pub name: String,
+        /// Optional topic description.
+        #[operand(default = String::new())]
+        pub topic: String,
+        /// The repository the channel belongs to. Resolved from the calling
+        /// session when it has one.
+        #[operand(context)]
+        pub repo_root: String,
+        /// The branch that opened the channel, for provenance. Resolved from the
+        /// calling session; a human launch leaves it unset.
+        #[operand(context)]
+        pub branch: Option<String>,
+    }
+
+    pub type Output = ChannelView;
+
+    impl Scoped for Input {
+        fn scope_ref(&self) -> ScopeRef<'_> {
+            ScopeRef::Repository(&self.repo_root)
+        }
+    }
+}
+
+pub mod get {
+    use super::prelude::*;
+
+    /// Inspect one channel and its delivery bindings.
+    #[operation(
+    id = "channels.get",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Read,
+    grants = ["loom/channels/read@v1"],
+    cli = "channels get",
+    mcp = "loom_channel::get",
+)]
+    pub struct Get;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    pub struct Input {
+        /// A visible channel id. Empty means this session's own channel,
+        /// resolved server-side.
+        #[operand(positional, default = String::new())]
+        pub channel: String,
+        /// Resolved from the calling session; not something a caller supplies.
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = ChannelView;
+
+    impl Scoped for Input {
+        fn scope_ref(&self) -> ScopeRef<'_> {
+            ScopeRef::Branch(&self.branch)
+        }
+    }
+}
+
+pub mod list {
+    use super::prelude::*;
+
+    /// List visible durable channels and their unread state.
+    #[operation(
+    id = "channels.list",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Read,
+    grants = ["loom/channels/read@v1"],
+    cli = "channels list",
+    cli_alias = "ls",
+    mcp = "loom_channel::list",
+)]
+    pub struct List;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    pub struct Input {
+        /// Include archived channels.
+        #[operand(default = false)]
+        pub archived: bool,
+        /// Resolved from the calling session; not something a caller supplies.
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = Vec<ChannelView>;
+
+    impl Scoped for Input {
+        fn scope_ref(&self) -> ScopeRef<'_> {
+            ScopeRef::Branch(&self.branch)
+        }
+    }
+}
+
+pub mod messages {
+    //! Items within one durable channel.
+    pub(super) use super::prelude;
+    pub mod create {
+        use super::prelude::*;
+
+        /// Append and deliver a durable channel message.
+        ///
+        /// Idempotent on `idempotency_key`.
+        #[operation(
+    id = "channels.messages.create",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Write,
+    grants = ["loom/channels/write@v1"],
+    cli = "channels send",
+    mcp = "loom_channel::send",
+)]
+        pub struct Create;
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        pub struct Input {
+            /// A visible channel id. Empty means this session's own channel,
+            /// resolved server-side.
+            #[operand(default = String::new())]
+            pub channel: String,
+            /// The message body.
+            #[operand(positional)]
+            pub body: String,
+            /// `message`, `status`, or `result`.
+            #[operand(default = String::from("message"))]
+            pub kind: String,
+            /// `normal`, `attention`, or `blocked`.
+            #[operand(default = String::from("normal"))]
+            pub urgency: String,
+            /// Arbitrary structured payload alongside the body.
+            #[operand(json, default = serde_json::json!({}))]
+            pub payload: serde_json::Value,
+            /// Reply to an existing message in this channel.
+            pub reply_to: Option<String>,
+            /// Retry-safe key scoped to the channel.
+            pub idempotency_key: Option<String>,
+            /// Resolved from the calling session; not something a caller supplies.
+            #[operand(context)]
+            pub branch: String,
+        }
+
+        pub type Output = ChannelMessageView;
+
+        impl Scoped for Input {
+            fn scope_ref(&self) -> ScopeRef<'_> {
+                ScopeRef::Branch(&self.branch)
+            }
+        }
+    }
+
+    pub mod list {
+        use super::prelude::*;
+
+        /// Read a channel's message history, advancing the read marker unless
+        /// peeking.
+        #[operation(
+    id = "channels.messages.list",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Read,
+    grants = ["loom/channels/read@v1"],
+    cli = "channels read",
+    mcp = "loom_channel::read",
+)]
+        pub struct List;
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        pub struct Input {
+            /// A visible channel id. Empty means this session's own channel,
+            /// resolved server-side.
+            #[operand(default = String::new())]
+            pub channel: String,
+            /// Only return items after this sequence number.
+            #[operand(default = 0)]
+            pub after: i64,
+            /// Maximum number of items to return.
+            #[operand(default = 100)]
+            pub limit: i64,
+            /// Restrict to these message kinds (`goal`, `message`, `status`,
+            /// `result`, `system`).
+            pub kinds: Vec<String>,
+            /// Read without advancing this session's read marker.
+            #[operand(default = false)]
+            pub peek: bool,
+            /// Resolved from the calling session; not something a caller supplies.
+            #[operand(context)]
+            pub branch: String,
+        }
+
+        pub type Output = Vec<ChannelMessageView>;
+
+        impl Scoped for Input {
+            fn scope_ref(&self) -> ScopeRef<'_> {
+                ScopeRef::Branch(&self.branch)
+            }
+        }
+    }
+}
+
+pub mod read_marker {
+    //! A session's read marker on a channel.
+    pub(super) use super::prelude;
+    pub mod set {
+        use super::prelude::*;
+
+        /// Acknowledge a channel through a sequence number.
+        #[operation(
+    id = "channels.read_marker.set",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Write,
+    grants = ["loom/channels/write@v1"],
+    cli = "channels ack",
+    mcp = "loom_channel::ack",
+)]
+        pub struct Set;
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        pub struct Input {
+            /// A visible channel id. Empty means this session's own channel,
+            /// resolved server-side.
+            #[operand(default = String::new())]
+            pub channel: String,
+            /// Mark read through this sequence; omission advances through the
+            /// latest message.
+            pub seq: Option<i64>,
+            /// Resolved from the calling session; not something a caller supplies.
+            #[operand(context)]
+            pub branch: String,
+        }
+
+        pub type Output = ChannelSubscriptionView;
+
+        impl Scoped for Input {
+            fn scope_ref(&self) -> ScopeRef<'_> {
+                ScopeRef::Branch(&self.branch)
+            }
+        }
+    }
+}
+
+pub mod subscription {
+    //! A session's subscription to a channel.
+    pub(super) use super::prelude;
+    pub mod set {
+        use super::prelude::*;
+
+        /// Set how a session follows a channel.
+        #[operation(
+    id = "channels.subscription.set",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Write,
+    grants = ["loom/channels/write@v1"],
+    cli = "channels subscribe",
+    mcp = "loom_channel::subscribe",
+)]
+        pub struct Set;
+
+        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        pub struct Input {
+            /// A visible channel id. Empty means this session's own channel,
+            /// resolved server-side.
+            #[operand(default = String::new())]
+            pub channel: String,
+            /// `observe` or `deliver`.
+            #[operand(default = String::from("observe"))]
+            pub mode: String,
+            /// Subscribe this descendant session instead of the caller.
+            pub session: Option<String>,
+            /// Resolved from the calling session; not something a caller supplies.
+            #[operand(context)]
+            pub branch: String,
+        }
+
+        pub type Output = ChannelSubscriptionView;
+
+        impl Scoped for Input {
+            fn scope_ref(&self) -> ScopeRef<'_> {
+                ScopeRef::Branch(&self.branch)
+            }
+        }
+    }
+}
+
+pub mod wait {
+    use super::prelude::*;
+
+    /// Wait for the next matching channel message.
+    #[operation(
+    id = "channels.wait",
+    actor = SessionSelf,
+    scope = Branch,
+    risk = Read,
+    grants = ["loom/channels/read@v1"],
+    cli = "channels wait",
+    mcp = "loom_channel::wait",
+    view = View,
+)]
+    pub struct Wait;
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    pub struct Input {
+        /// A visible channel id. Empty means this session's own channel,
+        /// resolved server-side.
+        #[operand(default = String::new())]
+        pub channel: String,
+        /// Wait for items after this sequence; omission starts from the
+        /// channel's latest known message.
+        pub after: Option<i64>,
+        /// Wake only for this message kind, e.g. `result`.
+        pub kind: Option<String>,
+        /// Wake only for `attention` or `blocked` urgency.
+        #[operand(default = false)]
+        pub urgent: bool,
+        /// Seconds to wait before giving up.
+        #[operand(default = 1800)]
+        pub timeout: i64,
+        /// Resolved from the calling session; not something a caller supplies.
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = ChannelMessageView;
+
+    /// CLI-only flags that never cross the wire.
+    #[derive(Debug, Clone, Default, View)]
+    pub struct View {
+        /// Seconds between polls while waiting.
+        #[operand(default = 2)]
+        pub interval: i64,
+    }
+
+    impl Scoped for Input {
+        fn scope_ref(&self) -> ScopeRef<'_> {
+            ScopeRef::Branch(&self.branch)
+        }
+    }
+}
+
+static OPERATIONS: &[&OperationSpec] = &[
+    <list::List as Operation>::SPEC,
+    <get::Get as Operation>::SPEC,
+    <messages::list::List as Operation>::SPEC,
+    <messages::create::Create as Operation>::SPEC,
+    <create::Create as Operation>::SPEC,
+    <archive::Archive as Operation>::SPEC,
+    <subscription::set::Set as Operation>::SPEC,
+    <read_marker::set::Set as Operation>::SPEC,
+    <wait::Wait as Operation>::SPEC,
+    <bindings::list::List as Operation>::SPEC,
+];
+
+pub(super) const fn bundle() -> OperationBundle {
+    OperationBundle {
+        name: "channels",
+        label: "Durable conversations",
+        operations: OPERATIONS,
+    }
+}

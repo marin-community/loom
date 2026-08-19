@@ -203,67 +203,48 @@ fn one_declaration_produces_every_projection() {
     );
 }
 
-/// The convention itself, checked: an operation's id is its path on disk.
+/// The convention itself, checked: a bundle's operations live in the one file
+/// named after it, and no extra file under `operations/` goes unregistered.
 ///
-/// `issues.tags.set` lives in `operations/issues/tags/set.rs` and nowhere else.
-/// This is what makes the tree navigable without a map — you read an id in a log
-/// line and you know the file. A registry that allows `issues.rs` to quietly
-/// accumulate twelve operations drifts back into the 1096-line module this
-/// replaced.
+/// Every `issues.*` operation lives in `operations/issues.rs`. This is what
+/// keeps the tree navigable — you read a bundle name in a log line and you
+/// know the file — without a bundle's operations scattering across files or a
+/// stray file drifting out of the registry unnoticed.
 #[test]
-fn every_operation_lives_in_the_file_its_id_names() {
+fn every_bundle_has_exactly_one_file_and_nothing_else_does() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operations");
-    let mut missing = Vec::new();
-    for operation in operations::operations() {
-        let relative = format!("{}.rs", operation.id.replace('.', "/"));
-        if !root.join(&relative).is_file() {
-            missing.push((operation.id, relative));
-        }
-    }
-    assert!(
-        missing.is_empty(),
-        "operations whose declaration is not in the file their id names: {missing:#?}"
-    );
-}
-
-/// The other direction: no operation file is orphaned.
-///
-/// Every file under `operations/` must declare a registered operation, be a
-/// bundle `mod.rs`, or be the `registry.rs` vocabulary module.
-#[test]
-fn every_operation_file_declares_a_registered_operation() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/operations");
-    let declared: BTreeSet<String> = operations::operations()
-        .map(|operation| format!("{}.rs", operation.id.replace('.', "/")))
+    // A bundle's public name may use hyphens (`session-layout`); its module,
+    // like every Rust identifier, cannot, so the file is the underscored form.
+    let module_names: BTreeSet<String> = operations::operation_bundles()
+        .map(|bundle| bundle.name.replace('-', "_"))
         .collect();
 
+    let missing: Vec<_> = module_names
+        .iter()
+        .filter(|name| !root.join(format!("{name}.rs")).is_file())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "bundles with no matching operations/<name>.rs file: {missing:#?}"
+    );
+
     let mut orphans = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).expect("operations tree is readable") {
-            let path = entry.expect("directory entry").path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(&root)
-                .expect("path is under the operations tree")
-                .to_string_lossy()
-                .replace('\\', "/");
-            // `mod.rs` files carry bundle wiring; `registry.rs` is the vocabulary.
-            if relative.ends_with("mod.rs") || relative == "registry.rs" {
-                continue;
-            }
-            if !declared.contains(&relative) {
-                orphans.push(relative);
-            }
+    for entry in std::fs::read_dir(&root).expect("operations tree is readable") {
+        let path = entry.expect("directory entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
         }
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        // `mod.rs` wires up the crate; `registry.rs` is the vocabulary module.
+        if stem == "mod" || stem == "registry" || module_names.contains(&stem) {
+            continue;
+        }
+        orphans.push(stem);
     }
     orphans.sort();
     assert!(
         orphans.is_empty(),
-        "operation files that declare nothing the registry knows about: {orphans:#?}"
+        "operations/ files not named by any registered bundle: {orphans:#?}"
     );
 }
 
