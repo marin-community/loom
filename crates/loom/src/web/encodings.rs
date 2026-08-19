@@ -50,11 +50,11 @@ use super::ApiResult;
 /// Mount every non-JSON operation at its derived route.
 ///
 /// `io = Session` is excluded: those three are JSON-bodied and mounted beside
-/// the auth routes because their response must carry a `Set-Cookie`, which is a
-/// header concern rather than an encoding one. Everything else reaching this
-/// match is a stream, a websocket, or a byte body, and the ids it accepts are
-/// the whole list — `mounted_encodings` is that same match read back, so the
-/// test below cannot pass by describing a different one.
+/// the auth routes because their response must carry a `Set-Cookie` header.
+/// Everything else reaching this match is a stream, a websocket, or a byte
+/// body, and the ids it accepts are the whole list — `mounted_encodings` is
+/// that same match read back, so the test below cannot pass by describing a
+/// different one.
 pub(super) fn mount(router: Router<AppState>) -> Router<AppState> {
     mount_inner(router).0
 }

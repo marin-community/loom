@@ -502,7 +502,7 @@ async fn op_tags_replace(
 
 /// Fully remove one durable session and all resources it owns.
 ///
-/// Shared by the session route and automation cancellation races. External
+/// Used by the operation handler and automation cancellation. External
 /// teardown is intentionally idempotent: a missing terminal/worktree is
 /// already removed, while failures are returned as warnings after the durable
 /// ownership rows have been released.
@@ -866,8 +866,6 @@ fn content_type_for(path: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
-
-// Branch history compatibility alias plus session conversation/event endpoints.
 
 fn history_error(error: crate::history::PageError) -> AppError {
     match error {

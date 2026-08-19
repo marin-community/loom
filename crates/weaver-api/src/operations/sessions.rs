@@ -258,8 +258,8 @@ pub mod context {
 pub mod conversation {
     use super::prelude::*;
 
-    // `sessions.conversation.block` serves the untruncated content one elided
-    // block points at.
+    // `sessions.conversation.block` fetches untruncated content when an elided
+    // block is referenced.
     pub(super) use super::prelude;
     pub mod block {
         use super::prelude::*;
@@ -563,7 +563,7 @@ pub mod github {
     pub mod access {
         //! Which repositories a session may reach through Loom's GitHub credential.
         //!
-        //! The read half only. Granting and revoking are `permissions.github.grant` /
+        //! Read-only. Granting and revoking are `permissions.github.grant` /
         //! `.revoke`, which live with the other permission decisions a human makes
         //! about an agent.
         pub(super) use super::prelude;

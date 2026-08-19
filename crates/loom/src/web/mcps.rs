@@ -56,8 +56,7 @@ pub(super) async fn create_custom_mcp_operation(
 }
 
 /// `mcps.custom.get`. The `identity` field is the caller-supplied absolute
-/// identity directly; the route this replaced instead reconstructed it from
-/// a URL wildcard path segment.
+/// identity directly.
 pub(super) async fn get_custom_mcp_operation(
     context: OperationContext,
     input: mcps_operations::custom::get::Input,

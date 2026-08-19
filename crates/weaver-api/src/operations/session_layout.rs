@@ -554,8 +554,8 @@ pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {
         // The `#[operation(...)]` macro derives an operation's `bundle` field
         // from its id's first dotted segment with `_` replaced by `-` (see
-        // `loom-api-macros/src/operation.rs`), so this must match that, not
-        // the `session_layout` directory/module name the id itself uses.
+        // `loom-api-macros/src/operation.rs`), so this must match the derived
+        // name, not the module's directory name.
         name: "session-layout",
         label: "Session layout",
         operations: OPERATIONS,

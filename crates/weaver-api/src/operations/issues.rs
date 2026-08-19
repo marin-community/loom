@@ -11,12 +11,9 @@ pub(super) use super::prelude;
 pub mod actions {
     //! The general bulk form: one action applied atomically to a set of work items.
     //!
-    //! This operation is why the previous registry could not describe its own
-    //! surface. `IssueAction` is an internally-tagged union, and the old
-    //! `ArgumentKind` vocabulary had five scalar kinds — so this endpoint was marked
-    //! "custom" and left out. Nothing about it is special; it was simply unwritable.
-    //! Deriving the schema from the real type removes the ceiling, so it registers
-    //! like anything else.
+    //! `IssueAction` is an internally-tagged union. Deriving the schema from the
+    //! real type prevents invalid field combinations at compile time, making this
+    //! operation register like any other in the registry.
 
     use super::prelude::*;
 

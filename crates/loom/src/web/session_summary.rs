@@ -28,8 +28,8 @@ async fn summary_get(
     build_session_catchup(st, &context.principal, session, branch).await
 }
 
-/// Shared by the operation and the legacy route: the goal, status, inbox,
-/// artifacts, issues, and next actions for one resolved session/branch.
+/// Build the goal, status, inbox, artifacts, issues, and next actions for one
+/// resolved session/branch.
 async fn build_session_catchup(
     st: &AppState,
     principal: &Principal,

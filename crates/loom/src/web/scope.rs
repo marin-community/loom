@@ -58,10 +58,8 @@ pub(crate) async fn require_repo_access(
 /// A session credential may reach the branches of its own session tree.
 ///
 /// The tree, not just the session's own branch: a session that launches a child
-/// must still be able to act on what it launched. This is the same rule the
-/// path allowlist in `auth.rs` applied to `/branches/{id}` — moved here so it is
-/// stated once, against the branch the operation's typed input names rather than
-/// against a URL segment.
+/// must still be able to act on what it launched. The authorization is enforced
+/// against the branch operand in the operation's typed input.
 pub(crate) async fn require_branch_access(
     st: &AppState,
     principal: &Principal,

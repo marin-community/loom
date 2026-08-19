@@ -150,8 +150,8 @@ pub mod github {
     }
 
     pub mod revoke {
-        //! Revoke explicit GitHub repository access from a live session. Like `grant`,
-        //! this is expressed through `actor = User`.
+        //! Revoke explicit GitHub repository access from a live session.
+        //! This is expressed through `actor = User`.
 
         use super::prelude::*;
 

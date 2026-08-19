@@ -10,10 +10,7 @@ use super::{ApiResult, AppError, AppState};
 /// The `runs` bundle: automation-triggered session launches (GitHub Actions,
 /// ops scripts, Grafana alerts). Federation/token minting (`federate`,
 /// `mint_automation_token`, `list_federations`, `add_federation`,
-/// `remove_federation`) below are a different bundle and are untouched here.
-/// The legacy `/runs`, `/runs/{id}` axum routes are already gone from
-/// `web/mod.rs`, so there is no old handler left to keep alive alongside
-/// these.
+/// `remove_federation`) are handled by a separate bundle.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<run_operations::list::List, _, _>(list_runs),

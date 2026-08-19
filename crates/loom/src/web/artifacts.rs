@@ -245,8 +245,8 @@ async fn list_operation(context: OperationContext, input: list::Input) -> ApiRes
     Ok(artifacts.iter().map(artifact_meta).collect())
 }
 
-/// `artifacts.get`. Reuses [`artifact_view`], so the projected reference map
-/// (issue chips) rides along exactly as it did for the route this replaces.
+/// `artifacts.get`. Returns the envelope, content, version list, and projected
+/// reference map (issue chips) via [`artifact_view`].
 async fn get_operation(context: OperationContext, input: get::Input) -> ApiResult<get::Output> {
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
@@ -459,10 +459,8 @@ async fn thread_artifact(
     Ok((branch, a))
 }
 
-/// `artifacts.threads.list`, plus the `all` filter the operation's `Input`
-/// declares that the route it replaced did not have (that route always listed
-/// every status; `all` defaulting to `false` means the default here is
-/// open-only unless the caller asks for everything).
+/// `artifacts.threads.list`. The `open_only` flag (inverse of `all`) defaults
+/// to true: listing open threads only unless the caller requests all statuses.
 async fn threads_list_operation(
     context: OperationContext,
     input: threads::list::Input,

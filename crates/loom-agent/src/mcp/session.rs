@@ -3,11 +3,9 @@
 //!
 //! `get`, `summary`, `status_get`, `history`, and `search` are registered
 //! `sessions.*` operations and route straight through
-//! `super::dispatch::call_tool` — there is no `resolve_session_argument`
-//! left to maintain for them; a caller-omitted session resolves to this
+//! `super::dispatch::call_tool`. A caller-omitted session resolves to this
 //! session through the same `#[operand(context)]` fill every other bundle
-//! uses, in one `self_context()` call shared across the whole request rather
-//! than one per tool.
+//! uses, in one `self_context()` call shared across the whole request.
 //!
 //! `status_set` (and its legacy alias `status`) stay hand-written: setting
 //! the branch's status also posts a channel message, and the old adapter

@@ -16,9 +16,8 @@ use super::{ApiResult, AppError};
 // ---------------------------------------------------------------------------
 // Operation registry — `repos.env.*`, bound onto
 // `weaver_api::operations::repos::env`. Folded into `repos::bound_operations()`
-// (see `repos.rs`) rather than exported to the coordinator's `registry()`
-// directly, since `repos.env.*` is part of the `repos` bundle even though its
-// handlers live in this sibling file.
+// (see `repos.rs`) since `repos.env.*` is part of the `repos` bundle even
+// though its handlers live in this sibling file.
 // ---------------------------------------------------------------------------
 
 async fn repo_env_view(db: &Db, repo_root: &str) -> ApiResult<RepoEnvView> {

@@ -25,11 +25,9 @@ use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppState};
 
 /// The `tasks` bundle (one read-only operation over the in-memory background
-/// task ring buffer) plus two operations bound here alongside the legacy
-/// handlers they port: `logs.list` (the snapshot counterpart of
-/// `logs.stream`) and `diagnostics.status` (next to `server_status`; its
-/// sibling `diagnostics.get` is bound in `web/diagnostics.rs`, next to the
-/// `diagnostics` handler it ports).
+/// task ring buffer), plus `logs.list` (the snapshot counterpart of
+/// `logs.stream`), plus `diagnostics.status` (whose sibling `diagnostics.get`
+/// is bound in `web/diagnostics.rs`).
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<task_operations::list::List, _, _>(list_tasks),

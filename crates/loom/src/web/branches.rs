@@ -365,9 +365,9 @@ async fn slack_reply_operation(
         return Err(AppError::bad_request("text is required"));
     }
     if input.thread.is_none() {
-        // Preserve the compatibility route while making the session channel the
-        // canonical reply record and delivery bus. The branch wiring is checked
-        // before appending, matching this endpoint's historical failure shape.
+        // When no thread is specified, reply to the branch wiring instead.
+        // The branch wiring is checked before appending, matching this
+        // endpoint's behavior.
         let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
             .await?
             .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;

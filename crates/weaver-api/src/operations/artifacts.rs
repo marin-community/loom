@@ -210,12 +210,10 @@ pub mod threads {
     pub mod comment {
         //! `artifacts.threads.comment` — start a thread or reply to one.
         //!
-        //! The old registry could only express this as one endpoint whose fields were
-        //! all individually optional (`thread_id`? `base_rev`? `quote`?) because its
-        //! `ArgumentSpec` had five scalar kinds and no way to say "one of these two
-        //! shapes." That let a caller send neither a `thread_id` nor a `base_rev` and
-        //! find out only at request time. `CommentTarget` is a real tagged union —
-        //! the same fix `issues.actions` applies to its own `action` field.
+        //! `CommentTarget` is a real tagged union, enforcing at compile time that
+        //! a caller provides either a base revision and anchor (to start a new thread)
+        //! or a thread id (to reply to an existing one). This matches the pattern
+        //! `issues.actions` applies to its own `action` field.
 
         use super::prelude::*;
 

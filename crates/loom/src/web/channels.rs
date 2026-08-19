@@ -362,12 +362,9 @@ fn resolve_channel_id(principal: &Principal, channel: &str) -> ApiResult<String>
 }
 
 /// Fill in a [`ChannelView`]'s delivery bindings. The row mapper in
-/// `loom-store` always leaves `bindings` empty (a comment there says as
-/// much) because only the server handler knows how to resolve delivery
-/// targets and the Slack origin thread. The old MCP `get`/`list` tools
-/// fetched these with a second round trip per channel and merged them in by
-/// hand; `channels.get` and `channels.list` must still return them, just as
-/// part of the one response now.
+/// `loom-store` leaves `bindings` empty because only the server handler knows
+/// how to resolve delivery targets and the Slack origin thread.
+/// `channels.get` and `channels.list` resolve and return them.
 async fn with_bindings(st: &AppState, mut view: ChannelView) -> ApiResult<ChannelView> {
     if let Some(access) = channels::access(&st.db, &view.id).await? {
         view.bindings = channel_bindings(st, &view.id, &access).await?;
@@ -467,9 +464,8 @@ pub(super) async fn create_channel_message_operation(
 /// `channels.create` — open a custom channel in a repository.
 ///
 /// The channel belongs to `repo_root`; `branch` only records which branch
-/// opened it. Both are context operands, so a session gets them filled from its
-/// own row and a human from the repo it named — the two callers that used to
-/// need two different routes.
+/// opened it. Both are context operands: a session gets them from its own row,
+/// a human from the repo and branch they name.
 pub(super) async fn create_channel_operation(
     context: OperationContext,
     input: ops::create::Input,
@@ -604,14 +600,11 @@ pub(super) async fn set_channel_read_marker_operation(
     Ok(channels::mark_read(&st.db, &channel_id, &subject, input.seq).await?)
 }
 
-/// Long-poll for the next channel message matching `kind`/`urgent`, exactly
-/// as the old `loom_channel::wait` MCP tool did it (this operation absorbs
-/// that tool's server-side loop rather than a client polling the server
-/// repeatedly): default the scan cursor to the channel's latest known
-/// message, validate `timeout` to the same `1..=3600` second window, then
-/// poll once a second until a match lands or the deadline passes. `io =
-/// Json` — this returns exactly one response, after the wait, never a
-/// stream.
+/// Long-poll for the next channel message matching `kind`/`urgent`. Defaults
+/// the scan cursor to the channel's latest known message, validates `timeout`
+/// to the `1..=3600` second window, then polls once a second until a match
+/// lands or the deadline passes. Returns exactly one response after the wait,
+/// never a stream.
 pub(super) async fn wait_for_channel_message_operation(
     context: OperationContext,
     input: ops::wait::Input,

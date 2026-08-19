@@ -18,8 +18,8 @@
 //! value, exactly what `Operands::from_matches` fills an absent flag with —
 //! and then [`Operands::fill_context`] overwrites the context fields from the
 //! session, same as the CLI. A field the schema marks `required` still has to
-//! come from the caller; that is checked before the merge so a missing `id` is
-//! a clear error rather than a silent `0`.
+//! come from the caller; missing required fields are checked before the merge
+//! and fail with a clear error.
 
 use std::collections::BTreeMap;
 use std::future::Future;

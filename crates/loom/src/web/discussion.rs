@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Branch-scoped discussion — the twin of the session-scoped routes above, for
-// a `loom artifacts comment/resolve/threads` target with no live session
-// required, matching the branch-scoped artifact routes in `artifacts.rs`.
+// Branch-scoped discussion — for a `loom artifacts comment/resolve/threads`
+// target with no live session required, matching the branch-scoped artifact
+// routes in `artifacts.rs`.
 // ---------------------------------------------------------------------------

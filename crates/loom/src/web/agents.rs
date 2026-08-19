@@ -75,11 +75,9 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `agents.list`. The route this replaces lived beside session listing
-/// (`web/sessions.rs`), not this file — these routes only add/edit/remove
-/// the custom rows it merges in. The `agent::agent_metadata` /
-/// `custom_agents::list` / `crate::profile` calls below are the same shared
-/// domain logic that route used.
+/// `agents.list`. Merges the agent metadata registry with custom agents
+/// from the database. The `agent::agent_metadata`, `custom_agents::list`,
+/// and `crate::profile` calls below provide the shared domain logic.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,

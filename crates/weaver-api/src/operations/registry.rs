@@ -417,9 +417,7 @@ mod tests {
 
     #[test]
     fn routes_are_derived_from_identity_not_declared() {
-        // The defect this replaces: `loom help` printed a declared path while
-        // `--json` printed a computed one, and they disagreed for every
-        // generated operation.
+        // Routes are derived from `id`, so all surfaces report the same endpoint.
         fn schema() -> Value {
             Value::Null
         }

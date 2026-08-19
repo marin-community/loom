@@ -6,12 +6,11 @@
 //! `super::dispatch::call_tool`. The schema-driven argument merge handles all
 //! required shape; no extra validation is needed.
 //!
-//! Capability sets are hand-authored to avoid a name collision. The
+//! Capability sets are hand-authored to avoid collision. The
 //! `sessions.context` operation claims the same `loom/sessions/read@v1` grant
-//! as `loom_session`'s read tools, but serves from a different MCP process. If
-//! this adapter derived its sets, `expand_tool_set` would return the first match
-//! and silently hide the real read set. Instead, this adapter keeps a distinct
-//! `loom/context/read@v1` identity.
+//! as `loom_session`'s read tools, but serves from a different MCP process.
+//! This adapter keeps a distinct `loom/context/read@v1` identity to prevent
+//! `expand_tool_set` from colliding on the first match.
 
 use serde_json::Value;
 

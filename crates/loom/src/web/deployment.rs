@@ -160,9 +160,7 @@ async fn reconcile_deployment_core(st: &AppState, req: DeploymentReq) -> ApiResu
     })
 }
 
-/// `deployment.reconcile`.
-///
-/// Central `authorize()` (`actor = Admin`) replaces the inline `principal.is_admin()` check.
+/// `deployment.reconcile`. Authorized by `actor = Admin` in the central dispatcher.
 pub(super) async fn reconcile_deployment_operation(
     context: OperationContext,
     input: reconcile::Input,

@@ -53,8 +53,7 @@ pub(super) async fn session_layout_events(
     Extension(principal): Extension<Principal>,
     Query(input): Query<events::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    // `actor = User` on the declaration is the same rule `require_human` was:
-    // the layout is the signed-in operator's own dashboard state.
+    // `actor = User` ensures only signed-in operators can access their own dashboard state.
     super::encodings::authorized::<events::Events>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
@@ -79,8 +78,8 @@ pub(super) async fn session_layout_events(
 // so there is nothing to conflict on.
 // ---------------------------------------------------------------------------
 
-/// The operation-typed twin of [`mutation_response`], returning the bare
-/// output `register` expects instead of a `Json` wrapper.
+/// The operation-typed twin of [`mutation_response`], unwrapping the `Json`
+/// wrapper to return the bare output.
 async fn mutation_result(
     st: &AppState,
     username: &str,
@@ -205,9 +204,8 @@ async fn groups_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.preference.set`. Unlike the rest of this bundle,
-/// this does not go through `mutation_result` because a collapse toggle
-/// carries no `expected_revision` to conflict on.
+/// `session_layout.groups.preference.set`. This skips `mutation_result`: a
+/// collapse toggle carries no `expected_revision` to conflict on.
 async fn groups_preference_set_operation(
     context: OperationContext,
     input: groups::preference::set::Input,

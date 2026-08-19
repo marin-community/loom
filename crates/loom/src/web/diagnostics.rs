@@ -424,20 +424,16 @@ async fn metric_snapshot(db: &Db) -> Result<DiagnosticsView> {
     })
 }
 
-/// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`. Its
-/// sibling `diagnostics.status` is bound in `web/logview.rs`, next to the
-/// legacy `server_status` handler it ports.
+/// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`.
+/// Its sibling `diagnostics.status` is bound in `web/logview.rs`.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![register::<diagnostics_operations::get::Get, _, _>(
         diagnostics_operation,
     )]
 }
 
-/// `diagnostics.get`. `actor = User` already excludes every non-human
-/// principal, so the inline `is_human()` check the route this replaces made
-/// is not repeated here (same as `auth.automation_token` dropping its inline
-/// `is_admin()` check once `actor = Admin` said the same thing
-/// structurally).
+/// `diagnostics.get`. `actor = User` in the operation declaration
+/// restricts this to human principals.
 async fn diagnostics_operation(
     context: OperationContext,
     _input: diagnostics_operations::get::Input,

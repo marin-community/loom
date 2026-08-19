@@ -780,10 +780,7 @@ fn protected_api_router() -> Router<AppState> {
     //
     // There is nothing to add to this function. Adding an endpoint means
     // declaring an operation in `weaver-api` and binding it with
-    // `register::<O>(handler)`; the route follows from the id. What used to sit
-    // here was a second route table for the same data — 121 hand-written routes
-    // whose paths, methods, bodies and authority were maintained separately from
-    // the declarations that claimed to describe them.
+    // `register::<O>(handler)`; the route follows from the id.
     registered_api_router()
 }
 

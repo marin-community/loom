@@ -18,12 +18,12 @@ use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
-// TODO(registry): not yet ported — the `github.*` operations are not in the
-// operation registry yet, so this adapter keeps its own hand-written schemas,
-// argument projection, and capability sets rather than `dispatch::bind`.
+// All six tools gate through one registered operation via a runtime
+// session-policy check, not a compile-time grant, so this adapter keeps its
+// own schemas and dispatch loop instead of `dispatch::bind`. See the module
+// doc on `github` for the full reasoning.
 pub mod github;
 
-// Fully converted: every tool routes through `dispatch::call_tool`.
 pub(crate) mod channel;
 pub(crate) mod context;
 pub(crate) mod issue;

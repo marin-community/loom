@@ -61,8 +61,7 @@ pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<Is
 }
 
 /// Every issue across every repo, minus the ones an automation-class session
-/// has claimed unless `automation` asks for them. Shared by `issues.board` and
-/// the `GET /issues` route it replaces.
+/// has claimed unless `automation` asks for them. Shared by `issues.board`.
 async fn collect_issue_board(
     st: &AppState,
     all: bool,
@@ -117,8 +116,7 @@ pub(super) async fn create_branch_issue_operation(
     if input.title.trim().is_empty() {
         return Err(AppError::bad_request("issue title is required"));
     }
-    // The old request carried a `tags` list that both callers always sent
-    // empty; a new issue starts untagged and `issues.tags.set` labels it.
+    // New issues start untagged; labels are applied with `issues.tags.set`.
     let tags = Vec::new();
     let branch = require_branch(&st.db, &input.branch).await?;
     let issue = weaver_core::issue::add_with_tags(
@@ -333,10 +331,8 @@ pub(super) async fn set_issue_tag_operation(
 ) -> ApiResult<IssueView> {
     let id = input.id;
     let tag_key = input.key.trim().to_string();
-    // `by` is derived from the credential, not taken from the body. The old
-    // request let a caller name whoever it liked as the setter, and the tag is
-    // shown in the dashboard as provenance. The two values are the ones both
-    // callers already wrote: the dashboard sent `manual`, the MCP tool `agent`.
+    // `by` is derived from the credential and shown in the dashboard as
+    // provenance: `manual` for a human, `agent` for MCP.
     let by = Some(
         if context.principal.is_human() {
             "manual"
@@ -603,8 +599,7 @@ async fn require_repo_access(
 
 /// The repo-wide issue board, or just the unclaimed backlog with `backlog: true`.
 ///
-/// The repo-access check the old handler ran inline is gone: `authorize()` does
-/// it once from `Scoped`, before this is ever called.
+/// Repo access is checked by `authorize()` from `Scoped`, before this is called.
 pub(super) async fn list_repo_issues_operation(
     context: OperationContext,
     input: issue_operations::list::Input,
@@ -832,16 +827,14 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.claimed_branch, None);
 
-        // Assigning a claim is not expressible at all now. The route took
-        // `claimed_branch: Option<Option<String>>` and 400'd every inhabitant
-        // but `Some(None)`; `unclaim: bool` says the same thing in a type that
-        // cannot hold the rejected case, so there is nothing left to reject.
+        // Claims are made by launching against an issue, not by editing it.
+        // The `unclaim: bool` field reflects this: it only clears, never assigns.
         let schema = (weaver_api::operation("issues.update")
             .expect("declared")
             .schema)();
         assert!(
             schema["properties"].get("claimed_branch").is_none(),
-            "a claim is made by launching against an item, not by editing it: {schema}"
+            "claimed_branch must not appear in the schema: {schema}"
         );
     }
 
