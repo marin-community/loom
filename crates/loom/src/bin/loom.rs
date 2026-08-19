@@ -15,7 +15,7 @@ use loom::agent_cli::{
 use serde_json::{json, Value};
 use weaver_api::operations::permissions as perm_ops;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, CreatePermissionRequestReq, CreateReviewReq,
+    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, DecidePermissionRequestReq,
     DeleteSessionGroupReq, DeleteSessionSpaceReq, MoveSessionsReq, ReorderSessionLayoutReq,
     RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,

@@ -120,7 +120,6 @@ use launches::*;
 use logview::*;
 use mcps::*;
 use operations::*;
-use permission_requests::*;
 use profiles::*;
 use repo_env::*;
 use repos::*;

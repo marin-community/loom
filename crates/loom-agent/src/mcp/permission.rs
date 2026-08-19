@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use weaver_api::{CreatePermissionRequestReq, OperationView};
+use weaver_api::OperationView;
 
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
@@ -59,7 +59,7 @@ fn tools() -> Value {
     weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
 }
 
-async fn project_input(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
+async fn project_input(client: &weaver_api::Client, _name: &str, arguments: Value) -> Result<Value> {
     let _ = client;
     Ok(arguments)
 }

@@ -1,25 +1,19 @@
 use std::collections::BTreeSet;
 
 use axum::{extract::State, http::StatusCode, Extension, Json};
+use weaver_api::operations::deployment::reconcile;
 use weaver_api::{DeploymentReq, DeploymentView};
 
 use crate::auth::Principal;
 use crate::config;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{profiles, ApiResult, AppError, AppState};
 
 /// Reconcile the runtime resources declared by a deployment stack. This is the
 /// API-first boundary Pulumi's startup generation calls through the local Loom
 /// CLI; the manifest contains references and policy, never secret values.
-pub(super) async fn reconcile_deployment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<DeploymentReq>,
-) -> ApiResult<Json<DeploymentView>> {
-    if !principal.is_admin() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
-    }
-
+async fn reconcile_deployment_core(st: &AppState, req: DeploymentReq) -> ApiResult<DeploymentView> {
     let mut setting_values = Vec::with_capacity(req.settings.len());
     for (key, declared) in &req.settings {
         if config::spec(key).is_none() {
@@ -147,7 +141,7 @@ pub(super) async fn reconcile_deployment(
         let profile = crate::profile::get(&st.db, &name)
             .await?
             .ok_or_else(|| AppError::not_found("profile"))?;
-        profile_views.push(profiles::view(&st, profile).await?);
+        profile_views.push(profiles::view(st, profile).await?);
     }
     let mappings = crate::automation::federation_list(&st.db)
         .await?
@@ -161,9 +155,49 @@ pub(super) async fn reconcile_deployment(
         .filter(|setting| setting_names.contains(setting.spec.key))
         .map(Into::into)
         .collect();
-    Ok(Json(DeploymentView {
+    Ok(DeploymentView {
         settings,
         profiles: profile_views,
         federations: mappings,
-    }))
+    })
+}
+
+pub(super) async fn reconcile_deployment(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<DeploymentReq>,
+) -> ApiResult<Json<DeploymentView>> {
+    if !principal.is_admin() {
+        return Err(AppError::new(StatusCode::FORBIDDEN, "admin grant required"));
+    }
+    Ok(Json(reconcile_deployment_core(&st, req).await?))
+}
+
+/// `deployment.reconcile` — the twin of [`reconcile_deployment`]. Central
+/// `authorize()` (this operation is declared `actor = Admin`) already
+/// restricts it to an admin credential, so the legacy handler's inline
+/// `principal.is_admin()` check is not repeated here — that duplication is
+/// exactly what the operation registry replaces.
+pub(super) async fn reconcile_deployment_operation(
+    context: OperationContext,
+    input: reconcile::Input,
+) -> ApiResult<DeploymentView> {
+    let req = DeploymentReq {
+        settings: input.settings,
+        profiles: input.profiles,
+        federations: input.federations,
+        prune: input.prune,
+    };
+    reconcile_deployment_core(&context.state, req).await
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `deployment.*`, bound onto
+// `weaver_api::operations::deployment`.
+// ---------------------------------------------------------------------------
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<reconcile::Reconcile, _, _>(
+        reconcile_deployment_operation,
+    )]
 }

@@ -2,15 +2,14 @@ use std::path::PathBuf;
 
 use axum::{
     extract::{Path, Query, State},
-    Extension, Json,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::operations::issues as issue_operations;
 use weaver_api::{
-    CreateRepoIssueReq, DeleteIssueResult, IssueAction,
-    IssueActionProblem as IssueActionProblemView, IssueActionsReq, IssueActionsResult,
-    IssueTagInput, IssueView, PatchIssueReq,
+    IssueAction, IssueActionProblem as IssueActionProblemView, IssueActionsResult, IssueTagInput,
+    IssueView, PatchIssueReq,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::issue::{BulkIssueAction, Issue, NewIssueTag};

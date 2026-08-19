@@ -13,7 +13,7 @@ use weaver_api::{GithubTokenView, RestrictedGithubToolView};
 use crate::github_app::{GithubApp, GithubThreadKind};
 
 use super::operations::OperationContext;
-use super::{ApiResult, AppError, AppState};
+use super::{ApiResult, AppError};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
