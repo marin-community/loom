@@ -346,8 +346,10 @@ than a reason to leave the registry:
 | `Session` | POST | hand-written, because the response must carry a `Set-Cookie` |
 | `Stream` | GET | hand-written, because the body is an SSE stream |
 | `Duplex` | GET | hand-written, because the response is a websocket upgrade |
+| `Upload` | POST | hand-written, because the *request* body is the payload's raw bytes |
+| `Download` | GET | hand-written, because the response is raw bytes plus a content type |
 
-A `Stream` or `Duplex` operation takes its operands from the query string
+A `Stream`, `Duplex` or `Download` operation takes its operands from the query string
 (`GET /api/sessions/terminal?session=abc`) rather than from path segments,
 precisely so that its real route equals its derived one. Its handler lives in
 [`crates/loom/src/web/encodings.rs`](../crates/loom/src/web/encodings.rs) and calls
@@ -360,34 +362,72 @@ stands in for.
 
 ### What is not an operation
 
-Three things, and they are enumerated in
+Nineteen paths, and they are enumerated in
 [`crates/loom/tests/surface_parity.rs`](../crates/loom/tests/surface_parity.rs)
-rather than left to judgement:
+with a reason each rather than left to judgement:
 
-* the reverse proxy to the embedded editor, which forwards an arbitrary sub-path;
+* the reverse proxy to the embedded editor, which forwards an arbitrary sub-path
+  into a container and streams back whatever comes out;
 * unauthenticated infrastructure (`/health`, `/metrics`, `/ready`), the
   HMAC-authenticated GitHub webhook, and the browser OAuth redirects;
+* the three `io = Session` operations, which *are* registered and appear in the
+  surface — they are mounted beside the auth routes only because their response
+  must carry a `Set-Cookie`;
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
-That file is the ledger, and it is a ratchet in both directions — it fails if
-`web/mod.rs` mounts a route the ledger does not name, and if the ledger names a
-route nobody mounts any more. Every hand-mounted route is in one of three lists:
-a declared transport (the above), a route an operation already supersedes (still
-mounted for a caller that has not moved yet), or a route with no operation at
-all. The last list is the registry being *incomplete*, which is counted
-separately because it is a different problem from being duplicated, and it is the
-one that has to reach zero. It is down to two, and both survivors are about a
-wire encoding `Io` has no variant for rather than a shape the DSL cannot express.
+That list is the whole hand-mounted surface. It used to be one of three: the
+other two held routes an operation already superseded (115 of them, kept alive by
+callers that had not moved) and routes no operation served at all, which is the
+registry being *incomplete* — no schema, no CLI, no MCP projection, no declared
+actor policy for a piece of live API. Both are now empty, so the ledger asserts a
+property instead of counting a debt: a `.route(` in `web/mod.rs` that is not a
+declared transport fails the test, in either direction — an undeclared route, or
+a declared transport nobody mounts.
 
-The same file also checks the *other* half of the authority model. `grant_allows`
-in `crates/loom/src/web/auth.rs` decides raw paths, and since a registered
-operation's authority comes from its declaration instead, that function now
-applies only to routes which are not operations. So an entry naming a route that
-has been deleted is dead — and for the session-credential allowlist it is worse
-than dead, because it pre-authorizes whatever gets mounted at that path next.
-`no_session_allowlist_path_is_unmounted` and `no_user_denylist_path_is_unmounted`
-scan the two lists and assert every path literal is still served.
+Getting there took eleven operations that did not exist yet (`issues.update`,
+`issues.board`, `sessions.summary.list`, `sessions.tags.replace`,
+`sessions.github.access.list`, `channels.archive`, `artifacts.raw`, and the
+`sessions.scratch.*` trio), one new `Io` variant (`Download`, the mirror of
+`Upload`: a GET that answers bytes and a content type), and widening four
+declarations that had been narrower than the routes they replaced.
+
+### The authority model has one half now
+
+`grant_allows` in [`crates/loom/src/web/auth.rs`](../crates/loom/src/web/auth.rs)
+decides *raw paths*. It used to be a parallel authority model running in addition
+to the registry, and both of its failure modes happened:
+
+* a newly declared operation was refused until someone also added its URL to the
+  list, which is what 403'd `permissions.requests.create` for the very session it
+  was declared for;
+* an entry naming a deleted route stayed a standing pre-authorization for
+  whatever got mounted at that path next.
+
+With the routes gone it decides seven paths: the IDE proxy and registry
+discovery. Everything else is `actor` on the declaration plus `authorize()` at
+the dispatcher — one decision, reached identically by REST, the CLI and MCP, so
+an adapter cannot widen authority by choosing a different door.
+`no_grant_allows_path_is_unmounted` still scans it, because the pre-authorization
+failure mode does not care how short the list is.
+
+Two resource checks the path allowlist had been making, invisibly, moved into the
+code that has the id to check:
+
+* a session credential reaches only channels in its own tree — now
+  `require_channel` in `web/channels.rs`, called by every channel operation.
+  `scope = Branch` cannot state this: `branch` is a context operand, so it always
+  names the caller's own branch and the scope check passes whatever `channel` was
+  requested. `every_channel_operation_checks_reachability` counts the calls
+  against the operations that need them.
+* a session credential reaches only its own session tree, its own repository, and
+  its own tree's branches — `web/scope.rs`, driven by `Scoped` on typed input
+  rather than by URL segments.
+
+One capability narrowed on purpose: an automation credential reaches no raw path
+and only `actor = Internal` operations, which is `runs.create`. The allowlist
+also let it `GET /sessions/{id}` for sessions it had created; nothing used that,
+and `Internal` is what an automation credential is for.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`

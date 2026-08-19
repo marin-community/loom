@@ -728,14 +728,10 @@ fn registered_api_router() -> Router<AppState> {
     // The non-JSON half of the same registry: SSE feeds and terminal
     // websockets, mounted at their derived paths off the same declarations.
     let router = encodings::mount(router);
-    let router = mount_session_api(router);
-    let router = mount_channel_api(router);
-    let router = mount_artifact_api(router);
-    let router = mount_issue_api(router);
-    mount_permission_api(router)
-}
-
-fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
+    // The IDE proxy: the one hand-mounted thing on the authenticated surface
+    // that is not an operation and is not going to become one. It forwards an
+    // arbitrary sub-path into a container and streams back whatever comes out —
+    // there is no request shape to declare and no response to encode.
     router
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
         .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))
@@ -743,34 +739,12 @@ fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
             "/sessions/{id}/ide/{*rest}",
             axum::routing::any(crate::ide::proxy),
         )
-}
-
-fn mount_channel_api(router: Router<AppState>) -> Router<AppState> {
-    router
-}
-
-fn mount_artifact_api(router: Router<AppState>) -> Router<AppState> {
-    router
-}
-
-fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
-    router
-}
-
-fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
-    router
+        // Registry discovery. Operations describing operations would be
+        // circular, so these four stay routes.
         .route("/meta", get(api_meta))
         .route("/operations", get(list_operations))
         .route("/operations/{id}", get(get_operation))
         .route("/openapi.json", get(openapi))
-    // `restricted-github/{tool}`, `github/token`, and the `PUT` half of
-    // `github/access` are now `permissions.github.restricted.invoke`,
-    // `permissions.github.token`, and `permissions.github.{grant,revoke}` —
-    // registered operations mounted by `operations::mount` above, not routes
-    // here. `github/access` keeps its `GET` for now: listing a session's
-    // GitHub overrides has no operation-registry counterpart yet.
-    // `/permission-requests/{id}/decision` is now the two operations
-    // `permissions.requests.approve` and `permissions.requests.deny`.
 }
 
 /// The unauthenticated route table.
@@ -805,35 +779,16 @@ fn public_api_router() -> Router<AppState> {
 /// Takes no state for the same reason [`public_api_router`] does not — building
 /// it is how route overlaps are detected, and that must not need a database.
 fn protected_api_router() -> Router<AppState> {
-    // Everything else requires an authenticated principal — a bearer token, a
+    // Every endpoint here requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
+    //
+    // There is nothing to add to this function. Adding an endpoint means
+    // declaring an operation in `weaver-api` and binding it with
+    // `register::<O>(handler)`; the route follows from the id. What used to sit
+    // here was a second route table for the same data — 121 hand-written routes
+    // whose paths, methods, bodies and authority were maintained separately from
+    // the declarations that claimed to describe them.
     registered_api_router()
-    // Misc
-    // Operator-defined custom agents (create + edit/remove by name). The
-    // static `/custom` segment is registered before the `{name}` capture.
-    // The managed repo store + clone allowlist (register/list).
-    // Per-repo environment variables (write-only values), layered into a
-    // non-restricted session's terminal above its selected profile.
-    // Settings, operator preferences, profiles, the MCP registry and the
-    // default profile's environment facade are registered operations —
-    // `settings.*`, `preferences.*`, `profiles.*`, `mcps.*`,
-    // `settings.env.*`. Nothing is mounted by hand here.
-    // The operator scratch shell — a single persistent login shell in the
-    // container, for one-time setup like `gcloud auth login`.
-    // Server logs + background tasks (Settings → Diagnostics) — snapshot +
-    // live SSE tail + build status + the detached trigger-task list. These
-    // are available to human users for self-service debugging.
-    // Watches — periodic / triggered watch programs over the fleet.
-    // Automation run ingest. `runs.create` / `runs.list` / `runs.get` are the
-    // registered operations, but these are the URLs external systems (a
-    // Grafana webhook, say) already point at, so they stay mounted until
-    // those callers move — like every other legacy route in this file.
-    // The static segment wins over the `{id}` capture below, so a program
-    // named "programs" can't shadow this listing.
-    // The one-shot headless agent — the judgement primitive watch
-    // programs (and any script) call through the daemon.
-    // Authentication management: API tokens, the caller's password, the
-    // approved-user allowlist, and the GitHub OAuth app config.
 }
 
 pub fn router(state: AppState) -> Router {
