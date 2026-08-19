@@ -736,6 +736,11 @@ fn static_dir() -> PathBuf {
 }
 
 fn registered_api_router() -> Router<AppState> {
+    // Declarations and handlers must be the same set, and the moment to find
+    // out is boot — not the first request to a descriptor nothing serves. The
+    // registry this replaces had no such check, which is how it came to
+    // advertise operations that 404ed.
+    operations::assert_registry_is_complete();
     let router = operations::mount(Router::new());
     let router = mount_session_api(router);
     let router = mount_channel_api(router);

@@ -11,9 +11,11 @@ use serial_test::serial;
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
 use weaver_api::{
-    CreateChannelMessageReq, CreatePermissionRequestReq, CreateReq, DecidePermissionRequestReq,
+    CreateChannelMessageReq, CreateReq, DecidePermissionRequestReq,
     SettingKind, SettingSource,
 };
+
+use weaver_api::operations::permissions as permission_ops;
 
 use crate::fixtures::TestServer;
 
@@ -201,21 +203,22 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(request_operation.path, "/api/permissions/requests/create");
 
     let request = session
-        .create_permission_request(
-            &created.id,
-            &CreatePermissionRequestReq {
-                kind: "github_repository".to_string(),
-                repository: "acme/widgets".to_string(),
-                mode: "write".to_string(),
-                reason: "update the shared client".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::create::Create>(&permission_ops::requests::create::Input {
+            repository: "acme/widgets".to_string(),
+            reason: "update the shared client".to_string(),
+            mode: "write".to_string(),
+            session: created.id.clone(),
+        })
         .await
         .unwrap();
     assert_eq!(request.state, "pending");
     assert_eq!(
         session
-            .effective_permissions(&created.id)
+            .invoke::<permission_ops::effective::get::Get>(
+                &permission_ops::effective::get::Input {
+                    session: created.id.clone(),
+                }
+            )
             .await
             .unwrap()
             .pending_requests[0]

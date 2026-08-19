@@ -6,6 +6,8 @@ use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 
+use weaver_api::operations::issues::{close, reopen, tags};
+
 use crate::fixtures::{branch_tag, branch_tag_value, sh, TestServer};
 
 /// Ordinary launches do not manufacture issues. Hand-created issues are claimed
@@ -163,42 +165,78 @@ async fn cross_repo_board_and_issue_tags() {
         "the new issue shows on the cross-repo board"
     );
 
-    // Set a free-form label through the typed client. The key deliberately
-    // contains path/query delimiters so the client must encode it as one path
-    // segment instead of changing the route.
+    // Set a free-form label through the registered operation. The key
+    // deliberately contains path/query delimiters, which are now unremarkable:
+    // the operation carries its arguments in the body, so nothing about this
+    // key touches the route.
     let tag_key = "priority / now?#";
     let tagged = client
-        .set_issue_tag(issue_id, tag_key, "high", "ship first", "agent")
+        .invoke::<tags::set::Set>(&tags::set::Input {
+            id: issue_id,
+            key: tag_key.to_string(),
+            value: "high".to_string(),
+            note: "ship first".to_string(),
+            repo_root: repo_root.clone(),
+        })
         .await
         .unwrap();
     assert_eq!(tagged.tags.len(), 1);
     assert_eq!(tagged.tags[0].key, tag_key);
     assert_eq!(tagged.tags[0].value, "high");
     assert_eq!(tagged.tags[0].note, "ship first");
-    assert_eq!(tagged.tags[0].set_by, "agent");
+    // Provenance is read off the credential, not the body: this client holds a
+    // human token, so the tag records `manual`. A session token records
+    // `agent`, and no caller can claim to be either.
+    assert_eq!(tagged.tags[0].set_by, "manual");
 
     // An empty value is rejected (clear the tag instead).
     let bad = client
-        .set_issue_tag(issue_id, tag_key, "", "", "agent")
+        .invoke::<tags::set::Set>(&tags::set::Input {
+            id: issue_id,
+            key: tag_key.to_string(),
+            value: String::new(),
+            note: String::new(),
+            repo_root: repo_root.clone(),
+        })
         .await;
     assert!(bad.is_err(), "an empty issue-tag value is rejected");
 
     // Clearing removes the label.
-    let cleared = client.clear_issue_tag(issue_id, tag_key).await.unwrap();
+    let cleared = client
+        .invoke::<tags::delete::Delete>(&tags::delete::Input {
+            id: issue_id,
+            key: tag_key.to_string(),
+            repo_root: repo_root.clone(),
+        })
+        .await
+        .unwrap();
     assert!(cleared.tags.is_empty(), "clearing removes the label");
 
-    // Scalar lifecycle operations are the canonical typed API surface. They
-    // retain the bulk endpoint's state validation while mapping directly to
-    // the corresponding MCP operations.
-    let closed = client.close_issue(issue_id).await.unwrap();
-    assert_eq!(closed.status, "closed");
+    // Lifecycle operations take a set of ids and apply atomically. The single
+    // -id case is just the one-element set, so the scalar convenience wrappers
+    // this replaces no longer have to exist to be kept in sync.
+    let close = |ids: Vec<i64>| {
+        let input = close::Input {
+            ids,
+            repo_root: repo_root.clone(),
+        };
+        async move { client.invoke::<close::Close>(&input).await }
+    };
+    let closed = close(vec![issue_id]).await.unwrap();
+    assert_eq!(closed.issues[0].status, "closed");
     assert!(
-        client.close_issue(issue_id).await.is_err(),
+        close(vec![issue_id]).await.is_err(),
         "closing an already-closed issue retains atomic action validation"
     );
-    let reopened = client.reopen_issue(issue_id).await.unwrap();
-    assert_eq!(reopened.status, "open");
-    client.close_issue(issue_id).await.unwrap();
+    let reopened = client
+        .invoke::<reopen::Reopen>(&reopen::Input {
+            ids: vec![issue_id],
+            repo_root: repo_root.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(reopened.issues[0].status, "open");
+    close(vec![issue_id]).await.unwrap();
 
     // A closed issue leaves the default board but returns with ?all=true.
     let open_board = client.get("/api/issues").await.unwrap();

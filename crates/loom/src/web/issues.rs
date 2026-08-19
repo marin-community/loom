@@ -357,10 +357,16 @@ pub(super) async fn set_issue_tag_operation(
     let tag_key = input.key.trim().to_string();
     // `by` is derived from the credential, not taken from the body. The old
     // request let a caller name whoever it liked as the setter, and the tag is
-    // shown in the dashboard as provenance.
-    let by = Some(super::author_or_manual(
-        context.principal.is_human().then_some("manual"),
-    ));
+    // shown in the dashboard as provenance. The two values are the ones both
+    // callers already wrote: the dashboard sent `manual`, the MCP tool `agent`.
+    let by = Some(
+        if context.principal.is_human() {
+            "manual"
+        } else {
+            "agent"
+        }
+        .to_string(),
+    );
     let repo_root = input.repo_root.clone();
     let result = issue_actions_operation(
         context,
