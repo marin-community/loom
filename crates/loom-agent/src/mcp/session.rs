@@ -1,8 +1,20 @@
-//! Session lifecycle and normalized history projected from Loom's REST API.
+//! Session lifecycle and normalized history, served by the generic registry
+//! dispatcher.
 //!
-//! TODO(registry): not yet ported — `sessions.*` has no operation registry
-//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
-//! loop, and capability sets rather than `super::dispatch::bind`.
+//! `get`, `summary`, `status_get`, `history`, and `search` are registered
+//! `sessions.*` operations and route straight through
+//! `super::dispatch::call_tool` — there is no `resolve_session_argument`
+//! left to maintain for them; a caller-omitted session resolves to this
+//! session through the same `#[operand(context)]` fill every other bundle
+//! uses, in one `self_context()` call shared across the whole request rather
+//! than one per tool.
+//!
+//! `status_set` (and its legacy alias `status`) stay hand-written: setting
+//! the branch's status also posts a channel message, and the old adapter
+//! reports that delivered message (`Client::get_channel(..).last_message`)
+//! alongside the updated branch. `sessions.status.set`'s plain response is
+//! only the branch, so routing this one through the generic dispatcher would
+//! silently drop that delivery confirmation.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -88,6 +100,10 @@ fn server_config() -> Value {
     super::builtin_server_config("session")
 }
 
+/// `status` is a legacy alias tool: it advertises the same schema as
+/// `status_set` (the only operation registered under this server for
+/// updating status) under its old name, for sessions pinned to
+/// `mcp/session/status@v1` before the canonical rename.
 fn tools() -> Value {
     let mut tools = weaver_api::mcp_tools_ordered(SERVER_NAME, &CANONICAL_TOOL_NAMES)
         .as_array()
@@ -103,37 +119,6 @@ fn tools() -> Value {
     Value::Array(tools)
 }
 
-fn history_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
-    let before = super::string_argument(arguments, "before")?;
-    let limit = arguments
-        .get("limit")
-        .map(|value| {
-            let limit = value.as_u64().context("limit must be a positive integer")?;
-            let limit = usize::try_from(limit).context("limit is too large")?;
-            (limit > 0 && limit <= crate::history::MAX_LIMIT)
-                .then_some(limit)
-                .context("limit is outside the supported range")
-        })
-        .transpose()?;
-    let kinds = arguments
-        .get("kinds")
-        .map(|value| {
-            value
-                .as_array()
-                .context("kinds must be an array")?
-                .iter()
-                .map(|kind| {
-                    kind.as_str()
-                        .context("every kind must be a string")
-                        .map(str::to_string)
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    Ok((before, limit, kinds))
-}
-
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move { call_tool(&name, arguments).await })
@@ -143,83 +128,40 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     if !TOOL_NAMES.contains(&name) {
         bail!("unknown session tool '{name}'");
     }
+    let client = super::runtime_client("session")?;
+    match name {
+        "status_set" | "status" => set_status(&client, name, arguments).await,
+        // `status` and `status_set` are the same operation under two names;
+        // every other tool here maps 1:1 onto its own registered operation.
+        _ => super::dispatch::call_tool(&client, SERVER_NAME, name, arguments).await,
+    }
+}
+
+/// Update the branch's durable status and report the channel message that
+/// delivery produced — data `sessions.status.set`'s plain response (just the
+/// updated branch) does not carry.
+async fn set_status(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
     if !super::runtime_tool_allowed(name) {
         bail!("session tool '{name}' is not allowed by this session");
     }
-    arguments
-        .as_object()
-        .context("session tool arguments must be an object")?;
-    let client = super::runtime_client("session")?;
-    match name {
-        "get" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let session = client.get_session(&id).await?;
-            super::structured_result(&format!("session {id}"), &session)
-        }
-        "summary" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let summary = client.session_summary(&id).await?;
-            super::structured_result(&format!("session {id} summary"), &summary)
-        }
-        "status_get" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let session = client.get_session(&id).await?;
-            let attention = session
-                .branch
-                .tags
-                .iter()
-                .find(|tag| tag.key == weaver_core::tags::ATTENTION_KEY)
-                .map(|tag| tag.value.as_str())
-                .unwrap_or("ok");
-            let value = json!({
-                "session_id": session.id,
-                "attention": attention,
-                "message": session.branch.description,
-            });
-            super::structured_result(&format!("session {id} status"), &value)
-        }
-        "status_set" | "status" => {
-            let level =
-                super::string_argument(&arguments, "level")?.context("status requires level")?;
-            if !matches!(level, "ok" | "attention" | "blocked") {
-                bail!("level must be 'ok', 'attention', or 'blocked'");
-            }
-            let message = arguments
-                .get("message")
-                .and_then(Value::as_str)
-                .context("status requires string message")?;
-            if message.len() > 4096 {
-                bail!("status message must be at most 4096 bytes");
-            }
-            let context = client.self_context().await?;
-            let branch = client
-                .set_branch_status(&context.branch_id, level, message)
-                .await?;
-            let channel = client.get_channel(&context.channel_id).await?;
-            let value = json!({ "branch": branch, "status_message": channel.last_message });
-            super::structured_result(&format!("status updated to {level}"), &value)
-        }
-        "history" | "search" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let (before, limit, kinds) = history_args(&arguments)?;
-            let page = if name == "history" {
-                client
-                    .get_session_history(&id, before, limit, &kinds)
-                    .await?
-            } else {
-                let query =
-                    super::string_argument(&arguments, "q")?.context("search requires q")?;
-                client
-                    .search_session_history(&id, query, before, limit, &kinds)
-                    .await?
-            };
-            super::structured_result(
-                &format!("{} normalized history record(s)", page.records.len()),
-                &page,
-            )
-        }
-        _ => unreachable!(),
+    let level = super::string_argument(&arguments, "level")?.context("status requires level")?;
+    if !matches!(level, "ok" | "attention" | "blocked") {
+        bail!("level must be 'ok', 'attention', or 'blocked'");
     }
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .context("status requires string message")?;
+    if message.len() > 4096 {
+        bail!("status message must be at most 4096 bytes");
+    }
+    let context = client.self_context().await?;
+    let branch = client
+        .set_branch_status(&context.branch_id, level, message)
+        .await?;
+    let channel = client.get_channel(&context.channel_id).await?;
+    let value = json!({ "branch": branch, "status_message": channel.last_message });
+    super::structured_result(&format!("status updated to {level}"), &value)
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -242,5 +184,8 @@ mod tests {
         assert_eq!(names, TOOL_NAMES);
         assert_eq!(expand_tool_set("loom/sessions/read@v1").unwrap().len(), 5);
         assert_eq!(expand_tool_set("mcp/session/read@v1").unwrap().len(), 3);
+        for name in CANONICAL_TOOL_NAMES {
+            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
+        }
     }
 }

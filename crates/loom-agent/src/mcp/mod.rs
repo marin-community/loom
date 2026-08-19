@@ -18,21 +18,27 @@ use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
-// TODO(registry): not yet ported — their operations are not in the registry
-// yet, so they keep their own hand-written schemas, argument projection, and
-// capability sets rather than `dispatch::bind`.
-pub(crate) mod artifact;
+// TODO(registry): not yet ported — the `github.*` operations are not in the
+// operation registry yet, so this adapter keeps its own hand-written schemas,
+// argument projection, and capability sets rather than `dispatch::bind`.
+pub mod github;
+
+// Fully converted: every tool routes through `dispatch::call_tool`.
 pub(crate) mod channel;
 pub(crate) mod context;
-pub mod github;
+pub(crate) mod issue;
+pub(crate) mod permission;
+
+// Converted except for a handful of tools that stay hand-written on purpose —
+// see each module's own doc comment for exactly which and why (a response
+// enrichment the plain operation does not carry, or an operation that has no
+// registry entry under this adapter's own server name).
+pub(crate) mod artifact;
 pub(crate) mod history;
 pub(crate) mod messaging;
-pub(crate) mod permission;
 pub(crate) mod session;
 
-// Fully converted: served by the generic registry dispatcher below.
 pub(crate) mod dispatch;
-pub(crate) mod issue;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
@@ -859,6 +865,20 @@ mod tests {
     /// flag for `open_only` so the default keeps returning resolved threads;
     /// and `issues.list` gained the `backlog` filter that `?scope=backlog` used
     /// to provide.
+    ///
+    /// Re-pinned again when `channel`, `artifact`, and `permission` switched
+    /// their canonical (`loom/*@v1`) sets from a hand-authored tool order to
+    /// `super::dispatch::derive_capability_sets`, which groups a bundle's
+    /// operations by their own `grants` field and sorts each group's tools
+    /// alphabetically: `loom/channels/read@v1`, `loom/channels/write@v1`,
+    /// `loom/artifacts/read@v1`, `loom/artifacts/write@v1`, and
+    /// `loom/permissions/read@v1` all keep the exact same tool *membership*,
+    /// just reordered (e.g. artifacts' read set was `[list, get, history,
+    /// threads]`, now `[get, history, list, threads]`). Their legacy `mcp/*@v1`
+    /// twins, `loom/sessions/*@v1`, `loom/context/read@v1`, and
+    /// `loom/permissions/request@v1` (one tool — nothing to reorder) stay
+    /// hand-authored and are untouched by this re-pin; see each adapter's own
+    /// module doc comment for why.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -879,11 +899,11 @@ mod tests {
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:256e58a4ba152e18a0cd3a2cff5280df509283c45dd44482a43c70e01e28b9d0",
+                "sha256:b9622262c7af548b291b8a492f0cb934ccbc3d154b37fb0d036921bbe2129b55",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:c60a9ef0f3a8e161644469c9b767c1ba336eec51d4cb1bac0061dbb3b6da48bd",
+                "sha256:49d600ff81e95ddd18abbf2618ccc4473c397faab81f207da5b71fd520f4b502",
             ),
             (
                 "mcp/channel/read@v1",
@@ -895,11 +915,11 @@ mod tests {
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:4923942640310841b7c6ae447c447b1803e2057741e4bce06083c55678d667a3",
+                "sha256:95b92113ee60960aabcab1f1566f76029240cd0f13c6d1160a7a638005c42055",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:020fb0c5959f4344c6a39ed065e8d5f09b402354a52bb8d3823c5f11c6bc02a1",
+                "sha256:f446a8e165480e7915e6d1985f004803da25413aa100e9a80b91a2446b8c4015",
             ),
             (
                 "mcp/artifact/read@v1",
@@ -947,7 +967,7 @@ mod tests {
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:a27288df3e294bbceabb04bfe693b999396e68a648914c9c38c9e95b6d558b06",
+                "sha256:143a7be8de88851dfb6f2258952eb5a539552a44a95cfe0040b1b3ca92439696",
             ),
             (
                 "loom/permissions/request@v1",

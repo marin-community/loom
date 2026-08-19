@@ -1,18 +1,28 @@
 //! Built-in session messaging MCP adapter.
 //!
-//! TODO(registry): not yet ported — messaging has no operation registry
-//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
-//! loop, and capability sets rather than `super::dispatch::bind`.
+//! `slack_reply` is the registered `branches.slack.reply` operation
+//! (`mcp = "loom_messaging::slack_reply"`) and routes straight through
+//! `super::dispatch::call_tool`.
 //!
-//! Both operations are facades over Loom's existing session-scoped REST
-//! routes. Credentials, branch/thread routing, durable status events, and
-//! GitHub/Slack mirroring remain server-side.
+//! `status_update` stays hand-written rather than aliasing
+//! `loom_session::status_set`: `super::dispatch::call_tool`'s allow-list
+//! check (`super::runtime_tool_allowed`) is keyed by the *tool name it is
+//! given* against this process's own `LOOM_MCP_ALLOWED_TOOLS` — which, for a
+//! `loom_messaging` subprocess, only ever lists `status_update`/`slack_reply`
+//! (see `server_configs` in `mod.rs`, which derives each adapter's allow-list
+//! from that adapter's own `tools()`). Calling it with the *renamed*
+//! `status_set` would check for a name the allow-list never contains, so a
+//! session with scoped MCP permissions would have every `status_update` call
+//! rejected as "not allowed by this session" even when it plainly is. Both
+//! schemas stay hand-written too: `status_update` has no registered
+//! `loom_messaging::*` projection to borrow one from, and `slack_reply`'s
+//! hand-written `thread` shape and wording are what sessions pinned to
+//! `mcp/messaging/status@v1`/`mcp/slack/message@v1` already see.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::{Adapter, CapabilitySet, ServeFuture};
+use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_messaging";
 const TOOL_NAMES: [&str; 2] = ["status_update", "slack_reply"];
@@ -52,40 +62,16 @@ fn capability_sets() -> &'static [CapabilitySet] {
     CAPABILITY_SETS
 }
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered messaging tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({
-        "type": "stdio",
-        "command": "loom",
-        "args": ["mcp", "serve", ADAPTER.name]
-    })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(serve())
+    super::builtin_server_config("messaging")
 }
 
 fn tools() -> Value {
@@ -133,6 +119,11 @@ fn tools() -> Value {
     ])
 }
 
+fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
+    let name = name.to_string();
+    Box::pin(async move { call_tool(&name, arguments).await })
+}
+
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     if !TOOL_NAMES.contains(&name) {
         bail!("unknown messaging tool '{name}'");
@@ -140,66 +131,43 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     if !super::runtime_tool_allowed(name) {
         bail!("messaging tool '{name}' is not allowed by this session");
     }
+    let client = super::runtime_client("messaging")?;
+    match name {
+        "status_update" => update_status(&client, arguments).await,
+        "slack_reply" => {
+            super::dispatch::call_tool(&client, SERVER_NAME, "slack_reply", arguments).await
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// `sessions.status.set` (`loom_session::status_set`) is the same operation
+/// this tool exposes, but reached by name translation that would defeat
+/// `super::runtime_tool_allowed`'s allow-list check — see the module doc
+/// comment — so this calls the underlying REST route directly instead of
+/// `super::dispatch::call_tool`.
+async fn update_status(client: &weaver_api::Client, arguments: Value) -> Result<Value> {
+    let level = arguments
+        .get("level")
+        .and_then(Value::as_str)
+        .context("status_update requires level")?;
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .context("status_update requires message")?;
+    if message.len() > 4096 {
+        bail!("status_update message must be at most 4096 bytes");
+    }
     let session_id =
         std::env::var("LOOM_SESSION_ID").context("messaging MCP is missing LOOM_SESSION_ID")?;
-    let token = weaver_api::endpoint::token_from_env()
-        .context("messaging MCP is missing its session-scoped LOOM_TOKEN")?;
-    let client = weaver_api::Client::new(weaver_api::endpoint::base_url()).with_token(Some(token));
     let session = client
         .get_session(&session_id)
         .await
         .context("resolving the messaging MCP session")?;
-    let text = match name {
-        "status_update" => {
-            let level = arguments
-                .get("level")
-                .and_then(Value::as_str)
-                .context("status_update requires level")?;
-            let message = arguments
-                .get("message")
-                .and_then(Value::as_str)
-                .context("status_update requires message")?;
-            if message.len() > 4096 {
-                bail!("status_update message must be at most 4096 bytes");
-            }
-            client
-                .set_branch_status(&session.branch.id, level, message)
-                .await?;
-            format!("status updated to {level}")
-        }
-        "slack_reply" => {
-            let text = arguments
-                .get("text")
-                .and_then(Value::as_str)
-                .context("slack_reply requires text")?;
-            if text.is_empty() || text.len() > 4000 {
-                bail!("slack_reply text must contain 1 to 4000 bytes");
-            }
-            let mut body = json!({ "text": text });
-            // The server authorizes the thread against this session's routes, so
-            // pass it through as given rather than validating a Slack id here.
-            if let Some(thread) = arguments.get("thread") {
-                body["thread"] = thread.clone();
-            }
-            if let Some(key) = arguments.get("idempotency_key") {
-                body["idempotency_key"] = key.clone();
-            }
-            let posted = client
-                .post(
-                    &format!(
-                        "/api/branches/{}/slack/reply",
-                        percent_encoding::utf8_percent_encode(
-                            &session.branch.id,
-                            percent_encoding::NON_ALPHANUMERIC
-                        )
-                    ),
-                    body,
-                )
-                .await?;
-            return super::structured_result("message posted to the session Slack thread", &posted);
-        }
-        _ => unreachable!(),
-    };
+    client
+        .set_branch_status(&session.branch.id, level, message)
+        .await?;
+    let text = format!("status updated to {level}");
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
         "structuredContent": { "message": text },
@@ -207,71 +175,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     }))
 }
 
-fn result(id: &Value, value: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": value })
-}
-
-fn error(id: &Value, code: i64, message: impl Into<String>) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
-}
-
-async fn dispatch(request: Value) -> Option<Value> {
-    let id = request.get("id")?.clone();
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-    Some(match method {
-        "initialize" => result(
-            &id,
-            json!({
-                "protocolVersion": request.pointer("/params/protocolVersion")
-                    .and_then(Value::as_str).unwrap_or("2024-11-05"),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
-            }),
-        ),
-        "ping" => result(&id, json!({})),
-        "tools/list" => result(&id, json!({ "tools": super::runtime_tools(tools()) })),
-        "tools/call" => {
-            let name = request.pointer("/params/name").and_then(Value::as_str);
-            let arguments = request
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            match name {
-                Some(name) => match call_tool(name, arguments).await {
-                    Ok(value) => result(&id, value),
-                    Err(err) => result(
-                        &id,
-                        json!({
-                            "content": [{ "type": "text", "text": format!("{err:#}") }],
-                            "isError": true
-                        }),
-                    ),
-                },
-                None => error(&id, -32602, "tools/call requires params.name"),
-            }
-        }
-        _ => error(&id, -32601, format!("method not found: {method}")),
-    })
-}
-
-async fn serve() -> Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value =
-            serde_json::from_str(&line).map_err(|error| anyhow!("invalid MCP request: {error}"))?;
-        if let Some(response) = dispatch(request).await {
-            stdout
-                .write_all(serde_json::to_string(&response)?.as_bytes())
-                .await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
-        }
-    }
-    Ok(())
+fn serve_boxed() -> ServeFuture {
+    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
 }
 
 #[cfg(test)]
@@ -287,5 +192,16 @@ mod tests {
             vec!["mcp__loom_messaging__status_update"]
         );
         assert_eq!(tools().as_array().unwrap().len(), 2);
+    }
+
+    /// `slack_reply` is a real `loom_messaging` projection; `status_update`
+    /// is not (it rides on `loom_session::status_set` instead), so only one
+    /// of the two tool names this adapter advertises resolves in the
+    /// registry under its own server.
+    #[test]
+    fn slack_reply_resolves_in_the_registry_status_update_does_not() {
+        assert!(weaver_api::operation_for_mcp(SERVER_NAME, "slack_reply").is_some());
+        assert!(weaver_api::operation_for_mcp(SERVER_NAME, "status_update").is_none());
+        assert!(weaver_api::operation_for_mcp("loom_session", "status_set").is_some());
     }
 }

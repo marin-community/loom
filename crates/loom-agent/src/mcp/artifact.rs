@@ -1,12 +1,26 @@
-//! Versioned artifact operations projected from Loom's REST API.
+//! Versioned artifact operations, served by the generic registry dispatcher.
 //!
-//! TODO(registry): not yet ported — `artifacts.*` has no operation registry
-//! bundle yet, so this adapter keeps its own hand-written schemas, argument
-//! projection, and capability sets rather than `super::dispatch::bind`.
+//! Every tool here is a registered `artifacts.*` operation, and `tools/list`
+//! is `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`. `delete`,
+//! `history`, `threads`, `comment`, and `resolve` route straight through
+//! `super::dispatch::call_tool` — there is no `project_input` left for them to
+//! maintain (`threads`'s `open_only` flag and `comment`'s tagged
+//! `New`/`Reply` target are exactly what the schema already advertised; the
+//! old hand code here still read a stale `all` flag and flat
+//! `thread_id`/`quote` arguments that predated it).
+//!
+//! `list`, `get`, and `write` stay hand-written for one reason: they resolve
+//! each artifact's dashboard `url` with a second REST call
+//! (`Client::branch_artifact_url`) and merge it into the response.
+//! `ArtifactMeta`/`ArtifactView` carry no `url` field the way
+//! `ChannelView::bindings` now carries channel bindings, so routing these
+//! three through the plain operation would silently drop that link.
+
+use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use weaver_api::{AnchorDto, ArtifactUpsertReq};
+use weaver_api::ArtifactUpsertReq;
 
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
@@ -14,36 +28,26 @@ const SERVER_NAME: &str = "loom_artifact";
 const TOOL_NAMES: [&str; 8] = [
     "list", "get", "write", "delete", "history", "threads", "comment", "resolve",
 ];
-const READ_TOOLS: &[&str] = &["list", "get", "history", "threads"];
-const WRITE_TOOLS: &[&str] = &["write", "delete", "comment", "resolve"];
-const CAPABILITY_SETS: &[CapabilitySet] = &[
-    CapabilitySet {
-        name: "loom/artifacts/read@v1",
-        group: "artifact",
-        version: "v1",
-        description: "List and read versioned artifacts and their discussions.",
-        tools: READ_TOOLS,
-    },
-    CapabilitySet {
-        name: "loom/artifacts/write@v1",
-        group: "artifact",
-        version: "v1",
-        description: "Write, delete, comment on, and resolve versioned artifacts.",
-        tools: WRITE_TOOLS,
-    },
+
+// Existing pinned sessions keep their exact identities during the CLI/MCP
+// migration: `mcp/artifact/*@v1` predates the `loom/artifacts/*@v1` grant
+// names and has no registry counterpart to derive from.
+const LEGACY_READ_TOOLS: &[&str] = &["list", "get", "history", "threads"];
+const LEGACY_WRITE_TOOLS: &[&str] = &["write", "delete", "comment", "resolve"];
+const LEGACY_CAPABILITY_SETS: &[CapabilitySet] = &[
     CapabilitySet {
         name: "mcp/artifact/read@v1",
         group: "artifact",
         version: "v1",
         description: "List and read versioned artifacts and their discussions.",
-        tools: READ_TOOLS,
+        tools: LEGACY_READ_TOOLS,
     },
     CapabilitySet {
         name: "mcp/artifact/write@v1",
         group: "artifact",
         version: "v1",
         description: "Write, delete, comment on, and resolve versioned artifacts.",
-        tools: WRITE_TOOLS,
+        tools: LEGACY_WRITE_TOOLS,
     },
 ];
 
@@ -51,7 +55,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
     name: "artifact",
     server_name: SERVER_NAME,
     description: "Named, versioned deliverables and anchored review threads.",
-    capability_sets: || CAPABILITY_SETS,
+    capability_sets,
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -59,12 +63,47 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
+/// Capability sets, derived from the registry rather than hand-maintained:
+/// every `artifacts.*` operation whose MCP projection targets this server
+/// contributes its tool to the set named by its grant.
+fn capability_sets() -> &'static [CapabilitySet] {
+    static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        let mut sets =
+            super::dispatch::derive_capability_sets(SERVER_NAME, "artifact", describe_capability);
+        sets.extend(LEGACY_CAPABILITY_SETS.iter().map(|set| CapabilitySet {
+            name: set.name,
+            group: set.group,
+            version: set.version,
+            description: set.description,
+            tools: set.tools,
+        }));
+        sets
+    })
+}
+
+fn describe_capability(grant: &str) -> &'static str {
+    match grant {
+        "loom/artifacts/read@v1" => "List and read versioned artifacts and their discussions.",
+        "loom/artifacts/write@v1" => "Write, delete, comment on, and resolve versioned artifacts.",
+        _ => "Versioned artifact operations.",
+    }
+}
+
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    capability_sets()
+        .iter()
+        .find(|set| set.name == name)
+        .map(|set| {
+            set.tools
+                .iter()
+                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
+                .collect()
+        })
 }
 
 fn server_config() -> Value {
@@ -99,6 +138,19 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
         .as_object()
         .context("artifact tool arguments must be an object")?;
     let client = super::runtime_client("artifact")?;
+    match name {
+        "list" | "get" | "write" => with_dashboard_url(&client, name, arguments).await,
+        _ => super::dispatch::call_tool(&client, SERVER_NAME, name, arguments).await,
+    }
+}
+
+/// `list`/`get`/`write` merge in a dashboard `url` the plain operation
+/// response does not carry, so they stay outside the generic dispatcher.
+async fn with_dashboard_url(
+    client: &weaver_api::Client,
+    name: &str,
+    arguments: Value,
+) -> Result<Value> {
     let context = client.self_context().await?;
     let branch = context.branch_id;
     match name {
@@ -178,117 +230,6 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
                 &value,
             )
         }
-        "delete" => {
-            let artifact_name =
-                super::string_argument(&arguments, "name")?.context("delete requires name")?;
-            let repo = repo_scope(&arguments)?;
-            let artifact = client
-                .get_branch_artifact(&branch, artifact_name, None, repo)
-                .await?;
-            client
-                .delete_branch_artifact(&branch, artifact_name, repo)
-                .await?;
-            super::structured_result(
-                &format!("deleted artifact {artifact_name}"),
-                &json!({ "deleted": true, "artifact": artifact.meta }),
-            )
-        }
-        "history" => {
-            let artifact_name =
-                super::string_argument(&arguments, "name")?.context("history requires name")?;
-            let artifact = client
-                .get_branch_artifact(&branch, artifact_name, None, repo_scope(&arguments)?)
-                .await?;
-            super::structured_result(
-                &format!(
-                    "{} revision(s) for {artifact_name}",
-                    artifact.versions.len()
-                ),
-                &artifact.versions,
-            )
-        }
-        "threads" => {
-            let artifact_name =
-                super::string_argument(&arguments, "name")?.context("threads requires name")?;
-            let all = arguments
-                .get("all")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let mut threads = client.list_branch_threads(&branch, artifact_name).await?;
-            if !all {
-                threads.retain(|thread| thread.status == "open");
-            }
-            super::structured_result(
-                &format!("{} review thread(s) on {artifact_name}", threads.len()),
-                &threads,
-            )
-        }
-        "comment" => {
-            let artifact_name =
-                super::string_argument(&arguments, "name")?.context("comment requires name")?;
-            let body =
-                super::string_argument(&arguments, "body")?.context("comment requires body")?;
-            if let Some(thread_id) = arguments.get("thread_id").and_then(Value::as_i64) {
-                if thread_id <= 0 {
-                    bail!("thread_id must be positive");
-                }
-                let comment = client
-                    .add_branch_thread_comment(&branch, artifact_name, thread_id, body)
-                    .await?;
-                super::structured_result(&format!("commented on thread {thread_id}"), &comment)
-            } else {
-                let quote = super::string_argument(&arguments, "quote")?
-                    .context("comment requires quote when thread_id is omitted")?;
-                let base_rev = match arguments.get("base_rev") {
-                    Some(value) => value.as_i64().context("base_rev must be an integer")?,
-                    None => {
-                        client
-                            .get_branch_artifact(&branch, artifact_name, None, false)
-                            .await?
-                            .meta
-                            .rev
-                    }
-                };
-                if base_rev <= 0 {
-                    bail!("base_rev must be positive");
-                }
-                let thread = client
-                    .create_branch_thread(
-                        &branch,
-                        artifact_name,
-                        base_rev,
-                        AnchorDto {
-                            quote: quote.to_string(),
-                            prefix: arguments
-                                .get("prefix")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
-                            suffix: arguments
-                                .get("suffix")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
-                        },
-                        body,
-                    )
-                    .await?;
-                super::structured_result(&format!("opened review thread {}", thread.id), &thread)
-            }
-        }
-        "resolve" => {
-            let artifact_name =
-                super::string_argument(&arguments, "name")?.context("resolve requires name")?;
-            let thread_id = arguments
-                .get("thread_id")
-                .and_then(Value::as_i64)
-                .filter(|value| *value > 0)
-                .context("resolve requires a positive thread_id")?;
-            let value = client
-                .resolve_branch_thread(&branch, artifact_name, thread_id)
-                .await?;
-            super::structured_result(&format!("resolved thread {thread_id}"), &value)
-        }
         _ => unreachable!(),
     }
 }
@@ -319,5 +260,16 @@ mod tests {
             .unwrap()["inputSchema"]["properties"]
             .get("base_rev")
             .is_some());
+        for name in &names {
+            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
+        }
+    }
+
+    #[test]
+    fn capability_sets_are_grouped_by_grant() {
+        assert_eq!(expand_tool_set("loom/artifacts/read@v1").unwrap().len(), 4);
+        assert_eq!(expand_tool_set("loom/artifacts/write@v1").unwrap().len(), 4);
+        assert_eq!(expand_tool_set("mcp/artifact/read@v1").unwrap().len(), 4);
+        assert_eq!(expand_tool_set("mcp/artifact/write@v1").unwrap().len(), 4);
     }
 }

@@ -27,7 +27,10 @@ use std::pin::Pin;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
-use weaver_api::operations::{issues, ContextValues, Operands, Operation, OperationSpec, Render};
+use weaver_api::operations::{
+    artifacts, branches, channels, issues, permissions, sessions, ContextValues, Operands,
+    Operation, OperationSpec, Render,
+};
 use weaver_api::Client;
 
 use super::CapabilitySet;
@@ -131,10 +134,14 @@ fn merge_defaults(mut arguments: Value, defaults: Value) -> Value {
 
 /// Every registered operation's MCP binding.
 ///
-/// One line per operation, exactly like `crate::cli::bindings()`. Only
-/// `issues` is in the registry so far; a bundle that is not registered here
-/// simply serves no MCP tool, so nothing else in this module needs to change
-/// when the next bundle is ported.
+/// One line per operation, exactly like `crate::cli::bindings()`. This list is
+/// shared by every adapter's `tools/call` (see `call_tool` below), keyed by
+/// operation id rather than by adapter — `loom_history`/`loom_messaging`
+/// route some of their tools at operations bound here under a *different*
+/// server name (`loom_session`), which is exactly why binding lives in one
+/// shared table instead of one per adapter. A bundle that is not registered
+/// here simply serves no MCP tool, so nothing else in this module needs to
+/// change when the next bundle is ported.
 pub(crate) fn bindings() -> Vec<McpBinding> {
     vec![
         bind::<issues::list::List>(),
@@ -147,6 +154,34 @@ pub(crate) fn bindings() -> Vec<McpBinding> {
         bind::<issues::tags::set::Set>(),
         bind::<issues::tags::delete::Delete>(),
         bind::<issues::actions::Actions>(),
+        bind::<channels::list::List>(),
+        bind::<channels::get::Get>(),
+        bind::<channels::messages::list::List>(),
+        bind::<channels::messages::create::Create>(),
+        bind::<channels::create::Create>(),
+        bind::<channels::subscription::set::Set>(),
+        bind::<channels::read_marker::set::Set>(),
+        bind::<channels::wait::Wait>(),
+        bind::<artifacts::list::List>(),
+        bind::<artifacts::get::Get>(),
+        bind::<artifacts::write::Write>(),
+        bind::<artifacts::delete::Delete>(),
+        bind::<artifacts::history::History>(),
+        bind::<artifacts::threads::list::List>(),
+        bind::<artifacts::threads::comment::Comment>(),
+        bind::<artifacts::threads::resolve::Resolve>(),
+        bind::<sessions::context::Get>(),
+        bind::<sessions::get::Get>(),
+        bind::<sessions::summary::get::Get>(),
+        bind::<sessions::status::get::Get>(),
+        bind::<sessions::status::set::Set>(),
+        bind::<sessions::history::list::List>(),
+        bind::<sessions::history::search::Search>(),
+        bind::<permissions::effective::get::Get>(),
+        bind::<permissions::explain::Explain>(),
+        bind::<permissions::requests::list::List>(),
+        bind::<permissions::requests::create::Create>(),
+        bind::<branches::slack::reply::Reply>(),
     ]
 }
 
@@ -244,26 +279,26 @@ pub(crate) fn is_permission_rule(server: &str, rule: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The invariant that makes the binding table trustworthy: every *ported*
-    /// operation that advertises an MCP tool has a binding, mirroring
+    /// The invariant that makes the binding table trustworthy: every
+    /// operation that advertises an MCP tool has a binding here, mirroring
     /// `crate::cli::dispatch::tests::every_advertised_invocation_parses`.
     ///
-    /// Scoped to the `issues` bundle rather than every registered operation:
-    /// only `loom_issue` has been converted to the generic dispatcher so far
-    /// (see the module-level TODOs on the other adapters), so a bundle that
-    /// exists in the registry but has no converted adapter yet is expected to
-    /// have no binding here.
+    /// This covers every *registered* MCP projection, not just the adapters
+    /// whose own server name matches their bundle: `loom_history` and
+    /// `loom_messaging::status_update` reach operations bound here under a
+    /// different server (`loom_session`), so binding is keyed by operation id
+    /// rather than mirrored per adapter — see `call_tool` below.
     #[test]
-    fn registered_issue_operations_have_a_binding() {
+    fn registered_operations_have_a_binding() {
         let bound: Vec<_> = bindings().iter().map(|binding| binding.operation.id).collect();
         let missing: Vec<_> = weaver_api::operations()
-            .filter(|operation| operation.bundle == "issues" && operation.mcp.is_some())
+            .filter(|operation| operation.mcp.is_some())
             .map(|operation| operation.id)
             .filter(|id| !bound.contains(id))
             .collect();
         assert!(
             missing.is_empty(),
-            "issues operations advertise an MCP tool but have no binding: {missing:?}"
+            "operations advertise an MCP tool but have no binding: {missing:?}"
         );
     }
 

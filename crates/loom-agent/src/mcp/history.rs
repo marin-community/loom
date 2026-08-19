@@ -1,19 +1,27 @@
 //! Built-in session self-history MCP adapter.
 //!
-//! TODO(registry): not yet ported — session history has no operation registry
-//! bundle yet, so this adapter keeps its own hand-written schemas, dispatch
-//! loop, and capability sets rather than `super::dispatch::bind`.
+//! `history` and `search` are the registered `sessions.history.list` and
+//! `sessions.history.search` operations, reached under this adapter's legacy
+//! tool names by routing `tools/call` to `super::dispatch::call_tool` against
+//! the `loom_session` server rather than this adapter's own `loom_history`
+//! name — no operation declares an `loom_history::*` MCP projection, since
+//! this adapter predates the `sessions` bundle and was folded into it rather
+//! than duplicated. That dispatch call is what replaces the hand-rolled
+//! session-id/token lookup and argument parsing this file used to do; the
+//! session selector is still refused (see the test below), now because
+//! `session` is a `#[operand(context)]` field the schema never advertises
+//! rather than because this file checks for it.
 //!
-//! This is deliberately only a facade: the REST history resources own source
-//! normalization, pagination, filtering, literal search, and authorization.
-//! The tool surface has no session selector; it resolves `LOOM_SESSION_ID` and
-//! calls the corresponding session route with the scoped token.
+//! The tool surface stays hand-written: `sessions.history.*`'s
+//! registry-derived schema (shared with `loom_session::history`/`::search`)
+//! does not carry the `limit`/`kinds`/`q` bounds this adapter has always
+//! advertised, and loosening what a session pinned to `mcp/history/self@v1`
+//! sees is not part of this port.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use super::{Adapter, CapabilitySet, ServeFuture};
+use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_history";
 const TOOL_NAMES: [&str; 2] = ["history", "search"];
@@ -42,40 +50,16 @@ fn capability_sets() -> &'static [CapabilitySet] {
     CAPABILITY_SETS
 }
 
-fn permission_rule(tool: &str) -> Option<String> {
-    TOOL_NAMES
-        .contains(&tool)
-        .then(|| format!("mcp__{SERVER_NAME}__{tool}"))
-}
-
 fn is_permission_rule(rule: &str) -> bool {
-    TOOL_NAMES
-        .iter()
-        .any(|tool| permission_rule(tool).as_deref() == Some(rule))
+    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    CAPABILITY_SETS
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| permission_rule(tool).expect("registered history tool"))
-                .collect()
-        })
+    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
-    json!({
-        "type": "stdio",
-        "command": "loom",
-        "args": ["mcp", "serve", ADAPTER.name]
-    })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(serve())
+    super::builtin_server_config("history")
 }
 
 fn tools() -> Value {
@@ -129,151 +113,25 @@ fn tools() -> Value {
     ])
 }
 
-fn optional_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
-    let before = match arguments.get("before") {
-        Some(value) => Some(
-            value
-                .as_str()
-                .filter(|value| !value.is_empty())
-                .context("before must be a non-empty string")?,
-        ),
-        None => None,
-    };
-    let limit = match arguments.get("limit") {
-        Some(value) => Some(
-            usize::try_from(value.as_u64().context("limit must be a positive integer")?)
-                .context("limit is too large")?,
-        ),
-        None => None,
-    };
-    let kinds = match arguments.get("kinds") {
-        Some(value) => value
-            .as_array()
-            .context("kinds must be an array")?
-            .iter()
-            .map(|kind| {
-                kind.as_str()
-                    .context("every kind must be a string")
-                    .map(str::to_string)
-            })
-            .collect::<Result<Vec<_>>>()?,
-        None => Vec::new(),
-    };
-    Ok((before, limit, kinds))
+fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
+    let name = name.to_string();
+    Box::pin(async move { call_tool(&name, arguments).await })
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     if !TOOL_NAMES.contains(&name) {
         bail!("unknown history tool '{name}'");
     }
-    if !super::runtime_tool_allowed(name) {
-        bail!("history tool '{name}' is not allowed by this session");
-    }
-    let allowed = match name {
-        "history" => &["before", "limit", "kinds"][..],
-        "search" => &["q", "before", "limit", "kinds"][..],
-        _ => unreachable!(),
-    };
-    let object = arguments
-        .as_object()
-        .context("history tool arguments must be an object")?;
-    if let Some(unknown) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        bail!("unknown argument '{unknown}' for history tool '{name}'");
-    }
-    let session_id =
-        std::env::var("LOOM_SESSION_ID").context("history MCP is missing LOOM_SESSION_ID")?;
-    let token = weaver_api::endpoint::token_from_env()
-        .context("history MCP is missing its session-scoped LOOM_TOKEN")?;
-    let client = weaver_api::Client::new(weaver_api::endpoint::base_url()).with_token(Some(token));
-    let (before, limit, kinds) = optional_args(&arguments)?;
-    let page = match name {
-        "history" => {
-            client
-                .get_session_history(&session_id, before, limit, &kinds)
-                .await?
-        }
-        "search" => {
-            let query = arguments
-                .get("q")
-                .and_then(Value::as_str)
-                .context("search requires q")?;
-            client
-                .search_session_history(&session_id, query, before, limit, &kinds)
-                .await?
-        }
-        _ => unreachable!(),
-    };
-    super::structured_result(
-        &format!("{} normalized history record(s)", page.records.len()),
-        &page,
-    )
+    let client = super::runtime_client("history")?;
+    // `history`/`search` are `sessions.history.list`/`sessions.history.search`
+    // registered under the `loom_session` server; this adapter exposes them
+    // under its own legacy name, so route there explicitly rather than
+    // through `SERVER_NAME` (which no operation projects onto).
+    super::dispatch::call_tool(&client, "loom_session", name, arguments).await
 }
 
-fn result(id: &Value, value: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": value })
-}
-
-fn error(id: &Value, code: i64, message: impl Into<String>) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
-}
-
-async fn dispatch(request: Value) -> Option<Value> {
-    let id = request.get("id")?.clone();
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-    Some(match method {
-        "initialize" => result(
-            &id,
-            json!({
-                "protocolVersion": request.pointer("/params/protocolVersion")
-                    .and_then(Value::as_str).unwrap_or("2024-11-05"),
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
-            }),
-        ),
-        "ping" => result(&id, json!({})),
-        "tools/list" => result(&id, json!({ "tools": super::runtime_tools(tools()) })),
-        "tools/call" => {
-            let name = request.pointer("/params/name").and_then(Value::as_str);
-            let arguments = request
-                .pointer("/params/arguments")
-                .cloned()
-                .unwrap_or_else(|| json!({}));
-            match name {
-                Some(name) => match call_tool(name, arguments).await {
-                    Ok(value) => result(&id, value),
-                    Err(err) => result(
-                        &id,
-                        json!({
-                            "content": [{ "type": "text", "text": format!("{err:#}") }],
-                            "isError": true
-                        }),
-                    ),
-                },
-                None => error(&id, -32602, "tools/call requires params.name"),
-            }
-        }
-        _ => error(&id, -32601, format!("method not found: {method}")),
-    })
-}
-
-async fn serve() -> Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let request: Value =
-            serde_json::from_str(&line).map_err(|error| anyhow!("invalid MCP request: {error}"))?;
-        if let Some(response) = dispatch(request).await {
-            stdout
-                .write_all(serde_json::to_string(&response)?.as_bytes())
-                .await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
-        }
-    }
-    Ok(())
+fn serve_boxed() -> ServeFuture {
+    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
 }
 
 #[cfg(test)]
@@ -294,11 +152,16 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn unadvertised_session_selector_fails_closed() {
-        let error = call_tool("history", json!({ "session_id": "sibling" }))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("unknown argument 'session_id'"));
+    /// `history`/`search` route to `sessions.history.*` under the
+    /// `loom_session` server; each tool name here must resolve there, since
+    /// nothing is registered under this adapter's own `loom_history` name.
+    #[test]
+    fn history_tools_resolve_against_the_sessions_bundle() {
+        for name in TOOL_NAMES {
+            assert!(
+                weaver_api::operation_for_mcp("loom_session", name).is_some(),
+                "loom_session has no MCP projection for '{name}'"
+            );
+        }
     }
 }

@@ -1,10 +1,26 @@
-//! Current caller context as a small, typed REST projection.
+//! Current caller context, served by the generic registry dispatcher.
 //!
-//! TODO(registry): not yet ported — this tool has no operation registry entry
-//! yet, so this adapter keeps its own hand-written schema and capability sets
-//! rather than `super::dispatch::bind`.
+//! The single tool here is the registered `sessions.context` operation
+//! (`mcp = "loom_context::get"`) — `tools/list` is
+//! `weaver_api::mcp_tools_ordered` and `tools/call` is
+//! `super::dispatch::call_tool`. The old hand-rolled "accepts no arguments"
+//! check is gone: the operation's `Input` has no caller-supplied fields, so
+//! the generic dispatcher's schema-driven merge already leaves nothing for an
+//! extra argument to do.
+//!
+//! Capability sets stay hand-authored rather than
+//! `super::dispatch::derive_capability_sets`: `sessions.context`'s own
+//! `grants` names `loom/sessions/read@v1` — it is part of the same read
+//! grant as `loom_session`'s tools, just served from a different MCP process
+//! — so deriving from it here would mint a *second*, incomplete
+//! `loom/sessions/read@v1` set (only `get`, missing `summary`/`history`/etc.)
+//! under `context`'s own adapter. `expand_tool_set` resolves a set name
+//! against the *first* adapter that recognizes it
+//! (`crate::mcp::expand_tool_sets`), so that collision would silently steal
+//! the name from `session`'s real set for any caller that lists adapters in
+//! this order — this adapter keeps its own distinct `loom/context/read@v1`
+//! identity instead.
 
-use anyhow::{bail, Result};
 use serde_json::Value;
 
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
@@ -42,11 +58,19 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    CAPABILITY_SETS
+        .iter()
+        .find(|set| set.name == name)
+        .map(|set| {
+            set.tools
+                .iter()
+                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
+                .collect()
+        })
 }
 
 fn server_config() -> Value {
@@ -59,21 +83,10 @@ fn tools() -> Value {
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
-    Box::pin(async move { call_tool(&name, arguments).await })
-}
-
-async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if name != "get" {
-        bail!("unknown context tool '{name}'");
-    }
-    if !super::runtime_tool_allowed(name) {
-        bail!("context tool '{name}' is not allowed by this session");
-    }
-    if !arguments.as_object().is_some_and(|value| value.is_empty()) {
-        bail!("context get accepts no arguments");
-    }
-    let value = super::runtime_client("context")?.self_context().await?;
-    super::structured_result("resolved current Loom context", &value)
+    Box::pin(async move {
+        let client = super::runtime_client("context")?;
+        super::dispatch::call_tool(&client, SERVER_NAME, &name, arguments).await
+    })
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -87,6 +100,7 @@ mod tests {
     #[test]
     fn context_surface_is_one_read_only_tool() {
         assert_eq!(tools().as_array().unwrap().len(), 1);
+        assert!(weaver_api::operation_for_mcp(SERVER_NAME, "get").is_some());
         assert_eq!(
             expand_tool_set("mcp/context/read@v1").unwrap(),
             vec!["mcp__loom_context__get"]
