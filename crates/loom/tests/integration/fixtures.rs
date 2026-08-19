@@ -24,6 +24,8 @@ use tokio_tungstenite::tungstenite::Message;
 use weaver_core::config as core_config;
 use weaver_core::events::EventBus;
 
+use crate::support::tapestry_bin;
+
 /// Run `program args` in `dir`, asserting it succeeds.
 pub fn sh(dir: &Path, program: &str, args: &[&str]) {
     let status = Command::new(program)
@@ -32,26 +34,6 @@ pub fn sh(dir: &Path, program: &str, args: &[&str]) {
         .status()
         .unwrap_or_else(|e| panic!("failed to run {program}: {e}"));
     assert!(status.success(), "{program} {args:?} failed");
-}
-
-/// The `tapestry` supervisor binary built alongside this test binary. The
-/// integration test runner lives at `target/<profile>/deps/<bin>`; the sibling
-/// `tapestry` binary is two levels up at `target/<profile>/tapestry`. loom's
-/// `backend` reads `WEAVER_TAPESTRY_BIN` to launch it (so it does not try to
-/// re-exec the test harness as a supervisor).
-fn tapestry_bin() -> std::path::PathBuf {
-    let exe = std::env::current_exe().expect("test executable path");
-    let bin = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target dir")
-        .join("tapestry");
-    assert!(
-        bin.exists(),
-        "tapestry binary missing at {} — run via `cargo test --workspace` (or `cargo build -p tapestry` first)",
-        bin.display()
-    );
-    bin
 }
 
 /// Best-effort teardown: kill every supervisor whose socket lives under this
