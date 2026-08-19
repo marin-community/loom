@@ -1401,7 +1401,7 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
 /// tool call that would inject the goal a second time.
 fn entrance_note(tracking_issue: Option<i64>) -> String {
     let mut note = "You are working in a Loom session. Use `loom summary` \
-                    to recover context, `loom help` to explore the registered \
+                    after compaction, `loom help` to explore the registered \
                     command surface, and `loom permissions show` to inspect \
                     effective access. This session has a durable channel for \
                     user/agent messages and status history; append a typed \
@@ -1649,7 +1649,7 @@ mod tests {
     fn entrance_note_keeps_catch_up_out_of_the_first_turn() {
         let note = entrance_note(Some(42));
         assert!(note.contains("loom summary"));
-        assert!(note.contains("recover context"));
+        assert!(note.contains("after compaction"));
         assert!(!note.contains("summary` first"));
         assert!(!note.contains("prints the full goal"));
         // It tells the agent exactly how to signal "done".
