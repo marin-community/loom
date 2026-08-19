@@ -213,41 +213,11 @@ pub async fn repair_acp_sessions(state: &AppState) {
         }
         match crate::acp::attach(&state.acp_ctx(), &session.id).await {
             Ok(()) => {
-                if session.status == "orphaned" {
-                    match session_mod::set_status(&state.db, &session.id, "running").await {
-                        Ok(()) => {
-                            crate::status::clear_acp_failure(
-                                &state.db,
-                                &state.bus,
-                                &session.branch_id,
-                            )
-                            .await;
-                            if let Err(error) = crate::events::record(
-                                &state.db,
-                                &state.bus,
-                                &session.branch_id,
-                                "status",
-                                serde_json::json!({
-                                    "status": "running",
-                                    "reason": "ACP runtime reattached",
-                                }),
-                            )
-                            .await
-                            {
-                                tracing::warn!(
-                                    session = %session.id,
-                                    %error,
-                                    "acp repair could not record restored session status"
-                                );
-                            }
-                        }
-                        Err(error) => tracing::warn!(
-                            session = %session.id,
-                            %error,
-                            "acp repair reattached the runtime but could not restore session status"
-                        ),
-                    }
-                }
+                // Settle the row from its *post-attach* state, never from the
+                // snapshot above: a driver this attach evicted can mark the
+                // session orphaned while the attach is still in flight.
+                crate::lifecycle::settle_reattached_session(state, &session.id, &session.branch_id)
+                    .await;
                 tracing::info!("acp repair: re-attached session {}", session.id);
             }
             Err(e) => tracing::warn!(

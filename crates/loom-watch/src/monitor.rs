@@ -513,6 +513,7 @@ mod tests {
             protocol: "terminal".to_string(),
             acp_session_id: None,
             acp_ack_seq: 0,
+            acp_driver_epoch: 0,
             acp_inflight: None,
             current_mode: None,
             pending_prompt: None,

@@ -824,9 +824,14 @@ impl AcpRegistry {
             .map(|entry| entry.handle.clone())
     }
 
-    /// Whether a task is running for `session_id`.
+    /// Whether `session_id` has a live, driveable task.
     pub fn is_live(&self, session_id: &str) -> bool {
-        self.inner.lock().unwrap().map.contains_key(session_id)
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .is_some_and(|entry| !entry.handle.cmd_tx.is_closed())
     }
 
     /// Stop a live session: drop its handle so the task's command channel closes
@@ -924,13 +929,14 @@ impl AcpRegistry {
         }));
     }
 
-    /// Remove the session's slot only if it still holds `generation` — a task
-    /// that has been superseded leaves the newer registration untouched.
-    fn remove_own(&self, session_id: &str, generation: u64) {
+    /// Remove this generation's slot, returning whether it owned the slot.
+    fn remove_own(&self, session_id: &str, generation: u64) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if inner.map.get(session_id).map(|entry| entry.generation) == Some(generation) {
             inner.map.remove(session_id);
+            return true;
         }
+        false
     }
 
     /// Whether `generation` is still the registered task for `session_id`.
@@ -1062,6 +1068,8 @@ async fn start_inner(
     // down and clear partially-persisted provider state before returning, or the
     // caller gets a stuck row plus a relay name handoff cannot safely reuse.
     let prepared: Result<(Task, mpsc::Receiver<Command>)> = async {
+        // Claim the driver slot before subscribing — see [`attach`].
+        let driver_epoch = session::claim_acp_driver(&state.db, session_id).await?;
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
         let mut task = Task::fresh(
             state,
@@ -1071,6 +1079,7 @@ async fn start_inner(
             events_tx.clone(),
         )
         .await?;
+        task.driver_epoch = driver_epoch;
         // `session/load` may replay an unanswered permission request and wait
         // for the client response before returning. Register the task before
         // setup so the REST permission route can drive that request instead of
@@ -1085,7 +1094,7 @@ async fn start_inner(
             },
         );
         if let Err(error) = task.handshake(&launch, handoff, &mut cmd_rx).await {
-            task.registry.remove_own(&task.session_id, task.generation);
+            let _ = task.registry.remove_own(&task.session_id, task.generation);
             return Err(error);
         }
         Ok((task, cmd_rx))
@@ -1129,6 +1138,10 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("session {session_id} has no acp_session_id"))?;
     let relay_name = session.term_session.clone();
     let cursor = session.acp_ack_seq.max(0) as u64;
+    // Claim the driver slot *before* subscribing: the subscribe evicts whatever
+    // driver the relay had, and the evicted task must already be fenced out of
+    // the row by the time its stream ends.
+    let driver_epoch = session::claim_acp_driver(&state.db, session_id).await?;
     let stream = crate::backend::subscribe_relay(&relay_name, cursor).await?;
 
     let (events_tx, _) = broadcast::channel(256);
@@ -1141,6 +1154,7 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
         events_tx.clone(),
     )
     .await?;
+    task.driver_epoch = driver_epoch;
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     task.generation = state.acp.register(
@@ -1425,6 +1439,8 @@ struct Task {
     registry: AcpRegistry,
     /// This task's registry generation — used to remove only its own slot on exit.
     generation: u64,
+    /// Durable ownership of the session's ACP driver slot.
+    driver_epoch: i64,
     session_id: String,
     branch_id: String,
     relay_name: String,
@@ -1517,6 +1533,7 @@ impl Task {
             bus: state.bus.clone(),
             registry: state.acp.clone(),
             generation: 0,
+            driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
             relay_name,
@@ -1606,6 +1623,7 @@ impl Task {
             bus: state.bus.clone(),
             registry: state.acp.clone(),
             generation: 0,
+            driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
             relay_name,
@@ -2072,21 +2090,37 @@ impl Task {
                 },
             }
         };
+        // Release the registry slot *before* touching the row: a session must
+        // never be both `orphaned` and live, or adoption refuses it ("session
+        // already has a live ACP task") and the repair sweep skips it, which
+        // leaves no way back. `remove_own` also reports whether this task was
+        // still this process's driver for the session.
+        let owns_registry_slot = self.registry.remove_own(&self.session_id, self.generation);
         let failure_message = stop_reason.failure_message();
-        if let TaskStopReason::AgentExit { .. } = stop_reason {
-            self.on_failure(
-                failure_message
-                    .as_deref()
-                    .expect("agent exit always carries a failure message"),
-            )
-            .await;
-        } else if let Some(message) = &failure_message {
-            tracing::warn!(session = %self.session_id, reason = message, "acp task failed");
-        }
         if let Some(message) = &failure_message {
-            crate::status::record_acp_failure(&self.db, &self.bus, &self.session_id, message).await;
+            if owns_registry_slot && self.still_the_durable_driver().await {
+                if let TaskStopReason::AgentExit { .. } = stop_reason {
+                    self.on_failure(message).await;
+                } else {
+                    tracing::warn!(session = %self.session_id, reason = message, "acp task failed");
+                }
+                crate::status::record_acp_failure(
+                    &self.db,
+                    &self.bus,
+                    &self.session_id,
+                    self.driver_epoch,
+                    message,
+                )
+                .await;
+            } else {
+                tracing::info!(
+                    session = %self.session_id,
+                    epoch = self.driver_epoch,
+                    reason = ?stop_reason,
+                    "superseded acp task exited without detaching its former session"
+                );
+            }
         }
-        self.registry.remove_own(&self.session_id, self.generation);
         if let Some((reply, snapshot)) = handoff_reply {
             let _ = reply.send(Ok(snapshot));
         }
@@ -2096,6 +2130,19 @@ impl Task {
             reason = ?stop_reason,
             "acp task stopped"
         );
+    }
+
+    /// Whether this task still owns the durable ACP driver claim.
+    async fn still_the_durable_driver(&self) -> bool {
+        match session::get(&self.db, &self.session_id).await {
+            Ok(Some(session)) => session.acp_driver_epoch == self.driver_epoch,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(session = %self.session_id, %error,
+                    "could not confirm the ACP driver claim on exit");
+                true
+            }
+        }
     }
 
     fn journal_replay_needed(&self) -> bool {

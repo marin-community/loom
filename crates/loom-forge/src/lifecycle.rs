@@ -987,6 +987,20 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
             "session is done and cannot be adopted".to_string()
         )));
     }
+    // Adoption exists to make a session driveable again, so a session that is
+    // *already* driveable is a row to settle rather than a request to refuse:
+    // `orphaned` alongside a live ACP driver is exactly the contradiction a user
+    // reaches for Adopt to fix, and `adopt_acp` can only answer it with a 409.
+    // Settle before claiming a transition — the reconciliation is fenced on the
+    // row being unowned.
+    if session.protocol == "acp"
+        && session.status == "orphaned"
+        && settle_reattached_session(st, &session.id, &branch.id).await
+    {
+        tracing::info!(session = %session.id, branch = %branch.id,
+            "adopt reconciled an orphaned row against its live ACP driver");
+        return Ok(());
+    }
     let profile = require_session_profile_lifetime(&st.db, session).await?;
     require_resume_capacity(&st.db, session, &profile).await?;
     let custom_agent = stamped_custom_agent(session)?;
@@ -1148,6 +1162,37 @@ pub async fn adopt_terminal_into_acp(
     .await
     .ok();
     Ok(())
+}
+
+/// Restore an orphaned session that has a live ACP driver.
+pub async fn settle_reattached_session(st: &AppState, session_id: &str, branch_id: &str) -> bool {
+    if !st.acp.is_live(session_id) {
+        return false;
+    }
+    match session_mod::clear_orphaned_after_reattach(&st.db, session_id).await {
+        Ok(false) => false,
+        Ok(true) => {
+            crate::status::clear_acp_failure(&st.db, &st.bus, branch_id).await;
+            if let Err(error) = events::record(
+                &st.db,
+                &st.bus,
+                branch_id,
+                "status",
+                json!({ "status": "running", "reason": "ACP runtime reattached" }),
+            )
+            .await
+            {
+                tracing::warn!(session = %session_id, %error,
+                    "could not record the restored session status");
+            }
+            true
+        }
+        Err(error) => {
+            tracing::warn!(session = %session_id, %error,
+                "reattached the ACP runtime but could not restore the session status");
+            false
+        }
+    }
 }
 
 /// Adopt an ACP session: respawn its relay + adapter and reopen the conversation.

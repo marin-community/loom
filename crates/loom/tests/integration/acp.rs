@@ -1991,6 +1991,106 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
     .await;
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_driver_does_not_detach_its_successors_session() {
+    let ts = TestServer::start().await;
+    let id = "acp-driver-handover";
+    start_new(&ts, id, None, None).await;
+
+    // A second loom generation: same database and relays, its own registry.
+    let successor = acp::AcpCtx {
+        ctx: ts.state.ctx.clone(),
+        acp: acp::AcpRegistry::new(),
+    };
+    acp::attach(&successor, id)
+        .await
+        .expect("the successor generation attaches its own driver");
+    assert!(
+        successor.acp.is_live(id),
+        "the successor drives the session"
+    );
+
+    // The evicted driver unwinds: it drops its registry slot (so the process it
+    // belongs to can repair the session again) and leaves the row alone.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while ts.state.acp.is_live(id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the evicted driver never released its registry slot"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+    assert_eq!(
+        session.status, "running",
+        "the evicted driver detached a session its successor was driving"
+    );
+    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    assert!(
+        branch_tag_value(&view, "runtime").is_empty(),
+        "no runtime failure is reported for a session that never lost its driver"
+    );
+
+    // The successor really is driving it: a prompt through its handle runs a turn.
+    successor
+        .acp
+        .get(id)
+        .expect("the successor handle is registered")
+        .prompt("say:handed-over".to_string(), None, vec![])
+        .await
+        .expect("the successor drives the conversation");
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "handed-over"
+        })
+    })
+    .await;
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopt_reconciles_an_orphaned_row_that_still_has_a_live_driver() {
+    let ts = TestServer::start().await;
+    let id = "acp-orphaned-but-live";
+    start_new(&ts, id, None, None).await;
+    assert!(
+        session_mod::mark_orphaned(&ts.state.db, id).await.unwrap(),
+        "stage the contradiction: an orphaned row under a live driver"
+    );
+
+    ts.client
+        .post(&format!("/api/sessions/{id}/adopt"), json!({}))
+        .await
+        .expect("adopt reconciles the row instead of refusing it");
+    let view = poll_view(&ts, id, Duration::from_secs(10), |view| {
+        view["status"] == "running"
+    })
+    .await;
+    assert_eq!(view["status"], "running");
+    assert!(
+        ts.state.acp.is_live(id),
+        "the original driver was kept — nothing was respawned"
+    );
+
+    // Still the same live conversation, not a restarted one.
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:still-here" }),
+        )
+        .await
+        .expect("the reconciled session takes prompts");
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "still-here"
+        })
+    })
+    .await;
+}
+
 /// A relay can survive while its Loom-side task exits (for example after a
 /// journal write loses a prolonged SQLite lock race). The repair pass must
 /// re-register the driver, replay the unacked frames, and leave the session
