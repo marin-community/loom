@@ -200,6 +200,84 @@ async fn pty_and_relay_supervisors_derive_shells_with_their_exact_environment() 
     std::env::remove_var("TAPESTRY_OWNER_AMBIENT");
 }
 
+/// Installing a new loom replaces the `tapestry` binary underneath every
+/// supervisor already running. `current_exe()` then reports a path that no
+/// longer exists (Linux appends ` (deleted)`), so a supervisor that re-execs
+/// that name to launch a sibling fails with `ENOENT` — which is how every
+/// worktree shell derived from a pre-upgrade session died at launch, leaving the
+/// browser stuck on "reconnecting". A supervisor must keep deriving shells from
+/// its own running image instead.
+#[tokio::test]
+#[serial]
+async fn derives_shells_after_its_own_binary_is_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    std::env::set_var("WEAVER_HOME", home.path());
+    let install = TempDir::new().unwrap();
+    let bin = install.path().join("tapestry");
+    std::fs::copy(env!("CARGO_BIN_EXE_tapestry"), &bin).unwrap();
+
+    let owner = format!("tap-replaced-owner-{}", std::process::id());
+    tapestry::spawn_detached(&LaunchOptions {
+        name: &owner,
+        cwd: &std::env::temp_dir(),
+        script: "exec sleep 60",
+        env: &[],
+        env_clear: false,
+        cols: 80,
+        rows: 24,
+        mode: Mode::Pty,
+        segment_max_bytes: None,
+        supervisor_bin: Some(&bin),
+    })
+    .await
+    .unwrap();
+
+    // The upgrade: unlink the file the supervisor was launched from and leave a
+    // different one at its path. The stub could never serve a session, so a
+    // shell that comes up proves the owner re-exec'd its own image rather than
+    // whatever now sits where it was installed.
+    std::fs::remove_file(&bin).unwrap();
+    std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let shell = format!("tap-replaced-shell-{}", std::process::id());
+    Client::connect(&owner)
+        .await
+        .unwrap()
+        .derive(&DerivedLaunch {
+            name: shell.clone(),
+            cwd: std::env::temp_dir(),
+            script: "echo REPLACED_OK; exec sleep 60".to_string(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .expect("derive a shell after the supervisor's binary was replaced");
+
+    let mut screen = String::new();
+    for _ in 0..200 {
+        screen = Client::connect(&shell)
+            .await
+            .unwrap()
+            .capture(0)
+            .await
+            .unwrap();
+        if screen.contains("REPLACED_OK") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        screen.contains("REPLACED_OK"),
+        "derived shell never ran; got {screen:?}"
+    );
+
+    let _ = Client::connect(&shell).await.unwrap().kill().await;
+    let _ = Client::connect(&owner).await.unwrap().kill().await;
+}
+
 /// The supervisor is its session's subreaper: a process the agent detaches and
 /// orphans must reparent to the supervisor (not escape to PID 1) and then get
 /// reaped when it dies, instead of lingering as a zombie. Without this a

@@ -184,7 +184,7 @@ pub async fn new_session_derived(
     match &result {
         Ok(()) => tracing::info!(session = %name, owner, "derived terminal session spawned"),
         Err(error) => {
-            tracing::warn!(session = %name, owner, %error, "failed to spawn derived terminal session")
+            tracing::warn!(session = %name, owner, error = %format!("{error:#}"), "failed to spawn derived terminal session")
         }
     }
     result
@@ -225,7 +225,9 @@ async fn new_session_with_placement(
     };
     match &result {
         Ok(()) => tracing::info!(session = %name, "terminal session spawned"),
-        Err(e) => tracing::warn!(session = %name, error = %e, "failed to spawn terminal session"),
+        Err(e) => {
+            tracing::warn!(session = %name, error = %format!("{e:#}"), "failed to spawn terminal session")
+        }
     }
     result
 }
