@@ -847,6 +847,18 @@ mod tests {
     }
 
     #[test]
+    /// The digests pin what each capability advertises to an agent.
+    ///
+    /// They move when a tool's schema moves, which is the point: a session
+    /// launched with `loom/artifacts/write@v1` should be able to tell that the
+    /// shape of `write` changed underneath it. Re-pin only with a reason.
+    ///
+    /// Last re-pinned for four deliberate contract fixes: `artifacts.write.kind`
+    /// became optional so omitting it keeps the artifact's current kind instead
+    /// of resetting it to markdown; `artifacts.threads.list` swapped an `all`
+    /// flag for `open_only` so the default keeps returning resolved threads;
+    /// and `issues.list` gained the `backlog` filter that `?scope=backlog` used
+    /// to provide.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -883,23 +895,23 @@ mod tests {
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:e08dfd3c426a2e140fb35dc79e912dbe7fe2a778c489ec954f5968b89ab378d9",
+                "sha256:4923942640310841b7c6ae447c447b1803e2057741e4bce06083c55678d667a3",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:fb22a3052915911facad9d5149599488e138d61d0870a1d2a8a428758372a15f",
+                "sha256:020fb0c5959f4344c6a39ed065e8d5f09b402354a52bb8d3823c5f11c6bc02a1",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:0c9a05b7b947dd701160c3aeb2ef2c465c6bf4bdfeedb150a5d40a5339596ade",
+                "sha256:5ce4b6aa0ac62f4340654a2281c7d6cd65c68ee3272915941540708370fccd89",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:e63731bd5e4dbd6e82a59086987ee1ca081072b41592e183c80c8540840ad30b",
+                "sha256:5142a22e9a4b7151648891edbdce7a322baded4b146378d9d580176f69f4aeae",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:7d9c80c9387e2fe0536d544859237e525e5293ab0c4cee439287d93c572928ce",
+                "sha256:aa2ae1a0151900570e4cb8a1f9ecb1e1f5db101ea839a528c5cff0c14ad617a6",
             ),
             (
                 "loom/issues/write@v1",
@@ -955,9 +967,25 @@ mod tests {
             }
         }
         assert_eq!(actual.len(), expected.len());
-        for (name, digest) in expected {
-            assert_eq!(actual.get(name).map(String::as_str), Some(digest), "{name}");
-        }
+        // Report EVERY drift at once. Failing on the first one hides how much
+        // moved, which is exactly when re-pinning stops being a decision and
+        // becomes a reflex.
+        let drift: Vec<String> = expected
+            .iter()
+            .filter(|(name, digest)| actual.get(**name).map(String::as_str) != Some(**digest))
+            .map(|(name, digest)| {
+                format!(
+                    "  {name}\n    was {digest}\n    now {}",
+                    actual.get(*name).map(String::as_str).unwrap_or("(absent)")
+                )
+            })
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "{} capability set(s) changed what they advertise to agents:\n{}",
+            drift.len(),
+            drift.join("\n")
+        );
     }
 
     #[tokio::test]
