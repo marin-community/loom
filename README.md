@@ -436,7 +436,6 @@ loom settings list
 loom profile ls
 loom profile show default
 loom profile show ops --effective
-loom profile probe ops
 loom mcp ls
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging

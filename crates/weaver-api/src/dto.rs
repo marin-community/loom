@@ -805,13 +805,6 @@ pub struct EffectiveProfileView {
     pub mcp_servers: Vec<McpServerProcessView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProfileProbeView {
-    pub ok: bool,
-    pub effective: EffectiveProfileView,
-    pub errors: Vec<String>,
-}
-
 /// Fields a caller may layer over a named profile for one launch. Presence is
 /// significant: an omitted (or blank agent) field inherits while an explicit
 /// empty model or effort selects the agent's own default.

@@ -900,7 +900,7 @@ only teaches stock `git` and `gh` how to ask for them.
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
 or an explicit group list. Saving resolves the trusted builtin registry and
 enabled, validated custom definitions and pins the exact result to that profile
-revision. Launch validates availability, copies the capability
+revision. Launch copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
 descriptors whose subprocess tool surfaces are filtered to the stamped rules.

@@ -5,7 +5,7 @@ use axum::{
 };
 use weaver_api::{
     CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileEnvView,
-    ProfileProbeView, ProfileReq, ProfileView, PutProfileEnvReq,
+    ProfileReq, ProfileView, PutProfileEnvReq,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -144,22 +144,6 @@ pub(super) async fn effective_profile(
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
     Ok(Json(effective(&st, item).await?))
-}
-
-pub(super) async fn probe_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<ProfileProbeView>> {
-    let item = profile::get(&st.db, &name)
-        .await?
-        .ok_or_else(|| AppError::not_found("profile"))?;
-    let effective = effective(&st, item).await?;
-    let errors = crate::mcp::snapshot_errors(&st.db, &effective.mcp_policy).await?;
-    Ok(Json(ProfileProbeView {
-        ok: errors.is_empty(),
-        effective,
-        errors,
-    }))
 }
 
 pub(super) async fn create_profile(

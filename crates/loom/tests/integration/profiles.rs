@@ -332,13 +332,6 @@ print("custom tests passed")
         effective["mcp_servers"][0]["args"],
         json!(["mcp", "serve-custom", "/ops/status"])
     );
-    let probe = ts
-        .client
-        .post("/api/profiles/custom-tools/probe", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(probe["ok"], true);
-
     let source_v2 = source.replace("Return a value.", "Return a pinned value.");
     let edited = ts
         .client
@@ -396,13 +389,6 @@ print("custom tests passed")
         .unwrap();
     assert_eq!(disabled["identity"], "/ops/status");
     assert_eq!(disabled["revision"], 3);
-    let probe = ts
-        .client
-        .post("/api/profiles/custom-tools/probe", json!({}))
-        .await
-        .unwrap();
-    assert_eq!(probe["ok"], false);
-    assert!(probe["errors"][0].as_str().unwrap().contains("is disabled"));
 
     let response = reqwest::Client::new()
         .delete(format!("http://{}/api/mcps/custom/ops/status", ts.addr))

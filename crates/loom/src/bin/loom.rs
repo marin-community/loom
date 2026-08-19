@@ -1400,8 +1400,6 @@ enum ProfileCmd {
         #[arg(long)]
         effective: bool,
     },
-    /// Validate and resolve a profile without launching a session.
-    Probe { name: String },
     /// Resolve the exact launch snapshot, including provenance and capacity.
     Resolve {
         name: String,
@@ -3005,13 +3003,6 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     serde_json::to_string_pretty(&client.get_profile(&name).await?)?
                 }
             );
-        }
-        ProfileCmd::Probe { name } => {
-            let probe = client.probe_profile(&name).await?;
-            println!("{}", serde_json::to_string_pretty(&probe)?);
-            if !probe.ok {
-                bail!("profile probe failed");
-            }
         }
         ProfileCmd::Resolve {
             name,
