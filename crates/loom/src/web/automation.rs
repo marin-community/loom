@@ -18,17 +18,14 @@ use super::{ApiResult, AppError, AppState};
 /// ops scripts, Grafana alerts). Federation/token minting (`federate`,
 /// `mint_automation_token`, `list_federations`, `add_federation`,
 /// `remove_federation`) below are a different bundle and are untouched here.
-///
-/// The legacy `/runs`, `/runs/{id}` axum routes in `web/mod.rs` still point at
-/// `list_runs`/`get_run`/`create_run` below (unchanged) — route deletion is a
-/// coordinated pass, not this agent's to make — so the operation-registry
-/// handlers below are named `*_operation` and share their core logic with the
-/// legacy handlers rather than replacing them in place.
+/// The legacy `/runs`, `/runs/{id}` axum routes are already gone from
+/// `web/mod.rs`, so there is no old handler left to keep alive alongside
+/// these.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<run_operations::list::List, _, _>(list_runs_operation),
-        register::<run_operations::get::Get, _, _>(get_run_operation),
-        register::<run_operations::create::Create, _, _>(create_run_operation),
+        register::<run_operations::list::List, _, _>(list_runs),
+        register::<run_operations::get::Get, _, _>(get_run),
+        register::<run_operations::create::Create, _, _>(create_run),
     ]
 }
 
@@ -110,43 +107,15 @@ pub(super) async fn remove_federation(
     }
 }
 
-/// The requesting identity's subject and allowed profile set, for the legacy
-/// `/runs` route: `Grant::Admin`/`Grant::User` both act as themselves, naming
-/// any profile; `Grant::Automation` is restricted to its own minted profile
-/// set; nothing else may create a run.
-fn run_identity(
-    principal: &Principal,
-    requested_profile: &str,
-) -> ApiResult<(String, Vec<String>)> {
-    match &principal.grant {
-        Grant::Admin | Grant::User => Ok((
-            principal.username.clone(),
-            vec![requested_profile.to_string()],
-        )),
-        Grant::Automation { subject, profiles } => {
-            if !profiles.iter().any(|profile| profile == requested_profile) {
-                return Err(AppError::new(
-                    StatusCode::FORBIDDEN,
-                    format!("automation grant does not allow profile '{requested_profile}'"),
-                ));
-            }
-            Ok((subject.clone(), profiles.clone()))
-        }
-        Grant::Anonymous | Grant::Session { .. } => Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "session credentials cannot create automation runs",
-        )),
-    }
-}
-
 /// The requesting identity for `runs.create`, `actor = Internal`:
 /// `authorize()` has already refused anything but `Grant::Admin` or
 /// `Grant::Automation` by the time this runs (`Grant::User`/`Grant::Session`
-/// cannot reach here — unlike the legacy `/runs` route above, which still
-/// treats `Grant::User` the same as `Grant::Admin`; see the port report). The
-/// automation grant's own profile allowlist is per-token business state, not
-/// something the central actor/scope check can see, so it stays.
-fn create_run_identity(
+/// cannot reach here). The old handler this replaces also let a plain
+/// `Grant::User` act as itself, naming any profile — a widening this
+/// declaration deliberately drops; see the port report. The automation
+/// grant's own profile allowlist is per-token business state, not something
+/// the central actor/scope check can see, so it stays.
+fn run_identity(
     principal: &Principal,
     requested_profile: &str,
 ) -> ApiResult<(String, Vec<String>)> {

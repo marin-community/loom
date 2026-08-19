@@ -251,20 +251,28 @@ async fn reconcile_trigger(st: &AppState, program: &str, params: &Value, fallbac
     }
 }
 
+async fn get_watch_core(st: &AppState, key: &str) -> ApiResult<WatchView> {
+    let o = require_watch(&st.db, key).await?;
+    watch_view(&st.db, &o).await
+}
+
 pub(super) async fn get_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<Json<WatchView>> {
-    let o = require_watch(&st.db, &key).await?;
-    Ok(Json(watch_view(&st.db, &o).await?))
+    Ok(Json(get_watch_core(&st, &key).await?))
 }
 
-pub(super) async fn patch_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<PatchWatchReq>,
-) -> ApiResult<Json<WatchView>> {
-    let o = require_watch(&st.db, &key).await?;
+/// `watches.get`.
+pub(super) async fn get_watch_operation(
+    context: OperationContext,
+    input: watches_operations::get::Input,
+) -> ApiResult<WatchView> {
+    get_watch_core(&context.state, &input.key).await
+}
+
+async fn patch_watch_core(st: &AppState, key: &str, req: PatchWatchReq) -> ApiResult<WatchView> {
+    let o = require_watch(&st.db, key).await?;
 
     if let Some(program) = &req.program {
         validate_program(program)?;
@@ -288,7 +296,7 @@ pub(super) async fn patch_watch(
                 let params = req.params.clone().unwrap_or_else(|| o.params());
                 let fallback =
                     program_default_trigger(program).unwrap_or_else(|| o.trigger_spec.clone());
-                Some(reconcile_trigger(&st, program, &params, &fallback).await)
+                Some(reconcile_trigger(st, program, &params, &fallback).await)
             }
             None => None,
         },
@@ -308,30 +316,70 @@ pub(super) async fn patch_watch(
         watch_store::update(&st.db, &o.id, &patch).await?;
     }
     let o = require_watch(&st.db, &o.id).await?;
-    Ok(Json(watch_view(&st.db, &o).await?))
+    watch_view(&st.db, &o).await
+}
+
+pub(super) async fn patch_watch(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<PatchWatchReq>,
+) -> ApiResult<Json<WatchView>> {
+    Ok(Json(patch_watch_core(&st, &key, req).await?))
+}
+
+/// `watches.update`.
+pub(super) async fn update_watch_operation(
+    context: OperationContext,
+    input: watches_operations::update::Input,
+) -> ApiResult<WatchView> {
+    let req = PatchWatchReq {
+        enabled: input.enabled,
+        trigger: input.trigger,
+        scope: input.scope,
+        program: input.program,
+        params: input.params,
+        capabilities: input.capabilities,
+        profile: input.profile,
+        model: input.model,
+        effort: input.effort,
+        cooldown_secs: input.cooldown_secs,
+    };
+    patch_watch_core(&context.state, &input.key, req).await
+}
+
+async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteResult> {
+    let o = require_watch(&st.db, key).await?;
+    watch_store::delete(&st.db, &o.id).await?;
+    tracing::info!(watch = %o.id, name = %o.name, "watch deleted");
+    Ok(WatchDeleteResult {
+        deleted: true,
+        id: o.id,
+    })
 }
 
 pub(super) async fn delete_watch(
     State(st): State<AppState>,
     Path(key): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let o = require_watch(&st.db, &key).await?;
-    watch_store::delete(&st.db, &o.id).await?;
-    tracing::info!(watch = %o.id, name = %o.name, "watch deleted");
-    Ok(Json(json!({ "deleted": true })))
+    let result = delete_watch_core(&st, &key).await?;
+    Ok(Json(json!({ "deleted": result.deleted })))
+}
+
+/// `watches.delete`.
+pub(super) async fn delete_watch_operation(
+    context: OperationContext,
+    input: watches_operations::delete::Input,
+) -> ApiResult<WatchDeleteResult> {
+    delete_watch_core(&context.state, &input.key).await
 }
 
 /// Fire a round now, in the daemon (the single terminal owner), and report its
 /// outcome. `dry_run` stubs every mutating action — the iteration primitive,
 /// safe to repeat. Re-reads the closed run row to surface outcome + summary.
-pub(super) async fn run_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<RunWatchReq>,
-) -> ApiResult<Json<Value>> {
-    let o = require_watch(&st.db, &key).await?;
-    let reason = if req.dry_run { "run (dry)" } else { "run" };
-    let run_id = ov_engine::fire_now(&st, &o.id, req.dry_run, reason).await?;
+async fn run_watch_core(st: &AppState, key: &str, dry_run: bool) -> ApiResult<WatchRunResult> {
+    let o = require_watch(&st.db, key).await?;
+    let reason = if dry_run { "run (dry)" } else { "run" };
+    let run_id = ov_engine::fire_now(st, &o.id, dry_run, reason).await?;
     let run = watch_store::recent_runs(&st.db, &o.id, 50)
         .await?
         .into_iter()
@@ -339,11 +387,34 @@ pub(super) async fn run_watch(
     let (outcome, summary) = run
         .map(|r| (r.outcome, r.summary))
         .unwrap_or_else(|| (String::new(), String::new()));
+    Ok(WatchRunResult {
+        run_id,
+        outcome,
+        summary,
+    })
+}
+
+pub(super) async fn run_watch(
+    State(st): State<AppState>,
+    Path(key): Path<String>,
+    Json(req): Json<RunWatchReq>,
+) -> ApiResult<Json<Value>> {
+    let result = run_watch_core(&st, &key, req.dry_run).await?;
     Ok(Json(json!({
-        "run_id": run_id,
-        "outcome": outcome,
-        "summary": summary,
+        "run_id": result.run_id,
+        "outcome": result.outcome,
+        "summary": result.summary,
     })))
+}
+
+/// `watches.run`. Not exercised here — this handler fires a watch round for
+/// real when invoked, so it is wired but deliberately never called by any
+/// test or manual check in this port.
+pub(super) async fn run_watch_operation(
+    context: OperationContext,
+    input: watches_operations::run::Input,
+) -> ApiResult<WatchRunResult> {
+    run_watch_core(&context.state, &input.key, input.dry_run).await
 }
 
 /// Run a one-shot ACP prompt and return `{output}` — the judgement primitive
@@ -416,15 +487,31 @@ async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
     Ok(())
 }
 
+async fn watch_runs_core(
+    st: &AppState,
+    key: &str,
+    limit: Option<i64>,
+) -> ApiResult<Vec<WatchRunView>> {
+    let o = require_watch(&st.db, key).await?;
+    let limit = limit.unwrap_or(50).clamp(1, 1000);
+    let runs = watch_store::recent_runs(&st.db, &o.id, limit).await?;
+    Ok(runs.into_iter().map(WatchRunView::from).collect())
+}
+
 pub(super) async fn watch_runs(
     State(st): State<AppState>,
     Path(key): Path<String>,
     Query(q): Query<RunsQuery>,
 ) -> ApiResult<Json<Vec<WatchRunView>>> {
-    let o = require_watch(&st.db, &key).await?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
-    let runs = watch_store::recent_runs(&st.db, &o.id, limit).await?;
-    Ok(Json(runs.into_iter().map(WatchRunView::from).collect()))
+    Ok(Json(watch_runs_core(&st, &key, q.limit).await?))
+}
+
+/// `watches.runs`.
+pub(super) async fn watch_runs_operation(
+    context: OperationContext,
+    input: watches_operations::runs::Input,
+) -> ApiResult<Vec<WatchRunView>> {
+    watch_runs_core(&context.state, &input.key, input.limit).await
 }
 
 /// Serialize an optional structured-JSON field into the text column the model

@@ -725,13 +725,14 @@ mod tests {
 
         let issue = create_repo_issue_operation(
             OperationContext::new(st, admin_principal()),
-            CreateRepoIssueReq {
+            issue_operations::backlog::create::Input {
                 repo_root: "/r".to_string(),
                 title: "backlog item".to_string(),
                 body: String::new(),
                 github_issue: None,
+                // The branch NAME, which is what `source_branch` stores and what
+                // the CLI compares against — see `ContextSource::BranchName`.
                 source_branch: Some("weaver/a".to_string()),
-                tags: Vec::new(),
             },
         )
         .await
@@ -855,17 +856,16 @@ mod tests {
         .await
         .unwrap();
 
-        let result = issue_actions(
-            State(st),
-            Extension(admin_principal()),
-            Json(IssueActionsReq {
+        let result = issue_actions_operation(
+            OperationContext::new(st, admin_principal()),
+            issue_operations::actions::Input {
                 ids: vec![first.id, second.id],
                 action: IssueAction::Close,
-            }),
+                repo_root: "/r".to_string(),
+            },
         )
         .await
-        .unwrap()
-        .0;
+        .unwrap();
         assert_eq!(result.issues.len(), 2);
         assert!(result.issues.iter().all(|issue| issue.status == "closed"));
         assert!(result.deleted_ids.is_empty());
@@ -888,15 +888,21 @@ mod tests {
 
         let closed = close_issue_operation(
             OperationContext::new(st.clone(), admin_principal()),
-            issue_operations::IdInput { id: issue.id },
+            issue_operations::close::Input {
+                ids: vec![issue.id],
+                repo_root: "/r".to_string(),
+            },
         )
         .await
         .unwrap();
-        assert_eq!(closed.status, "closed");
+        assert_eq!(closed.issues[0].status, "closed");
 
         let duplicate = close_issue_operation(
             OperationContext::new(st.clone(), admin_principal()),
-            issue_operations::IdInput { id: issue.id },
+            issue_operations::close::Input {
+                ids: vec![issue.id],
+                repo_root: "/r".to_string(),
+            },
         )
         .await
         .unwrap_err();
@@ -904,11 +910,14 @@ mod tests {
 
         let reopened = reopen_issue_operation(
             OperationContext::new(st, admin_principal()),
-            issue_operations::IdInput { id: issue.id },
+            issue_operations::reopen::Input {
+                ids: vec![issue.id],
+                repo_root: "/r".to_string(),
+            },
         )
         .await
         .unwrap();
-        assert_eq!(reopened.status, "open");
+        assert_eq!(reopened.issues[0].status, "open");
     }
 
     #[tokio::test]
@@ -926,13 +935,13 @@ mod tests {
         .await
         .unwrap();
 
-        let error = issue_actions(
-            State(st),
-            Extension(admin_principal()),
-            Json(IssueActionsReq {
+        let error = issue_actions_operation(
+            OperationContext::new(st, admin_principal()),
+            issue_operations::actions::Input {
                 ids: vec![issue.id, 999_999],
                 action: IssueAction::Close,
-            }),
+                repo_root: "/r".to_string(),
+            },
         )
         .await
         .unwrap_err();

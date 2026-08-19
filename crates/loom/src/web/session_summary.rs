@@ -5,11 +5,32 @@ use axum::{
     Extension, Json,
 };
 use weaver_api::SessionCatchupView;
+use weaver_core::branch::Branch;
 use weaver_core::{artifact, issue, tags};
 
 use crate::auth::Principal;
+use crate::session::Session;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{artifact_meta, issue_views, principal_subject, require_session, ApiResult, AppState};
+
+/// The bound `sessions.summary.get` operation.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<
+        weaver_api::operations::sessions::summary::get::Get,
+        _,
+        _,
+    >(summary_get)]
+}
+
+async fn summary_get(
+    context: OperationContext,
+    input: weaver_api::operations::sessions::summary::get::Input,
+) -> ApiResult<SessionCatchupView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    build_session_catchup(st, &context.principal, session, branch).await
+}
 
 /// Structured, server-authoritative catch-up for one session. This replaces
 /// client-side orchestration in `loom summary`.
@@ -19,11 +40,24 @@ pub(super) async fn get_session_summary(
     Extension(principal): Extension<Principal>,
 ) -> ApiResult<Json<SessionCatchupView>> {
     let (session, branch) = require_session(&st.db, &key).await?;
+    Ok(Json(
+        build_session_catchup(&st, &principal, session, branch).await?,
+    ))
+}
+
+/// Shared by the operation and the legacy route: the goal, status, inbox,
+/// artifacts, issues, and next actions for one resolved session/branch.
+async fn build_session_catchup(
+    st: &AppState,
+    principal: &Principal,
+    session: Session,
+    branch: Branch,
+) -> ApiResult<SessionCatchupView> {
     let attention = tags::get(&st.db, &branch.id, tags::ATTENTION_KEY)
         .await?
         .map(|tag| tag.value)
         .unwrap_or_else(|| "ok".to_string());
-    let channel = crate::channels::get(&st.db, &session.id, &principal_subject(&principal)).await?;
+    let channel = crate::channels::get(&st.db, &session.id, &principal_subject(principal)).await?;
     let artifacts = artifact::list_for_session(&st.db, &branch.repo_root, &branch.id)
         .await?
         .iter()
@@ -64,7 +98,7 @@ pub(super) async fn get_session_summary(
         next_actions.push("loom permissions requests --state pending".to_string());
     }
 
-    Ok(Json(SessionCatchupView {
+    Ok(SessionCatchupView {
         session_id: session.id,
         branch_id: branch.id,
         goal: if branch.goal.is_empty() {
@@ -79,5 +113,5 @@ pub(super) async fn get_session_summary(
         issues,
         recent_events,
         next_actions,
-    }))
+    })
 }
