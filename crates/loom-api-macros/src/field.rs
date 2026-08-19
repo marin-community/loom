@@ -248,6 +248,14 @@ fn inner(segment: &syn::PathSegment) -> Option<Kind> {
     })
 }
 
+/// Extract the first paragraph of a `///` doc comment.
+///
+/// This becomes an operation's MCP description, its OpenAPI `summary`, and an
+/// operand's schema/CLI help text — everything an API caller sees. A doc
+/// comment can say more after a blank `///` line (grant reasoning, an
+/// internal cross-reference, why a type is shaped the way it is); that stays
+/// ordinary rustdoc for whoever reads the source, and stops there instead of
+/// leaking into what a caller sees.
 pub fn doc_comment(attrs: &[Attribute]) -> Option<String> {
     let mut lines = Vec::new();
     for attr in attrs {
@@ -263,13 +271,15 @@ pub fn doc_comment(attrs: &[Attribute]) -> Option<String> {
         let Lit::Str(text) = &expr.lit else {
             continue;
         };
-        lines.push(text.value().trim().to_string());
+        let line = text.value().trim().to_string();
+        if line.is_empty() {
+            break;
+        }
+        lines.push(line);
     }
     if lines.is_empty() {
         return None;
     }
-    // Help text is one paragraph; blank doc lines separate the summary from
-    // prose the CLI renders as the long help.
     Some(lines.join(" ").trim().to_string())
 }
 

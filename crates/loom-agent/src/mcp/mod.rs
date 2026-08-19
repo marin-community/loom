@@ -815,6 +815,14 @@ mod tests {
     /// `issues.*`, and `channels.*` operation structs for clarity — those doc
     /// comments are the MCP tool description, so the digest moved with the
     /// text. No schema or behavior changed.
+    ///
+    /// Re-pinned again after `loom-api-macros::field::doc_comment` stopped
+    /// joining an operation's entire multi-paragraph doc comment into its MCP
+    /// description; it now stops at the first blank `///` line, so any
+    /// operation whose doc comment went on to explain grant reasoning or a
+    /// route it replaced stopped advertising that explanation to an agent.
+    /// `artifacts.write`, `channels.archive`/`channels.create` and their
+    /// legacy `mcp/*@v1` twins were the only descriptions that changed.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -839,7 +847,7 @@ mod tests {
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:e5c39878972998e9eb49045d427551a8b42e5b3ace07256361b886acdf4eeb89",
+                "sha256:0a3c055cc0fa683d2c223ee7685aed6eec574aaf271a511cd687141079bc807d",
             ),
             (
                 "mcp/channel/read@v1",
@@ -847,7 +855,7 @@ mod tests {
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:8756837d85513740e473c948a38fdc8a615a9ca7018e5602cc3a1f82d8413bde",
+                "sha256:e2e84b022c03e482922a6aaf966db27fb329fb5863a762176f6ea559150b7477",
             ),
             (
                 "loom/artifacts/read@v1",
@@ -855,7 +863,7 @@ mod tests {
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:271e8dba6b496899ee0f6a64c54bf1189439a466e30588bb30326021ed27fc0e",
+                "sha256:2923f6036496be067a51890d3f121016fbfbdb1d032a5710a25bad0c617e4334",
             ),
             (
                 "mcp/artifact/read@v1",
@@ -863,7 +871,7 @@ mod tests {
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:9f2196b01619665f8550a75c1feda9d38de7c468fdbfafa4eb69507fda67e947",
+                "sha256:898c1f154c1c9696567581eea5ada77ab5659ce6f4cfa33a6e29dbbd31b0a188",
             ),
             (
                 "loom/issues/read@v1",
