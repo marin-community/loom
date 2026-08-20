@@ -50,7 +50,14 @@ const scratchError = ref('');
 const scratchPicker = ref<InstanceType<typeof ScratchPicker> | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const agents = ref<AgentMetadata[]>([]);
+const availableAgents = computed(() => agents.value.filter((agent) => agent.available !== false));
+const availableAgentKinds = computed(
+  () => new Set(availableAgents.value.map((agent) => agent.kind)),
+);
 const profiles = ref<Profile[]>([]);
+const visibleProfiles = computed(() =>
+  profiles.value.filter((p) => availableAgentKinds.value.has(p.agent_kind)),
+);
 const profile = ref('default');
 const overrides = ref<LaunchOverrideValues>({});
 const resolved = ref<ResolvedLaunch | null>(null);
@@ -336,9 +343,9 @@ function resetForm() {
   repo.value = '';
   title.value = '';
   goal.value = '';
-  profile.value = profiles.value.some((item) => item.name === 'default')
+  profile.value = visibleProfiles.value.some((item) => item.name === 'default')
     ? 'default'
-    : (profiles.value[0]?.name ?? 'default');
+    : (visibleProfiles.value[0]?.name ?? 'default');
   overrides.value = {};
   name.value = '';
   base.value = '';
@@ -436,10 +443,10 @@ async function refreshLaunchData() {
     managedRepos.value = managed;
     agents.value = metadata.agents;
     profiles.value = templates;
-    if (!templates.some((item) => item.name === profile.value)) {
-      profile.value = templates.some((item) => item.name === 'default')
+    if (!visibleProfiles.value.some((item) => item.name === profile.value)) {
+      profile.value = visibleProfiles.value.some((item) => item.name === 'default')
         ? 'default'
-        : (templates[0]?.name ?? 'default');
+        : (visibleProfiles.value[0]?.name ?? 'default');
       lastResolved.value = null;
     }
   } catch (cause) {
@@ -1031,7 +1038,11 @@ onActivated(() => void refreshLaunchData());
               :disabled="creating"
               @change="chooseProfile(($event.target as HTMLSelectElement).value)"
             >
-              <option v-for="candidate in profiles" :key="candidate.name" :value="candidate.name">
+              <option
+                v-for="candidate in visibleProfiles"
+                :key="candidate.name"
+                :value="candidate.name"
+              >
                 {{ candidate.name }}
               </option>
             </select>
@@ -1068,7 +1079,7 @@ onActivated(() => void refreshLaunchData());
           </div>
           <LaunchOverrides
             v-model="overrides"
-            :agents="agents"
+            :agents="availableAgents"
             :resolved="resolved"
             :fallback="lastResolved"
             :disabled="Boolean((resolved ?? lastResolved)?.policy.strict)"

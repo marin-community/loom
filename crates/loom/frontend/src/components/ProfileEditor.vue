@@ -26,6 +26,7 @@ const envName = ref('');
 const envValue = ref('');
 const envKind = ref<'literal' | 'gcp_secret'>('literal');
 
+const availableAgents = computed(() => props.agents.filter((agent) => agent.available !== false));
 const selectedAgent = computed(() =>
   props.agents.find((agent) => agent.kind === draft.value.agent_kind),
 );
@@ -180,7 +181,7 @@ watch(
         :disabled="disabled"
         class="min-w-0 rounded bg-input px-2 py-1.5"
       >
-        <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
+        <option v-for="agent in availableAgents" :key="agent.kind" :value="agent.kind">
           {{ agent.label }}
         </option>
       </select>

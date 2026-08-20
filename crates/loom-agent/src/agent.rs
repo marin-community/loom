@@ -60,6 +60,10 @@ pub struct AgentMetadata {
     /// A create request may override a builtin's default (`--protocol
     /// terminal` keeps the PTY); see [`resolve_protocol`].
     pub protocol: String,
+    /// Whether the agent binary is available on the system PATH. Used by the
+    /// UI to hide unavailable agent harnesses (e.g. when `codex` is not
+    /// installed).
+    pub available: Option<bool>,
 }
 
 pub struct AgentInstance {
@@ -205,6 +209,30 @@ async fn refresh_codex_metadata(metadata: &mut AgentMetadata) {
     apply_codex_catalog(metadata, &output.stdout);
 }
 
+pub async fn is_claude_available() -> bool {
+    binary_on_path("claude")
+}
+
+pub async fn is_codex_available() -> bool {
+    binary_on_path("codex")
+}
+
+/// Whether `bin` resolves to an executable on the `PATH`. A cheap filesystem
+/// probe — no subprocess spawn — so it is safe to call per-request. This
+/// reports presence, not functional health: a binary that exists but misbehaves
+/// still counts as available.
+fn binary_on_path(bin: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let target = if cfg!(windows) {
+        format!("{bin}.exe")
+    } else {
+        bin.to_string()
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(&target).exists())
+}
+
 fn apply_codex_catalog(metadata: &mut AgentMetadata, bytes: &[u8]) {
     let Ok(catalog) = serde_json::from_slice::<CodexModelCatalog>(bytes) else {
         return;
@@ -282,12 +310,24 @@ pub async fn resolve(db: &Db, kind: &str) -> Result<Option<ResolvedAgent>> {
 /// Every agent's metadata — the builtins followed by the operator's custom agents
 /// (name order). What `GET /api/agents` lists and the picker renders.
 pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
+    let claude_available = is_claude_available().await;
+    let codex_available = is_codex_available().await;
     let mut out = builtin_metadata();
+    // Set available field on builtin agents, but keep them in the list for backward compatibility
+    for meta in &mut out {
+        if meta.kind == "claude" {
+            meta.available = Some(claude_available);
+        } else if meta.kind == "codex" {
+            meta.available = Some(codex_available);
+        }
+    }
     if let Some(codex) = out.iter_mut().find(|meta| meta.kind == "codex") {
         refresh_codex_metadata(codex).await;
     }
     for a in crate::custom_agents::list(db).await? {
-        out.push(CustomAgentType::new(a).metadata());
+        let mut meta = CustomAgentType::new(a).metadata();
+        meta.available = Some(true); // custom agents always "available" (operator-defined)
+        out.push(meta);
     }
     Ok(out)
 }
@@ -519,6 +559,7 @@ impl AgentType for ClaudeAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
         }
     }
 
@@ -549,6 +590,7 @@ impl AgentType for CodexAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
         }
     }
 
@@ -579,6 +621,7 @@ impl AgentType for CustomAgentType {
             } else {
                 self.agent.protocol.clone()
             },
+            available: None,
         }
     }
 
@@ -2758,6 +2801,7 @@ mod tests {
             builtin,
             supports_acp: builtin || protocol == "acp",
             protocol: protocol.to_string(),
+            available: None,
         }
     }
 
