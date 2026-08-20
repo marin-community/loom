@@ -1765,7 +1765,8 @@ mod tests {
                 "Weaver context.",
                 None,
             ),
-            format!("do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow.")
+            "do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow."
+                .to_string()
         );
     }
 }
