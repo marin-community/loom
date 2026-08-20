@@ -642,6 +642,8 @@ export interface AgentMetadata {
   supports_acp: boolean;
   /** The runtime's declared/default execution backend. */
   protocol: 'terminal' | 'acp';
+  /** Whether the agent binary is available on the system PATH. */
+  available?: boolean;
 }
 
 /** An operator-defined custom agent: the shell commands loom runs at each launch

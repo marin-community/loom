@@ -17,6 +17,14 @@ const notice = ref('');
 const envName = ref('');
 const envValue = ref('');
 
+const availableAgents = computed(() => agents.value.filter((agent) => agent.available !== false));
+const availableAgentKinds = computed(
+  () => new Set(availableAgents.value.map((agent) => agent.kind)),
+);
+const visibleProfiles = computed(() =>
+  profiles.value.filter((profile) => availableAgentKinds.value.has(profile.agent_kind)),
+);
+
 const current = computed(() => profiles.value.find((profile) => profile.name === selected.value));
 
 function editable(profile: Profile): ProfileInput {
@@ -57,9 +65,9 @@ async function load() {
     agents.value = metadata.agents;
     mcpRegistry.value = registry;
     choose(
-      items.some((item) => item.name === selected.value)
+      visibleProfiles.value.some((item) => item.name === selected.value)
         ? selected.value
-        : (items[0]?.name ?? 'default'),
+        : (visibleProfiles.value[0]?.name ?? 'default'),
     );
   } catch (cause) {
     error.value = (cause as Error).message;
@@ -72,7 +80,7 @@ function add() {
   draft.value = {
     name: '',
     description: '',
-    agent_kind: agents.value[0]?.kind ?? 'claude',
+    agent_kind: availableAgents.value[0]?.kind ?? 'claude',
     model: '',
     effort: '',
     protocol: '',
@@ -166,7 +174,7 @@ onMounted(load);
           @change="choose(($event.target as HTMLSelectElement).value)"
         >
           <option v-if="creating" value="">New profile</option>
-          <option v-for="profile in profiles" :key="profile.name" :value="profile.name">
+          <option v-for="profile in visibleProfiles" :key="profile.name" :value="profile.name">
             {{ profile.name }} · {{ profile.agent_kind }} ·
             {{ profile.model || 'default model' }}
           </option>
@@ -196,7 +204,7 @@ onMounted(load);
       <template v-if="draft">
         <ProfileEditor
           v-model="draft"
-          :agents="agents"
+          :agents="availableAgents"
           :mcp-registry="mcpRegistry"
           :name-locked="!creating"
           :disabled="busy"
