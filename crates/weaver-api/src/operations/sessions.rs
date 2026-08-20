@@ -264,9 +264,8 @@ pub mod conversation {
     pub mod block {
         use super::prelude::*;
 
-        /// One conversation block, untruncated — what the `full` pointer
-        /// `sessions.conversation` leaves in place of an oversized tool payload names.
-        /// Addressed by position in the log, matching [`super::Conversation`].
+        /// Fetch a full conversation block that was elided in the main conversation
+        /// view, addressed by message and block position.
         #[operation(
     id = "sessions.conversation.block",
     actor = SessionSelf,
@@ -752,9 +751,7 @@ pub mod handoff {
         use super::prelude::*;
 
         /// Preview a handoff without applying it: resolve a selection to the exact
-        /// non-secret template snapshot [`super::Handoff`] would replace the current
-        /// runtime with, the same way `sessions.launches.resolve` previews a fresh
-        /// launch.
+        /// non-secret template that would be applied to the session.
         ///
         /// Same grant as `sessions.handoff` itself, even though this is `risk =
         /// Read`: a session entitled to hand itself off gains no new surface by

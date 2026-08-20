@@ -13,8 +13,7 @@ pub(super) use super::prelude;
 pub mod list {
     use super::prelude::*;
 
-    /// A snapshot of the most recent server log lines, oldest first. The UI loads
-    /// this once, then follows `logs.stream` for new lines.
+    /// A snapshot of the most recent server log lines, oldest first.
     ///
     /// `actor = User`: the snapshot counterpart of `logs.stream` — same policy,
     /// same reasoning (see that operation's doc comment).

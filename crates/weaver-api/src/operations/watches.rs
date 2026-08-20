@@ -161,8 +161,7 @@ pub mod list {
 pub mod programs {
     use super::prelude::*;
 
-    /// List the builtin watch programs that ship with loom — what the create form
-    /// offers and the panel's read-only script viewer renders.
+    /// List the builtin watch programs that ship with loom.
     #[operation(
     id = "watches.programs",
     actor = User,
@@ -269,8 +268,7 @@ pub mod runs {
 pub mod update {
     use super::prelude::*;
 
-    /// Patch a watch: every mutable field optional, including `enabled` (the
-    /// arm/disarm toggle).
+    /// Update a watch's settings, optionally arm or disarm it via the `enabled` field.
     ///
     /// Operator-only for the same reason as `watches.create` — a `User` grant is
     /// refused on every mutating `/watches/{id}` route.

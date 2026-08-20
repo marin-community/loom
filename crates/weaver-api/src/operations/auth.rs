@@ -531,8 +531,8 @@ pub mod tokens {
     pub mod list {
         use super::prelude::*;
 
-        /// List the caller's own personal API tokens (metadata only — never the
-        /// secret, see [`create`](super::create)).
+        /// List the caller's own personal API tokens (metadata only; secrets are
+        /// never returned).
         #[operation(
     id = "auth.tokens.list",
     actor = User,
@@ -592,7 +592,7 @@ pub mod users {
     pub mod create {
         use super::prelude::*;
 
-        /// Approve a new operator, same reasoning as [`list`](super::list).
+        /// Add a new operator to the approved allowlist.
         #[operation(
     id = "auth.users.create",
     actor = Admin,

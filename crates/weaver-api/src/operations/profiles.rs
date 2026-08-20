@@ -14,9 +14,8 @@ pub mod clone {
 
     /// Clone one profile's reviewed policy into a new insert-only profile,
     /// optionally composing its write-only environment in the same transaction.
-    /// Loom guards both the source profile's revision and the resolver
-    /// fingerprint the caller reviewed; a drift in either returns a fresh
-    /// preview instead of silently applying a stale composition.
+    /// If the profile changed since the caller reviewed it, this returns a
+    /// fresh preview instead of silently applying a stale composition.
     #[operation(
     id = "profiles.clone",
     actor = Admin,
@@ -241,8 +240,9 @@ pub mod env {
     pub mod set {
         use super::prelude::*;
 
-        /// Set one profile's write-only environment variable — a literal value or a
-        /// GCP Secret Manager reference. Exactly one of the two is required.
+        /// Set one profile's write-only environment variable from a literal
+        /// value or GCP Secret Manager reference — exactly one of the two is
+        /// required.
         #[operation(
     id = "profiles.env.set",
     actor = Admin,
