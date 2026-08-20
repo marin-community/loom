@@ -194,6 +194,58 @@ async fn transient_prompt_uses_acp_and_cleans_its_relay() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposable_launch_validation_rejects_unavailable_modes_and_cleans_its_relay() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+    let mut launch = transient_launch(
+        &ts,
+        vec![("FAKE_ACP_MODES".to_string(), "default,plan".to_string())],
+    );
+    launch.mode = Some("auto".to_string());
+    launch.initial_model = Some("fake-deep".to_string());
+    launch.initial_effort = Some("high".to_string());
+
+    let error = acp::validate_launch(
+        &ts.state.db,
+        ts.state.acp.transient_sessions(),
+        launch,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("the adapter does not advertise auto mode");
+    assert!(
+        error
+            .to_string()
+            .contains("launch mode 'auto' is not available"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("default, plan"), "{error}");
+
+    let mut launch = transient_launch(&ts, vec![]);
+    launch.initial_model = Some("claude-unavailable".to_string());
+    let error = acp::validate_launch(
+        &ts.state.db,
+        ts.state.acp.transient_sessions(),
+        launch,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("the adapter does not advertise the requested model");
+    assert!(
+        error
+            .to_string()
+            .contains("launch model 'claude-unavailable' is not available"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("fake-fast, fake-deep"),
+        "{error}"
+    );
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_prompt_failures_fall_back_without_leaking_relays() {
     let ts = TestServer::start().await;
     let before = backend::list_sessions().await.unwrap();
@@ -2862,6 +2914,58 @@ async fn rest_create_uses_the_configured_permission_default() {
         .post(&format!("/api/sessions/{id}/archive"), json!({}))
         .await
         .unwrap();
+}
+
+/// Provider-owned selectors are vetted before a durable session or worktree is
+/// created, so an account/model combination that lacks the profile's mode is a
+/// normal validation error instead of a recoverable broken runtime.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_create_vets_builtin_profile_before_provisioning() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
+    )
+    .await
+    .unwrap();
+    loom::profile::env_set(
+        &ts.state.db,
+        loom::profile::DEFAULT_PROFILE,
+        "FAKE_ACP_MODES",
+        "default,plan",
+    )
+    .await
+    .unwrap();
+
+    let worktree = ts.repo_path().join(".worktrees").join("invalid-profile");
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions", ts.addr))
+        .json(&json!({
+            "goal": "must not start",
+            "cwd": ts.cwd(),
+            "agent": "claude",
+            "protocol": "acp",
+            "name": "invalid-profile"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("launch mode 'auto' is not available"),
+        "{body}"
+    );
+    assert!(
+        !worktree.exists(),
+        "validation happens before worktree creation"
+    );
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
 }
 
 /// Poll `GET /api/sessions/{id}` until `pred` accepts the view, returning it.

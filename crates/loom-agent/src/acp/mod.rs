@@ -164,6 +164,62 @@ pub enum AcpPromptEffort<'a> {
     Prefer(&'a str),
 }
 
+/// Open and configure a disposable ACP session without sending a prompt.
+///
+/// This exercises the runtime-owned model, effort, and mode controls before a
+/// durable Loom session is provisioned. Provider entitlements are not reliably
+/// discoverable from static metadata, so the adapter handshake is the source of
+/// truth. The detached relay is always removed before returning.
+pub async fn validate_launch(
+    db: &Db,
+    transient_sessions: &crate::backend::TransientSessionRegistry,
+    launch: AcpLaunch,
+    timeout: Duration,
+) -> Result<()> {
+    if !matches!(launch.new_or_load, NewOrLoad::New { .. }) {
+        bail!("ACP launch validation requires a fresh session");
+    }
+
+    let relay_name = format!(
+        "{}{:016x}",
+        crate::backend::TRANSIENT_SESSION_PREFIX,
+        rand::random::<u64>()
+    );
+    let _relay_lease = transient_sessions.lease(&relay_name);
+    let env: Vec<(&str, &str)> = launch
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+        crate::backend::memory_max_gb(db).await,
+    )
+    .await?;
+
+    let operation = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        AcpPromptClient::new(stream).validate(&launch).await
+    };
+    let result = match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("timed out validating ACP launch after {timeout:?}")),
+    };
+    let cleanup = crate::backend::kill_session_and_wait(&relay_name).await;
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup)) => Err(cleanup.context("cleaning up ACP validation relay")),
+        (Err(error), Err(cleanup)) => Err(anyhow!(
+            "{error}; failed to clean up ACP validation relay: {cleanup}"
+        )),
+    }
+}
+
 /// Run one isolated prompt through an ordinary ACP adapter launch. Model and
 /// effort are selected through the adapter's live `configOptions`; this path
 /// never knows or invokes a provider CLI. The relay and provider session are
@@ -250,6 +306,80 @@ impl AcpPromptClient {
             output: String::new(),
             output_oversized: false,
         }
+    }
+
+    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
+        self.request(method::INITIALIZE, wire::initialize_params())
+            .await?;
+        let (cwd, meta) = match &launch.new_or_load {
+            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
+            NewOrLoad::Load { .. } => unreachable!("checked by validate_launch"),
+        };
+        let opened = self
+            .request(
+                method::SESSION_NEW,
+                wire::new_session_params(&cwd.to_string_lossy(), &launch.mcp_servers, meta),
+            )
+            .await?;
+        let opened: wire::NewSessionResult =
+            serde_json::from_value(opened).context("invalid ACP session/new response")?;
+        self.session_id = opened.session_id;
+        let mut options = opened.config_options.unwrap_or_default();
+
+        for (kind, desired) in [
+            ("model", launch.initial_model.as_deref()),
+            ("effort", launch.initial_effort.as_deref()),
+        ] {
+            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let Some((config_id, current, available)) = config_option_details(&options, kind)
+            else {
+                // Some adapters apply launch selectors out of band and do not
+                // advertise a matching ACP control. session/new is authoritative
+                // for those runtimes, just as it is during the durable handshake.
+                continue;
+            };
+            if current.as_deref() == Some(desired) {
+                continue;
+            }
+            let unavailable = if available.is_empty() {
+                format!("launch {kind} '{desired}' is not available")
+            } else {
+                format!(
+                    "launch {kind} '{desired}' is not available (advertised {kind}s: {})",
+                    available.join(", ")
+                )
+            };
+            options = self
+                .set_config_option(&config_id, Value::String(desired.to_string()))
+                .await
+                .with_context(|| unavailable)?;
+        }
+
+        if let Some(mode) = launch
+            .mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty())
+        {
+            if let Some(modes) = &opened.modes {
+                let available = mode_ids(&modes.available_modes);
+                if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
+                    bail!(
+                        "launch mode '{mode}' is not available (available modes: {})",
+                        available.join(", ")
+                    );
+                }
+            }
+            self.request(
+                method::SESSION_SET_MODE,
+                wire::set_mode_params(&self.session_id, mode),
+            )
+            .await
+            .with_context(|| format!("launch mode '{mode}' is not available"))?;
+        }
+        Ok(())
     }
 
     async fn run(
@@ -437,6 +567,49 @@ impl AcpPromptClient {
         }
         Ok(())
     }
+}
+
+fn config_option_details(
+    config_options: &[Value],
+    kind: &str,
+) -> Option<(String, Option<String>, Vec<String>)> {
+    config_options.iter().find_map(|option| {
+        let id = option.get("id").and_then(Value::as_str)?;
+        let category = option.get("category").and_then(Value::as_str);
+        let matches = match kind {
+            "model" => category == Some("model") || id == "model",
+            "effort" => {
+                category == Some("thought_level") || id == "effort" || id.contains("reasoning")
+            }
+            _ => false,
+        };
+        matches.then(|| {
+            let current = option
+                .get("currentValue")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let available = option
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| {
+                    choice
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            (id.to_string(), current, available)
+        })
+    })
+}
+
+fn mode_ids(modes: &[Value]) -> Vec<String> {
+    modes
+        .iter()
+        .filter_map(|mode| mode.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
 }
 
 fn current_model(config_options: &[Value]) -> Option<String> {

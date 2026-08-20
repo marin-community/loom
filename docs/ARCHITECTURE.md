@@ -388,6 +388,16 @@ the concrete non-secret snapshot stamped for that runtime launch. Subsequent
 template/default/registry edits cannot silently mutate it; an explicit handoff
 can replace it with a newly resolved snapshot.
 
+Builtin ACP launches have one additional admission check because provider
+account entitlements cannot be inferred from Loom's static agent metadata.
+After resolving the repository/profile environment but before creating a
+worktree or session row, Loom opens a disposable, prompt-free ACP session and
+applies the selected model, effort, and mode through the adapter's live config
+surface. An unavailable selector is returned as launch validation; the
+transient relay is always removed and receives no MCP servers or session token.
+Operator-defined adapters retain the recoverable failed-session path because
+their launch commands and validation semantics are operator-owned.
+
 **Launch base.** A new session's worktree forks from `base`. When the create
 request omits it, `git::default_base` resolves the repo's default branch on
 `origin` and fetches it, so the branch starts from a fresh `origin/<default>`
