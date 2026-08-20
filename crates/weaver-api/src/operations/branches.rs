@@ -35,18 +35,11 @@ pub mod events {
             /// Arbitrary event payload.
             #[operand(json, default = serde_json::Value::Null)]
             pub data: serde_json::Value,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = weaver_core::events::Event;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 
     pub mod list {
@@ -65,18 +58,11 @@ pub mod events {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<weaver_core::events::Event>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -96,18 +82,11 @@ pub mod get {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = BranchView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod issues {
@@ -136,18 +115,11 @@ pub mod issues {
             /// Include closed work items.
             #[operand(default = false)]
             pub all: bool,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<IssueView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -169,12 +141,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<BranchView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod slack {
@@ -208,18 +174,11 @@ pub mod slack {
             pub thread: Option<SlackThreadRef>,
             /// Dedupe key so a retried send doesn't double-post.
             pub idempotency_key: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = serde_json::Value;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -252,18 +211,11 @@ pub mod status {
             /// The current-state message shown alongside the level. Absent/empty
             /// leaves the previous message in place.
             pub message: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -292,18 +244,11 @@ pub mod tags {
             pub key: String,
             /// Who is clearing it (a watch name, or blank for `manual`).
             pub by: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 
     pub mod set {
@@ -335,18 +280,11 @@ pub mod tags {
             pub note: String,
             /// Who is setting it (a watch name, or blank for `manual`).
             pub by: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -377,18 +315,11 @@ pub mod update {
         pub goal: Option<String>,
         /// The agent's current-state message.
         pub description: Option<String>,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = BranchView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

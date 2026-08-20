@@ -26,18 +26,11 @@ pub mod adopt {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod archive {
@@ -57,18 +50,11 @@ pub mod archive {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionArchiveResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod changes {
@@ -87,18 +73,11 @@ pub mod changes {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = ChangeSetDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod chat {
@@ -124,19 +103,12 @@ pub mod chat {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[serde(default)]
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ();
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     /// The journaled ACP conversation plus the agent-owned composer metadata,
@@ -157,18 +129,11 @@ pub mod chat {
         pub before_turn: Option<i64>,
         /// Page before this sequence number within `before_turn`.
         pub before_seq: Option<i64>,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionChatView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod config {
@@ -197,7 +162,6 @@ pub mod config {
             /// The new value for this option.
             #[operand(json)]
             pub value: serde_json::Value,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
@@ -211,12 +175,6 @@ pub mod config {
         }
 
         pub type Output = ConfigOptionResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -241,18 +199,11 @@ pub mod context {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SelfContextView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod conversation {
@@ -282,18 +233,11 @@ pub mod conversation {
             pub message: u32,
             /// Which block within that message.
             pub block: u32,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = weaver_core::transcript::iris::Block;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     /// The session's agent conversation as a normalized iris log — the live
@@ -312,18 +256,11 @@ pub mod conversation {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = weaver_core::transcript::iris::Log;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod delete {
@@ -348,7 +285,6 @@ pub mod delete {
         /// the session.
         #[operand(default = false)]
         pub keep_branch: bool,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
@@ -365,12 +301,6 @@ pub mod delete {
     }
 
     pub type Output = DeleteResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod events {
@@ -398,18 +328,11 @@ pub mod events {
             /// Arbitrary event payload.
             #[operand(json, default = serde_json::Value::Null)]
             pub data: serde_json::Value,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = weaver_core::events::Event;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod list {
@@ -428,18 +351,11 @@ pub mod events {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = Vec<weaver_core::events::Event>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod stream {
@@ -466,7 +382,6 @@ pub mod events {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             //
             // `serde(default)` because a stream's operands arrive in the query string,
             // which is extracted before the dispatcher's default-filling step can run.
@@ -478,12 +393,6 @@ pub mod events {
         }
 
         pub type Output = ();
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -507,18 +416,11 @@ pub mod files {
         /// Case-insensitive substring filter. Blank matches everything.
         #[operand(default = String::new())]
         pub q: String,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionFilesView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod get {
@@ -538,18 +440,11 @@ pub mod get {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod github {
@@ -592,12 +487,6 @@ pub mod github {
             }
 
             pub type Output = Vec<SessionGithubAccessView>;
-
-            impl Scoped for Input {
-                fn scope_ref(&self) -> ScopeRef<'_> {
-                    ScopeRef::Session(&self.session)
-                }
-            }
         }
     }
 
@@ -617,18 +506,11 @@ pub mod github {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod labels {
@@ -654,7 +536,6 @@ pub mod github {
                 /// 1 to 10 label names to add to the pull request.
                 #[serde(default)]
                 pub labels: Vec<String>,
-                /// A visible session id. Omit for this session.
                 #[operand(context)]
                 pub session: String,
             }
@@ -667,12 +548,6 @@ pub mod github {
             }
 
             pub type Output = AddLabelsResult;
-
-            impl Scoped for Input {
-                fn scope_ref(&self) -> ScopeRef<'_> {
-                    ScopeRef::Session(&self.session)
-                }
-            }
         }
     }
 
@@ -693,18 +568,11 @@ pub mod github {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod set {
@@ -727,18 +595,11 @@ pub mod github {
             /// The pull request number to pin to.
             #[operand(positional)]
             pub pr_number: i64,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -771,18 +632,11 @@ pub mod handoff {
             /// The profile and per-launch overrides to resolve.
             #[operand(skip_cli)]
             pub selection: LaunchSelection,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ResolvedLaunchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     /// Replace the provider behind an idle ACP session while preserving Loom's
@@ -817,18 +671,11 @@ pub mod handoff {
         /// Optimistic-concurrency guard against the previewed resolver snapshot.
         #[operand(skip_cli)]
         pub expected_resolver_revision: Option<String>,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod history {
@@ -858,18 +705,11 @@ pub mod history {
             /// `tool_result`, `context`, `event`, or `image`.
             #[serde(default)]
             pub kinds: Vec<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = HistoryPageView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod search {
@@ -898,18 +738,11 @@ pub mod history {
             /// `tool_result`, `context`, `event`, or `image`.
             #[serde(default)]
             pub kinds: Vec<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = HistoryPageView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -934,12 +767,6 @@ pub mod ide_info {
     pub struct Input {}
 
     pub type Output = SessionIdeInfoView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod interrupt {
@@ -958,18 +785,11 @@ pub mod interrupt {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionInterruptResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod launch {
@@ -1062,12 +882,6 @@ pub mod launch {
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod launches {
@@ -1102,12 +916,6 @@ pub mod launches {
         }
 
         pub type Output = ResolvedLaunchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -1162,12 +970,6 @@ pub mod list {
     }
 
     pub type Output = Vec<SessionView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod mode {
@@ -1192,18 +994,11 @@ pub mod mode {
         pub mode_id: String,
         /// Who is changing it (a watch name, or blank for `manual`).
         pub by: Option<String>,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionModeResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod permissions {
@@ -1237,7 +1032,6 @@ pub mod permissions {
             pub option_id: String,
             /// Who is answering (a watch name, or blank for `manual`).
             pub by: Option<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
@@ -1250,12 +1044,6 @@ pub mod permissions {
         }
 
         pub type Output = AnswerPermissionResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1279,18 +1067,11 @@ pub mod preview {
         /// the visible pane).
         #[operand(default = 0)]
         pub lines: i64,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionPreviewResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod prompt {
@@ -1331,7 +1112,6 @@ pub mod prompt {
             /// Worktree-relative files to attach as ACP resource links.
             #[serde(default)]
             pub files: Vec<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
@@ -1346,12 +1126,6 @@ pub mod prompt {
         }
 
         pub type Output = PromptResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod retract {
@@ -1371,7 +1145,6 @@ pub mod prompt {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
@@ -1383,12 +1156,6 @@ pub mod prompt {
         }
 
         pub type Output = RetractResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1420,19 +1187,12 @@ pub mod raw {
         #[serde(default)]
         #[operand(default = String::new())]
         pub path: String,
-        /// A visible session id. Omit for this session.
         #[serde(default)]
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod recover {
@@ -1453,18 +1213,11 @@ pub mod recover {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod resumption_cue {
@@ -1491,18 +1244,11 @@ pub mod resumption_cue {
             /// threshold.
             #[operand(default = false)]
             pub force: bool,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ResumptionCueView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod get {
@@ -1520,18 +1266,11 @@ pub mod resumption_cue {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ResumptionCueView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1558,18 +1297,11 @@ pub mod scratch {
             /// The file name to delete.
             #[operand(positional)]
             pub name: String,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ScratchDeleteResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod limits {
@@ -1590,12 +1322,6 @@ pub mod scratch {
         pub struct Input {}
 
         pub type Output = ScratchLimitsView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -1614,18 +1340,11 @@ pub mod scratch {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = Vec<ScratchFileView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod write {
@@ -1659,19 +1378,12 @@ pub mod scratch {
             #[serde(default)]
             #[operand(default = String::new())]
             pub name: String,
-            /// A visible session id. Omit for this session.
             #[serde(default)]
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ScratchWriteResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1699,18 +1411,11 @@ pub mod send {
         pub submit: Option<bool>,
         /// Who is sending (a watch name, or blank for `manual`).
         pub by: Option<String>,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionSendResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod shells {
@@ -1735,7 +1440,6 @@ pub mod shells {
             /// Which of the session's debug shells to close.
             #[operand(positional)]
             pub index: u32,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
@@ -1743,12 +1447,6 @@ pub mod shells {
         /// The shell indices still live after the close, so a client refreshes its tabs
         /// in one round trip.
         pub type Output = Vec<u32>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod list {
@@ -1768,18 +1466,11 @@ pub mod shells {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = Vec<u32>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod terminal {
@@ -1806,19 +1497,12 @@ pub mod shells {
             #[serde(default)]
             #[operand(default = 0u32)]
             pub index: u32,
-            /// A visible session id. Omit for this session.
             #[serde(default)]
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = ();
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1842,18 +1526,11 @@ pub mod status {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod set {
@@ -1878,18 +1555,11 @@ pub mod status {
             pub level: String,
             /// The current-state message shown alongside the level.
             pub message: Option<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -1913,18 +1583,11 @@ pub mod summary {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionCatchupView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod list {
@@ -1971,12 +1634,6 @@ pub mod summary {
         }
 
         pub type Output = Vec<SessionSummaryView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -2004,18 +1661,11 @@ pub mod tags {
             pub key: String,
             /// Who is clearing it (a watch name, or blank for `manual`).
             pub by: Option<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod list {
@@ -2034,18 +1684,11 @@ pub mod tags {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod replace {
@@ -2081,18 +1724,11 @@ pub mod tags {
             pub clear: Vec<TagMatch>,
             /// The author whose existing tag set is replaced. Defaults to `manual`.
             pub by: Option<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod set {
@@ -2122,18 +1758,11 @@ pub mod tags {
             pub note: String,
             /// Who is setting it (a watch name, or blank for `manual`).
             pub by: Option<String>,
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = BranchView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -2160,19 +1789,12 @@ pub mod terminal {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[serde(default)]
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod title {
@@ -2199,18 +1821,11 @@ pub mod title {
                 /// Whether automatic title generation is enabled.
                 #[operand(positional)]
                 pub enabled: bool,
-                /// A visible session id. Omit for this session.
                 #[operand(context)]
                 pub session: String,
             }
 
             pub type Output = SessionView;
-
-            impl Scoped for Input {
-                fn scope_ref(&self) -> ScopeRef<'_> {
-                    ScopeRef::Session(&self.session)
-                }
-            }
         }
     }
 
@@ -2230,18 +1845,11 @@ pub mod title {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// A visible session id. Omit for this session.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = SessionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -2277,18 +1885,11 @@ pub mod update {
         /// The agent's current-state message — the prose shown beside the
         /// attention level.
         pub description: Option<String>,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod url {
@@ -2309,18 +1910,11 @@ pub mod url {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
 
     pub type Output = SessionUrlView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

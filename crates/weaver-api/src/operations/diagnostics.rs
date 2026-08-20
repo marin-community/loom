@@ -29,12 +29,6 @@ pub mod get {
     pub struct Input {}
 
     pub type Output = DiagnosticsView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod status {
@@ -68,12 +62,6 @@ pub mod status {
         pub pid: u32,
         /// When this process started capturing logs (≈ process start), RFC3339.
         pub started_at: String,
-    }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
     }
 }
 

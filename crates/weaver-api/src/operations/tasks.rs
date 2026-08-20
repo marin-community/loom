@@ -32,12 +32,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<TaskView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[<list::List as Operation>::SPEC];

@@ -44,12 +44,6 @@ pub mod reconcile {
     }
 
     pub type Output = DeploymentView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[<reconcile::Reconcile as Operation>::SPEC];

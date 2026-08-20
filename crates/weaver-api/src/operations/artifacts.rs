@@ -31,18 +31,11 @@ pub mod delete {
         /// this branch's own copy.
         #[operand(default = false)]
         pub repo: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ArtifactDeleteResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod get {
@@ -71,18 +64,11 @@ pub mod get {
         /// this branch's own copy first.
         #[operand(default = false)]
         pub repo: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ArtifactView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod history {
@@ -109,18 +95,11 @@ pub mod history {
         /// list this branch's own copy.
         #[operand(default = false)]
         pub repo: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = Vec<ArtifactVersion>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod list {
@@ -144,18 +123,11 @@ pub mod list {
         /// only this branch's own artifacts and the repository-shared ones.
         #[operand(default = false)]
         pub repo: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = Vec<ArtifactMeta>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod raw {
@@ -189,19 +161,12 @@ pub mod raw {
         /// Pin an immutable past revision instead of the latest.
         #[serde(default)]
         pub rev: Option<i64>,
-        /// Resolved from the calling session; not something a caller supplies.
         #[serde(default)]
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod threads {
@@ -256,7 +221,6 @@ pub mod threads {
             /// JSON object, because a tagged union is not a flag.
             #[operand(json)]
             pub target: CommentTarget,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
@@ -273,12 +237,6 @@ pub mod threads {
         }
 
         pub type Output = ThreadDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 
     pub mod list {
@@ -305,18 +263,11 @@ pub mod threads {
             /// Resolved threads appear collapsed in the dashboard, not hidden.
             #[operand(default = false)]
             pub open_only: bool,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<ThreadDto>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 
     pub mod resolve {
@@ -342,18 +293,11 @@ pub mod threads {
             /// The thread to resolve.
             #[operand(positional)]
             pub thread_id: i64,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = ThreadDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -382,18 +326,11 @@ pub mod url {
         /// The artifact's name.
         #[operand(positional)]
         pub name: String,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = SessionUrlView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod write {
@@ -440,18 +377,11 @@ pub mod write {
         /// copy.
         #[operand(default = false)]
         pub repo: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ArtifactView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

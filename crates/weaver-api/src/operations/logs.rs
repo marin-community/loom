@@ -50,12 +50,6 @@ pub mod list {
     }
 
     pub type Output = Vec<LogLineView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod stream {
@@ -79,12 +73,6 @@ pub mod stream {
     pub struct Input {}
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

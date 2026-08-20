@@ -30,12 +30,6 @@ pub mod branches {
     }
 
     pub type Output = Vec<RepoBranchView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod env {
@@ -71,12 +65,6 @@ pub mod env {
         }
 
         pub type Output = RepoEnvView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod get {
@@ -105,12 +93,6 @@ pub mod env {
         }
 
         pub type Output = RepoEnvView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -147,12 +129,6 @@ pub mod env {
         }
 
         pub type Output = RepoEnvView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -174,12 +150,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<RepoView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod recent {
@@ -204,12 +174,6 @@ pub mod recent {
     }
 
     pub type Output = Vec<RecentRepoView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod register {
@@ -235,12 +199,6 @@ pub mod register {
     }
 
     pub type Output = RepoView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod revisions {
@@ -274,12 +232,6 @@ pub mod revisions {
         }
 
         pub type Output = RepoRevisionValidationView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 

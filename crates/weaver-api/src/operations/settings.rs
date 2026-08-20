@@ -41,12 +41,6 @@ pub mod env {
         }
 
         pub type Output = Vec<AgentEnvVarView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -69,12 +63,6 @@ pub mod env {
         pub struct Input {}
 
         pub type Output = Vec<AgentEnvVarView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -104,12 +92,6 @@ pub mod env {
         }
 
         pub type Output = Vec<AgentEnvVarView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -135,12 +117,6 @@ pub mod get {
     pub struct Input {}
 
     pub type Output = SettingsEnvelope;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod patch {
@@ -175,12 +151,6 @@ pub mod patch {
     }
 
     pub type Output = SettingsEnvelope;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

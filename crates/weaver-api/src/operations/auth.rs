@@ -45,12 +45,6 @@ pub mod automation_token {
     }
 
     pub type Output = AutomationTokenView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod federate {
@@ -84,12 +78,6 @@ pub mod federate {
     }
 
     pub type Output = AutomationTokenView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod federations {
@@ -143,12 +131,6 @@ pub mod federations {
         }
 
         pub type Output = FederationView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -171,12 +153,6 @@ pub mod federations {
         pub struct Input {}
 
         pub type Output = Vec<FederationView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod remove {
@@ -203,12 +179,6 @@ pub mod federations {
         }
 
         pub type Output = RemoveFederationResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -237,12 +207,6 @@ pub mod github_config {
         pub struct Input {}
 
         pub type Output = GithubConfigView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -271,12 +235,6 @@ pub mod github_config {
         }
 
         pub type Output = GithubConfigView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -304,12 +262,6 @@ pub mod github_token {
         pub struct Input {}
 
         pub type Output = GithubTokenStatusView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod remove {
@@ -330,12 +282,6 @@ pub mod github_token {
         pub struct Input {}
 
         pub type Output = GithubTokenStatusView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -363,12 +309,6 @@ pub mod github_token {
         }
 
         pub type Output = GithubTokenStatusView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -402,12 +342,6 @@ pub mod login {
     }
 
     pub type Output = MeView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod logout {
@@ -429,12 +363,6 @@ pub mod logout {
 
     /// The caller's identity after logout (`authenticated: false`).
     pub type Output = MeView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod me {
@@ -455,12 +383,6 @@ pub mod me {
     pub struct Input {}
 
     pub type Output = MeView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod set_password {
@@ -484,12 +406,6 @@ pub mod set_password {
     }
 
     pub type Output = UserView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod tokens {
@@ -520,12 +436,6 @@ pub mod tokens {
         }
 
         pub type Output = CreatedTokenView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -547,12 +457,6 @@ pub mod tokens {
         pub struct Input {}
 
         pub type Output = Vec<TokenView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod revoke {
@@ -577,12 +481,6 @@ pub mod tokens {
         }
 
         pub type Output = RevokeTokenResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -629,12 +527,6 @@ pub mod users {
         }
 
         pub type Output = UserView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -655,12 +547,6 @@ pub mod users {
         pub struct Input {}
 
         pub type Output = Vec<UserView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod remove {
@@ -684,12 +570,6 @@ pub mod users {
         }
 
         pub type Output = RemoveUserResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set_role {
@@ -726,12 +606,6 @@ pub mod users {
         }
 
         pub type Output = UserView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 

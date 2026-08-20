@@ -92,6 +92,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut output_ty = None;
     let mut view_ty = None;
     let mut custom_render = false;
+    let mut custom_scoped = false;
 
     for entry in &args.entries {
         match entry.key.to_string().as_str() {
@@ -111,6 +112,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "output" => output_ty = Some(as_ident(&entry.value)?),
             "view" => view_ty = Some(as_ident(&entry.value)?),
             "render" => custom_render = as_ident(&entry.value)? == "custom",
+            "scoped" => custom_scoped = as_ident(&entry.value)? == "custom",
             other => {
                 return Err(syn::Error::new_spanned(
                     &entry.key,
@@ -217,6 +219,41 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
+    // `Scoped` for free: every operation's resource check reduces to "which
+    // context field names the resource", and that's exactly what `scope`
+    // already says. `scoped = custom` opts out for the rare operation whose
+    // resource isn't one of its own context fields.
+    let scoped_impl = if custom_scoped {
+        quote!()
+    } else {
+        let scope_ref = match scope.to_string().as_str() {
+            "Global" => quote!(::weaver_api::operations::ScopeRef::Global),
+            "Session" => quote!(::weaver_api::operations::ScopeRef::Session(&self.session)),
+            "Branch" => quote!(::weaver_api::operations::ScopeRef::Branch(&self.branch)),
+            "Repository" => {
+                quote!(::weaver_api::operations::ScopeRef::Repository(
+                    &self.repo_root
+                ))
+            }
+            other => {
+                return Err(syn::Error::new_spanned(
+                    &item,
+                    format!(
+                        "no default `Scoped` impl for `scope = {other}`; add `scoped = custom` \
+                         and implement it by hand"
+                    ),
+                ))
+            }
+        };
+        quote! {
+            impl ::weaver_api::operations::Scoped for #input_ty {
+                fn scope_ref(&self) -> ::weaver_api::operations::ScopeRef<'_> {
+                    #scope_ref
+                }
+            }
+        }
+    };
+
     Ok(quote! {
         #(#attrs)*
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,5 +282,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
 
         #render_impl
+
+        #scoped_impl
     })
 }

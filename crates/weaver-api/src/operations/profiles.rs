@@ -56,12 +56,6 @@ pub mod clone {
     }
 
     pub type Output = ProfileView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod create {
@@ -129,12 +123,6 @@ pub mod create {
     }
 
     pub type Output = ProfileView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod delete {
@@ -160,12 +148,6 @@ pub mod delete {
     }
 
     pub type Output = ProfileDeleteResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod effective {
@@ -191,12 +173,6 @@ pub mod effective {
     }
 
     pub type Output = EffectiveProfileView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod env {
@@ -229,12 +205,6 @@ pub mod env {
         }
 
         pub type Output = ProfileView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -269,12 +239,6 @@ pub mod env {
         }
 
         pub type Output = ProfileView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -301,12 +265,6 @@ pub mod get {
     }
 
     pub type Output = ProfileView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod list {
@@ -329,12 +287,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<ProfileView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod update {
@@ -405,12 +357,6 @@ pub mod update {
     }
 
     pub type Output = ProfileView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

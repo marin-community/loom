@@ -62,12 +62,6 @@ pub mod custom {
         }
 
         pub type Output = CustomAgentsView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod delete {
@@ -95,12 +89,6 @@ pub mod custom {
         }
 
         pub type Output = CustomAgentsView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod update {
@@ -147,12 +135,6 @@ pub mod custom {
         }
 
         pub type Output = CustomAgentsView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -175,12 +157,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = AgentsView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod oneshot {
@@ -230,12 +206,6 @@ pub mod oneshot {
         /// `null` when the adapter is absent or fails — callers degrade to their
         /// own deterministic fallback rather than seeing an error.
         pub output: Option<String>,
-    }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
     }
 }
 

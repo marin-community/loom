@@ -62,12 +62,6 @@ pub mod create {
     }
 
     pub type Output = WatchView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod delete {
@@ -94,12 +88,6 @@ pub mod delete {
     }
 
     pub type Output = WatchDeleteResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod get {
@@ -124,12 +112,6 @@ pub mod get {
     }
 
     pub type Output = WatchView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod list {
@@ -150,12 +132,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<WatchView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod programs {
@@ -185,12 +161,6 @@ pub mod programs {
         /// Print one program's embedded script source instead of the table, e.g.
         /// `--source builtin:archive-merged`.
         pub source: Option<String>,
-    }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
     }
 }
 
@@ -223,12 +193,6 @@ pub mod run {
     }
 
     pub type Output = WatchRunResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod runs {
@@ -257,12 +221,6 @@ pub mod runs {
     }
 
     pub type Output = Vec<WatchRunView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod update {
@@ -315,12 +273,6 @@ pub mod update {
     }
 
     pub type Output = WatchView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

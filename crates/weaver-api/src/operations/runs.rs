@@ -57,12 +57,6 @@ pub mod create {
     }
 
     pub type Output = RunView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod get {
@@ -89,12 +83,6 @@ pub mod get {
     }
 
     pub type Output = RunView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod list {
@@ -118,12 +106,6 @@ pub mod list {
     pub struct Input {}
 
     pub type Output = Vec<RunView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

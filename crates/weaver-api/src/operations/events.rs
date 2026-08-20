@@ -45,12 +45,6 @@ pub mod stream {
     }
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[<stream::Stream as Operation>::SPEC];

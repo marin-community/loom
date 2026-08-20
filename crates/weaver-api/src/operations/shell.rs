@@ -25,12 +25,6 @@ pub mod restart {
     pub struct Input {}
 
     pub type Output = ShellRestartResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod terminal {
@@ -51,12 +45,6 @@ pub mod terminal {
     pub struct Input {}
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

@@ -46,12 +46,6 @@ pub mod custom {
         }
 
         pub type Output = CustomMcpView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod delete {
@@ -77,12 +71,6 @@ pub mod custom {
         }
 
         pub type Output = CustomMcpDeleteResult;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod get {
@@ -108,12 +96,6 @@ pub mod custom {
         }
 
         pub type Output = CustomMcpView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -135,12 +117,6 @@ pub mod custom {
         pub struct Input {}
 
         pub type Output = Vec<CustomMcpView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod update {
@@ -179,12 +155,6 @@ pub mod custom {
         }
 
         pub type Output = CustomMcpView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -207,12 +177,6 @@ pub mod get {
     pub struct Input {}
 
     pub type Output = McpRegistryView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

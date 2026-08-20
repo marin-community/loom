@@ -62,12 +62,6 @@ pub mod comments {
         }
 
         pub type Output = ReviewDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod delete {
@@ -99,12 +93,6 @@ pub mod comments {
         }
 
         pub type Output = ReviewDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod resolve {
@@ -136,12 +124,6 @@ pub mod comments {
         }
 
         pub type Output = ReviewCommentDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod update {
@@ -183,12 +165,6 @@ pub mod comments {
         }
 
         pub type Output = ReviewDto;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -239,12 +215,6 @@ pub mod create {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod discard {
@@ -276,12 +246,6 @@ pub mod discard {
     pub struct Output {
         pub discarded: bool,
     }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod get {
@@ -309,12 +273,6 @@ pub mod get {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod list {
@@ -340,7 +298,6 @@ pub mod list {
         /// The artifact name for `subject_kind = "artifact"`, or `"changes"` for
         /// `subject_kind = "changes"`.
         pub subject_key: String,
-        /// A visible session id. Omit for this session.
         #[operand(context)]
         pub session: String,
     }
@@ -356,12 +313,6 @@ pub mod list {
     }
 
     pub type Output = Vec<ReviewDto>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Session(&self.session)
-        }
-    }
 }
 
 pub mod retarget {
@@ -392,12 +343,6 @@ pub mod retarget {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod retry_delivery {
@@ -425,12 +370,6 @@ pub mod retry_delivery {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod submit {
@@ -464,12 +403,6 @@ pub mod submit {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod update {
@@ -504,12 +437,6 @@ pub mod update {
     }
 
     pub type Output = ReviewDto;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

@@ -55,12 +55,6 @@ pub mod actions {
     }
 
     pub type Output = IssueActionsResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod backlog {
@@ -110,12 +104,6 @@ pub mod backlog {
         }
 
         pub type Output = IssueView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Repository(&self.repo_root)
-            }
-        }
     }
 }
 
@@ -151,12 +139,6 @@ pub mod board {
     }
 
     pub type Output = Vec<IssueView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod close {
@@ -187,12 +169,6 @@ pub mod close {
     }
 
     pub type Output = IssueActionsResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod create {
@@ -226,12 +202,6 @@ pub mod create {
     }
 
     pub type Output = IssueView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod delete {
@@ -262,12 +232,6 @@ pub mod delete {
     }
 
     pub type Output = IssueActionsResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod get {
@@ -297,12 +261,6 @@ pub mod get {
     }
 
     pub type Output = IssueView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod list {
@@ -331,7 +289,6 @@ pub mod list {
 
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
     pub struct Input {
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub repo_root: String,
         /// Include closed work items.
@@ -352,12 +309,6 @@ pub mod list {
         pub repo: bool,
         /// Show only the items claimed by this branch.
         pub mine: bool,
-    }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
     }
 }
 
@@ -389,12 +340,6 @@ pub mod reopen {
     }
 
     pub type Output = IssueActionsResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod tags {
@@ -430,12 +375,6 @@ pub mod tags {
         }
 
         pub type Output = IssueView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Repository(&self.repo_root)
-            }
-        }
     }
 
     pub mod set {
@@ -473,12 +412,6 @@ pub mod tags {
         }
 
         pub type Output = IssueView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Repository(&self.repo_root)
-            }
-        }
     }
 }
 
@@ -522,12 +455,6 @@ pub mod update {
     }
 
     pub type Output = IssueView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

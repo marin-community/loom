@@ -25,18 +25,11 @@ pub mod effective {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = EffectivePermissionsView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -63,12 +56,6 @@ pub mod explain {
     }
 
     pub type Output = crate::operations::OperationView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod github {
@@ -102,12 +89,6 @@ pub mod github {
         }
 
         pub type Output = SessionGithubAccessView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod restricted {
@@ -134,18 +115,11 @@ pub mod github {
                 /// Tool-specific arguments (`number`, optional `body`/`title`).
                 #[operand(json)]
                 pub arguments: serde_json::Value,
-                /// Resolved from the calling session; not something a caller supplies.
                 #[operand(context)]
                 pub session: String,
             }
 
             pub type Output = RestrictedGithubToolView;
-
-            impl Scoped for Input {
-                fn scope_ref(&self) -> ScopeRef<'_> {
-                    ScopeRef::Session(&self.session)
-                }
-            }
         }
     }
 
@@ -176,12 +150,6 @@ pub mod github {
         }
 
         pub type Output = SessionGithubAccessView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod token {
@@ -201,18 +169,11 @@ pub mod github {
 
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
         pub struct Input {
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = GithubTokenView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 
@@ -247,12 +208,6 @@ pub mod requests {
         }
 
         pub type Output = PermissionRequestView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod create {
@@ -280,18 +235,11 @@ pub mod requests {
             /// Currently only `write` is accepted.
             #[operand(default = "write")]
             pub mode: String,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = PermissionRequestView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 
     pub mod deny {
@@ -319,12 +267,6 @@ pub mod requests {
         }
 
         pub type Output = PermissionRequestView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod list {
@@ -346,18 +288,11 @@ pub mod requests {
         pub struct Input {
             /// Restrict to `pending`, `approved`, or `denied`. Omit to list all.
             pub state: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub session: String,
         }
 
         pub type Output = Vec<PermissionRequestView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Session(&self.session)
-            }
-        }
     }
 }
 

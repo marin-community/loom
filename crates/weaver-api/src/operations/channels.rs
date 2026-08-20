@@ -31,18 +31,11 @@ pub mod archive {
         /// A visible channel id.
         #[operand(positional)]
         pub channel: String,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ChannelArchiveResult;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod bindings {
@@ -69,18 +62,11 @@ pub mod bindings {
             /// resolved server-side.
             #[operand(default = String::new())]
             pub channel: String,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<ChannelBindingView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -121,12 +107,6 @@ pub mod create {
     }
 
     pub type Output = ChannelView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Repository(&self.repo_root)
-        }
-    }
 }
 
 pub mod get {
@@ -150,18 +130,11 @@ pub mod get {
         /// resolved server-side.
         #[operand(positional, default = String::new())]
         pub channel: String,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = ChannelView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod list {
@@ -185,18 +158,11 @@ pub mod list {
         /// Include archived channels.
         #[operand(default = false)]
         pub archived: bool,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
 
     pub type Output = Vec<ChannelView>;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
-    }
 }
 
 pub mod messages {
@@ -241,18 +207,11 @@ pub mod messages {
             pub reply_to: Option<String>,
             /// Retry-safe key scoped to the channel.
             pub idempotency_key: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = ChannelMessageView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 
     pub mod list {
@@ -289,18 +248,11 @@ pub mod messages {
             /// Read without advancing this session's read marker.
             #[operand(default = false)]
             pub peek: bool,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<ChannelMessageView>;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -331,18 +283,11 @@ pub mod read_marker {
             /// Mark read through this sequence; omission advances through the
             /// latest message.
             pub seq: Option<i64>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = ChannelSubscriptionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -375,18 +320,11 @@ pub mod subscription {
             pub mode: String,
             /// Subscribe this descendant session instead of the caller.
             pub session: Option<String>,
-            /// Resolved from the calling session; not something a caller supplies.
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = ChannelSubscriptionView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Branch(&self.branch)
-            }
-        }
     }
 }
 
@@ -423,7 +361,6 @@ pub mod wait {
         /// Seconds to wait before giving up.
         #[operand(default = 1800)]
         pub timeout: i64,
-        /// Resolved from the calling session; not something a caller supplies.
         #[operand(context)]
         pub branch: String,
     }
@@ -436,12 +373,6 @@ pub mod wait {
         /// Seconds between polls while waiting.
         #[operand(default = 2)]
         pub interval: i64,
-    }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Branch(&self.branch)
-        }
     }
 }
 

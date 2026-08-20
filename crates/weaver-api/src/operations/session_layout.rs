@@ -51,12 +51,6 @@ pub mod defaults {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod set {
@@ -98,12 +92,6 @@ pub mod defaults {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -128,12 +116,6 @@ pub mod events {
     pub struct Input {}
 
     pub type Output = ();
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod get {
@@ -154,12 +136,6 @@ pub mod get {
     pub struct Input {}
 
     pub type Output = SessionLayoutView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod groups {
@@ -189,12 +165,6 @@ pub mod groups {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod delete {
@@ -226,12 +196,6 @@ pub mod groups {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod preference {
@@ -263,12 +227,6 @@ pub mod groups {
             }
 
             pub type Output = SessionLayoutView;
-
-            impl Scoped for Input {
-                fn scope_ref(&self) -> ScopeRef<'_> {
-                    ScopeRef::Global
-                }
-            }
         }
     }
 
@@ -297,12 +255,6 @@ pub mod groups {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 
@@ -334,12 +286,6 @@ pub mod r#move {
     }
 
     pub type Output = SessionLayoutView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 pub mod reorder {
     use super::prelude::*;
@@ -384,12 +330,6 @@ pub mod reorder {
     }
 
     pub type Output = SessionLayoutView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod restore {
@@ -420,12 +360,6 @@ pub mod restore {
     }
 
     pub type Output = SessionLayoutView;
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 pub mod spaces {
@@ -454,12 +388,6 @@ pub mod spaces {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod delete {
@@ -491,12 +419,6 @@ pub mod spaces {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 
     pub mod update {
@@ -524,12 +446,6 @@ pub mod spaces {
         }
 
         pub type Output = SessionLayoutView;
-
-        impl Scoped for Input {
-            fn scope_ref(&self) -> ScopeRef<'_> {
-                ScopeRef::Global
-            }
-        }
     }
 }
 

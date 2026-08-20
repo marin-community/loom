@@ -76,12 +76,6 @@ pub mod connection_status {
         pub default_repo: String,
         pub socket: SlackSocketView,
     }
-
-    impl Scoped for Input {
-        fn scope_ref(&self) -> ScopeRef<'_> {
-            ScopeRef::Global
-        }
-    }
 }
 
 static OPERATIONS: &[&OperationSpec] = &[<connection_status::ConnectionStatus as Operation>::SPEC];
