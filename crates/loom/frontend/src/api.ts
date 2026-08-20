@@ -625,7 +625,8 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
   return get(`/sessions/${id}/chat${query}`) as Promise<ChatSnapshot>;
 };
 
-/** Send a user message to an ACP session now, stopping and replacing a live turn. */
+/** Send a user message now, stopping an ordinary live turn. During compaction
+ * the server queues it for the next turn instead. */
 export const promptSession = (id: string, text: string, by?: string, files: string[] = []) =>
   post(`/sessions/${id}/prompt`, {
     text,

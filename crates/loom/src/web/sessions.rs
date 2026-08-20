@@ -1820,9 +1820,10 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // A cross-session send must not sit behind an ACP turn indefinitely or be
-    // discarded with an adapter's in-memory steer. Cancel a live turn and
-    // immediately start this message as a fresh turn, keeping the same audit.
+    // A cross-session send must not sit behind an ordinary ACP turn indefinitely
+    // or be discarded with an adapter's in-memory steer. Cancel and replace that
+    // turn, while allowing a provider-owned compaction to finish before the
+    // message starts, keeping the same audit either way.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());
@@ -2075,8 +2076,9 @@ pub(super) struct PromptBody {
     pub text: String,
     #[serde(default)]
     pub by: Option<String>,
-    /// Deliver this user message immediately by cancelling any live turn and
-    /// starting the message as a normal prompt.
+    /// Deliver this user message immediately by cancelling any ordinary live
+    /// turn and starting the message as a normal prompt. A live compaction queues
+    /// the message until its provider-owned boundary instead.
     #[serde(default)]
     pub send_now: bool,
     /// Promote the server's durable next-turn queue instead of sending `text`.
@@ -2196,7 +2198,8 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 
 /// Send a user message to an ACP session. A normal request is dispatched when
 /// idle or appended to the durable queue while a turn is live; `send_now`
-/// instead cancels any live turn and starts the message as a normal prompt.
+/// instead cancels an ordinary live turn and starts the message as a normal
+/// prompt. A live compaction always finishes before queued feedback starts.
 /// Returns 202 `{ queued, turn }`. Every send records a `nudge` event (the audit
 /// rule).
 pub(super) async fn prompt_session(

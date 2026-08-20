@@ -1570,6 +1570,95 @@ async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
     }));
 }
 
+/// Compaction mutates provider-owned conversation state and must finish at its
+/// normal prompt-response boundary. Immediate user input becomes durable
+/// next-turn feedback, including after Loom re-attaches to the live adapter.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_send_now_waits_for_live_compaction() {
+    let ts = TestServer::start().await;
+    let id = "acp-compact-queue";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![("FAKE_ACP_COMPACT_DELAY".to_string(), "1500".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "/compact preserve task context" }),
+        )
+        .await
+        .unwrap();
+    let inflight = session_mod::get(&ts.state.db, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .acp_inflight
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&inflight).unwrap()["compaction"],
+        true
+    );
+
+    // Model a Loom-side restart while the provider keeps compacting. The
+    // durable in-flight marker must preserve the no-interrupt rule.
+    assert!(ts.state.acp.stop(id), "the compaction task was running");
+    acp::attach(&ts.state.acp_ctx(), id)
+        .await
+        .expect("re-attach succeeds");
+
+    let sent = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "say:after compaction", "send_now": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], true, "response: {sent}");
+    assert_eq!(sent["turn"], 0);
+    // Promoting the visible queue is still follow-up delivery, not an explicit
+    // request to abort the provider's compaction.
+    let forced = ts
+        .client
+        .post(
+            &format!("/api/sessions/{id}/prompt"),
+            json!({ "text": "", "force_queued": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forced["queued"], true, "response: {forced}");
+    assert_eq!(forced["turn"], 0);
+
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(10), |chat| {
+        let blocks = chat["blocks"].as_array().unwrap();
+        chat["live_turn"].is_null()
+            && blocks.iter().any(|block| {
+                block["turn"] == 1
+                    && block["kind"] == "agent_message"
+                    && block["payload"]["text"] == "after compaction"
+            })
+    })
+    .await;
+    assert!(chat["pending_prompt"].is_null());
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "end_turn"
+    }));
+    assert!(!blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+}
+
 /// Cross-session `/send` is control-plane input, not ordinary composer
 /// feedback. It cancels a live turn and starts the message immediately instead
 /// of leaving it in the durable next-turn queue.

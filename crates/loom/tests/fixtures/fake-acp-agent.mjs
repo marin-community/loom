@@ -24,6 +24,8 @@
 //                        Claude background-task continuation and close it with
 //                        Claude's cost-bearing task-notification usage marker
 //   wait:MS              sleep MS ms (cancellable) — for queueing/interrupt/crash tests
+//   /compact TEXT        model a provider-owned compaction for
+//                        `FAKE_ACP_COMPACT_DELAY` ms
 //   permission:NAME      a session/request_permission that BLOCKS the turn until the
 //                        client answers (exercises both auto-answer and REST-answer)
 //   resources            echo the names of supplied resource_link blocks
@@ -326,6 +328,8 @@ async function runToken(tok) {
     }, Number(delay));
   } else if (tok.startsWith("wait:")) {
     await sleepCancellable(Number(tok.slice(5)));
+  } else if (tok === "/compact" || tok.startsWith("/compact ")) {
+    await sleepCancellable(Number(process.env.FAKE_ACP_COMPACT_DELAY || "0"));
   } else if (tok.startsWith("permission:")) {
     const outcome = await askPermission(tok.slice(11));
     if (!outcome || !outcome.outcome || outcome.outcome.outcome === "cancelled") {
