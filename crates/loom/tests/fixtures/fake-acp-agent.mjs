@@ -92,12 +92,19 @@ async function sleepCancellable(ms) {
   }
 }
 
-const MODES = [
-  { id: "default", name: "Default" },
-  { id: "acceptEdits", name: "Accept edits" },
-  { id: "bypassPermissions", name: "Bypass permissions" },
-  { id: "plan", name: "Plan" },
-];
+const modeNames = {
+  auto: "Auto",
+  default: "Default",
+  acceptEdits: "Accept edits",
+  bypassPermissions: "Bypass permissions",
+  plan: "Plan",
+};
+const MODES = (
+  process.env.FAKE_ACP_MODES || "auto,default,acceptEdits,bypassPermissions,plan"
+)
+  .split(",")
+  .filter(Boolean)
+  .map((id) => ({ id, name: modeNames[id] || id }));
 const modelValues = (process.env.FAKE_ACP_MODELS || "fake-fast,fake-deep").split(",");
 let currentModel = modelValues[0];
 let currentEffort = "medium";
@@ -455,7 +462,17 @@ function handleMessage(msg) {
       respond(msg.id, {});
       break;
     case "session/set_config_option":
-      if (msg.params.configId === "model") currentModel = msg.params.value;
+      if (msg.params.configId === "model") {
+        if (!modelValues.includes(msg.params.value)) {
+          send({
+            jsonrpc: JSONRPC,
+            id: msg.id,
+            error: { code: -32602, message: `Model ${msg.params.value} is not available` },
+          });
+          break;
+        }
+        currentModel = msg.params.value;
+      }
       if (msg.params.configId === "thought_level") currentEffort = msg.params.value;
       if (msg.params.configId === "mode") currentMode = msg.params.value;
       if (msg.params.configId === "fast-mode") fastMode = msg.params.value;
