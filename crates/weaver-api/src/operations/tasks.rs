@@ -16,11 +16,8 @@ pub mod list {
     /// blow GitHub's delivery timeout — newest first.
     ///
     /// `actor = User`: human-only self-service debugging (Settings →
-    /// Diagnostics), same as the log endpoints (`crates/loom/src/web/logview.rs`).
-    /// `GET` is unconditionally allowed for a `User` grant; a session credential
-    /// has never been able to reach `/tasks` (absent from the `Grant::Session`
-    /// allowlist in `crates/loom/src/web/auth.rs`), so this stays `User` rather
-    /// than `SessionSelf`.
+    /// Diagnostics), same as the log endpoints. No session grant can reach
+    /// `/tasks`, so this is `User` rather than `SessionSelf`.
     #[operation(
     id = "tasks.list",
     actor = User,

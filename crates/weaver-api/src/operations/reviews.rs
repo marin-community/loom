@@ -16,8 +16,7 @@ pub mod comments {
         ///
         /// Operator-only: a review's comments are private to the human drafting them
         /// until `reviews.submit` delivers the whole thing, so a session credential —
-        /// even the reviewed session's own — may not add one. See `require_operator`
-        /// in `crates/loom/src/web/reviews.rs`.
+        /// even the reviewed session's own — may not add one.
         #[operation(
     id = "reviews.comments.create",
     actor = User,
@@ -76,9 +75,8 @@ pub mod comments {
 
         /// Remove a draft review comment.
         ///
-        /// Operator-only, same reasoning as `reviews.comments.create`. Rejected once
-        /// the review has left `draft` status. See `creator_review` in
-        /// `crates/loom/src/web/reviews.rs`.
+        /// Operator-only and limited to the review's own creator — drafts are
+        /// private. Rejected once the review has left `draft` status.
         #[operation(
     id = "reviews.comments.delete",
     actor = User,
@@ -116,8 +114,7 @@ pub mod comments {
         ///
         /// Operator-only, but — unlike the other `reviews.comments.*` operations —
         /// not limited to the review's own creator: any human operator may resolve a
-        /// comment on any submitted review. See `submitted_operator_review` in
-        /// `crates/loom/src/web/reviews.rs`.
+        /// comment on any submitted review.
         #[operation(
     id = "reviews.comments.resolve",
     actor = User,
@@ -294,8 +291,7 @@ pub mod get {
     /// version.
     ///
     /// Operator-only: a submitted review is visible to any human operator, and a
-    /// draft only to the operator who created it. See `require_operator` and
-    /// `review::get_visible` in `crates/loom/src/web/reviews.rs`.
+    /// draft only to the operator who created it.
     #[operation(
     id = "reviews.get",
     actor = User,
@@ -375,9 +371,8 @@ pub mod retarget {
     /// artifact's latest revision, or the branch's current change-set — in one
     /// step, without touching anything else.
     ///
-    /// Operator-only, and limited to the review's own creator — same reasoning
-    /// as `reviews.comments.create`. Rejected once the review has left `draft`
-    /// status. See `creator_review` in `crates/loom/src/web/reviews.rs`.
+    /// Operator-only and limited to the review's own creator — drafts are
+    /// private. Rejected once the review has left `draft` status.
     #[operation(
     id = "reviews.retarget",
     actor = User,
@@ -412,8 +407,7 @@ pub mod retry_delivery {
     ///
     /// Operator-only, and — unlike `reviews.comments.create` and
     /// `reviews.submit` — not limited to the review's own creator: any human
-    /// operator may retry delivery of any submitted review. See
-    /// `submitted_operator_review` in `crates/loom/src/web/reviews.rs`.
+    /// operator may retry delivery of any submitted review.
     #[operation(
     id = "reviews.retry_delivery",
     actor = User,
@@ -445,9 +439,8 @@ pub mod submit {
     /// Submit a review's draft, delivering its structured feedback into the
     /// reviewed session's own conversation.
     ///
-    /// Operator-only, same reasoning as `reviews.comments.create` — only the
-    /// review's creator may submit it. See `creator_review` in
-    /// `crates/loom/src/web/reviews.rs`.
+    /// Operator-only and limited to the review's own creator — only the
+    /// creator may submit it.
     #[operation(
     id = "reviews.submit",
     actor = User,
@@ -485,9 +478,8 @@ pub mod update {
     /// Edit a draft review's summary, or retarget it onto a caller-supplied
     /// subject version.
     ///
-    /// Operator-only, and limited to the review's own creator — same reasoning
-    /// as `reviews.comments.create`. Rejected once the review has left `draft`
-    /// status. See `creator_review` in `crates/loom/src/web/reviews.rs`.
+    /// Operator-only and limited to the review's own creator — drafts are
+    /// private. Rejected once the review has left `draft` status.
     #[operation(
     id = "reviews.update",
     actor = User,

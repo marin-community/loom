@@ -112,8 +112,8 @@ pub mod events {
 
     /// Subscribe to layout changes as other dashboard tabs make them.
     ///
-    /// `actor = User`: the layout is the signed-in operator's own dashboard state,
-    /// and a session credential has never been able to read it.
+    /// `actor = User`: the layout is the signed-in operator's own dashboard
+    /// state; no session grant can read it.
     #[operation(
     id = "session_layout.events",
     actor = User,

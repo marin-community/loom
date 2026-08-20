@@ -18,13 +18,9 @@ pub mod create {
     /// session: the entry point GitHub Actions, ops scripts, and Grafana alerts
     /// call through their federated automation credential.
     ///
-    /// `actor = Internal`: the only real caller is the runtime itself, presenting
-    /// an automation bearer token minted by `POST /api/auth/automation-token` (see
-    /// `.github/workflows/loom-issue.yml`). `crates/loom/src/web/automation.rs`'s
-    /// `run_identity` also lets a plain `Admin`/`User` grant name any profile —
-    /// there is no CLI command or dashboard control that exercises that path
-    /// today, so the more restrictive `Internal` is the honest description of
-    /// this operation's actual surface; `Admin` still reaches it unconditionally.
+    /// `actor = Internal`: the runtime is the only real caller, presenting an
+    /// automation bearer token minted by `auth.automation_token`. `Admin` can
+    /// still reach it directly.
     #[operation(
     id = "runs.create",
     actor = Internal,

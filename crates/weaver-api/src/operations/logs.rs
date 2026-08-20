@@ -63,9 +63,8 @@ pub mod stream {
 
     /// Tail the server log as it is written.
     ///
-    /// `actor = User`: human-only self-service debugging, the same policy the
-    /// snapshot endpoints carry. A session credential has never been able to reach
-    /// the log routes.
+    /// `actor = User`: human-only self-service debugging; no session grant can
+    /// reach the log routes.
     #[operation(
     id = "logs.stream",
     actor = User,
