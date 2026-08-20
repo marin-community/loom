@@ -1608,7 +1608,6 @@ async fn prompt_send_now_waits_for_live_compaction() {
     // Model a Loom-side restart while the provider keeps compacting. The
     // durable in-flight marker must preserve the no-interrupt rule.
     assert!(ts.state.acp.stop(id), "the compaction task was running");
-    tokio::time::sleep(Duration::from_millis(100)).await;
     acp::attach(&ts.state.acp_ctx(), id)
         .await
         .expect("re-attach succeeds");
