@@ -308,12 +308,12 @@ impl AcpPromptClient {
         }
     }
 
-    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
+    async fn open_new_session(&mut self, launch: &AcpLaunch) -> Result<wire::NewSessionResult> {
         self.request(method::INITIALIZE, wire::initialize_params())
             .await?;
         let (cwd, meta) = match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
-            NewOrLoad::Load { .. } => unreachable!("checked by validate_launch"),
+            NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
         };
         let opened = self
             .request(
@@ -323,7 +323,12 @@ impl AcpPromptClient {
             .await?;
         let opened: wire::NewSessionResult =
             serde_json::from_value(opened).context("invalid ACP session/new response")?;
-        self.session_id = opened.session_id;
+        self.session_id.clone_from(&opened.session_id);
+        Ok(opened)
+    }
+
+    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
+        let opened = self.open_new_session(launch).await?;
         let mut options = opened.config_options.unwrap_or_default();
 
         for (kind, desired) in [
@@ -333,26 +338,25 @@ impl AcpPromptClient {
             let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
                 continue;
             };
-            let Some((config_id, current, available)) = config_option_details(&options, kind)
-            else {
+            let Some(details) = config_option_details(&options, kind) else {
                 // Some adapters apply launch selectors out of band and do not
                 // advertise a matching ACP control. session/new is authoritative
                 // for those runtimes, just as it is during the durable handshake.
                 continue;
             };
-            if current.as_deref() == Some(desired) {
+            if details.current.as_deref() == Some(desired) {
                 continue;
             }
-            let unavailable = if available.is_empty() {
+            let unavailable = if details.available.is_empty() {
                 format!("launch {kind} '{desired}' is not available")
             } else {
                 format!(
                     "launch {kind} '{desired}' is not available (advertised {kind}s: {})",
-                    available.join(", ")
+                    details.available.join(", ")
                 )
             };
             options = self
-                .set_config_option(&config_id, Value::String(desired.to_string()))
+                .set_config_option(&details.id, Value::String(desired.to_string()))
                 .await
                 .with_context(|| unavailable)?;
         }
@@ -389,21 +393,7 @@ impl AcpPromptClient {
         model: AcpPromptModel<'_>,
         effort: AcpPromptEffort<'_>,
     ) -> Result<Option<AcpPromptOutput>> {
-        self.request(method::INITIALIZE, wire::initialize_params())
-            .await?;
-        let (cwd, meta) = match &launch.new_or_load {
-            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
-            NewOrLoad::Load { .. } => unreachable!("checked by prompt_once"),
-        };
-        let opened = self
-            .request(
-                method::SESSION_NEW,
-                wire::new_session_params(&cwd.to_string_lossy(), &launch.mcp_servers, meta),
-            )
-            .await?;
-        let opened: wire::NewSessionResult =
-            serde_json::from_value(opened).context("invalid ACP session/new response")?;
-        self.session_id = opened.session_id;
+        let opened = self.open_new_session(launch).await?;
         let mut options = opened.config_options.unwrap_or_default();
 
         let model = match model {
@@ -569,21 +559,27 @@ impl AcpPromptClient {
     }
 }
 
-fn config_option_details(
-    config_options: &[Value],
-    kind: &str,
-) -> Option<(String, Option<String>, Vec<String>)> {
+struct ConfigOptionDetails {
+    id: String,
+    current: Option<String>,
+    available: Vec<String>,
+}
+
+fn is_config_option_kind(option: &Value, kind: &str) -> bool {
+    let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+    let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "model" => category == "model" || id == "model",
+        "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
+        "mode" => category == "mode" || id == "mode",
+        _ => false,
+    }
+}
+
+fn config_option_details(config_options: &[Value], kind: &str) -> Option<ConfigOptionDetails> {
     config_options.iter().find_map(|option| {
         let id = option.get("id").and_then(Value::as_str)?;
-        let category = option.get("category").and_then(Value::as_str);
-        let matches = match kind {
-            "model" => category == Some("model") || id == "model",
-            "effort" => {
-                category == Some("thought_level") || id == "effort" || id.contains("reasoning")
-            }
-            _ => false,
-        };
-        matches.then(|| {
+        is_config_option_kind(option, kind).then(|| {
             let current = option
                 .get("currentValue")
                 .and_then(Value::as_str)
@@ -600,7 +596,11 @@ fn config_option_details(
                         .map(str::to_string)
                 })
                 .collect();
-            (id.to_string(), current, available)
+            ConfigOptionDetails {
+                id: id.to_string(),
+                current,
+                available,
+            }
         })
     })
 }
@@ -613,14 +613,7 @@ fn mode_ids(modes: &[Value]) -> Vec<String> {
 }
 
 fn current_model(config_options: &[Value]) -> Option<String> {
-    config_options.iter().find_map(|option| {
-        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
-        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
-        (category == "model" || id == "model")
-            .then(|| option.get("currentValue").and_then(Value::as_str))
-            .flatten()
-            .map(str::to_string)
-    })
+    config_option_details(config_options, "model").and_then(|details| details.current)
 }
 
 fn preferred_config_value(
@@ -629,16 +622,9 @@ fn preferred_config_value(
     preferences: &[&str],
     allow_contains: bool,
 ) -> Option<(String, String)> {
-    let option = config_options.iter().find(|option| {
-        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
-        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
-        match kind {
-            "model" => category == "model" || id == "model",
-            "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
-            "mode" => category == "mode" || id == "mode",
-            _ => false,
-        }
-    })?;
+    let option = config_options
+        .iter()
+        .find(|option| is_config_option_kind(option, kind))?;
     let id = option.get("id")?.as_str()?.to_string();
     let values = option
         .get("options")
