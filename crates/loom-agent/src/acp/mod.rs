@@ -580,7 +580,8 @@ impl AcpHandle {
     }
 
     /// Deliver immediate input by cancelling a live turn and starting the
-    /// message normally.
+    /// message normally. A live `/compact` is allowed to finish; the message is
+    /// queued for its next turn instead.
     pub async fn stop_and_send(
         &self,
         text: String,
@@ -1177,7 +1178,8 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
 enum PromptDelivery {
     /// Preserve the conversation composer's queue-first behavior.
     Queue,
-    /// Immediate input: cancel and restart immediately.
+    /// Immediate input: cancel and restart immediately, except while the
+    /// provider is compacting its conversation.
     StopAndSend,
 }
 
@@ -1460,6 +1462,10 @@ struct Task {
     next_seq: i64,
     turns_dispatched: i64,
     turn_live: bool,
+    /// A provider-owned `/compact` mutates the conversation state behind the
+    /// ACP session. Ordinary incoming messages wait for that turn boundary so
+    /// `session/cancel` cannot leave the provider's context half-compacted.
+    compaction_turn: bool,
 
     buf: Option<ChunkBuf>,
     tools: HashMap<String, LiveTool>,
@@ -1547,6 +1553,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: false,
+            compaction_turn: false,
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
@@ -1589,6 +1596,11 @@ impl Task {
         let external_turn = inflight_value
             .as_ref()
             .and_then(|v| v.get("external"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let compaction_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("compaction"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let inflight = inflight_value
@@ -1637,6 +1649,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: live_turn.is_some(),
+            compaction_turn,
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
@@ -2588,6 +2601,7 @@ impl Task {
         // Settle the durable turn state *before* signalling the end over SSE, so a
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
+        self.compaction_turn = false;
         self.inflight_prompt = None;
         self.external_turn = false;
         self.effective_mode = None;
@@ -2765,6 +2779,9 @@ impl Task {
         resources: Vec<Value>,
     ) -> Result<PromptAck> {
         if self.turn_live {
+            if self.compaction_turn {
+                return self.queue_prompt(&text, &resources).await;
+            }
             self.cancel_live_turn().await?;
         }
         self.start_prompt(text, by, resources).await
@@ -2879,6 +2896,7 @@ impl Task {
         self.next_seq = seq + 1;
         self.turns_dispatched += 1;
         self.turn_live = true;
+        self.compaction_turn = false;
         self.effective_mode = effective_mode;
         if self
             .pending_interrupt_notice_through
@@ -3003,6 +3021,7 @@ impl Task {
         }
         self.turns_dispatched += 1;
         self.turn_live = true;
+        self.compaction_turn = opening_kind == kind::USER_MESSAGE && is_compaction_prompt(&text);
         self.effective_mode = self.current_mode.clone();
 
         self.emit(
@@ -3021,6 +3040,7 @@ impl Task {
             "prompt_id": id,
             "turn": self.current_turn,
             "mode": self.effective_mode,
+            "compaction": self.compaction_turn,
         })
         .to_string();
         session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await?;
@@ -3274,6 +3294,11 @@ impl Task {
                 };
                 if queued.trim().is_empty() {
                     let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                } else if self.turn_live && self.compaction_turn {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: true,
+                        turn: Some(self.current_turn),
+                    }));
                 } else if !self.turn_live {
                     let result = self.start_pending_prompt(by).await;
                     self.resume_automatic_dispatch_on(&result);
@@ -3294,7 +3319,10 @@ impl Task {
                 // instead of hiding it behind an arbitrarily long boundary.
                 // A wake for the review already in flight is only a retry of
                 // the notifier and must never interrupt that same review.
-                if self.inflight_review.is_some() || self.automatic_dispatch_paused {
+                if self.inflight_review.is_some()
+                    || self.compaction_turn
+                    || self.automatic_dispatch_paused
+                {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
                         turn: Some(self.current_turn),
@@ -3447,6 +3475,7 @@ impl Task {
                 json!({ "turn": turn, "state": "ended", "stop_reason": "error" }),
             );
             self.turn_live = false;
+            self.compaction_turn = false;
             self.external_turn = false;
             self.effective_mode = None;
             let _ = session::set_inflight(&self.db, &self.session_id, None).await;
@@ -3603,14 +3632,28 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
     queued
 }
 
+/// A compaction command must own its provider turn through the normal response
+/// boundary. Arguments are allowed, but similarly prefixed commands are not.
+fn is_compaction_prompt(text: &str) -> bool {
+    text.split_ascii_whitespace().next() == Some("/compact")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_choice, deny_choice, preferred_config_value, preferred_mode, queued_prompt_text,
-        LiveTool, PermissionOption,
+        auto_choice, deny_choice, is_compaction_prompt, preferred_config_value, preferred_mode,
+        queued_prompt_text, LiveTool, PermissionOption,
     };
     use crate::acp::wire::{ContentBlock, ToolCallContent};
     use serde_json::json;
+
+    #[test]
+    fn compaction_prompt_detection_requires_the_exact_command() {
+        assert!(is_compaction_prompt("/compact"));
+        assert!(is_compaction_prompt("  /compact preserve the test context"));
+        assert!(!is_compaction_prompt("/compaction"));
+        assert!(!is_compaction_prompt("explain /compact"));
+    }
 
     #[tokio::test]
     async fn review_claim_fence_tracks_activation_rotation_and_task_death() {
