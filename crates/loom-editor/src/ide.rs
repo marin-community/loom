@@ -114,7 +114,7 @@ impl IdeManager {
     /// no DB. A cold start resolves the worktree via [`session::resolve_key`]
     /// and spawns; concurrent first-hits share the one spawn via the `OnceCell`.
     /// Errors are returned as a ready [`Response`] so the proxy can relay them.
-    async fn ensure(&self, st: &EditorState, id: &str) -> Result<u16, Response> {
+    async fn ensure(&self, st: &EditorState, id: &str) -> Result<u16, Box<Response>> {
         let cell = {
             let mut map = self.inner.lock().unwrap();
             map.entry(id.to_string())
@@ -129,13 +129,15 @@ impl IdeManager {
         let session = match session::resolve_key(&st.db, id).await {
             Ok(Some((session, _))) => session,
             Ok(None) => {
-                return Err((StatusCode::NOT_FOUND, "no such session").into_response());
+                return Err(Box::new(
+                    (StatusCode::NOT_FOUND, "no such session").into_response(),
+                ));
             }
             Err(e) => {
                 tracing::error!(session = %id, error = %e, "could not resolve session for editor");
-                return Err(
-                    (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed").into_response()
-                );
+                return Err(Box::new(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed").into_response(),
+                ));
             }
         };
         let command = ide_command(&st.db).await;
@@ -144,7 +146,7 @@ impl IdeManager {
         let inst = cell
             .get_or_try_init(|| spawn(command, home, work_dir))
             .await
-            .map_err(|msg| (StatusCode::BAD_GATEWAY, msg).into_response())?;
+            .map_err(|msg| Box::new((StatusCode::BAD_GATEWAY, msg).into_response()))?;
         inst.touch();
         Ok(inst.port)
     }
@@ -465,7 +467,7 @@ pub async fn proxy(
     };
     let port = match st.ide.ensure(&st, &id).await {
         Ok(port) => port,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     if is_ws_upgrade(req.headers()) {
         proxy_ws(req, port, &suffix).await
