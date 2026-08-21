@@ -25,6 +25,7 @@ use weaver_api::{
 };
 
 use loom::client::{self, Client};
+use loom_agent::agent as agent_mod;
 use weaver_core::db::Db;
 
 #[derive(Parser)]
@@ -2025,6 +2026,12 @@ async fn run_server(cmd: ServerCmd) -> Result<()> {
     match cmd {
         ServerCmd::Run { addr } => {
             init_tracing();
+            if !agent_mod::is_claude_available().await {
+                tracing::warn!("claude agent harness not available at startup");
+            }
+            if !agent_mod::is_codex_available().await {
+                tracing::warn!("codex agent harness not available at startup");
+            }
             let addr = loom::endpoint::bind_addr(addr.as_deref());
             loom::server::run(&addr).await
         }

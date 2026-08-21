@@ -294,7 +294,9 @@ async function toggleHandoff() {
   handoffError.value = '';
   try {
     const [metadata, profiles] = await Promise.all([listAgents(), listProfiles()]);
-    handoffAgents.value = metadata.agents.filter((agent) => agent.supports_acp);
+    handoffAgents.value = metadata.agents.filter(
+      (agent) => agent.supports_acp && agent.available !== false,
+    );
     handoffProfiles.value = profiles.filter((profile) => profile.class === props.ws.class);
     handoffProfile.value = handoffProfiles.value.some(
       (profile) => profile.name === props.ws.profile,

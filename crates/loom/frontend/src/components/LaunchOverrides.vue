@@ -16,8 +16,9 @@ const emit = defineEmits<{
 }>();
 const uid = useId();
 const settings = computed(() => props.resolved ?? props.fallback ?? null);
+const availableAgents = computed(() => props.agents.filter((agent) => agent.available !== false));
 const effectiveAgent = computed(
-  () => props.modelValue.agent ?? settings.value?.agent ?? props.agents[0]?.kind ?? '',
+  () => props.modelValue.agent ?? settings.value?.agent ?? availableAgents.value[0]?.kind ?? '',
 );
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
 
@@ -63,7 +64,7 @@ function locked(field: keyof LaunchOverrides): boolean {
           class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
           @change="set('agent', ($event.target as HTMLSelectElement).value)"
         >
-          <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
+          <option v-for="agent in availableAgents" :key="agent.kind" :value="agent.kind">
             {{ agent.label }}
           </option>
         </select>
