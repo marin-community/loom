@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue';
 import type { AgentMetadata, LaunchOverrides, ResolvedLaunch } from '../types';
+import ModelCombobox from './ModelCombobox.vue';
 
 const props = defineProps<{
   agents: AgentMetadata[];
@@ -75,22 +76,16 @@ function locked(field: keyof LaunchOverrides): boolean {
             {{ changed('model') ? 'changed' : 'from profile' }}
           </span>
         </span>
-        <input
+        <ModelCombobox
           v-if="metadata?.accepts_raw_model"
           :id="`${uid}-model`"
-          aria-label="Model"
-          :value="value('model')"
+          :choices="metadata.models"
+          :model-value="value('model')"
           :disabled="locked('model')"
-          data-testid="override-model"
-          list="launch-model-options"
-          autocomplete="off"
-          placeholder="Agent default"
-          class="w-full rounded bg-surface px-2 py-1.5 font-mono disabled:opacity-60"
-          @input="set('model', ($event.target as HTMLInputElement).value)"
+          field-class="bg-surface"
+          testid="override-model"
+          @update:model-value="set('model', $event)"
         />
-        <datalist v-if="metadata?.accepts_raw_model" id="launch-model-options">
-          <option v-for="choice in metadata.models" :key="choice.id" :value="choice.id" />
-        </datalist>
         <select
           v-else
           :id="`${uid}-model`"
