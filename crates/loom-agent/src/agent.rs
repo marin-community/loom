@@ -796,12 +796,13 @@ fn prepend_path(env: &mut Vec<(String, String)>, directory: &Path) {
 }
 
 /// Build the launch script the supervisor runs as `sh -c <script>`: prepend the
-/// weaver bin dir to `$PATH`, run the (optional) inner agent command, then `exec`
-/// the login shell. The session's environment is delivered **out of band** (via
-/// the process environment — see [`start_terminal`] / [`backend::new_session`]),
-/// not `export`-ed here, so secret values never land on the child shell's argv.
-/// The `$PATH` prepend stays in the script because it needs the shell to expand
-/// the inherited `$PATH` at runtime; it carries no secret.
+/// session's GitHub CLI adapter and the weaver bin dir to `$PATH`, run the
+/// optional inner agent command, then `exec` the login shell. The session's
+/// environment is delivered **out of band** (via the process environment — see
+/// [`start_terminal`] / [`backend::new_session`]), not `export`-ed here, so
+/// secret values never land on the child shell's argv. The `$PATH` prepend stays
+/// in the script because it needs the shell to expand the inherited `$PATH` at
+/// runtime; it carries no secret.
 fn wrap_launch_script(
     inner: &str,
     weaver_dir: Option<&Path>,
