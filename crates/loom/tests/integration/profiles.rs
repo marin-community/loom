@@ -700,6 +700,89 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 }
 
 #[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_channel_exposes_a_retryable_launch_failure() {
+    let ts = TestServer::start().await;
+    let repo_root = ts.repo_path().canonicalize().unwrap();
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[
+            (
+                loom::github_app::APP_ID_KEY.to_string(),
+                Some("123456".to_string()),
+            ),
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some("configured-for-preflight".to_string()),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    ts.client
+        .post(
+            "/api/profiles",
+            json!({
+                "name": "ops",
+                "description": "operations intake",
+                "agent_kind": "claude",
+                "protocol": "acp",
+                "mode": "default",
+                "class": "automation",
+                "strict": true,
+                "env_clear": true,
+                "max_concurrent": 1,
+                "turn_budget": 20,
+                "prelude": "none"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let error = ts
+        .client
+        .post(
+            "/api/runs",
+            json!({
+                "profile": "ops",
+                "source": "grafana",
+                "channel": "operator",
+                "idempotency_key": "alert:missing-credential",
+                "session": {
+                    "cwd": ts.cwd(),
+                    "title": "Grafana operator",
+                    "goal": "triage the alert"
+                }
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("server returned 428"),
+        "unexpected response: {error}"
+    );
+
+    let runs = ts.client.get("/api/runs").await.unwrap();
+    let run = &runs.as_array().unwrap()[0];
+    assert_eq!(run["status"], "waiting");
+    assert!(
+        run["summary"]
+            .as_str()
+            .unwrap()
+            .contains("No GitHub credential configured"),
+        "retryable launch failures must remain actionable after the response is gone: {run}"
+    );
+}
+
+#[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deployment_reconcile_rest_journey() {
     let ts = TestServer::start_api_only().await;

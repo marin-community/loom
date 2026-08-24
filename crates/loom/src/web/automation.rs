@@ -122,6 +122,7 @@ async fn run_view(st: &AppState, id: &str) -> ApiResult<Json<RunView>> {
     Ok(Json(run.into()))
 }
 
+#[derive(Clone, Copy)]
 enum LaunchFailure {
     Final,
     Retryable,
@@ -211,9 +212,20 @@ async fn launch_run(
             }
         }
         Err(error) => {
+            let summary = error.to_string();
+            tracing::warn!(
+                run = %run.id,
+                session = %run.session_id,
+                source = %run.source,
+                service_tag = %run.service_tag,
+                profile = %run.profile,
+                retryable = matches!(failure, LaunchFailure::Retryable),
+                error = ?error,
+                "automation launch failed"
+            );
             let still_owned = match failure {
                 LaunchFailure::Final => {
-                    match crate::runs::failed(&st.db, &run.id, &format!("{error:?}")).await {
+                    match crate::runs::failed(&st.db, &run.id, &summary).await {
                         Ok(owned) => owned,
                         Err(record_error) => {
                             tracing::warn!(
@@ -225,17 +237,19 @@ async fn launch_run(
                         }
                     }
                 }
-                LaunchFailure::Retryable => match crate::runs::waiting(&st.db, &run.id).await {
-                    Ok(owned) => owned,
-                    Err(record_error) => {
-                        tracing::warn!(
-                            run = %run.id,
-                            error = %record_error,
-                            "could not return automation launch to waiting"
-                        );
-                        true
+                LaunchFailure::Retryable => {
+                    match crate::runs::waiting_after_failure(&st.db, &run.id, &summary).await {
+                        Ok(owned) => owned,
+                        Err(record_error) => {
+                            tracing::warn!(
+                                run = %run.id,
+                                error = %record_error,
+                                "could not return automation launch to waiting"
+                            );
+                            true
+                        }
                     }
-                },
+                }
             };
             if !still_owned {
                 remove_late_session(st, &run.session_id).await;

@@ -263,7 +263,8 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
             .await?;
             sqlx::query(
                 "UPDATE automation_runs
-                 SET status = 'creating', session_id = ?, updated_at = ?
+                 SET status = 'creating', session_id = ?, outcome = NULL,
+                     summary = '', updated_at = ?
                  WHERE id = ?",
             )
             .bind(&session_id)
@@ -273,6 +274,8 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
             .await?;
             run.session_id = session_id;
             run.status = "creating".to_string();
+            run.outcome = None;
+            run.summary.clear();
             ChannelAction::Launch(run)
         }
     };
@@ -371,6 +374,22 @@ pub async fn waiting(db: &Db, id: &str) -> Result<bool> {
         "UPDATE automation_runs SET status = 'waiting', updated_at = ?
          WHERE id = ? AND status IN ('creating', 'delivering', 'waiting')",
     )
+    .bind(now_iso())
+    .bind(id)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Return a retryable launch to the operator-visible queue with its failure reason.
+pub async fn waiting_after_failure(db: &Db, id: &str, summary: &str) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE automation_runs
+         SET status = 'waiting', summary = ?, updated_at = ?
+         WHERE id = ? AND status IN ('creating', 'delivering', 'waiting')",
+    )
+    .bind(summary)
     .bind(now_iso())
     .bind(id)
     .execute(db)
@@ -677,6 +696,42 @@ mod tests {
             route_channel(&db, &second.id).await.unwrap(),
             ChannelAction::Launch(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn retrying_a_waiting_launch_clears_its_previous_failure() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let run = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "grafana",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "retry",
+                channel: Some("operator"),
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        assert!(matches!(
+            route_channel(&db, &run.id).await.unwrap(),
+            ChannelAction::Launch(_)
+        ));
+        assert!(waiting_after_failure(&db, &run.id, "credential missing")
+            .await
+            .unwrap());
+
+        let ChannelAction::Launch(retry) = route_channel(&db, &run.id).await.unwrap() else {
+            panic!("a waiting launch must be retried");
+        };
+        assert!(retry.summary.is_empty());
+        assert_eq!(retry.outcome, None);
     }
 
     #[tokio::test]
