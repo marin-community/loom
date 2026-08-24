@@ -304,10 +304,27 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
       echo "Loom-managed GitHub auth is missing its session credential" >&2
       exit 1
     fi
-    # Same per-repository scoping as the git helper. gh names its target with
-    # GH_REPO or the checkout's origin; without either, fall back to the
-    # session's whole set, which the App can mint while it stays single-owner.
-    repository="${GH_REPO:-}"
+    # Same per-repository scoping as the git helper. Match gh's repository
+    # selection precedence: an explicit --repo/-R flag, then GH_REPO, then the
+    # checkout's origin. Without any of them, fall back to the session's whole
+    # set, which the App can mint while it stays single-owner.
+    repository=
+    repository_argument=
+    for argument in "$@"; do
+      if [ "$repository_argument" = next ]; then
+        repository="$argument"
+        break
+      fi
+      case "$argument" in
+        --repo|-R) repository_argument=next ;;
+        --repo=*) repository="${argument#--repo=}"; break ;;
+        -R?*) repository="${argument#-R}"; break ;;
+        --) break ;;
+      esac
+    done
+    if [ -z "$repository" ]; then
+      repository="${GH_REPO:-}"
+    fi
     if [ -z "$repository" ]; then
       origin="$(git config --get remote.origin.url 2>/dev/null || true)"
       origin="${origin%.git}"
@@ -315,6 +332,7 @@ case "${LOOM_GITHUB_AUTH_MODE:-}" in
         *github.com[:/]*) repository="${origin##*github.com[:/]}" ;;
       esac
     fi
+    repository="${repository#github.com/}"
     if [ -n "$repository" ]; then
       GH_TOKEN="$(/usr/local/bin/loom github-token --repository "$repository")" || exit $?
     else

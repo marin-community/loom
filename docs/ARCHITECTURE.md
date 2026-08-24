@@ -934,11 +934,12 @@ owner, so a session holding access under two owners has no single token that
 spans them. `credential.useHttpPath` is enabled for github.com, so git names the
 repository in every helper request and the helper forwards it as
 `loom github-token --repository owner/name`; the `gh` wrapper resolves the same
-from `GH_REPO` or the checkout's origin. The server refuses a repository the
-session has no access to, so naming one narrows the token and never widens it.
-Omitting the repository falls back to the session's whole set, which the App can
-mint only while it stays single-owner. The `gh` wrapper translates the selected mode into
-the stock CLI's native authentication contract for each invocation.
+from an explicit `--repo`/`-R` flag, `GH_REPO`, or the checkout's origin, in
+that order. The server refuses a repository the session has no access to, so
+naming one narrows the token and never widens it. Omitting the repository falls
+back to the session's whole set, which the App can mint only while it stays
+single-owner. The `gh` wrapper translates the selected mode into the stock
+CLI's native authentication contract for each invocation.
 Adapter registration stays in the image's system Git config: linked worktrees
 share repository-local config, agents may clone additional repositories, and
 the helper must be available before a target repository exists. Session

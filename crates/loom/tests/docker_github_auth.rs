@@ -236,6 +236,41 @@ fn gh_wrapper_obeys_loom_owned_auth_mode() {
         "GH_TOKEN=broker-token:marin-community/vllm\nGITHUB_TOKEN=unset\n"
     );
 
+    // An explicit repository flag must beat both an ambient token and GH_REPO.
+    // Otherwise a cross-repository `gh pr create --repo ...` can be silently
+    // re-authenticated for the checkout's unrelated repository.
+    let explicit = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "broker"),
+            ("LOOM_SESSION_ID", "session"),
+            ("LOOM_TOKEN", "session-token"),
+            ("GH_TOKEN", "broker-token:wrong/repository"),
+            ("GH_REPO", "wrong/repository"),
+        ],
+        &["pr", "create", "--repo", "marin-community/harbor"],
+    );
+    assert!(explicit.status.success());
+    assert_eq!(
+        String::from_utf8(explicit.stdout).unwrap(),
+        "GH_TOKEN=broker-token:marin-community/harbor\nGITHUB_TOKEN=unset\n"
+    );
+
+    let short_flag = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "broker"),
+            ("LOOM_SESSION_ID", "session"),
+            ("LOOM_TOKEN", "session-token"),
+        ],
+        &["pr", "create", "-Rgithub.com/Open-Athena/mumwelt"],
+    );
+    assert!(short_flag.status.success());
+    assert_eq!(
+        String::from_utf8(short_flag.stdout).unwrap(),
+        "GH_TOKEN=broker-token:Open-Athena/mumwelt\nGITHUB_TOKEN=unset\n"
+    );
+
     let direct = run_script(
         &script,
         &[
