@@ -16,11 +16,11 @@ use serde_json::{json, Value};
 use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, CreatePermissionRequestReq, CreateReviewReq,
     CreateSessionGroupReq, CreateSessionSpaceReq, DecidePermissionRequestReq,
-    DeleteSessionGroupReq, DeleteSessionSpaceReq, MoveSessionsReq, ReorderSessionLayoutReq,
-    RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
-    SearchSessionsOptions, SessionCreatorFilter, SessionGroupPreferenceReq, SessionLayoutItemKind,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
+    DeleteSessionGroupReq, DeleteSessionSpaceReq, MoveSessionsReq, PermissionRequestView,
+    ReorderSessionLayoutReq, RestoreSessionGroupsReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter, SessionGroupPreferenceReq,
+    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
+    SessionSearchStatus, SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
     UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
@@ -1896,10 +1896,7 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                         },
                     )
                     .await?;
-                println!(
-                    "request {} pending — {} {}",
-                    request.id, request.mode, request.repository
-                );
+                println!("{}", permission_request_confirmation(&request));
                 Ok(())
             }
         },
@@ -1959,6 +1956,13 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
             update_permission_resource(&client, resource, "none").await
         }
     }
+}
+
+fn permission_request_confirmation(request: &PermissionRequestView) -> String {
+    format!(
+        "request {} {} — {} {}",
+        request.id, request.state, request.mode, request.repository
+    )
 }
 
 async fn update_permission_resource(
@@ -6519,5 +6523,34 @@ settings:
                 "sessions {verb} did not parse as canonical {expected}"
             );
         }
+    }
+
+    #[test]
+    fn permission_request_confirmation_reports_the_returned_state() {
+        let mut request = PermissionRequestView {
+            id: "req-1".to_string(),
+            session_id: "session-1".to_string(),
+            kind: "github_repository".to_string(),
+            repository: "acme/widgets".to_string(),
+            mode: "write".to_string(),
+            reason: "open the pull request".to_string(),
+            state: "pending".to_string(),
+            requested_by: "session:session-1".to_string(),
+            requested_at: "2026-08-24T00:00:00Z".to_string(),
+            decided_by: None,
+            decided_at: None,
+            decision_reason: None,
+        };
+        assert_eq!(
+            permission_request_confirmation(&request),
+            "request req-1 pending — write acme/widgets"
+        );
+
+        request.state = "approved".to_string();
+        request.decided_by = Some("policy:acme/*".to_string());
+        assert_eq!(
+            permission_request_confirmation(&request),
+            "request req-1 approved — write acme/widgets"
+        );
     }
 }
