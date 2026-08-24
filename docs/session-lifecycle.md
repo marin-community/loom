@@ -9,6 +9,9 @@ Automation launch attempts have a short phase before a session exists. Their
 `automation_runs` row reserves the future session id and remains visible when
 validation, capacity, clone, or fetch fails. Archive and remove accept that
 reserved id too, so an early failure is never an unactionable pseudo-session.
+Retryable channel failures remain `waiting` with their latest launch error. A
+redelivery clears that error when it claims a fresh provisioning attempt; the
+dashboard's Clear action archives an attempt that should no longer be retried.
 
 ## State transitions
 

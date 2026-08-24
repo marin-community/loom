@@ -107,6 +107,16 @@ function onKeydown(event: KeyboardEvent) {
         {{ timeAgo(run.updated_at) }}
       </time>
     </div>
+    <button
+      v-if="projection === 'intervention' && canArchive"
+      type="button"
+      data-testid="run-action-clear"
+      class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted transition-colors hover:border-muted hover:text-fg"
+      :disabled="!!busy"
+      @click="requestConfirmation('archive')"
+    >
+      Clear
+    </button>
     <div class="relative z-10 shrink-0">
       <button
         ref="trigger"
