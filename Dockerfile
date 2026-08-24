@@ -298,6 +298,7 @@ SH
 chmod +x /usr/local/bin/git-credential-ghtoken
 cat > /usr/local/bin/gh <<'SH'
 #!/bin/sh
+# Loom GitHub CLI credential adapter
 case "${LOOM_GITHUB_AUTH_MODE:-}" in
   broker)
     if [ -z "$LOOM_SESSION_ID" ] || [ -z "$LOOM_TOKEN" ]; then

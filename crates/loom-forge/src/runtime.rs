@@ -5,7 +5,7 @@ use crate::Db;
 pub const MISSING_GITHUB_TOKEN_MESSAGE: &str = "No GitHub credential configured for this repository. Add your personal GitHub token in Settings > Account or allowlist this repository for the selected profile's GitHub App credential.";
 pub const GITHUB_AUTH_MODE_ENV: &str = "LOOM_GITHUB_AUTH_MODE";
 
-/// How the image's Git/GitHub CLI adapters obtain a credential for one session.
+/// How the session's Git/GitHub CLI adapters obtain a credential.
 ///
 /// This is stamped by Loom after it resolves the session environment. The
 /// adapters must not infer policy from process or profile environment. A
@@ -154,7 +154,7 @@ pub fn user_github_token_allowed(class: &str, restricted: bool) -> bool {
     class == "interactive" && !restricted
 }
 
-/// Stamp the GitHub credential policy consumed by the Docker image's `git`
+/// Stamp the GitHub credential policy consumed by the session's `git`
 /// credential helper and `gh` wrapper.
 ///
 /// A Loom-injected per-user token selects `direct`; an allowed and configured
