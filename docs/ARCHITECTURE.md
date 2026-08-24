@@ -920,10 +920,12 @@ handoff and permission-mode changes are forbidden. The stock `github_comment`
 profile contains the policy only; its reviewed JSON manifest is seeded when
 absent and then remains operator-editable.
 
-**Git and GitHub CLI credentials.** The Docker image installs a Git credential
-helper and a `gh` wrapper because those clients do not speak Loom's session API.
-They are transport adapters, not policy owners: every fresh, resumed, warm, or
-handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
+**Git and GitHub CLI credentials.** Loom installs Git credential and `gh`
+adapters because those clients do not speak Loom's session API. The Docker image
+provides the Git adapter and a system `gh` adapter; native and ACP launches put a
+session-private `gh` adapter at the front of `PATH`. They are transport adapters,
+not policy owners: every fresh, resumed, warm, or handed-off session receives a
+reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the launching user's write-only PAT stored in Loom Account
 settings, `broker` requests a short-lived App installation token, and
 `disabled` rejects direct GitHub CLI access. The adapters fail closed when
@@ -939,8 +941,11 @@ that order. The server refuses a repository the session has no access to, so
 naming one narrows the token and never widens it. Omitting the repository falls
 back to the session's whole set, which the App can mint only while it stays
 single-owner. The `gh` wrapper translates the selected mode into the stock
-CLI's native authentication contract for each invocation.
-Adapter registration stays in the image's system Git config: linked worktrees
+CLI's native authentication contract for each invocation. In broker mode every
+invocation asks Loom for a current token, so long-running programs can make
+calls beyond GitHub's one-hour installation-token lifetime without managing the
+credential themselves.
+Git adapter registration stays in the image's system config: linked worktrees
 share repository-local config, agents may clone additional repositories, and
 the helper must be available before a target repository exists. Session
 selection and credentials remain Loom-owned policy; the image registration
