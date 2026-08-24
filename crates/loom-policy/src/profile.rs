@@ -487,30 +487,6 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         if existing.as_input()? == normalized && existing.mcp_policy_snapshot()? == mcp_policy {
             return Ok(existing);
         }
-        let widens_restricted_tools = existing.restricted
-            && widens_allowlist(
-                &effective_allowed_tool_rules_for(&existing, &existing.mcp_policy_snapshot()?)?,
-                &{
-                    let mut rules = crate::mcp::expand_tool_sets(&normalized.allowed_tools)?;
-                    rules.extend(crate::mcp::rules_for_snapshot(&mcp_policy)?);
-                    rules
-                },
-            );
-        if existing.is_automation_safe()
-            && has_automation_sessions(db, name).await?
-            && (!normalized.strict
-                || !normalized.env_clear
-                || normalized.class != "automation"
-                || (existing.restricted && !normalized.restricted)
-                || widens_restricted_tools
-                || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist)
-                || widens_allowlist(
-                    &existing.github_repositories()?,
-                    &normalized.github_repositories,
-                ))
-        {
-            bail!("cannot weaken a profile referenced by automation sessions");
-        }
     }
     let now = now_iso();
     let mut tx = weaver_core::db::begin_immediate(db).await?;
@@ -626,36 +602,6 @@ pub async fn update_expected(
     if existing.as_input()? == normalized && existing.mcp_policy_snapshot()? == mcp_policy {
         tx.commit().await?;
         return Ok(UpdateProfileOutcome::Updated(existing));
-    }
-    let widens_restricted_tools = existing.restricted
-        && widens_allowlist(
-            &effective_allowed_tool_rules_for(&existing, &existing.mcp_policy_snapshot()?)?,
-            &{
-                let mut rules = crate::mcp::expand_tool_sets(&normalized.allowed_tools)?;
-                rules.extend(crate::mcp::rules_for_snapshot(&mcp_policy)?);
-                rules
-            },
-        );
-    let has_automation: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ? AND class = 'automation')",
-    )
-    .bind(name)
-    .fetch_one(&mut *tx)
-    .await?;
-    if existing.is_automation_safe()
-        && has_automation
-        && (!normalized.strict
-            || !normalized.env_clear
-            || normalized.class != "automation"
-            || (existing.restricted && !normalized.restricted)
-            || widens_restricted_tools
-            || widens_allowlist(&existing.ambient_names()?, &normalized.ambient_allowlist)
-            || widens_allowlist(
-                &existing.github_repositories()?,
-                &normalized.github_repositories,
-            ))
-    {
-        bail!("cannot weaken a profile referenced by automation sessions");
     }
     sqlx::query(
         "UPDATE profiles SET
@@ -923,19 +869,6 @@ pub async fn create_clone_prepared(
         .await?
         .ok_or_else(|| anyhow!("cloned profile vanished after create"))?;
     Ok(CloneProfileOutcome::Created(created))
-}
-
-fn widens_allowlist(old: &[String], new: &[String]) -> bool {
-    new.iter().any(|name| !old.contains(name))
-}
-
-async fn has_automation_sessions(db: &Db, name: &str) -> Result<bool> {
-    Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM sessions WHERE profile = ? AND class = 'automation')",
-    )
-    .bind(name)
-    .fetch_one(db)
-    .await?)
 }
 
 pub async fn remove(db: &Db, name: &str) -> Result<bool> {
