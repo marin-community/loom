@@ -238,7 +238,7 @@ async fn launch_run(
                     }
                 }
                 LaunchFailure::Retryable => {
-                    match crate::runs::waiting_after_failure(&st.db, &run.id, &summary).await {
+                    match crate::runs::waiting(&st.db, &run.id, &summary).await {
                         Ok(owned) => owned,
                         Err(record_error) => {
                             tracing::warn!(
@@ -268,18 +268,14 @@ async fn prompt_channel_run(
         .await?
         .filter(|session| session.status == "running" && session.protocol == "acp")
     else {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "automation channel session is not ready; retry this delivery",
-        ));
+        let message = "automation channel session is not ready; retry this delivery";
+        crate::runs::waiting(&st.db, &run.id, message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     };
     let Some(handle) = st.acp.get(&session.id) else {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "automation channel session is being adopted; retry this delivery",
-        ));
+        let message = "automation channel session is being adopted; retry this delivery";
+        crate::runs::waiting(&st.db, &run.id, message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     };
     let channel = run
         .channel
@@ -295,11 +291,9 @@ async fn prompt_channel_run(
         .stop_and_send(goal.clone(), Some(by.clone()), Vec::new())
         .await
     {
-        crate::runs::waiting(&st.db, &run.id).await.ok();
-        return Err(AppError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("automation channel rejected the update: {error}"),
-        ));
+        let message = format!("automation channel rejected the update: {error}");
+        crate::runs::waiting(&st.db, &run.id, &message).await.ok();
+        return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     }
     crate::events::record(
         &st.db,
