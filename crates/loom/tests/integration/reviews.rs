@@ -11,8 +11,8 @@ use std::os::unix::fs::MetadataExt;
 use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, ChangeAnchorDto, ChangeSideDto, ChangeSourceDto,
-    CreateReviewReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
+    ArtifactTextAnchorDto, ChangeAnchorDto, ChangeSideDto, ChangeSourceDto, ReviewAnchorDto,
+    ReviewAnchorKindDto, ReviewSubjectKindDto,
 };
 
 use super::fixtures::TestServer;
@@ -70,16 +70,23 @@ async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
         .unwrap();
 }
 
-fn new_review(version: &str) -> CreateReviewReq {
-    CreateReviewReq {
+fn new_review(session: &str, version: &str) -> reviews::create::Input {
+    reviews::create::Input {
+        session: session.to_string(),
         subject_kind: ReviewSubjectKindDto::Artifact,
         subject_key: "design".to_string(),
         subject_version: version.to_string(),
     }
 }
 
-fn comment(expected_revision: i64, version: &str, body: &str) -> AddReviewCommentReq {
-    AddReviewCommentReq {
+fn comment(
+    id: i64,
+    expected_revision: i64,
+    version: &str,
+    body: &str,
+) -> reviews::comments::create::Input {
+    reviews::comments::create::Input {
+        id,
         expected_revision,
         subject_version: version.to_string(),
         anchor_kind: ReviewAnchorKindDto::Text,
@@ -100,25 +107,16 @@ async fn draft_with_comment(
 ) -> weaver_api::ReviewDto {
     let draft = ts
         .client
-        .invoke::<reviews::create::Op>(&reviews::create::Input {
-            session: session.id.to_string(),
-            subject_kind: new_review("1").subject_kind,
-            subject_key: new_review("1").subject_key.clone(),
-            subject_version: new_review("1").subject_version.clone(),
-        })
+        .invoke::<reviews::create::Op>(&new_review(&session.id, "1"))
         .await
         .unwrap();
     ts.client
-        .invoke::<reviews::comments::create::Op>(&reviews::comments::create::Input {
-            id: draft.id,
-            expected_revision: (comment(draft.draft_revision, "1", body)).expected_revision,
-            subject_version: (comment(draft.draft_revision, "1", body))
-                .subject_version
-                .clone(),
-            anchor_kind: (comment(draft.draft_revision, "1", body)).anchor_kind,
-            anchor: (comment(draft.draft_revision, "1", body)).anchor.clone(),
-            body: (comment(draft.draft_revision, "1", body)).body.clone(),
-        })
+        .invoke::<reviews::comments::create::Op>(&comment(
+            draft.id,
+            draft.draft_revision,
+            "1",
+            body,
+        ))
         .await
         .unwrap()
 }
@@ -174,12 +172,7 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
 
     let draft = ts
         .client
-        .invoke::<reviews::create::Op>(&reviews::create::Input {
-            session: session.id.to_string(),
-            subject_kind: new_review("01").subject_kind,
-            subject_key: new_review("01").subject_key.clone(),
-            subject_version: new_review("01").subject_version.clone(),
-        })
+        .invoke::<reviews::create::Op>(&new_review(&session.id, "01"))
         .await
         .unwrap();
     assert_eq!(draft.subject.version, "1");
@@ -197,30 +190,12 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         .unwrap();
     let added = ts
         .client
-        .invoke::<reviews::comments::create::Op>(&reviews::comments::create::Input {
-            id: draft.id,
-            expected_revision: (comment(
-                summarized.draft_revision,
-                "01",
-                "Explain why this is safe.",
-            ))
-            .expected_revision,
-            subject_version: (comment(
-                summarized.draft_revision,
-                "01",
-                "Explain why this is safe.",
-            ))
-            .subject_version
-            .clone(),
-            anchor_kind: (comment(summarized.draft_revision, "01", "Explain why this is safe."))
-                .anchor_kind,
-            anchor: (comment(summarized.draft_revision, "01", "Explain why this is safe."))
-                .anchor
-                .clone(),
-            body: (comment(summarized.draft_revision, "01", "Explain why this is safe."))
-                .body
-                .clone(),
-        })
+        .invoke::<reviews::comments::create::Op>(&comment(
+            draft.id,
+            summarized.draft_revision,
+            "01",
+            "Explain why this is safe.",
+        ))
         .await
         .unwrap();
     assert_eq!(added.comments[0].subject_version, "1");

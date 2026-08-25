@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 
 use weaver_api::operations::issues as issue_ops;
 use weaver_api::operations::{artifacts, branches, channels, permissions, settings};
-use weaver_api::{ArtifactUpsertReq, BranchView, Client, IssueAction, IssueView, ThreadDto};
+use weaver_api::{BranchView, Client, IssueAction, IssueView, ThreadDto};
 use weaver_core::tags;
 
 #[derive(Subcommand)]
@@ -1891,22 +1891,14 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                         (kind, text)
                     }
                 };
-            let req = ArtifactUpsertReq {
-                content,
-                title: Some(title.trim().to_string()),
-                kind: Some(kind),
-                author: None,
-                repo,
-                base_rev,
-            };
             let view = client
                 .invoke::<artifacts::write::Op>(&artifacts::write::Input {
                     name: name.trim().to_string(),
-                    content: req.content.clone(),
-                    title: req.title.clone(),
-                    kind: req.kind.clone(),
-                    base_rev: req.base_rev,
-                    repo: req.repo,
+                    content,
+                    title: Some(title.trim().to_string()),
+                    kind: Some(kind),
+                    base_rev,
+                    repo,
                     branch: key.to_string(),
                 })
                 .await?;

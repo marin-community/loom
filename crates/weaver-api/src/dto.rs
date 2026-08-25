@@ -1852,16 +1852,6 @@ pub struct CreateReviewReq {
     pub subject_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct AddReviewCommentReq {
-    pub expected_revision: i64,
-    pub subject_version: String,
-    pub anchor_kind: ReviewAnchorKindDto,
-    pub anchor: ReviewAnchorDto,
-    pub body: String,
-}
-
 // ---------------------------------------------------------------------------
 // Changes — one bounded, typed snapshot of the session worktree relative to
 // its real branch base.
@@ -2561,29 +2551,6 @@ pub struct ArtifactWriteBody {
     /// artifact's current latest revision, the server rejects the write with
     /// 409 instead of silently overwriting a newer edit. Omitted (the
     /// default) force-writes as before — backward compatible.
-    #[serde(default)]
-    pub base_rev: Option<i64>,
-}
-
-/// Body for `PUT /api/branches/{id}/artifacts/{name}`: create-or-append,
-/// unlike the session-scoped `PUT` (which requires the artifact to already
-/// exist). `author` defaults to `agent` — the CLI's writer; a `user` edit goes
-/// through the session-scoped route instead.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ArtifactUpsertReq {
-    pub content: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub author: Option<String>,
-    /// Write the repo-shared scope (`branch_id IS NULL`) instead of this
-    /// branch's own copy.
-    #[serde(default)]
-    pub repo: bool,
-    /// Reject the write when the currently resolved artifact has advanced past
-    /// the revision the caller edited. `None` preserves force-write behavior.
     #[serde(default)]
     pub base_rev: Option<i64>,
 }
