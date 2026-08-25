@@ -13,7 +13,6 @@ use std::sync::OnceLock;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use weaver_api::ArtifactUpsertReq;
 
 use weaver_api::operations::artifacts;
 
@@ -205,26 +204,24 @@ async fn with_dashboard_url(
                 })
                 .transpose()?;
             let artifact = client
-                .write_branch_artifact(
-                    &branch,
-                    artifact_name,
-                    &ArtifactUpsertReq {
-                        content: content.to_string(),
-                        title: arguments
-                            .get("title")
-                            .map(|value| {
-                                value
-                                    .as_str()
-                                    .context("title must be a string")
-                                    .map(str::to_string)
-                            })
-                            .transpose()?,
-                        kind: super::string_argument(&arguments, "kind")?.map(str::to_string),
-                        author: None,
-                        repo: repo_scope(&arguments)?,
-                        base_rev,
-                    },
-                )
+                .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+                    name: artifact_name.to_string(),
+                    content: content.to_string(),
+                    title: (arguments
+                        .get("title")
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .context("title must be a string")
+                                .map(str::to_string)
+                        })
+                        .transpose()?)
+                    .clone(),
+                    kind: (super::string_argument(&arguments, "kind")?.map(str::to_string)).clone(),
+                    base_rev,
+                    repo: (repo_scope(&arguments)?),
+                    branch: branch.to_string(),
+                })
                 .await?;
             let revision = artifact.meta.rev;
             let url = client.branch_artifact_url(&branch, artifact_name).await?;

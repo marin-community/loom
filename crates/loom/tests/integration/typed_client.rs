@@ -10,9 +10,7 @@ use serial_test::serial;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
-use weaver_api::{
-    CreateChannelMessageReq, CreateReq, DecidePermissionRequestReq, SettingKind, SettingSource,
-};
+use weaver_api::{CreateChannelMessageReq, DecidePermissionRequestReq, SettingKind, SettingSource};
 
 use weaver_api::operations::permissions as permission_ops;
 
@@ -39,10 +37,10 @@ async fn typed_create_list_get_and_mark() {
 
     // Typed create: build a CreateReq, get a SessionView back.
     let created = client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("typed client round-trip".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("typed client round-trip".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -114,11 +112,29 @@ async fn typed_create_list_get_and_mark() {
         idempotency_key: Some("typed-result-once".to_string()),
     };
     let first = session_client
-        .send_channel_message(&id, &result_request)
+        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
+            channel: id.to_string(),
+            body: result_request.body.clone(),
+            kind: result_request.kind.clone(),
+            urgency: result_request.urgency.clone(),
+            payload: result_request.payload.clone(),
+            reply_to: result_request.reply_to.clone(),
+            idempotency_key: result_request.idempotency_key.clone(),
+            branch: String::new(),
+        })
         .await
         .unwrap();
     let retry = session_client
-        .send_channel_message(&id, &result_request)
+        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
+            channel: id.to_string(),
+            body: result_request.body.clone(),
+            kind: result_request.kind.clone(),
+            urgency: result_request.urgency.clone(),
+            payload: result_request.payload.clone(),
+            reply_to: result_request.reply_to.clone(),
+            idempotency_key: result_request.idempotency_key.clone(),
+            branch: String::new(),
+        })
         .await
         .unwrap();
     assert_eq!(retry.id, first.id);
@@ -210,10 +226,10 @@ async fn operation_discovery_and_permission_request_round_trip() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("request repository access".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("request repository access".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -321,10 +337,10 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("deliver one canonical result".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("deliver one canonical result".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -363,7 +379,16 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
         idempotency_key: Some("answer-once".to_string()),
     };
     let message = client
-        .send_channel_message(&created.id, &request)
+        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
+            channel: created.id.to_string(),
+            body: request.body.clone(),
+            kind: request.kind.clone(),
+            urgency: request.urgency.clone(),
+            payload: request.payload.clone(),
+            reply_to: request.reply_to.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            branch: String::new(),
+        })
         .await
         .unwrap();
     assert_eq!(message.deliveries.len(), 1);

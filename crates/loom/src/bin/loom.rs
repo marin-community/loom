@@ -16,14 +16,14 @@ use serde_json::{json, Value};
 use weaver_api::operations::permissions as perm_ops;
 use weaver_api::operations::session_layout;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, DecidePermissionRequestReq,
-    MoveSessionsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
-    SearchSessionsOptions, SessionCreatorFilter, SessionLayoutItemKind, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
-    SetSessionGithubAccessReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
+    ArtifactTextAnchorDto, DecidePermissionRequestReq, MoveSessionsReq, ReviewAnchorDto,
+    ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter,
+    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
+    SessionSearchStatus, SetSessionGithubAccessReq,
 };
 
 use loom::client::{self, Client};
+use weaver_api::operations::deployment;
 use weaver_api::operations::{auth, branches, mcps, profiles, reviews, sessions};
 use weaver_core::db::Db;
 
@@ -2241,31 +2241,28 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 bail!("a comment body is required");
             }
             let draft = client
-                .create_session_review(
-                    &session,
-                    &CreateReviewReq {
-                        subject_kind: ReviewSubjectKindDto::Artifact,
-                        subject_key: artifact,
-                        subject_version: rev.to_string(),
-                    },
-                )
+                .invoke::<reviews::create::Op>(&reviews::create::Input {
+                    session: session.to_string(),
+                    subject_kind: ReviewSubjectKindDto::Artifact,
+                    subject_key: artifact.clone(),
+                    subject_version: rev.to_string(),
+                })
                 .await?;
             let comment = client
-                .add_review_comment(
-                    draft.id,
-                    &AddReviewCommentReq {
-                        expected_revision: draft.draft_revision,
-                        subject_version: rev.to_string(),
-                        anchor_kind: ReviewAnchorKindDto::Text,
-                        anchor: ReviewAnchorDto::Text(ArtifactTextAnchorDto {
-                            quote,
-                            prefix,
-                            suffix,
-                            block_index: block,
-                        }),
-                        body,
-                    },
-                )
+                .invoke::<reviews::comments::create::Op>(&reviews::comments::create::Input {
+                    id: draft.id,
+                    expected_revision: draft.draft_revision,
+                    subject_version: rev.to_string(),
+                    anchor_kind: ReviewAnchorKindDto::Text,
+                    anchor: (ReviewAnchorDto::Text(ArtifactTextAnchorDto {
+                        quote,
+                        prefix,
+                        suffix,
+                        block_index: block,
+                    }))
+                    .clone(),
+                    body: body.clone(),
+                })
                 .await?;
             let comment_id = comment
                 .comments
@@ -2289,15 +2286,13 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 bail!("a comment body is required");
             }
             let comment = client
-                .update_review_comment(
-                    review_id,
+                .invoke::<reviews::comments::update::Op>(&reviews::comments::update::Input {
+                    id: review_id,
                     comment_id,
-                    &UpdateReviewCommentReq {
-                        expected_revision: revision,
-                        body: Some(body),
-                        ..Default::default()
-                    },
-                )
+                    expected_revision: revision,
+                    body: (Some(body)).clone(),
+                    ..Default::default()
+                })
                 .await?;
             println!(
                 "updated comment {comment_id} · draft revision {}",
@@ -2316,22 +2311,21 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             block,
         } => {
             let comment = client
-                .update_review_comment(
-                    review_id,
+                .invoke::<reviews::comments::update::Op>(&reviews::comments::update::Input {
+                    id: review_id,
                     comment_id,
-                    &UpdateReviewCommentReq {
-                        expected_revision: revision,
-                        subject_version: Some(rev.to_string()),
-                        anchor_kind: Some(ReviewAnchorKindDto::Text),
-                        anchor: Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
-                            quote,
-                            prefix,
-                            suffix,
-                            block_index: block,
-                        })),
-                        body: None,
-                    },
-                )
+                    expected_revision: revision,
+                    body: None.clone(),
+                    subject_version: (Some(rev.to_string())).clone(),
+                    anchor_kind: (Some(ReviewAnchorKindDto::Text)),
+                    anchor: (Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
+                        quote,
+                        prefix,
+                        suffix,
+                        block_index: block,
+                    })))
+                    .clone(),
+                })
                 .await?;
             println!(
                 "re-anchored comment {comment_id} to revision {rev} · draft revision {}",
@@ -2350,24 +2344,20 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 bail!("an overall note is required");
             }
             let draft = client
-                .create_session_review(
-                    &session,
-                    &CreateReviewReq {
-                        subject_kind: ReviewSubjectKindDto::Artifact,
-                        subject_key: artifact,
-                        subject_version: rev.to_string(),
-                    },
-                )
+                .invoke::<reviews::create::Op>(&reviews::create::Input {
+                    session: session.to_string(),
+                    subject_kind: ReviewSubjectKindDto::Artifact,
+                    subject_key: artifact.clone(),
+                    subject_version: rev.to_string(),
+                })
                 .await?;
             let draft = client
-                .update_review(
-                    draft.id,
-                    &UpdateReviewReq {
-                        expected_revision: draft.draft_revision,
-                        summary: Some(summary),
-                        subject_version: None,
-                    },
-                )
+                .invoke::<reviews::update::Op>(&reviews::update::Input {
+                    id: draft.id,
+                    expected_revision: draft.draft_revision,
+                    summary: (Some(summary)).clone(),
+                    subject_version: None.clone(),
+                })
                 .await?;
             println!(
                 "draft review #{} · revision {} · overall note saved",
@@ -2455,25 +2445,21 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 revision
             } else {
                 client
-                    .update_review(
-                        review_id,
-                        &UpdateReviewReq {
-                            expected_revision: revision,
-                            summary: Some(summary),
-                            subject_version: None,
-                        },
-                    )
+                    .invoke::<reviews::update::Op>(&reviews::update::Input {
+                        id: review_id,
+                        expected_revision: revision,
+                        summary: (Some(summary)).clone(),
+                        subject_version: None.clone(),
+                    })
                     .await?
                     .draft_revision
             };
             let review = client
-                .submit_review(
-                    review_id,
-                    &SubmitReviewReq {
-                        expected_revision: revision,
-                        acknowledge_outdated,
-                    },
-                )
+                .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+                    id: review_id,
+                    expected_revision: revision,
+                    acknowledge_outdated,
+                })
                 .await?;
             println!(
                 "submitted review {} · delivery {}",
@@ -2902,10 +2888,26 @@ async fn run_mcp(cmd: McpCmd) -> Result<()> {
                 .any(|server| server.identity == opts.identity)
             {
                 client::default()?
-                    .put_custom_mcp(&opts.identity, &req)
+                    .invoke::<mcps::custom::update::Op>(&mcps::custom::update::Input {
+                        identity: opts.identity.to_string(),
+                        label: req.label.clone(),
+                        description: req.description.clone(),
+                        source: req.source.clone(),
+                        test_source: req.test_source.clone(),
+                        enabled: req.enabled,
+                    })
                     .await?
             } else {
-                client::default()?.create_custom_mcp(&req).await?
+                client::default()?
+                    .invoke::<mcps::custom::create::Op>(&mcps::custom::create::Input {
+                        identity: req.identity.clone(),
+                        label: req.label.clone(),
+                        description: req.description.clone(),
+                        source: req.source.clone(),
+                        test_source: req.test_source.clone(),
+                        enabled: req.enabled,
+                    })
+                    .await?
             };
             println!(
                 "{} revision {} ({})",
@@ -2954,10 +2956,10 @@ async fn run_token(cmd: TokenCmd) -> Result<()> {
             ttl,
         } => {
             let minted = client::default()?
-                .mint_automation_token(&weaver_api::AutomationTokenReq {
-                    subject,
-                    profiles,
-                    ttl_secs: parse_ttl(&ttl)?,
+                .invoke::<auth::automation_token::Op>(&auth::automation_token::Input {
+                    subject: subject.clone(),
+                    profiles: profiles.clone(),
+                    ttl_secs: (parse_ttl(&ttl)?),
                 })
                 .await?;
             println!("{}", minted.token);
@@ -3134,19 +3136,19 @@ async fn run_federation(cmd: FederationCmd) -> Result<()> {
                 format!("federation-{}", hex::encode(&digest[..8]))
             });
             let mapping = client
-                .add_federation(&weaver_api::FederationReq {
-                    name,
-                    provider,
-                    issuer,
-                    audience,
-                    subject,
-                    service_account,
-                    service_tag,
-                    repository_id,
-                    workflow_ref,
-                    event_name: event,
-                    ref_pattern: git_ref,
-                    profiles,
+                .invoke::<auth::federations::create::Op>(&auth::federations::create::Input {
+                    name: Some(name.clone()),
+                    provider: provider.clone(),
+                    issuer: issuer.clone(),
+                    audience: audience.clone(),
+                    subject: subject.clone(),
+                    service_account: service_account.clone(),
+                    service_tag: service_tag.clone(),
+                    repository_id: repository_id.clone(),
+                    workflow_ref: workflow_ref.clone(),
+                    event_name: event.clone(),
+                    ref_pattern: git_ref.clone(),
+                    profiles: profiles.clone(),
                 })
                 .await?;
             println!("added federation mapping {}", mapping.id);
@@ -3188,7 +3190,14 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
                     .with_context(|| format!("reading deployment manifest {file}"))?
             };
             let request = parse_deployment_manifest(&contents)?;
-            let result = client::default()?.reconcile_deployment(&request).await?;
+            let result = client::default()?
+                .invoke::<deployment::reconcile::Op>(&deployment::reconcile::Input {
+                    settings: request.settings.clone(),
+                    profiles: request.profiles.clone(),
+                    federations: request.federations.clone(),
+                    prune: request.prune,
+                })
+                .await?;
             println!(
                 "reconciled {} settings, {} profiles, and {} federation mappings",
                 result.settings.len(),
@@ -3214,28 +3223,27 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 None => String::new(),
             };
             let profile = client
-                .create_profile(&weaver_api::ProfileReq {
-                    name: opts.name,
-                    description: opts.description,
-                    agent_kind: opts.agent,
-                    model: opts.model,
-                    effort: opts.effort,
-                    protocol: opts.protocol,
-                    mode: opts.mode,
-                    class: opts.class,
+                .invoke::<profiles::create::Op>(&profiles::create::Input {
+                    name: opts.name.clone(),
+                    description: opts.description.clone(),
+                    agent_kind: opts.agent.clone(),
+                    model: opts.model.clone(),
+                    effort: opts.effort.clone(),
+                    protocol: opts.protocol.clone(),
+                    mode: opts.mode.clone(),
+                    class: opts.class.clone(),
                     strict: opts.strict,
                     env_clear: opts.env_clear,
-                    ambient_allowlist: opts.ambient,
+                    ambient_allowlist: opts.ambient.clone(),
                     idle_archive_secs: opts.idle_archive_secs,
                     max_concurrent: opts.max_concurrent,
                     turn_budget: opts.turn_budget,
-                    prelude: opts.prelude,
-                    instructions,
+                    prelude: opts.prelude.clone(),
+                    instructions: instructions.clone(),
                     restricted: opts.restricted,
-                    github_repositories: Vec::new(),
-                    runtime_permissions: opts.runtime_permission,
-                    mcp_access: parse_mcp_access(&opts.mcp)?,
-                    expected_revision: None,
+                    github_repositories: (Vec::new()).clone(),
+                    runtime_permissions: opts.runtime_permission.clone(),
+                    mcp_access: (parse_mcp_access(&opts.mcp)?).clone(),
                 })
                 .await?;
             println!(
@@ -3290,8 +3298,8 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             class,
         } => {
             let resolved = client
-                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
-                    selection: weaver_api::LaunchSelection {
+                .invoke::<sessions::launches::resolve::Op>(&sessions::launches::resolve::Input {
+                    selection: (weaver_api::LaunchSelection {
                         profile: name,
                         overrides: weaver_api::LaunchOverrides {
                             agent,
@@ -3301,7 +3309,8 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                             mode,
                             class,
                         },
-                    },
+                    })
+                    .clone(),
                 })
                 .await?;
             println!("{}", serde_json::to_string_pretty(&resolved)?);
@@ -3332,11 +3341,12 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 class,
             };
             let resolved = client
-                .resolve_session_launch(&weaver_api::ResolveLaunchReq {
-                    selection: weaver_api::LaunchSelection {
+                .invoke::<sessions::launches::resolve::Op>(&sessions::launches::resolve::Input {
+                    selection: (weaver_api::LaunchSelection {
                         profile: source.clone(),
                         overrides: overrides.clone(),
-                    },
+                    })
+                    .clone(),
                 })
                 .await?;
             let parse_environment = |raw: String, secret: bool| -> anyhow::Result<_> {
@@ -3362,24 +3372,23 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             let has_environment_proposal =
                 copy_environment || !remove_environment.is_empty() || !environment_set.is_empty();
             let saved = client
-                .clone_profile(
-                    &source,
-                    &weaver_api::CloneProfileReq {
-                        name,
-                        expected_profile_revision: resolved.profile_revision,
-                        expected_resolver_revision: resolved.resolver_revision,
-                        overrides,
-                        template: None,
-                        copy_environment,
-                        environment: has_environment_proposal.then_some(
-                            weaver_api::CloneProfileEnvironmentReq {
-                                inherit: copy_environment,
-                                remove: remove_environment,
-                                set: environment_set,
-                            },
-                        ),
-                    },
-                )
+                .invoke::<profiles::clone::Op>(&profiles::clone::Input {
+                    source: source.to_string(),
+                    name: name.clone(),
+                    expected_profile_revision: resolved.profile_revision,
+                    expected_resolver_revision: resolved.resolver_revision.clone(),
+                    overrides: overrides.clone(),
+                    template: None.clone(),
+                    copy_environment,
+                    environment: (has_environment_proposal.then_some(
+                        weaver_api::CloneProfileEnvironmentReq {
+                            inherit: copy_environment,
+                            remove: remove_environment,
+                            set: environment_set,
+                        },
+                    ))
+                    .clone(),
+                })
                 .await?;
             println!(
                 "cloned {source} as {} (revision {})",
@@ -3460,8 +3469,8 @@ fn parse_mcp_access(value: &str) -> Result<weaver_api::McpAccess> {
 
 async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
     let created = client::default()?
-        .create_token(&weaver_api::CreateTokenReq {
-            name,
+        .invoke::<auth::tokens::create::Op>(&auth::tokens::create::Input {
+            name: name.clone(),
             expires_in_days: expires_days,
         })
         .await?;
@@ -4793,7 +4802,7 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         },
     };
     let preview = client
-        .resolve_session_launch(&weaver_api::ResolveLaunchReq {
+        .invoke::<sessions::launches::resolve::Op>(&sessions::launches::resolve::Input {
             selection: selection.clone(),
         })
         .await?;
@@ -4804,20 +4813,20 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
         );
     }
     let ws = client
-        .create_session(&weaver_api::CreateReq {
-            goal: Some(goal),
-            selection: Some(selection),
-            expected_profile_revision: Some(preview.profile_revision),
-            expected_resolver_revision: Some(preview.resolver_revision),
-            title,
-            cwd,
-            repo: managed_repo,
-            base,
-            name,
-            existing_branch: branch,
-            issue,
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            title: title.clone(),
+            goal: (Some(goal)).clone(),
+            repo: managed_repo.clone(),
+            cwd: cwd.clone(),
+            base: base.clone(),
             claim_issue: claim,
-            parent_branch,
+            issue,
+            parent_branch: parent_branch.clone(),
+            name: name.clone(),
+            existing_branch: branch.clone(),
+            selection: (Some(selection)).clone(),
+            expected_profile_revision: (Some(preview.profile_revision)),
+            expected_resolver_revision: (Some(preview.resolver_revision)).clone(),
             ..Default::default()
         })
         .await?;
@@ -5545,12 +5554,10 @@ async fn cmd_handoff(
             },
         };
         let preview = client
-            .resolve_session_handoff(
-                &key,
-                &weaver_api::ResolveLaunchReq {
-                    selection: selection.clone(),
-                },
-            )
+            .invoke::<sessions::handoff::resolve::Op>(&sessions::handoff::resolve::Input {
+                selection: selection.clone(),
+                session: key.to_string(),
+            })
             .await?;
         if !preview.valid {
             bail!(
@@ -5576,7 +5583,18 @@ async fn cmd_handoff(
             ..Default::default()
         }
     };
-    let ws = client.handoff_session(&key, &request).await?;
+    let ws = client
+        .invoke::<sessions::handoff::Op>(&sessions::handoff::Input {
+            agent: request.agent.clone(),
+            model: request.model.clone(),
+            effort: request.effort.clone(),
+            mode: request.mode.clone(),
+            selection: request.selection.clone(),
+            expected_profile_revision: request.expected_profile_revision,
+            expected_resolver_revision: request.expected_resolver_revision.clone(),
+            session: key.to_string(),
+        })
+        .await?;
     println!("handed off session {} to {}", ws.id, ws.agent_kind);
     if !ws.model.is_empty() {
         println!("  model:   {}", ws.model);

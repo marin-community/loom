@@ -960,13 +960,6 @@ pub struct ResolvedLaunchView {
     pub errors: Vec<String>,
 }
 
-/// Body for `POST /api/session-launches/resolve`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ResolveLaunchReq {
-    #[serde(default)]
-    pub selection: LaunchSelection,
-}
-
 /// Body for `profiles.clone`. Creation is insert-only and
 /// atomic; the caller may submit the fully edited proposed template.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1159,13 +1152,6 @@ pub struct EffectivePermissionsView {
     pub operations: Vec<String>,
     pub github_repositories: Vec<String>,
     pub pending_requests: Vec<PermissionRequestView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AutomationTokenReq {
-    pub subject: String,
-    pub profiles: Vec<String>,
-    pub ttl_secs: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1900,38 +1886,6 @@ pub struct AddReviewCommentReq {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateReviewCommentReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub subject_version: Option<String>,
-    #[serde(default)]
-    pub anchor_kind: Option<ReviewAnchorKindDto>,
-    #[serde(default)]
-    pub anchor: Option<ReviewAnchorDto>,
-    #[serde(default)]
-    pub body: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitReviewReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub acknowledge_outdated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateReviewReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub subject_version: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Changes — one bounded, typed snapshot of the session worktree relative to
 // its real branch base.
@@ -2356,18 +2310,6 @@ pub struct ChannelSubscriptionView {
     pub read_seq: i64,
     pub created_at: String,
     pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateChannelReq {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub topic: String,
-    /// Required for an admin-created repo channel; ignored for a session
-    /// principal, whose repository and branch are derived from its grant.
-    #[serde(default)]
-    pub repo_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -3071,15 +3013,6 @@ pub struct CreatedTokenView {
     pub token: String,
     #[serde(flatten)]
     pub info: TokenView,
-}
-
-/// Body for `POST /api/auth/tokens`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateTokenReq {
-    pub name: String,
-    /// Optional lifetime in days; omitted / non-positive means it never expires.
-    #[serde(default)]
-    pub expires_in_days: Option<i64>,
 }
 
 /// Body for `POST /api/auth/login` (username/password).

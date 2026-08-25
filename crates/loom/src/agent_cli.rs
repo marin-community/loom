@@ -16,10 +16,7 @@ use std::sync::OnceLock;
 
 use weaver_api::operations::issues as issue_ops;
 use weaver_api::operations::{artifacts, branches, channels, permissions, settings};
-use weaver_api::{
-    ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq, IssueAction,
-    IssueView, ThreadDto,
-};
+use weaver_api::{ArtifactUpsertReq, BranchView, Client, IssueAction, IssueView, ThreadDto};
 use weaver_core::tags;
 
 #[derive(Subcommand)]
@@ -1264,10 +1261,11 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                 Err(_) => None,
             };
             let channel = client
-                .create_channel(&CreateChannelReq {
-                    name,
-                    topic,
-                    repo_root,
+                .invoke::<channels::create::Op>(&channels::create::Input {
+                    name: name.clone(),
+                    topic: topic.clone(),
+                    repo_root: repo_root.clone().unwrap_or_default(),
+                    branch: None,
                 })
                 .await?;
             println!("{}  {}", channel.id, channel.name);
@@ -1307,17 +1305,16 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                 bail!("message text is required");
             }
             let message = client
-                .send_channel_message(
-                    &id,
-                    &CreateChannelMessageReq {
-                        kind,
-                        urgency,
-                        body,
-                        payload: json!({}),
-                        reply_to: None,
-                        idempotency_key,
-                    },
-                )
+                .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
+                    channel: id.to_string(),
+                    body: body.clone(),
+                    kind: kind.clone(),
+                    urgency: urgency.clone(),
+                    payload: (json!({})).clone(),
+                    reply_to: None.clone(),
+                    idempotency_key: idempotency_key.clone(),
+                    branch: String::new(),
+                })
                 .await?;
             print_channel_messages(&[message]);
         }
@@ -1903,7 +1900,15 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 base_rev,
             };
             let view = client
-                .write_branch_artifact(&key, name.trim(), &req)
+                .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+                    name: name.trim().to_string(),
+                    content: req.content.clone(),
+                    title: req.title.clone(),
+                    kind: req.kind.clone(),
+                    base_rev: req.base_rev,
+                    repo: req.repo,
+                    branch: key.to_string(),
+                })
                 .await?;
             // The write already succeeded — loom is definitionally reachable at
             // this point, so the dashboard link is always known now (unlike the

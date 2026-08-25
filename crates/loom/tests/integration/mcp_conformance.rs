@@ -11,6 +11,7 @@ use tokio::{
 };
 
 use crate::fixtures::TestServer;
+use weaver_api::operations::sessions;
 
 fn loom_bin() -> &'static str {
     env!("CARGO_BIN_EXE_loom")
@@ -171,10 +172,10 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&weaver_api::CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("typed MCP projections".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("typed MCP projections".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await

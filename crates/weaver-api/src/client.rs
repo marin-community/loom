@@ -12,14 +12,9 @@ use serde_json::Value;
 use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
-    AddReviewCommentReq, ArtifactUpsertReq, ArtifactView, AutomationTokenReq, AutomationTokenView,
-    ChannelMessageView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
-    CreateChannelReq, CreateReq, CreateReviewReq, CreateTokenReq, CreatedTokenView, CustomMcpReq,
-    CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView, FederationReq,
-    FederationView, HandoffReq, MoveSessionsReq, PermissionRequestView, ProfileReq, ProfileView,
-    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ReviewDto, RunReq, RunView, RunWatchReq,
-    SearchSessionsOptions, SendReq, SessionGithubAccessView, SessionLayoutView, SessionView,
-    SetSessionGithubAccessReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
+    ChannelMessageView, CommentDto, DecidePermissionRequestReq, MoveSessionsReq,
+    PermissionRequestView, ReadinessView, RunWatchReq, SearchSessionsOptions, SendReq,
+    SessionGithubAccessView, SessionLayoutView, SessionView, SetSessionGithubAccessReq,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -263,82 +258,6 @@ impl Client {
         .await
     }
 
-    /// Launch a new session (`sessions.launch`).
-    pub async fn create_session(&self, req: &CreateReq) -> Result<SessionView> {
-        use crate::operations::sessions::launch;
-        self.invoke::<launch::Op>(&launch::Input {
-            title: req.title.clone(),
-            goal: req.goal.clone(),
-            repo: req.repo.clone(),
-            cwd: req.cwd.clone(),
-            base: req.base.clone(),
-            agent: req.agent.clone(),
-            protocol: req.protocol.clone(),
-            mode: req.mode.clone(),
-            class: req.class.clone(),
-            profile: req.profile.clone(),
-            claim_issue: req.claim_issue,
-            issue: req.issue,
-            parent_branch: req.parent_branch.clone(),
-            name: req.name.clone(),
-            existing_branch: req.existing_branch.clone(),
-            github_issue: req.github_issue,
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            selection: req.selection.clone(),
-            scratch: req.scratch.clone(),
-            expected_profile_revision: req.expected_profile_revision,
-            expected_resolver_revision: req.expected_resolver_revision.clone(),
-        })
-        .await
-    }
-
-    /// Resolve and validate a profile selection without launching
-    /// (`sessions.launches.resolve`).
-    pub async fn resolve_session_launch(
-        &self,
-        req: &ResolveLaunchReq,
-    ) -> Result<ResolvedLaunchView> {
-        use crate::operations::sessions::launches::resolve;
-        self.invoke::<resolve::Op>(&resolve::Input {
-            selection: req.selection.clone(),
-        })
-        .await
-    }
-
-    /// Resolve a canonical profile selection in the context of an existing
-    /// session handoff, including honest class and capacity credit
-    /// (`sessions.handoff.resolve`).
-    pub async fn resolve_session_handoff(
-        &self,
-        key: &str,
-        req: &ResolveLaunchReq,
-    ) -> Result<ResolvedLaunchView> {
-        use crate::operations::sessions::handoff::resolve;
-        self.invoke::<resolve::Op>(&resolve::Input {
-            selection: req.selection.clone(),
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Replace the provider behind a live ACP session while preserving the
-    /// loom session, worktree, branch, and canonical journal (`sessions.handoff`).
-    pub async fn handoff_session(&self, key: &str, req: &HandoffReq) -> Result<SessionView> {
-        use crate::operations::sessions::handoff;
-        self.invoke::<handoff::Op>(&handoff::Input {
-            agent: req.agent.clone(),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            mode: req.mode.clone(),
-            selection: req.selection.clone(),
-            expected_profile_revision: req.expected_profile_revision,
-            expected_resolver_revision: req.expected_resolver_revision.clone(),
-            session: key.to_string(),
-        })
-        .await
-    }
-
     /// Stamp a watch's mark on a session — the `triage` tag. A convenience
     /// over [`Client::set_tag`] / [`Client::clear_tag`] that keeps the `mark`
     /// capability name: a `level` of `attention`/`blocked` sets the tag, an empty
@@ -448,17 +367,6 @@ impl Client {
 
     // -- Channels ----------------------------------------------------------
 
-    pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
-        use crate::operations::channels::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: req.name.clone(),
-            topic: req.topic.clone(),
-            repo_root: req.repo_root.clone().unwrap_or_default(),
-            branch: None,
-        })
-        .await
-    }
-
     pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
         use crate::operations::channels::messages::list;
         self.invoke::<list::Op>(&list::Input {
@@ -467,25 +375,6 @@ impl Client {
             limit: 100,
             kinds: Vec::new(),
             peek: false,
-            branch: String::new(),
-        })
-        .await
-    }
-
-    pub async fn send_channel_message(
-        &self,
-        id: &str,
-        req: &CreateChannelMessageReq,
-    ) -> Result<ChannelMessageView> {
-        use crate::operations::channels::messages::create;
-        self.invoke::<create::Op>(&create::Input {
-            channel: id.to_string(),
-            body: req.body.clone(),
-            kind: req.kind.clone(),
-            urgency: req.urgency.clone(),
-            payload: req.payload.clone(),
-            reply_to: req.reply_to.clone(),
-            idempotency_key: req.idempotency_key.clone(),
             branch: String::new(),
         })
         .await
@@ -512,28 +401,6 @@ impl Client {
     //
     // The `artifacts.*` operations are addressed by branch, enabling the
     // `loom artifacts` CLI to target a branch with no active session.
-
-    /// Write a new revision of an artifact, creating it if absent
-    /// (`artifacts.write`). `author` is dropped: the operation derives the
-    /// writer from the credential.
-    pub async fn write_branch_artifact(
-        &self,
-        key: &str,
-        name: &str,
-        req: &ArtifactUpsertReq,
-    ) -> Result<ArtifactView> {
-        use crate::operations::artifacts::write;
-        self.invoke::<write::Op>(&write::Input {
-            name: name.to_string(),
-            content: req.content.clone(),
-            title: req.title.clone(),
-            kind: req.kind.clone(),
-            base_rev: req.base_rev,
-            repo: req.repo,
-            branch: key.to_string(),
-        })
-        .await
-    }
 
     /// The dashboard deep-link for a branch artifact, resolved server-side
     /// (`artifacts.url`) using the externally-visible origin (`auth.base_url` or
@@ -615,68 +482,6 @@ impl Client {
 
     // -- Staged reviews ------------------------------------------------------
 
-    pub async fn create_session_review(
-        &self,
-        session: &str,
-        req: &CreateReviewReq,
-    ) -> Result<ReviewDto> {
-        use crate::operations::reviews::create;
-        self.invoke::<create::Op>(&create::Input {
-            session: session.to_string(),
-            subject_kind: req.subject_kind,
-            subject_key: req.subject_key.clone(),
-            subject_version: req.subject_version.clone(),
-        })
-        .await
-    }
-
-    pub async fn add_review_comment(
-        &self,
-        review_id: i64,
-        req: &AddReviewCommentReq,
-    ) -> Result<ReviewDto> {
-        use crate::operations::reviews::comments::create;
-        self.invoke::<create::Op>(&create::Input {
-            id: review_id,
-            expected_revision: req.expected_revision,
-            subject_version: req.subject_version.clone(),
-            anchor_kind: req.anchor_kind,
-            anchor: req.anchor.clone(),
-            body: req.body.clone(),
-        })
-        .await
-    }
-
-    pub async fn update_review_comment(
-        &self,
-        review_id: i64,
-        comment_id: i64,
-        req: &UpdateReviewCommentReq,
-    ) -> Result<ReviewDto> {
-        use crate::operations::reviews::comments::update;
-        self.invoke::<update::Op>(&update::Input {
-            id: review_id,
-            comment_id,
-            expected_revision: req.expected_revision,
-            body: req.body.clone(),
-            subject_version: req.subject_version.clone(),
-            anchor_kind: req.anchor_kind,
-            anchor: req.anchor.clone(),
-        })
-        .await
-    }
-
-    pub async fn update_review(&self, review_id: i64, req: &UpdateReviewReq) -> Result<ReviewDto> {
-        use crate::operations::reviews::update;
-        self.invoke::<update::Op>(&update::Input {
-            id: review_id,
-            expected_revision: req.expected_revision,
-            summary: req.summary.clone(),
-            subject_version: req.subject_version.clone(),
-        })
-        .await
-    }
-
     pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
         use crate::operations::reviews::discard;
         let result = self
@@ -688,16 +493,6 @@ impl Client {
         Ok(serde_json::to_value(result)?)
     }
 
-    pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {
-        use crate::operations::reviews::submit;
-        self.invoke::<submit::Op>(&submit::Input {
-            id: review_id,
-            expected_revision: req.expected_revision,
-            acknowledge_outdated: req.acknowledge_outdated,
-        })
-        .await
-    }
-
     // -- Issues ---------------------------------------------------------------
 
     // -- Settings -------------------------------------------------------------
@@ -705,36 +500,6 @@ impl Client {
     /// Public database and migration readiness (`GET /api/ready`).
     pub async fn readiness(&self) -> Result<ReadinessView> {
         self.get_typed("/api/ready").await
-    }
-
-    pub async fn create_custom_mcp(&self, req: &CustomMcpReq) -> Result<CustomMcpView> {
-        use crate::operations::mcps::custom::create;
-        self.invoke::<create::Op>(&create::Input {
-            identity: req.identity.clone(),
-            label: req.label.clone(),
-            description: req.description.clone(),
-            source: req.source.clone(),
-            test_source: req.test_source.clone(),
-            enabled: req.enabled,
-        })
-        .await
-    }
-
-    pub async fn put_custom_mcp(
-        &self,
-        identity: &str,
-        req: &CustomMcpReq,
-    ) -> Result<CustomMcpView> {
-        use crate::operations::mcps::custom::update;
-        self.invoke::<update::Op>(&update::Input {
-            identity: identity.to_string(),
-            label: req.label.clone(),
-            description: req.description.clone(),
-            source: req.source.clone(),
-            test_source: req.test_source.clone(),
-            enabled: req.enabled,
-        })
-        .await
     }
 
     pub async fn delete_custom_mcp(&self, identity: &str) -> Result<Value> {
@@ -745,50 +510,6 @@ impl Client {
             })
             .await?;
         Ok(serde_json::to_value(result)?)
-    }
-
-    pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
-        use crate::operations::profiles::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: req.name.clone(),
-            description: req.description.clone(),
-            agent_kind: req.agent_kind.clone(),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            protocol: req.protocol.clone(),
-            mode: req.mode.clone(),
-            class: req.class.clone(),
-            strict: req.strict,
-            env_clear: req.env_clear,
-            ambient_allowlist: req.ambient_allowlist.clone(),
-            idle_archive_secs: req.idle_archive_secs,
-            max_concurrent: req.max_concurrent,
-            turn_budget: req.turn_budget,
-            prelude: req.prelude.clone(),
-            instructions: req.instructions.clone(),
-            restricted: req.restricted,
-            github_repositories: req.github_repositories.clone(),
-            runtime_permissions: req.runtime_permissions.clone(),
-            mcp_access: req.mcp_access.clone(),
-        })
-        .await
-    }
-
-    /// Clone one profile's policy on the server, optionally copying its
-    /// write-only environment in the same transaction (`profiles.clone`).
-    pub async fn clone_profile(&self, source: &str, req: &CloneProfileReq) -> Result<ProfileView> {
-        use crate::operations::profiles::clone;
-        self.invoke::<clone::Op>(&clone::Input {
-            source: source.to_string(),
-            name: req.name.clone(),
-            expected_profile_revision: req.expected_profile_revision,
-            expected_resolver_revision: req.expected_resolver_revision.clone(),
-            overrides: req.overrides.clone(),
-            template: req.template.clone(),
-            copy_environment: req.copy_environment,
-            environment: req.environment.clone(),
-        })
-        .await
     }
 
     pub async fn delete_profile(&self, name: &str) -> Result<Value> {
@@ -818,80 +539,12 @@ impl Client {
 
     // -- API tokens -------------------------------------------------------
 
-    pub async fn mint_automation_token(
-        &self,
-        req: &AutomationTokenReq,
-    ) -> Result<AutomationTokenView> {
-        use crate::operations::auth::automation_token;
-        self.invoke::<automation_token::Op>(&automation_token::Input {
-            subject: req.subject.clone(),
-            profiles: req.profiles.clone(),
-            ttl_secs: req.ttl_secs,
-        })
-        .await
-    }
-
-    pub async fn add_federation(&self, req: &FederationReq) -> Result<FederationView> {
-        use crate::operations::auth::federations::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: Some(req.name.clone()),
-            provider: req.provider.clone(),
-            issuer: req.issuer.clone(),
-            audience: req.audience.clone(),
-            subject: req.subject.clone(),
-            service_account: req.service_account.clone(),
-            service_tag: req.service_tag.clone(),
-            repository_id: req.repository_id.clone(),
-            workflow_ref: req.workflow_ref.clone(),
-            event_name: req.event_name.clone(),
-            ref_pattern: req.ref_pattern.clone(),
-            profiles: req.profiles.clone(),
-        })
-        .await
-    }
-
     pub async fn remove_federation(&self, id: &str) -> Result<Value> {
         use crate::operations::auth::federations::remove;
         let result = self
             .invoke::<remove::Op>(&remove::Input { id: id.to_string() })
             .await?;
         Ok(serde_json::to_value(result)?)
-    }
-
-    pub async fn reconcile_deployment(&self, req: &DeploymentReq) -> Result<DeploymentView> {
-        use crate::operations::deployment::reconcile;
-        self.invoke::<reconcile::Op>(&reconcile::Input {
-            settings: req.settings.clone(),
-            profiles: req.profiles.clone(),
-            federations: req.federations.clone(),
-            prune: req.prune,
-        })
-        .await
-    }
-
-    pub async fn create_run(&self, req: &RunReq) -> Result<RunView> {
-        use crate::operations::runs::create;
-        self.invoke::<create::Op>(&create::Input {
-            profile: req.profile.clone(),
-            idempotency_key: req.idempotency_key.clone(),
-            source: req.source.clone(),
-            watch_id: req.watch_id.clone(),
-            channel: req.channel.clone(),
-            slack: req.slack.clone(),
-            session: req.session.clone(),
-        })
-        .await
-    }
-
-    /// Mint a new API token, returning the one-time plaintext
-    /// (`auth.tokens.create`).
-    pub async fn create_token(&self, req: &CreateTokenReq) -> Result<CreatedTokenView> {
-        use crate::operations::auth::tokens::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: req.name.clone(),
-            expires_in_days: req.expires_in_days,
-        })
-        .await
     }
 
     /// Revoke an API token by id (`auth.tokens.revoke`).
