@@ -14,19 +14,29 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use weaver_api::operations::channels;
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_channel";
-const TOOL_NAMES: [&str; 8] = [
-    "list",
-    "get",
-    "read",
-    "send",
-    "wait",
-    "ack",
-    "open",
-    "subscribe",
-];
+
+/// The tools this server exports, in the order it advertises them.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<channels::list::Op>("list"),
+            export::<channels::get::Op>("get"),
+            export::<channels::messages::list::Op>("read"),
+            export::<channels::messages::create::Op>("send"),
+            export::<channels::wait::Op>("wait"),
+            export::<channels::read_marker::set::Op>("ack"),
+            export::<channels::create::Op>("open"),
+            export::<channels::subscription::set::Op>("subscribe"),
+        ]
+    })
+}
 
 // The names these sets carried before the `loom/` rename. Sessions pinned to
 // one still resolve it.
@@ -54,8 +64,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
-        let mut sets =
-            super::dispatch::derive_capability_sets(SERVER_NAME, "channel", describe_capability);
+        let mut sets = super::dispatch::capability_sets(exports(), "channel", describe_capability);
         sets.extend(super::dispatch::alias_capability_sets(&sets, RENAMED));
         sets
     })
@@ -70,19 +79,11 @@ fn describe_capability(grant: &str) -> &'static str {
 }
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    capability_sets()
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
-                .collect()
-        })
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -90,13 +91,14 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("channel", SERVER_NAME, &name, arguments).await
+        super::dispatch::call_adapter_tool("channel", SERVER_NAME, exports(), &name, arguments)
+            .await
     })
 }
 
@@ -107,20 +109,6 @@ fn serve_boxed() -> ServeFuture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn channel_surface_is_derived_from_operation_descriptors() {
-        let names = tools()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(names, TOOL_NAMES);
-        for name in &names {
-            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
-        }
-    }
 
     #[test]
     fn capability_sets_are_grouped_by_grant() {

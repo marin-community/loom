@@ -12,8 +12,7 @@ pub mod delete {
 
     /// Delete an artifact and its complete revision history.
     #[operation(id = "artifacts.delete", actor = SessionSelf, scope = Branch, risk = Destructive,
-                grants = ["loom/artifacts/write@v1"], cli = "artifacts delete",
-                mcp = "loom_artifact::delete")]
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts delete")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -34,8 +33,7 @@ pub mod get {
 
     /// Read one artifact or immutable revision.
     #[operation(id = "artifacts.get", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts get",
-                mcp = "loom_artifact::get")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts get")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -58,8 +56,7 @@ pub mod history {
 
     /// List immutable artifact revisions.
     #[operation(id = "artifacts.history", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts history",
-                mcp = "loom_artifact::history")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts history")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -80,8 +77,7 @@ pub mod list {
 
     /// List branch and repository-scoped artifacts.
     #[operation(id = "artifacts.list", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts list",
-                mcp = "loom_artifact::list")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts list")]
     pub struct Input {
         /// When true, list every artifact in the repository. By default, list
         /// only this branch's own artifacts and the repository-shared ones.
@@ -152,8 +148,7 @@ pub mod threads {
 
         /// Start or reply to an artifact review thread.
         #[operation(id = "artifacts.threads.comment", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts comment",
-                    mcp = "loom_artifact::comment", default = custom)]
+                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts comment", default = custom)]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -188,8 +183,7 @@ pub mod threads {
 
         /// List anchored artifact review threads.
         #[operation(id = "artifacts.threads.list", actor = SessionSelf, scope = Branch, risk = Read,
-                    grants = ["loom/artifacts/read@v1"], cli = "artifacts threads",
-                    mcp = "loom_artifact::threads")]
+                    grants = ["loom/artifacts/read@v1"], cli = "artifacts threads")]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -210,8 +204,7 @@ pub mod threads {
 
         /// Resolve an artifact review thread.
         #[operation(id = "artifacts.threads.resolve", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts resolve",
-                    mcp = "loom_artifact::resolve")]
+                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts resolve")]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -259,8 +252,7 @@ pub mod write {
     /// The wire format is always a JSON string. Reading `content` from a file
     /// or stdin is a convenience the command line applies before sending.
     #[operation(id = "artifacts.write", actor = SessionSelf, scope = Branch, risk = Write,
-                grants = ["loom/artifacts/write@v1"], cli = "artifacts write",
-                mcp = "loom_artifact::write")]
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts write")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]

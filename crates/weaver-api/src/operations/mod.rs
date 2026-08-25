@@ -110,14 +110,6 @@ pub fn operation(id: &str) -> Option<&'static OperationSpec> {
     operations().find(|operation| operation.id == id)
 }
 
-pub fn operation_for_mcp(server: &str, tool: &str) -> Option<&'static OperationSpec> {
-    operations().find(|operation| {
-        operation
-            .mcp
-            .is_some_and(|mcp| mcp.server == server && mcp.tool == tool)
-    })
-}
-
 /// Resolve a canonical operation route back to its descriptor.
 ///
 /// Routes are derived from identity, so this is an exact inverse of
@@ -139,12 +131,6 @@ pub fn operation_input_schema(operation: &OperationSpec) -> Value {
 
 // -- Discovery views ---------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct McpProjectionView {
-    pub server: String,
-    pub tool: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OperationView {
     pub id: String,
@@ -158,7 +144,6 @@ pub struct OperationView {
     pub path: String,
     pub cli: Option<String>,
     pub cli_aliases: Vec<String>,
-    pub mcp: Option<McpProjectionView>,
     pub grants: Vec<String>,
     pub schema: Value,
 }
@@ -185,10 +170,6 @@ impl From<&OperationSpec> for OperationView {
                         .collect()
                 })
                 .unwrap_or_default(),
-            mcp: spec.mcp.map(|mcp| McpProjectionView {
-                server: mcp.server.to_string(),
-                tool: mcp.tool.to_string(),
-            }),
             grants: spec
                 .grants
                 .iter()
@@ -210,60 +191,6 @@ pub struct ApiMetaView {
     pub operation_registry_version: u32,
     pub operations_url: String,
     pub openapi_url: String,
-}
-
-// -- MCP projection ----------------------------------------------------------
-
-/// Generate one MCP server's tool catalogue from the registry.
-///
-/// An operation reaches MCP only if it declares a projection, and
-/// [`validate_operation_registry`] refuses a projection on anything an agent may
-/// not call — so a human-only operation cannot acquire a tool by accident.
-pub fn mcp_tools(server: &str) -> Value {
-    let mut tools = operations()
-        .filter_map(|operation| {
-            let mcp = operation.mcp.filter(|mcp| mcp.server == server)?;
-            Some((
-                mcp.tool,
-                json!({
-                    "name": mcp.tool,
-                    "description": operation.summary,
-                    "inputSchema": (operation.schema)(),
-                }),
-            ))
-        })
-        .collect::<Vec<_>>();
-    tools.sort_by_key(|(name, _)| *name);
-    Value::Array(tools.into_iter().map(|(_, tool)| tool).collect())
-}
-
-/// One server's catalogue in an explicit advertised order.
-///
-/// Order is observable to MCP clients, so it stays declared even though tool
-/// identity is keyed by name.
-pub fn mcp_tools_ordered(server: &str, order: &[&str]) -> Value {
-    let by_name = mcp_tools(server)
-        .as_array()
-        .expect("generated MCP catalogue is an array")
-        .iter()
-        .map(|tool| {
-            (
-                tool["name"].as_str().unwrap_or_default().to_string(),
-                tool.clone(),
-            )
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    Value::Array(
-        order
-            .iter()
-            .map(|name| {
-                by_name
-                    .get(*name)
-                    .unwrap_or_else(|| panic!("unregistered MCP tool {server}::{name}"))
-                    .clone()
-            })
-            .collect(),
-    )
 }
 
 // -- Capabilities ------------------------------------------------------------
@@ -325,7 +252,6 @@ pub fn validate_operation_registry() -> Result<(), String> {
     let mut bundle_names = std::collections::BTreeSet::new();
     let mut ids = std::collections::BTreeSet::new();
     let mut cli_paths = std::collections::BTreeSet::new();
-    let mut mcp_tools = std::collections::BTreeSet::new();
 
     for bundle in operation_bundles() {
         if !bundle_names.insert(bundle.name) {
@@ -347,34 +273,6 @@ pub fn validate_operation_registry() -> Result<(), String> {
             if let Some(cli) = operation.cli {
                 if !cli_paths.insert(cli.path) {
                     return Err(format!("duplicate CLI projection {}", cli.invocation()));
-                }
-            }
-            if let Some(mcp) = operation.mcp {
-                if !mcp_tools.insert((mcp.server, mcp.tool)) {
-                    return Err(format!(
-                        "duplicate MCP projection {}::{}",
-                        mcp.server, mcp.tool
-                    ));
-                }
-                // The human-only boundary, enforced rather than merely absent.
-                if !operation.actor.agent_reachable() {
-                    return Err(format!(
-                        "operation {} is {} but exposes MCP tool {}::{}; \
-                         only session-self operations may reach an agent",
-                        operation.id,
-                        operation.actor.as_str(),
-                        mcp.server,
-                        mcp.tool
-                    ));
-                }
-                // A streaming or duplex operation cannot be served by the JSON
-                // dispatcher, so it must not advertise a tool for one.
-                if !operation.io.is_json() {
-                    return Err(format!(
-                        "operation {} is io={} and cannot expose an MCP tool",
-                        operation.id,
-                        operation.io.as_str()
-                    ));
                 }
             }
             if operation.grants.is_empty() && operation.actor.agent_reachable() {
@@ -417,9 +315,6 @@ pub fn openapi_document(version: &str) -> Value {
         });
         if let Some(cli) = operation.cli {
             definition["x-loom-cli"] = json!(cli.invocation());
-        }
-        if let Some(mcp) = operation.mcp {
-            definition["x-loom-mcp"] = json!(format!("{}::{}", mcp.server, mcp.tool));
         }
         if operation.method() == "POST" {
             definition["requestBody"] = body;

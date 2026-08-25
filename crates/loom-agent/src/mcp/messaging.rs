@@ -15,10 +15,35 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+use std::sync::OnceLock;
+
+use weaver_api::operations::{branches, sessions};
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_messaging";
-const TOOL_NAMES: [&str; 2] = ["status_update", "slack_reply"];
+
+/// The tools this server exports, in the order it advertises them.
+///
+/// `status_update` is the same operation as `loom_session::status_set`, served
+/// here under its own name; the handler below is hand-written because reaching
+/// it by name translation would defeat `super::runtime_tool_allowed`.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<sessions::status::set::Op>("status_update"),
+            export::<branches::slack::reply::Op>("slack_reply"),
+        ]
+    })
+}
+
+// Both sets are named by this adapter: `status_update` shares a grant with
+// `loom_session`'s write tool, and `expand_tool_set` resolves a name to the
+// first adapter that recognizes it.
+const STATUS_SET: &str = "mcp/messaging/status@v1";
+const SLACK_SET: &str = "mcp/slack/message@v1";
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "messaging",
@@ -32,35 +57,40 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
-const STATUS_TOOLS: &[&str] = &["status_update"];
-const SLACK_TOOLS: &[&str] = &["slack_reply"];
-const CAPABILITY_SETS: &[CapabilitySet] = &[
-    CapabilitySet {
-        name: "mcp/messaging/status@v1",
-        group: "messaging",
-        version: "v1",
-        description: "Update the durable Weaver status and its configured mirrors.",
-        tools: STATUS_TOOLS,
-    },
-    CapabilitySet {
-        name: "mcp/slack/message@v1",
-        group: "messaging",
-        version: "v1",
-        description: "Post a message to the Slack thread fixed to this session.",
-        tools: SLACK_TOOLS,
-    },
-];
-
 fn capability_sets() -> &'static [CapabilitySet] {
-    CAPABILITY_SETS
+    static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        exports()
+            .iter()
+            .map(|export| {
+                let (name, description) = match export.tool {
+                    "status_update" => (
+                        STATUS_SET,
+                        "Update the durable Weaver status and its configured mirrors.",
+                    ),
+                    _ => (
+                        SLACK_SET,
+                        "Post a message to the Slack thread fixed to this session.",
+                    ),
+                };
+                CapabilitySet {
+                    name,
+                    group: "messaging",
+                    version: "v1",
+                    description,
+                    tools: Vec::leak(vec![export.tool]),
+                }
+            })
+            .collect()
+    })
 }
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -118,7 +148,7 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
+    if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown messaging tool '{name}'");
     }
     if !super::runtime_tool_allowed(name) {
@@ -128,7 +158,8 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     match name {
         "status_update" => update_status(&client, arguments).await,
         "slack_reply" => {
-            super::dispatch::call_tool(&client, SERVER_NAME, "slack_reply", arguments).await
+            super::dispatch::call_tool(&client, SERVER_NAME, exports(), "slack_reply", arguments)
+                .await
         }
         _ => unreachable!(),
     }
@@ -178,23 +209,12 @@ mod tests {
 
     #[test]
     fn messaging_sets_are_grouped_and_exact() {
-        assert_eq!(CAPABILITY_SETS.len(), 2);
-        assert!(CAPABILITY_SETS.iter().all(|set| set.group == "messaging"));
+        assert_eq!(capability_sets().len(), 2);
+        assert!(capability_sets().iter().all(|set| set.group == "messaging"));
         assert_eq!(
             expand_tool_set("mcp/messaging/status@v1").unwrap(),
             vec!["mcp__loom_messaging__status_update"]
         );
         assert_eq!(tools().as_array().unwrap().len(), 2);
-    }
-
-    /// `slack_reply` is a real `loom_messaging` projection; `status_update`
-    /// is not (it rides on `loom_session::status_set` instead), so only one
-    /// of the two tool names this adapter advertises resolves in the
-    /// registry under its own server.
-    #[test]
-    fn slack_reply_resolves_in_the_registry_status_update_does_not() {
-        assert!(weaver_api::operation_for_mcp(SERVER_NAME, "slack_reply").is_some());
-        assert!(weaver_api::operation_for_mcp(SERVER_NAME, "status_update").is_none());
-        assert!(weaver_api::operation_for_mcp("loom_session", "status_set").is_some());
     }
 }

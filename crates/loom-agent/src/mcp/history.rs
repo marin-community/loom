@@ -1,28 +1,35 @@
-//! Built-in session self-history MCP adapter.
+//! This session's own normalized history.
 //!
-//! `history` and `search` route to `sessions.history.*` operations under the
-//! `loom_session` server because no operation declares an `loom_history::*`
-//! projection. The session selector is still refused because `session` is a
-//! context field that the schema never advertises.
-//!
-//! The tool surface is hand-written because `sessions.history.*`'s registry
-//! schema lacks the `limit`/`kinds`/`q` bounds this capability set advertises.
+//! `tools/list` is hand-written rather than derived: these two tools advertise
+//! `limit`/`kinds`/`q` bounds that `sessions.history.*`'s own operands do not
+//! carry. What the names mean is still declared once, in [`exports`].
+
+use std::sync::OnceLock;
 
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
+use weaver_api::operations::sessions;
 
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_history";
-const TOOL_NAMES: [&str; 2] = ["history", "search"];
-const HISTORY_TOOLS: &[&str] = &TOOL_NAMES;
-const CAPABILITY_SETS: &[CapabilitySet] = &[CapabilitySet {
-    name: "mcp/history/self@v1",
-    group: "history",
-    version: "v1",
-    description: "Page and literally search the normalized history of this session.",
-    tools: HISTORY_TOOLS,
-}];
+
+/// The tools this server exports, in the order it advertises them.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<sessions::history::list::Op>("history"),
+            export::<sessions::history::search::Op>("search"),
+        ]
+    })
+}
+
+// Both exports claim `loom/sessions/read@v1`, the grant `loom_session`'s read
+// tools also claim, and `expand_tool_set` resolves a set name to the first
+// adapter that recognizes it — so this adapter names its own set.
+const SET_NAME: &str = "mcp/history/self@v1";
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "history",
@@ -37,15 +44,24 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 fn capability_sets() -> &'static [CapabilitySet] {
-    CAPABILITY_SETS
+    static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        let mut sets = super::dispatch::capability_sets(exports(), "history", |_| {
+            "Page and literally search the normalized history of this session."
+        });
+        for set in &mut sets {
+            set.name = SET_NAME;
+        }
+        sets
+    })
 }
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -109,7 +125,7 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
+    if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown history tool '{name}'");
     }
     let client = super::runtime_client("history")?;
@@ -117,7 +133,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     // registered under the `loom_session` server; this adapter exposes them
     // under its own legacy name, so route there explicitly rather than
     // through `SERVER_NAME` (which no operation projects onto).
-    super::dispatch::call_tool(&client, "loom_session", name, arguments).await
+    super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -140,18 +156,5 @@ mod tests {
             expand_tool_set("mcp/history/self@v1").unwrap(),
             vec!["mcp__loom_history__history", "mcp__loom_history__search"]
         );
-    }
-
-    /// `history`/`search` route to `sessions.history.*` under the
-    /// `loom_session` server; each tool name here must resolve there, since
-    /// nothing is registered under this adapter's own `loom_history` name.
-    #[test]
-    fn history_tools_resolve_against_the_sessions_bundle() {
-        for name in TOOL_NAMES {
-            assert!(
-                weaver_api::operation_for_mcp("loom_session", name).is_some(),
-                "loom_session has no MCP projection for '{name}'"
-            );
-        }
     }
 }

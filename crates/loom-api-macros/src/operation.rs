@@ -87,7 +87,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut grants = Vec::new();
     let mut cli = None;
     let mut cli_aliases = Vec::new();
-    let mut mcp = None;
     let mut view_ty = None;
     let mut custom_render = false;
     let mut custom_scoped = false;
@@ -103,7 +102,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "grants" => grants = as_string_list(&entry.value)?,
             "cli" => cli = Some(as_string(&entry.value)?),
             "cli_alias" => cli_aliases.push(as_string(&entry.value)?),
-            "mcp" => mcp = Some(as_string(&entry.value)?),
             "view" => view_ty = Some(as_ident(&entry.value)?),
             "render" => custom_render = as_ident(&entry.value)? == "custom",
             "scoped" => custom_scoped = as_ident(&entry.value)? == "custom",
@@ -168,21 +166,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             }
             quote!(None)
         }
-    };
-
-    let mcp_tokens = match &mcp {
-        Some(projection) => {
-            let (server, tool) = projection.split_once("::").ok_or_else(|| {
-                syn::Error::new_spanned(&item, "`mcp` looks like \"server::tool\"")
-            })?;
-            let server = LitStr::new(server, span);
-            let tool = LitStr::new(tool, span);
-            quote!(Some(::weaver_api::operations::McpProjection {
-                server: #server,
-                tool: #tool,
-            }))
-        }
-        None => quote!(None),
     };
 
     let grant_literals = grants.iter().map(|grant| LitStr::new(grant, span));
@@ -278,7 +261,6 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     io: ::weaver_api::operations::Io::#io,
                     grants: &[#(#grant_literals),*],
                     cli: #cli_tokens,
-                    mcp: #mcp_tokens,
                     schema: <#input_ty as ::weaver_api::operations::Operands>::schema,
                     context: <#input_ty as ::weaver_api::operations::Operands>::CONTEXT,
                 };

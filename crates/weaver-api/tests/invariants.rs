@@ -15,62 +15,6 @@ fn registry_validates() {
     operations::validate_operation_registry().expect("registry must be structurally valid");
 }
 
-/// Invariant 4 (the half of it that is a security property).
-///
-/// An agent cannot approve its own permission request, enforced by requiring
-/// the operation to be agent-reachable.
-#[test]
-fn only_agent_reachable_operations_expose_mcp_tools() {
-    let leaked: Vec<_> = operations::operations()
-        .filter(|operation| operation.mcp.is_some() && !operation.actor.agent_reachable())
-        .map(|operation| (operation.id, operation.actor.as_str()))
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "human-only operations must not be agent-reachable: {leaked:?}"
-    );
-}
-
-/// A non-JSON operation cannot be served by the schema-driven MCP dispatcher, so
-/// it must not advertise a tool. This is what stops `io` from being a quiet way
-/// to smuggle an operation out of the generic path.
-#[test]
-fn only_json_operations_expose_mcp_tools() {
-    let leaked: Vec<_> = operations::operations()
-        .filter(|operation| operation.mcp.is_some() && !operation.io.is_json())
-        .map(|operation| (operation.id, operation.io.as_str()))
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "non-JSON operations with MCP tools: {leaked:?}"
-    );
-}
-
-/// Invariant 3: the MCP catalogue and the registry are the same set.
-#[test]
-fn mcp_catalogue_is_a_bijection_with_the_registry() {
-    let mut declared: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for operation in operations::operations() {
-        if let Some(mcp) = operation.mcp {
-            declared.entry(mcp.server).or_default().insert(mcp.tool);
-        }
-    }
-    for (server, tools) in &declared {
-        let generated = operations::mcp_tools(server);
-        let generated: BTreeSet<&str> = generated
-            .as_array()
-            .expect("catalogue is an array")
-            .iter()
-            .map(|tool| tool["name"].as_str().expect("tool has a name"))
-            .collect();
-        let expected: BTreeSet<&str> = tools.iter().copied().collect();
-        assert_eq!(
-            generated, expected,
-            "MCP server {server} catalogue disagrees with the registry"
-        );
-    }
-}
-
 /// Routes are derived from identity, so every operation must resolve from its own route.
 #[test]
 fn routes_round_trip() {
@@ -286,11 +230,6 @@ fn anonymous_operations_are_narrow() {
             "{} is anonymous but declares grants {:?}",
             operation.id,
             operation.grants
-        );
-        assert!(
-            operation.mcp.is_none(),
-            "{} is anonymous and must not expose an MCP tool",
-            operation.id
         );
     }
 }

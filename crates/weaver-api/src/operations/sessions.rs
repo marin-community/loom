@@ -134,7 +134,7 @@ pub mod context {
     // still spells it `loom context` and MCP still calls it `loom_context::get`:
     // projections are named independently of identity, which is the point.
     #[operation(id = "sessions.context", actor = SessionSelf, scope = Session, risk = Read,
-                grants = ["loom/sessions/read@v1"], cli = "context", mcp = "loom_context::get")]
+                grants = ["loom/sessions/read@v1"], cli = "context")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -296,7 +296,7 @@ pub mod get {
 
     /// Inspect one session and its branch projection.
     #[operation(id = "sessions.get", actor = SessionSelf, scope = Session, risk = Read,
-                grants = ["loom/sessions/read@v1"], cli = "sessions get", mcp = "loom_session::get")]
+                grants = ["loom/sessions/read@v1"], cli = "sessions get")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -486,7 +486,7 @@ pub mod history {
 
         /// Page normalized session history records.
         #[operation(id = "sessions.history.list", actor = SessionSelf, scope = Session, risk = Read,
-                    grants = ["loom/sessions/read@v1"], mcp = "loom_session::history")]
+                    grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             /// Page backward from this cursor (exclusive). Omit for the newest tail.
             pub before: Option<String>,
@@ -508,7 +508,7 @@ pub mod history {
 
         /// Search normalized session history records.
         #[operation(id = "sessions.history.search", actor = SessionSelf, scope = Session,
-                    risk = Read, grants = ["loom/sessions/read@v1"], mcp = "loom_session::search")]
+                    risk = Read, grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             /// Case-insensitive literal search text.
             pub q: String,
@@ -1101,8 +1101,7 @@ pub mod status {
 
         /// Read the session's durable attention level and status message.
         #[operation(id = "sessions.status.get", actor = SessionSelf, scope = Session, risk = Read,
-                    grants = ["loom/sessions/read@v1"], cli = "status get",
-                    mcp = "loom_session::status_get")]
+                    grants = ["loom/sessions/read@v1"], cli = "status get")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1116,8 +1115,7 @@ pub mod status {
 
         /// Update the durable attention level and status message.
         #[operation(id = "sessions.status.set", actor = SessionSelf, scope = Session, risk = Write,
-                    grants = ["loom/sessions/write@v1"], cli = "status set",
-                    mcp = "loom_session::status_set")]
+                    grants = ["loom/sessions/write@v1"], cli = "status set")]
         pub struct Input {
             /// The attention level: `ok`, `attention`, or `blocked`.
             #[operand(long = "tag")]
@@ -1140,8 +1138,7 @@ pub mod summary {
 
         /// Return the current goal, status, inbox, artifacts, issues, and next actions.
         #[operation(id = "sessions.summary.get", actor = SessionSelf, scope = Session, risk = Read,
-                    grants = ["loom/sessions/read@v1"], cli = "summary",
-                    mcp = "loom_session::summary")]
+                    grants = ["loom/sessions/read@v1"], cli = "summary")]
         pub struct Input {
             #[operand(context)]
             pub session: String,

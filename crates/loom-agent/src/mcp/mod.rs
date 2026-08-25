@@ -66,46 +66,6 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
-pub(crate) fn builtin_permission_rule(
-    server_name: &str,
-    tool_names: &[&str],
-    tool: &str,
-) -> Option<String> {
-    tool_names
-        .contains(&tool)
-        .then(|| format!("mcp__{server_name}__{tool}"))
-}
-
-pub(crate) fn is_builtin_permission_rule(
-    server_name: &str,
-    tool_names: &[&str],
-    rule: &str,
-) -> bool {
-    tool_names
-        .iter()
-        .any(|tool| builtin_permission_rule(server_name, tool_names, tool).as_deref() == Some(rule))
-}
-
-pub(crate) fn expand_builtin_tool_set(
-    server_name: &str,
-    tool_names: &[&str],
-    capability_sets: &[CapabilitySet],
-    name: &str,
-) -> Option<Vec<String>> {
-    capability_sets
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| {
-                    builtin_permission_rule(server_name, tool_names, tool)
-                        .expect("capability set references a registered tool")
-                })
-                .collect()
-        })
-}
-
 pub(crate) fn builtin_server_config(adapter: &str) -> Value {
     json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", adapter] })
 }
@@ -828,10 +788,13 @@ mod tests {
     /// restating their tool lists and became aliases of the canonical sets they
     /// were renamed from — the previous re-pin left them hand-authored, which
     /// meant an operation joining `loom/artifacts/read@v1` would silently not
-    /// join the older name for it. Membership is unchanged in all four; they
-    /// now carry the derived alphabetical order rather than the order someone
-    /// typed (artifacts' read set was `[list, get, history, threads]`, now
-    /// `[get, history, list, threads]`).
+    /// join the older name for it.
+    ///
+    /// Re-pinned again when adapters started naming the operations they export
+    /// instead of operations naming the server that exports them. A capability
+    /// set's tools now follow the order its adapter advertises them in, which
+    /// is the only order declared anywhere, rather than a second alphabetical
+    /// one applied on the way out. Membership is identical in all 23 sets.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -844,43 +807,43 @@ mod tests {
             ),
             (
                 "loom/context/read@v1",
-                "sha256:267b07a04f242f0cfae0601dc671d1e545f7c6d146e579a3e7e0ee5a86c17cde",
+                "sha256:43b519dcce558f12d6d10afc0a9121fadecd888a61a19c93147ec07644893dc9",
             ),
             (
                 "mcp/context/read@v1",
-                "sha256:730dfd75e29a4802def457da752aff0bebe4df1cd00259e19e691b8fd9c303d3",
+                "sha256:0a4807a5a163ebdbd66d52ca088150853ed3e005cc88e94ea7e58e4bfd7927ee",
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:b9622262c7af548b291b8a492f0cb934ccbc3d154b37fb0d036921bbe2129b55",
+                "sha256:256e58a4ba152e18a0cd3a2cff5280df509283c45dd44482a43c70e01e28b9d0",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:0a3c055cc0fa683d2c223ee7685aed6eec574aaf271a511cd687141079bc807d",
+                "sha256:1b09eb4edd3314c5c93e1f15cb1f7e7af1bd58203d23d15987d3f41e0eb6abd6",
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:97e6303f0979ec2aa6ec7e89b047b3c85a4f489047d2f3648f2167be2e4d7ad2",
+                "sha256:8e0aaa5aa62d047e71ed60f93ce28145cfd94ca083b148e9a6732951756a3d4d",
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:fad8463c646f951fe2c8b98bff654b428c01577b7c870a769a4ddad42ae17461",
+                "sha256:e2e84b022c03e482922a6aaf966db27fb329fb5863a762176f6ea559150b7477",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:0a335a3b93cf6137d7604fa744bcb2219799e31ee1375bf3e26488dcca7a1d9a",
+                "sha256:9aabc312b0ab288bcaf65a41ddb02bc54c15095bb92d4d4b29ef802c1c881c5a",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:2923f6036496be067a51890d3f121016fbfbdb1d032a5710a25bad0c617e4334",
+                "sha256:5c41decc1f0a1c731f10e8814c8cb3edde58ef14de9aa6da753040e6a8afdd28",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:7630e097d07c396f1f0430e1b5daae30ee4997e00e6cff1ead27f7dbdf133141",
+                "sha256:06c5c612abcb6bc9c17c2f543276619bcc006423b6a11c1379405b76775a7179",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:42d6c1d42c43d6634b87fff67f87e2a5f0d0879ed4787c6b633d30889a04157d",
+                "sha256:898c1f154c1c9696567581eea5ada77ab5659ce6f4cfa33a6e29dbbd31b0a188",
             ),
             (
                 "loom/issues/read@v1",
@@ -920,7 +883,7 @@ mod tests {
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:143a7be8de88851dfb6f2258952eb5a539552a44a95cfe0040b1b3ca92439696",
+                "sha256:a27288df3e294bbceabb04bfe693b999396e68a648914c9c38c9e95b6d558b06",
             ),
             (
                 "loom/permissions/request@v1",

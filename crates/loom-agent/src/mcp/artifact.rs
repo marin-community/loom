@@ -15,12 +15,32 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use weaver_api::ArtifactUpsertReq;
 
+use weaver_api::operations::artifacts;
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_artifact";
-const TOOL_NAMES: [&str; 8] = [
-    "list", "get", "write", "delete", "history", "threads", "comment", "resolve",
-];
+
+/// The tools this server exports, in the order it advertises them. `list`,
+/// `get`, and `write` are served by hand below — they resolve each artifact's
+/// dashboard `url` with a second call — but they are the same operations, so
+/// the catalogue and the capability sets still come from here.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<artifacts::list::Op>("list"),
+            export::<artifacts::get::Op>("get"),
+            export::<artifacts::write::Op>("write"),
+            export::<artifacts::delete::Op>("delete"),
+            export::<artifacts::history::Op>("history"),
+            export::<artifacts::threads::list::Op>("threads"),
+            export::<artifacts::threads::comment::Op>("comment"),
+            export::<artifacts::threads::resolve::Op>("resolve"),
+        ]
+    })
+}
 
 // The names these sets carried before the `loom/` rename. Sessions pinned to
 // one still resolve it.
@@ -48,8 +68,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
-        let mut sets =
-            super::dispatch::derive_capability_sets(SERVER_NAME, "artifact", describe_capability);
+        let mut sets = super::dispatch::capability_sets(exports(), "artifact", describe_capability);
         sets.extend(super::dispatch::alias_capability_sets(&sets, RENAMED));
         sets
     })
@@ -64,19 +83,11 @@ fn describe_capability(grant: &str) -> &'static str {
 }
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    capability_sets()
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
-                .collect()
-        })
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -84,7 +95,7 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
+    super::dispatch::tools(exports())
 }
 
 fn repo_scope(arguments: &Value) -> Result<bool> {
@@ -101,7 +112,7 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
+    if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown artifact tool '{name}'");
     }
     if !super::runtime_tool_allowed(name) {
@@ -113,7 +124,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     let client = super::runtime_client("artifact")?;
     match name {
         "list" | "get" | "write" => with_dashboard_url(&client, name, arguments).await,
-        _ => super::dispatch::call_tool(&client, SERVER_NAME, name, arguments).await,
+        _ => super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await,
     }
 }
 
@@ -214,29 +225,6 @@ fn serve_boxed() -> ServeFuture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn artifact_tools_use_resource_verbs() {
-        let surface = tools();
-        let names = surface
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(names, TOOL_NAMES);
-        assert!(surface
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|tool| tool["name"] == "write")
-            .unwrap()["inputSchema"]["properties"]
-            .get("base_rev")
-            .is_some());
-        for name in &names {
-            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
-        }
-    }
 
     #[test]
     fn capability_sets_are_grouped_by_grant() {

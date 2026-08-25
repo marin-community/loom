@@ -13,8 +13,7 @@ pub mod effective {
         /// Show this session's effective Loom operations and external repository
         /// scope.
         #[operation(id = "permissions.effective.get", actor = SessionSelf, scope = Session,
-                    risk = Read, grants = ["loom/permissions/read@v1"], cli = "permissions show",
-                    mcp = "loom_permission::show")]
+                    risk = Read, grants = ["loom/permissions/read@v1"], cli = "permissions show")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -29,8 +28,7 @@ pub mod explain {
 
     /// Explain one registered operation's actor, risk, and projections.
     #[operation(id = "permissions.explain", actor = SessionSelf, scope = Global, risk = Read,
-                grants = ["loom/permissions/read@v1"], cli = "permissions explain",
-                mcp = "loom_permission::explain")]
+                grants = ["loom/permissions/read@v1"], cli = "permissions explain")]
     pub struct Input {
         /// The operation id to explain, e.g. `issues.tags.set`.
         #[operand(positional)]
@@ -154,7 +152,7 @@ pub mod requests {
         /// Request a human-approved GitHub write-access expansion for this session.
         #[operation(id = "permissions.requests.create", actor = SessionSelf, scope = Session,
                     risk = Write, grants = ["loom/permissions/request@v1"],
-                    cli = "permissions request github-repository", mcp = "loom_permission::request")]
+                    cli = "permissions request github-repository")]
         pub struct Input {
             /// The `owner/repo` slug to request write access to.
             #[operand(positional)]
@@ -195,7 +193,7 @@ pub mod requests {
         /// List durable external-access requests for this session.
         #[operation(id = "permissions.requests.list", actor = SessionSelf, scope = Session,
                     risk = Read, grants = ["loom/permissions/read@v1"],
-                    cli = "permissions requests", mcp = "loom_permission::requests")]
+                    cli = "permissions requests")]
         pub struct Input {
             /// Restrict to `pending`, `approved`, or `denied`. Omit to list all.
             pub state: Option<String>,

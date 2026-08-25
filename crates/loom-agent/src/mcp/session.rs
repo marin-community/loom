@@ -17,26 +17,34 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+use std::sync::OnceLock;
+
+use weaver_api::operations::sessions;
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_session";
-const TOOL_NAMES: [&str; 7] = [
-    "get",
-    "summary",
-    "status_get",
-    "status_set",
-    "status",
-    "history",
-    "search",
-];
-const CANONICAL_TOOL_NAMES: [&str; 6] = [
-    "get",
-    "summary",
-    "status_get",
-    "status_set",
-    "history",
-    "search",
-];
+
+/// The tools this server exports, in the order it advertises them.
+///
+/// `status` and `status_set` are the same operation under two names — the
+/// former is what sessions pinned to `mcp/session/status@v1` called it before
+/// the rename, and saying so here is the whole of that alias.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<sessions::get::Op>("get"),
+            export::<sessions::summary::get::Op>("summary"),
+            export::<sessions::status::get::Op>("status_get"),
+            export::<sessions::status::set::Op>("status_set"),
+            export::<sessions::status::set::Op>("status"),
+            export::<sessions::history::list::Op>("history"),
+            export::<sessions::history::search::Op>("search"),
+        ]
+    })
+}
 const READ_TOOLS: &[&str] = &["get", "summary", "status_get", "history", "search"];
 const WRITE_TOOLS: &[&str] = &["status_set"];
 const LEGACY_READ_TOOLS: &[&str] = &["get", "history", "search"];
@@ -87,34 +95,19 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    super::dispatch::expand_tool_set(SERVER_NAME, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
     super::builtin_server_config("session")
 }
 
-/// `status` is a legacy alias tool: it advertises the same schema as
-/// `status_set` (the only operation registered under this server for
-/// updating status) under its old name, for sessions pinned to
-/// `mcp/session/status@v1` before the canonical rename.
 fn tools() -> Value {
-    let mut tools = weaver_api::mcp_tools_ordered(SERVER_NAME, &CANONICAL_TOOL_NAMES)
-        .as_array()
-        .expect("generated session MCP catalogue is an array")
-        .clone();
-    let mut legacy_status = tools
-        .iter()
-        .find(|tool| tool["name"] == "status_set")
-        .expect("status_set is a registered session operation")
-        .clone();
-    legacy_status["name"] = json!("status");
-    tools.insert(4, legacy_status);
-    Value::Array(tools)
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
@@ -123,7 +116,7 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
+    if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown session tool '{name}'");
     }
     let client = super::runtime_client("session")?;
@@ -131,7 +124,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
         "status_set" | "status" => set_status(&client, name, arguments).await,
         // `status` and `status_set` are the same operation under two names;
         // every other tool here maps 1:1 onto its own registered operation.
-        _ => super::dispatch::call_tool(&client, SERVER_NAME, name, arguments).await,
+        _ => super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await,
     }
 }
 
@@ -167,23 +160,4 @@ fn serve_boxed() -> ServeFuture {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_tools_consolidate_status_and_history() {
-        let surface = tools();
-        let names = surface
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(names, TOOL_NAMES);
-        assert_eq!(expand_tool_set("loom/sessions/read@v1").unwrap().len(), 5);
-        assert_eq!(expand_tool_set("mcp/session/read@v1").unwrap().len(), 3);
-        for name in CANONICAL_TOOL_NAMES {
-            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
-        }
-    }
-}
+mod tests {}

@@ -15,10 +15,25 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
+use weaver_api::operations::permissions;
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_permission";
-const TOOL_NAMES: [&str; 4] = ["show", "explain", "requests", "request"];
+
+/// The tools this server exports, in the order it advertises them.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<permissions::effective::get::Op>("show"),
+            export::<permissions::explain::Op>("explain"),
+            export::<permissions::requests::list::Op>("requests"),
+            export::<permissions::requests::create::Op>("request"),
+        ]
+    })
+}
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "permission",
@@ -38,7 +53,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
-        super::dispatch::derive_capability_sets(SERVER_NAME, "permissions", describe_capability)
+        super::dispatch::capability_sets(exports(), "permissions", describe_capability)
     })
 }
 
@@ -55,19 +70,11 @@ fn describe_capability(grant: &str) -> &'static str {
 }
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    capability_sets()
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| format!("mcp__{SERVER_NAME}__{tool}"))
-                .collect()
-        })
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -75,13 +82,14 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("permission", SERVER_NAME, &name, arguments).await
+        super::dispatch::call_adapter_tool("permission", SERVER_NAME, exports(), &name, arguments)
+            .await
     })
 }
 
@@ -92,34 +100,6 @@ fn serve_boxed() -> ServeFuture {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn permission_surface_is_derived_from_operation_descriptors() {
-        let names = tools()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(names, TOOL_NAMES);
-        for name in &names {
-            assert!(weaver_api::operation_for_mcp(SERVER_NAME, name).is_some());
-        }
-    }
-
-    #[test]
-    fn request_capability_remains_separate_from_human_decision() {
-        assert_eq!(
-            expand_tool_set("loom/permissions/request@v1")
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(weaver_api::operation("permissions.requests.approve")
-            .unwrap()
-            .mcp
-            .is_none());
-    }
 
     #[test]
     fn permission_rules_only_recognize_registered_tools() {

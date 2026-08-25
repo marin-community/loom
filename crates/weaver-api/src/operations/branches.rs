@@ -109,7 +109,7 @@ pub mod slack {
         /// targets a delivered thread.
         #[operation(id = "branches.slack.reply", actor = SessionSelf, scope = Branch,
                     risk = ExternalWrite, grants = ["loom/branches/write@v1"],
-                    cli = "branches slack reply", mcp = "loom_messaging::slack_reply")]
+                    cli = "branches slack reply")]
         pub struct Input {
             /// The message text.
             #[operand(positional)]

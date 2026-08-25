@@ -183,12 +183,6 @@ impl CliProjection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct McpProjection {
-    pub server: &'static str,
-    pub tool: &'static str,
-}
-
 /// A value the dispatcher resolves from the caller's session rather than
 /// prompting for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,7 +298,6 @@ pub struct OperationSpec {
     pub io: Io,
     pub grants: &'static [&'static str],
     pub cli: Option<CliProjection>,
-    pub mcp: Option<McpProjection>,
     pub schema: fn() -> Value,
     pub context: &'static [ContextField],
 }
@@ -431,7 +424,6 @@ mod tests {
             io: Io::Json,
             grants: &[],
             cli: None,
-            mcp: None,
             schema,
             context: &[],
         };

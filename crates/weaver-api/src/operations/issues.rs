@@ -19,8 +19,7 @@ pub mod actions {
 
     /// Apply one action atomically to a set of work items.
     #[operation(id = "issues.actions", actor = SessionSelf, scope = Repository, risk = Write,
-                grants = ["loom/issues/write@v1"], cli = "issues actions",
-                mcp = "loom_issue::actions", render = custom, default = custom)]
+                grants = ["loom/issues/write@v1"], cli = "issues actions", render = custom, default = custom)]
     pub struct Input {
         /// The work items to act on. Either every id succeeds or none does.
         #[operand(long = "id")]
@@ -55,8 +54,7 @@ pub mod backlog {
 
         /// Create an unclaimed repository backlog item.
         #[operation(id = "issues.backlog.create", actor = SessionSelf, scope = Repository,
-                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues backlog add",
-                    mcp = "loom_issue::backlog_add", render = custom)]
+                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues backlog add", render = custom)]
         pub struct Input {
             /// One-line summary of the work.
             #[operand(positional)]
@@ -115,7 +113,7 @@ pub mod close {
 
     /// Close one or more work items atomically.
     #[operation(id = "issues.close", actor = SessionSelf, scope = Repository, risk = Write,
-                grants = ["loom/issues/write@v1"], cli = "issues close", mcp = "loom_issue::close",
+                grants = ["loom/issues/write@v1"], cli = "issues close",
                 render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
@@ -134,7 +132,7 @@ pub mod create {
 
     /// Create a work item claimed by this session's branch.
     #[operation(id = "issues.create", actor = SessionSelf, scope = Branch, risk = Write,
-                grants = ["loom/issues/write@v1"], cli = "issues add", mcp = "loom_issue::add",
+                grants = ["loom/issues/write@v1"], cli = "issues add",
                 render = custom)]
     pub struct Input {
         /// One-line summary of the work.
@@ -157,8 +155,7 @@ pub mod delete {
 
     /// Permanently delete one or more work items atomically.
     #[operation(id = "issues.delete", actor = SessionSelf, scope = Repository, risk = Destructive,
-                grants = ["loom/issues/write@v1"], cli = "issues delete", cli_alias = "rm",
-                mcp = "loom_issue::delete", render = custom)]
+                grants = ["loom/issues/write@v1"], cli = "issues delete", cli_alias = "rm", render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
@@ -176,8 +173,7 @@ pub mod get {
 
     /// Inspect one work item and the status of the branch working it.
     #[operation(id = "issues.get", actor = SessionSelf, scope = Repository, risk = Read,
-                grants = ["loom/issues/read@v1"], cli = "issues get", cli_alias = "show",
-                mcp = "loom_issue::get", render = custom)]
+                grants = ["loom/issues/read@v1"], cli = "issues get", cli_alias = "show", render = custom)]
     pub struct Input {
         /// A Loom work-item id.
         #[operand(positional)]
@@ -200,8 +196,7 @@ pub mod list {
 
     /// List current-session and repository work items.
     #[operation(id = "issues.list", actor = SessionSelf, scope = Repository, risk = Read,
-                grants = ["loom/issues/read@v1"], cli = "issues list", cli_alias = "ls",
-                mcp = "loom_issue::list", view = View, render = custom)]
+                grants = ["loom/issues/read@v1"], cli = "issues list", cli_alias = "ls", view = View, render = custom)]
     pub struct Input {
         #[operand(context)]
         pub repo_root: String,
@@ -231,8 +226,7 @@ pub mod reopen {
 
     /// Reopen one or more closed work items atomically.
     #[operation(id = "issues.reopen", actor = SessionSelf, scope = Repository, risk = Write,
-                grants = ["loom/issues/write@v1"], cli = "issues reopen",
-                mcp = "loom_issue::reopen", render = custom)]
+                grants = ["loom/issues/write@v1"], cli = "issues reopen", render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
@@ -254,7 +248,7 @@ pub mod tags {
         /// Remove one free-form tag from a work item.
         #[operation(id = "issues.tags.delete", actor = SessionSelf, scope = Repository,
                     risk = Write, grants = ["loom/issues/write@v1"], cli = "issues tag delete",
-                    cli_alias = "rm", mcp = "loom_issue::tag_delete", render = custom)]
+                    cli_alias = "rm", render = custom)]
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
@@ -274,8 +268,7 @@ pub mod tags {
 
         /// Set one free-form tag on a work item.
         #[operation(id = "issues.tags.set", actor = SessionSelf, scope = Repository, risk = Write,
-                    grants = ["loom/issues/write@v1"], cli = "issues tag set",
-                    mcp = "loom_issue::tag_set", render = custom)]
+                    grants = ["loom/issues/write@v1"], cli = "issues tag set", render = custom)]
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
