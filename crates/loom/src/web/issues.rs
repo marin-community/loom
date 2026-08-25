@@ -30,18 +30,18 @@ use super::{ApiResult, AppError, AppState};
 /// and served while three other operations were declared and were not.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<issue_operations::actions::Actions, _, _>(issue_actions_operation),
-        register::<issue_operations::backlog::create::Create, _, _>(create_repo_issue_operation),
-        register::<issue_operations::board::Board, _, _>(issue_board_operation),
-        register::<issue_operations::close::Close, _, _>(close_issue_operation),
-        register::<issue_operations::create::Create, _, _>(create_branch_issue_operation),
-        register::<issue_operations::delete::Delete, _, _>(delete_issue_operation),
-        register::<issue_operations::get::Get, _, _>(get_issue_operation),
-        register::<issue_operations::list::List, _, _>(list_repo_issues_operation),
-        register::<issue_operations::reopen::Reopen, _, _>(reopen_issue_operation),
-        register::<issue_operations::tags::delete::Delete, _, _>(clear_issue_tag_operation),
-        register::<issue_operations::tags::set::Set, _, _>(set_issue_tag_operation),
-        register::<issue_operations::update::Update, _, _>(update_issue_operation),
+        register::<issue_operations::actions::Op, _, _>(issue_actions_operation),
+        register::<issue_operations::backlog::create::Op, _, _>(create_repo_issue_operation),
+        register::<issue_operations::board::Op, _, _>(issue_board_operation),
+        register::<issue_operations::close::Op, _, _>(close_issue_operation),
+        register::<issue_operations::create::Op, _, _>(create_branch_issue_operation),
+        register::<issue_operations::delete::Op, _, _>(delete_issue_operation),
+        register::<issue_operations::get::Op, _, _>(get_issue_operation),
+        register::<issue_operations::list::Op, _, _>(list_repo_issues_operation),
+        register::<issue_operations::reopen::Op, _, _>(reopen_issue_operation),
+        register::<issue_operations::tags::delete::Op, _, _>(clear_issue_tag_operation),
+        register::<issue_operations::tags::set::Op, _, _>(set_issue_tag_operation),
+        register::<issue_operations::update::Op, _, _>(update_issue_operation),
     ]
 }
 

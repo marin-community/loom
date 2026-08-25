@@ -288,31 +288,30 @@ same surface. The rule is one line:
 ### The operation registry
 
 An operation is declared exactly once, in
-[`crates/weaver-api/src/operations/`](../crates/weaver-api/src/operations/), and
-**its id is its path on disk**: `issues.tags.set` lives in
-`operations/issues/tags/set.rs` and nowhere else. A declaration is an
-`#[operation(...)]` attribute plus an `Input` struct:
+[`crates/weaver-api/src/operations/`](../crates/weaver-api/src/operations/) —
+one file per top-level group, and **its id is its module path**:
+`sessions.shells.delete` is `sessions.rs`'s `shells::delete` and nowhere else.
+A declaration is one attribute on the operation's `Input`:
 
 ```rust
-#[operation(
-    id = "sessions.shells.delete",
-    actor = SessionSelf,          // which credentials may call this
-    scope = Session,              // which resource it is authorized against
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-pub struct Delete;
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+/// Close one of a session's worktree debug shells.
+#[operation(id = "sessions.shells.delete", actor = SessionSelf, scope = Session,
+            risk = Write, grants = ["loom/sessions/write@v1"])]
 pub struct Input {
     /// Which of the session's debug shells to close.
     #[operand(positional)]
     pub index: u32,
-    /// A visible session id. Omit for this session.
     #[operand(context)]
     pub session: String,
 }
+
+pub type Output = ShellsView;
 ```
+
+`actor` says which credentials may call it, `scope` which resource it is
+authorized against. The attribute emits the serde/schema/clap derives, the
+`Op` marker handlers bind against, and a `Scoped` impl that reads the context
+field `scope` names — so the declared scope and the enforced one cannot drift.
 
 Everything else is derived from that:
 

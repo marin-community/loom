@@ -6,7 +6,7 @@
 //! carries an `expected_revision` optimistic-concurrency guard, since more
 //! than one open dashboard tab can race to reorganize the same layout.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -19,16 +19,8 @@ pub mod defaults {
         /// Clear a placement default, so newly created sessions matching this
         /// selector fall through to a broader default (or the fallback origin `*`,
         /// which cannot itself be removed).
-        #[operation(
-    id = "session_layout.defaults.delete",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.defaults.delete", actor = User, scope = Global,
+                    risk = Write, default = custom)]
         pub struct Input {
             /// Which kind of selector the default to clear matches on.
             #[operand(json)]
@@ -58,16 +50,8 @@ pub mod defaults {
 
         /// Set (or replace) the default group a newly created session lands in for
         /// one selector.
-        #[operation(
-    id = "session_layout.defaults.set",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.defaults.set", actor = User, scope = Global, risk = Write,
+                    default = custom)]
         pub struct Input {
             /// Which kind of selector this default matches on.
             #[operand(json)]
@@ -99,20 +83,8 @@ pub mod events {
     use super::prelude::*;
 
     /// Subscribe to layout changes as other dashboard tabs make them.
-    ///
-    /// `actor = User`: the layout is the signed-in operator's own dashboard
-    /// state; no session grant can read it.
-    #[operation(
-    id = "session_layout.events",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    io = Stream,
-)]
-    pub struct Events;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "session_layout.events", actor = User, scope = Global, risk = Read,
+                io = Stream)]
     pub struct Input {}
 
     pub type Output = ();
@@ -123,16 +95,7 @@ pub mod get {
 
     /// The signed-in operator's shared session-dashboard layout: spaces, groups,
     /// session placements, and per-selector placement defaults.
-    #[operation(
-    id = "session_layout.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "session_layout.get", actor = User, scope = Global, risk = Read)]
     pub struct Input {}
 
     pub type Output = SessionLayoutView;
@@ -145,16 +108,7 @@ pub mod groups {
         use super::prelude::*;
 
         /// Create a new group within a space.
-        #[operation(
-    id = "session_layout.groups.create",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.groups.create", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             pub space_id: String,
             pub name: String,
@@ -173,16 +127,8 @@ pub mod groups {
         /// Delete a group. Deleting a group never deletes sessions:
         /// `destination_group_id` is required whenever the group owns placements or
         /// default-placement selectors, and its contents move there atomically.
-        #[operation(
-    id = "session_layout.groups.delete",
-    actor = User,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.groups.delete", actor = User, scope = Global,
+                    risk = Destructive)]
         pub struct Input {
             /// The group being deleted.
             pub id: String,
@@ -210,16 +156,8 @@ pub mod groups {
             /// per-operator disclosure preference (`user_session_group_state`), not
             /// shared layout state another dashboard tab could race to change, so there
             /// is nothing to guard against.
-            #[operation(
-    id = "session_layout.groups.preference.set",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-            pub struct Set;
-
-            #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+            #[operation(id = "session_layout.groups.preference.set", actor = User, scope = Global,
+                        risk = Write)]
             pub struct Input {
                 /// The group whose disclosure state is being set.
                 pub id: String,
@@ -234,16 +172,7 @@ pub mod groups {
         use super::prelude::*;
 
         /// Rename a group.
-        #[operation(
-    id = "session_layout.groups.update",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Update;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.groups.update", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The group being renamed.
             pub id: String,
@@ -263,16 +192,7 @@ pub mod r#move {
 
     /// Atomically move one or more sessions to an exact insertion point within a
     /// group.
-    #[operation(
-    id = "session_layout.move",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Move;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "session_layout.move", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         pub session_ids: Vec<String>,
         pub destination_group_id: String,
@@ -291,16 +211,8 @@ pub mod reorder {
     use super::prelude::*;
 
     /// Reorder one space, or one group (optionally into another space).
-    #[operation(
-    id = "session_layout.reorder",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Reorder;
-
-    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "session_layout.reorder", actor = User, scope = Global, risk = Write,
+                default = custom)]
     pub struct Input {
         /// Whether `id` names a space or a group.
         #[operand(json)]
@@ -340,16 +252,7 @@ pub mod restore {
     /// The supplied groups must cover exactly the sessions currently placed in
     /// those groups, so an undo fails as a stale whole instead of partially
     /// overwriting an intervening placement.
-    #[operation(
-    id = "session_layout.restore",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Restore;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "session_layout.restore", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         #[operand(json)]
         pub groups: Vec<SessionGroupOrderReq>,
@@ -369,16 +272,7 @@ pub mod spaces {
         use super::prelude::*;
 
         /// Create a new top-level space, seeded with an "Inbox" group.
-        #[operation(
-    id = "session_layout.spaces.create",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.spaces.create", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             pub name: String,
             /// Optimistic-concurrency guard: the layout revision this call was
@@ -396,16 +290,8 @@ pub mod spaces {
         /// Delete a space. Deleting a non-empty space atomically moves its sessions
         /// and placement defaults to `destination_group_id`, which is required
         /// unless the space is empty. The last remaining space cannot be deleted.
-        #[operation(
-    id = "session_layout.spaces.delete",
-    actor = User,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.spaces.delete", actor = User, scope = Global,
+                    risk = Destructive)]
         pub struct Input {
             /// The space being deleted.
             pub id: String,
@@ -425,16 +311,7 @@ pub mod spaces {
         use super::prelude::*;
 
         /// Rename a space.
-        #[operation(
-    id = "session_layout.spaces.update",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Update;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "session_layout.spaces.update", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The space being renamed.
             pub id: String,
@@ -450,20 +327,20 @@ pub mod spaces {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <get::Get as Operation>::SPEC,
-    <spaces::create::Create as Operation>::SPEC,
-    <spaces::update::Update as Operation>::SPEC,
-    <spaces::delete::Delete as Operation>::SPEC,
-    <groups::create::Create as Operation>::SPEC,
-    <groups::update::Update as Operation>::SPEC,
-    <groups::delete::Delete as Operation>::SPEC,
-    <groups::preference::set::Set as Operation>::SPEC,
-    <r#move::Move as Operation>::SPEC,
-    <reorder::Reorder as Operation>::SPEC,
-    <restore::Restore as Operation>::SPEC,
-    <defaults::set::Set as Operation>::SPEC,
-    <defaults::delete::Delete as Operation>::SPEC,
-    <events::Events as Operation>::SPEC,
+    get::SPEC,
+    spaces::create::SPEC,
+    spaces::update::SPEC,
+    spaces::delete::SPEC,
+    groups::create::SPEC,
+    groups::update::SPEC,
+    groups::delete::SPEC,
+    groups::preference::set::SPEC,
+    r#move::SPEC,
+    reorder::SPEC,
+    restore::SPEC,
+    defaults::set::SPEC,
+    defaults::delete::SPEC,
+    events::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

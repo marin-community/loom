@@ -7,7 +7,7 @@
 //! REST surface here — `settings.get`/`settings.patch` and the
 //! `settings.env.*` facade they expose to operators — is.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -22,18 +22,8 @@ pub mod env {
 
         /// Remove one variable from the default profile's environment. A missing
         /// name is not an error — the desired end state already holds.
-        #[operation(
-    id = "settings.env.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "settings env delete",
-    cli_alias = "rm",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "settings.env.delete", actor = Admin, scope = Global, risk = Write,
+                    cli = "settings env delete", cli_alias = "rm")]
         pub struct Input {
             /// The variable name.
             #[operand(positional)]
@@ -48,18 +38,8 @@ pub mod env {
 
         /// List every variable in the default profile's environment. Unlike a named
         /// profile's environment metadata, values are returned in full.
-        #[operation(
-    id = "settings.env.list",
-    actor = Admin,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "settings env list",
-    cli_alias = "ls",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "settings.env.list", actor = Admin, scope = Global, risk = Read,
+                    cli = "settings env list", cli_alias = "ls")]
         pub struct Input {}
 
         pub type Output = Vec<AgentEnvVarView>;
@@ -71,17 +51,8 @@ pub mod env {
         /// Upsert one variable in the default profile's environment. The value is
         /// free-form; the name is validated as a shell identifier so it cannot
         /// corrupt the launch script that exports it.
-        #[operation(
-    id = "settings.env.set",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "settings env set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "settings.env.set", actor = Admin, scope = Global, risk = Write,
+                    cli = "settings env set")]
         pub struct Input {
             /// The variable name — a POSIX-portable shell identifier.
             #[operand(positional)]
@@ -100,20 +71,10 @@ pub mod get {
 
     /// Every registered runtime setting and its effective value.
     ///
-    /// `SessionSelf`: an agent may read the configuration it runs under. Writing
-    /// is `settings.patch` (`Admin`). Uses the session read grant — the
-    /// narrowest capability a session can hold.
-    #[operation(
-    id = "settings.get",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "settings get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// An agent may read the configuration it runs under; writing is
+    /// `settings.patch`.
+    #[operation(id = "settings.get", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "settings get")]
     pub struct Input {}
 
     pub type Output = SettingsEnvelope;
@@ -127,17 +88,8 @@ pub mod patch {
     use super::prelude::*;
 
     /// Apply setting changes. A `null` value clears a key back to its default.
-    #[operation(
-    id = "settings.patch",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "settings patch",
-)]
-    pub struct Patch;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "settings.patch", actor = Admin, scope = Global, risk = Write,
+                cli = "settings patch")]
     pub struct Input {
         /// Dotted setting key to new value; `null` clears that key back to its
         /// default.
@@ -154,11 +106,11 @@ pub mod patch {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <get::Get as Operation>::SPEC,
-    <patch::Patch as Operation>::SPEC,
-    <env::list::List as Operation>::SPEC,
-    <env::set::Set as Operation>::SPEC,
-    <env::delete::Delete as Operation>::SPEC,
+    get::SPEC,
+    patch::SPEC,
+    env::list::SPEC,
+    env::set::SPEC,
+    env::delete::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

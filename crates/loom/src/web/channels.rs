@@ -660,20 +660,19 @@ pub(super) async fn wait_for_channel_message_operation(
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<ops::list::List, _, _>(list_channels_operation),
-        register::<ops::get::Get, _, _>(get_channel_operation),
-        register::<ops::messages::list::List, _, _>(list_channel_messages_operation),
-        register::<ops::messages::create::Create, _, _>(create_channel_message_operation),
-        register::<ops::create::Create, _, _>(create_channel_operation),
-        register::<ops::archive::Archive, _, _>(archive_channel_operation),
-        register::<ops::subscription::set::Set, _, _>(set_channel_subscription_operation),
-        register::<ops::read_marker::set::Set, _, _>(set_channel_read_marker_operation),
-        register::<ops::wait::Wait, _, _>(wait_for_channel_message_operation),
-        register::<ops::bindings::list::List, _, _>(list_channel_bindings_operation),
+        register::<ops::list::Op, _, _>(list_channels_operation),
+        register::<ops::get::Op, _, _>(get_channel_operation),
+        register::<ops::messages::list::Op, _, _>(list_channel_messages_operation),
+        register::<ops::messages::create::Op, _, _>(create_channel_message_operation),
+        register::<ops::create::Op, _, _>(create_channel_operation),
+        register::<ops::archive::Op, _, _>(archive_channel_operation),
+        register::<ops::subscription::set::Op, _, _>(set_channel_subscription_operation),
+        register::<ops::read_marker::set::Op, _, _>(set_channel_read_marker_operation),
+        register::<ops::wait::Op, _, _>(wait_for_channel_message_operation),
+        register::<ops::bindings::list::Op, _, _>(list_channel_bindings_operation),
     ]
 }
 
-/// `channels.bindings.list`.
 pub(super) async fn list_channel_bindings_operation(
     context: OperationContext,
     input: ops::bindings::list::Input,

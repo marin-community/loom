@@ -4,7 +4,7 @@
 //! `crates/loom/src/web/issues.rs` — the registry derives its clap variant,
 //! client wrapper, MCP schema, and capability set.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -18,19 +18,9 @@ pub mod actions {
     use super::prelude::*;
 
     /// Apply one action atomically to a set of work items.
-    #[operation(
-    id = "issues.actions",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues actions",
-    mcp = "loom_issue::actions",
-    render = custom,
-)]
-    pub struct Actions;
-
-    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.actions", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues actions",
+                mcp = "loom_issue::actions", render = custom, default = custom)]
     pub struct Input {
         /// The work items to act on. Either every id succeeds or none does.
         #[operand(long = "id")]
@@ -64,19 +54,9 @@ pub mod backlog {
         use super::prelude::*;
 
         /// Create an unclaimed repository backlog item.
-        #[operation(
-    id = "issues.backlog.create",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues backlog add",
-    mcp = "loom_issue::backlog_add",
-    render = custom,
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "issues.backlog.create", actor = SessionSelf, scope = Repository,
+                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues backlog add",
+                    mcp = "loom_issue::backlog_add", render = custom)]
         pub struct Input {
             /// One-line summary of the work.
             #[operand(positional)]
@@ -112,21 +92,10 @@ pub mod board {
 
     /// Every work item across every repository — the dashboard's board.
     ///
-    /// This operation uses `scope = Global`, while `issues.list` uses
-    /// `scope = Repository`. A scope that changes with input cannot be checked
-    /// by the authorization system, so these are separate operations rather than
-    /// one with an optional parameter.
-    #[operation(
-    id = "issues.board",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/issues/read@v1"],
-    cli = "issues board",
-)]
-    pub struct Board;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Separate from `issues.list` rather than one operation with an optional
+    /// parameter, because a scope that changes with input cannot be authorized.
+    #[operation(id = "issues.board", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues board")]
     pub struct Input {
         /// Include closed work items.
         #[operand(default = false)]
@@ -145,20 +114,9 @@ pub mod close {
     use super::prelude::*;
 
     /// Close one or more work items atomically.
-    #[operation(
-    id = "issues.close",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues close",
-
-    mcp = "loom_issue::close",
-    render = custom,
-)]
-    pub struct Close;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.close", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues close", mcp = "loom_issue::close",
+                render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
@@ -175,19 +133,9 @@ pub mod create {
     use super::prelude::*;
 
     /// Create a work item claimed by this session's branch.
-    #[operation(
-    id = "issues.create",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues add",
-    mcp = "loom_issue::add",
-    render = custom,
-)]
-    pub struct Create;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.create", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues add", mcp = "loom_issue::add",
+                render = custom)]
     pub struct Input {
         /// One-line summary of the work.
         #[operand(positional)]
@@ -208,20 +156,9 @@ pub mod delete {
     use super::prelude::*;
 
     /// Permanently delete one or more work items atomically.
-    #[operation(
-    id = "issues.delete",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Destructive,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues delete",
-    cli_alias = "rm",
-    mcp = "loom_issue::delete",
-    render = custom,
-)]
-    pub struct Delete;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.delete", actor = SessionSelf, scope = Repository, risk = Destructive,
+                grants = ["loom/issues/write@v1"], cli = "issues delete", cli_alias = "rm",
+                mcp = "loom_issue::delete", render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
@@ -238,20 +175,9 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one work item and the status of the branch working it.
-    #[operation(
-    id = "issues.get",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Read,
-    grants = ["loom/issues/read@v1"],
-    cli = "issues get",
-    cli_alias = "show",
-    mcp = "loom_issue::get",
-    render = custom,
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.get", actor = SessionSelf, scope = Repository, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues get", cli_alias = "show",
+                mcp = "loom_issue::get", render = custom)]
     pub struct Input {
         /// A Loom work-item id.
         #[operand(positional)]
@@ -273,21 +199,9 @@ pub mod list {
     use super::prelude::*;
 
     /// List current-session and repository work items.
-    #[operation(
-    id = "issues.list",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Read,
-    grants = ["loom/issues/read@v1"],
-    cli = "issues list",
-    cli_alias = "ls",
-    mcp = "loom_issue::list",
-    view = View,
-    render = custom,
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.list", actor = SessionSelf, scope = Repository, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues list", cli_alias = "ls",
+                mcp = "loom_issue::list", view = View, render = custom)]
     pub struct Input {
         #[operand(context)]
         pub repo_root: String,
@@ -316,20 +230,9 @@ pub mod reopen {
     use super::prelude::*;
 
     /// Reopen one or more closed work items atomically.
-    #[operation(
-    id = "issues.reopen",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues reopen",
-
-    mcp = "loom_issue::reopen",
-    render = custom,
-)]
-    pub struct Reopen;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.reopen", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues reopen",
+                mcp = "loom_issue::reopen", render = custom)]
     pub struct Input {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
@@ -349,20 +252,9 @@ pub mod tags {
         use super::prelude::*;
 
         /// Remove one free-form tag from a work item.
-        #[operation(
-    id = "issues.tags.delete",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues tag delete",
-    cli_alias = "rm",
-    mcp = "loom_issue::tag_delete",
-    render = custom,
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "issues.tags.delete", actor = SessionSelf, scope = Repository,
+                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues tag delete",
+                    cli_alias = "rm", mcp = "loom_issue::tag_delete", render = custom)]
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
@@ -381,19 +273,9 @@ pub mod tags {
         use super::prelude::*;
 
         /// Set one free-form tag on a work item.
-        #[operation(
-    id = "issues.tags.set",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues tag set",
-    mcp = "loom_issue::tag_set",
-    render = custom,
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "issues.tags.set", actor = SessionSelf, scope = Repository, risk = Write,
+                    grants = ["loom/issues/write@v1"], cli = "issues tag set",
+                    mcp = "loom_issue::tag_set", render = custom)]
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
@@ -423,17 +305,8 @@ pub mod update {
     /// Claiming is not here: a claim is made by launching a session against an
     /// item, so the only claim change this expresses is `unclaim: bool`, which
     /// returns the item to the backlog and cannot represent any other transition.
-    #[operation(
-    id = "issues.update",
-    actor = SessionSelf,
-    scope = Repository,
-    risk = Write,
-    grants = ["loom/issues/write@v1"],
-    cli = "issues update",
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "issues.update", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues update")]
     pub struct Input {
         /// A Loom work-item id.
         #[operand(positional)]
@@ -458,18 +331,18 @@ pub mod update {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <board::Board as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <create::Create as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <backlog::create::Create as Operation>::SPEC,
-    <close::Close as Operation>::SPEC,
-    <reopen::Reopen as Operation>::SPEC,
-    <delete::Delete as Operation>::SPEC,
-    <tags::set::Set as Operation>::SPEC,
-    <tags::delete::Delete as Operation>::SPEC,
-    <actions::Actions as Operation>::SPEC,
+    list::SPEC,
+    board::SPEC,
+    get::SPEC,
+    create::SPEC,
+    update::SPEC,
+    backlog::create::SPEC,
+    close::SPEC,
+    reopen::SPEC,
+    delete::SPEC,
+    tags::set::SPEC,
+    tags::delete::SPEC,
+    actions::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

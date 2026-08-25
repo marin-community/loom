@@ -13,7 +13,7 @@ use super::{artifact_meta, issue_views, principal_subject, require_session, ApiR
 /// The bound `sessions.summary.get` operation.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![register::<
-        weaver_api::operations::sessions::summary::get::Get,
+        weaver_api::operations::sessions::summary::get::Op,
         _,
         _,
     >(summary_get)]

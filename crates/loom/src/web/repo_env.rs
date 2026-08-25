@@ -36,13 +36,12 @@ async fn repo_env_view(db: &Db, repo_root: &str) -> ApiResult<RepoEnvView> {
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<ops::get::Get, _, _>(env_get_operation),
-        register::<ops::set::Set, _, _>(env_set_operation),
-        register::<ops::delete::Delete, _, _>(env_delete_operation),
+        register::<ops::get::Op, _, _>(env_get_operation),
+        register::<ops::set::Op, _, _>(env_set_operation),
+        register::<ops::delete::Op, _, _>(env_delete_operation),
     ]
 }
 
-/// `repos.env.get`.
 async fn env_get_operation(
     context: OperationContext,
     input: ops::get::Input,
@@ -52,7 +51,6 @@ async fn env_get_operation(
     repo_env_view(&st.db, &repo_root).await
 }
 
-/// `repos.env.set`.
 async fn env_set_operation(
     context: OperationContext,
     input: ops::set::Input,
@@ -66,7 +64,6 @@ async fn env_set_operation(
     repo_env_view(&st.db, &repo_root).await
 }
 
-/// `repos.env.delete`.
 async fn env_delete_operation(
     context: OperationContext,
     input: ops::delete::Input,

@@ -48,7 +48,7 @@ fn applied(result: &IssueActionsResult, verb: &str) -> String {
     parts.join("; ")
 }
 
-impl Render for issues::list::List {
+impl Render for issues::list::Op {
     fn text(output: &Vec<IssueView>, view: &issues::list::View) -> String {
         let mut items: Vec<&IssueView> = output.iter().collect();
         if view.mine {
@@ -65,55 +65,55 @@ impl Render for issues::list::List {
     }
 }
 
-impl Render for issues::get::Get {
+impl Render for issues::get::Op {
     fn text(output: &IssueView, _: &NoView) -> String {
         detail(output)
     }
 }
 
-impl Render for issues::create::Create {
+impl Render for issues::create::Op {
     fn text(output: &IssueView, _: &NoView) -> String {
         format!("created work item #{}", output.id)
     }
 }
 
-impl Render for issues::backlog::create::Create {
+impl Render for issues::backlog::create::Op {
     fn text(output: &IssueView, _: &NoView) -> String {
         format!("created backlog item #{}", output.id)
     }
 }
 
-impl Render for issues::close::Close {
+impl Render for issues::close::Op {
     fn text(output: &IssueActionsResult, _: &NoView) -> String {
         applied(output, "closed")
     }
 }
 
-impl Render for issues::reopen::Reopen {
+impl Render for issues::reopen::Op {
     fn text(output: &IssueActionsResult, _: &NoView) -> String {
         applied(output, "reopened")
     }
 }
 
-impl Render for issues::delete::Delete {
+impl Render for issues::delete::Op {
     fn text(output: &IssueActionsResult, _: &NoView) -> String {
         applied(output, "deleted")
     }
 }
 
-impl Render for issues::tags::set::Set {
+impl Render for issues::tags::set::Op {
     fn text(output: &IssueView, _: &NoView) -> String {
         format!("tagged work item #{}", output.id)
     }
 }
 
-impl Render for issues::tags::delete::Delete {
+impl Render for issues::tags::delete::Op {
     fn text(output: &IssueView, _: &NoView) -> String {
         format!("removed tag from work item #{}", output.id)
     }
 }
 
-impl Render for issues::actions::Actions {
+impl Render for issues::actions::Op {
     fn text(output: &IssueActionsResult, _: &NoView) -> String {
         applied(output, "updated")
     }

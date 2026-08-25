@@ -221,19 +221,18 @@ pub(super) async fn raw_artifact_bytes(st: &AppState, input: &raw::Input) -> Api
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<list::List, _, _>(list_operation),
-        register::<get::Get, _, _>(get_operation),
-        register::<write::Write, _, _>(write_operation),
-        register::<delete::Delete, _, _>(delete_operation),
-        register::<history::History, _, _>(history_operation),
-        register::<threads::list::List, _, _>(threads_list_operation),
-        register::<threads::comment::Comment, _, _>(threads_comment_operation),
-        register::<threads::resolve::Resolve, _, _>(threads_resolve_operation),
-        register::<url::Url, _, _>(url_operation),
+        register::<list::Op, _, _>(list_operation),
+        register::<get::Op, _, _>(get_operation),
+        register::<write::Op, _, _>(write_operation),
+        register::<delete::Op, _, _>(delete_operation),
+        register::<history::Op, _, _>(history_operation),
+        register::<threads::list::Op, _, _>(threads_list_operation),
+        register::<threads::comment::Op, _, _>(threads_comment_operation),
+        register::<threads::resolve::Op, _, _>(threads_resolve_operation),
+        register::<url::Op, _, _>(url_operation),
     ]
 }
 
-/// `artifacts.list`.
 async fn list_operation(context: OperationContext, input: list::Input) -> ApiResult<list::Output> {
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
@@ -355,7 +354,6 @@ async fn write_operation(
     artifact_view(&st.db, &branch.repo_root, &a, None).await
 }
 
-/// `artifacts.delete`.
 async fn delete_operation(
     context: OperationContext,
     input: delete::Input,

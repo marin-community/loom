@@ -1,7 +1,7 @@
 //! Declarative reconciliation of runtime settings, launch profiles, and
 //! workload federation mappings against one deployment stack.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -14,17 +14,8 @@ pub mod reconcile {
     /// launch profiles, and federation mappings.
     ///
     /// The manifest carries references and policy, never secret values.
-    #[operation(
-    id = "deployment.reconcile",
-    actor = Admin,
-    scope = Global,
-    risk = ExternalWrite,
-    grants = [],
-    cli = "deployment reconcile",
-)]
-    pub struct Reconcile;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "deployment.reconcile", actor = Admin, scope = Global, risk = ExternalWrite,
+                cli = "deployment reconcile")]
     pub struct Input {
         /// Organization defaults for registered runtime settings. Live database
         /// values remain a higher-precedence override.
@@ -46,7 +37,7 @@ pub mod reconcile {
     pub type Output = DeploymentView;
 }
 
-static OPERATIONS: &[&OperationSpec] = &[<reconcile::Reconcile as Operation>::SPEC];
+static OPERATIONS: &[&OperationSpec] = &[reconcile::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

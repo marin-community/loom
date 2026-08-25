@@ -193,7 +193,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     // percent-encoded: they travel in the JSON body.
     let view = weaver_api::Client::new(weaver_api::endpoint::base_url())
         .with_token(Some(token))
-        .invoke::<invoke::Invoke>(&invoke::Input {
+        .invoke::<invoke::Op>(&invoke::Input {
             tool: name.to_string(),
             arguments,
             session: session_id,

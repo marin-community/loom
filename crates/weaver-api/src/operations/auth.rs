@@ -10,7 +10,7 @@
 //! are not registered here: they return redirects, not JSON, and are never called
 //! programmatically.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -18,20 +18,8 @@ pub mod automation_token {
     use super::prelude::*;
 
     /// Mint a short-lived automation-only token for a given subject.
-    ///
-    /// Operator-only: minting a credential for some other automated subject
-    /// is fleet administration, not a self-service action — `actor = Admin`.
-    #[operation(
-    id = "auth.automation_token",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "token mint",
-)]
-    pub struct AutomationToken;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "auth.automation_token", actor = Admin, scope = Global, risk = Write,
+                cli = "token mint")]
     pub struct Input {
         /// Stable identity recorded on runs launched with this token.
         #[operand(positional)]
@@ -53,25 +41,12 @@ pub mod federate {
     /// Exchange a workload-identity OIDC token for a short-lived automation
     /// token, per a mapping an admin registered with `auth.federations.create`.
     ///
-    /// The caller is a CI system (e.g. a GitHub Actions job presenting its
-    /// runner OIDC token), never a human and never an agent session — the
-    /// `actor = Anonymous` — which does NOT mean unauthenticated. The caller proves
-    /// itself with an external OIDC token carried in the request body; what it lacks
-    /// is a *Loom* credential, so there is no `Principal` for `authorize` to inspect
-    /// and the operation must vouch for itself. The OIDC token itself is what's
-    /// verified, similar to [`auth.login`](super::login) bootstrapping a session
-    /// from a password.
-    #[operation(
-    id = "auth.federate",
-    actor = Anonymous,
-    io = Session,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Federate;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// The caller is a CI system presenting an external OIDC token — a GitHub
+    /// Actions job with its runner token, say. `actor = Anonymous` here means
+    /// it holds no *Loom* credential, not that it is unauthenticated: the OIDC
+    /// token is verified in the request body, so there is no `Principal` for
+    /// `authorize` to inspect and the operation vouches for itself.
+    #[operation(id = "auth.federate", actor = Anonymous, io = Session, scope = Global, risk = Write)]
     pub struct Input {
         /// The workload-identity OIDC token to exchange.
         pub token: String,
@@ -90,19 +65,8 @@ pub mod federations {
         /// Register (or idempotently reconcile) a workload-identity federation
         /// mapping — the trust relationship `auth.federate` exchanges an OIDC token
         /// against.
-        ///
-        /// Fleet configuration, not a self-service action — `actor = Admin`.
-        #[operation(
-    id = "auth.federations.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "federation add",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.federations.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "federation add")]
         pub struct Input {
             /// Stable operator-owned identity used for idempotent reconciliation.
             /// When omitted, one is derived from the identity fields below.
@@ -137,19 +101,8 @@ pub mod federations {
         use super::prelude::*;
 
         /// List the registered workload-identity federation mappings.
-        ///
-        /// Operator-only, same reasoning as [`create`](super::create).
-        #[operation(
-    id = "auth.federations.list",
-    actor = Admin,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "federation ls",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.federations.list", actor = Admin, scope = Global, risk = Read,
+                    cli = "federation ls")]
         pub struct Input {}
 
         pub type Output = Vec<FederationView>;
@@ -159,19 +112,8 @@ pub mod federations {
         use super::prelude::*;
 
         /// Remove a workload-identity federation mapping.
-        ///
-        /// Operator-only, same reasoning as [`create`](super::create).
-        #[operation(
-    id = "auth.federations.remove",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "federation rm",
-)]
-        pub struct Remove;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.federations.remove", actor = Admin, scope = Global, risk = Write,
+                    cli = "federation rm")]
         pub struct Input {
             /// The mapping id (from `federation ls`).
             #[operand(positional)]
@@ -191,19 +133,8 @@ pub mod github_config {
         use super::prelude::*;
 
         /// Read the GitHub sign-in / App setup (secret withheld).
-        ///
-        /// Configuring how the whole fleet signs in is operator-only.
-        #[operation(
-    id = "auth.github_config.get",
-    actor = Admin,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "auth github-config get",
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.github_config.get", actor = Admin, scope = Global, risk = Read,
+                    cli = "auth github-config get")]
         pub struct Input {}
 
         pub type Output = GithubConfigView;
@@ -213,19 +144,8 @@ pub mod github_config {
         use super::prelude::*;
 
         /// Set the GitHub sign-in OAuth client id (and, optionally, its secret).
-        ///
-        /// Operator-only, same reasoning as [`get`](super::get).
-        #[operation(
-    id = "auth.github_config.set",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth github-config set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.github_config.set", actor = Admin, scope = Global, risk = Write,
+                    cli = "auth github-config set")]
         pub struct Input {
             #[operand(positional)]
             pub client_id: String,
@@ -248,17 +168,8 @@ pub mod github_token {
 
         /// Whether the caller has a personal GitHub token on file, and when it last
         /// changed.
-        #[operation(
-    id = "auth.github_token.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "auth github-token get",
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.github_token.get", actor = User, scope = Global, risk = Read,
+                    cli = "auth github-token get")]
         pub struct Input {}
 
         pub type Output = GithubTokenStatusView;
@@ -268,17 +179,8 @@ pub mod github_token {
         use super::prelude::*;
 
         /// Remove the caller's personal GitHub token.
-        #[operation(
-    id = "auth.github_token.remove",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth github-token rm",
-)]
-        pub struct Remove;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.github_token.remove", actor = User, scope = Global, risk = Write,
+                    cli = "auth github-token rm")]
         pub struct Input {}
 
         pub type Output = GithubTokenStatusView;
@@ -290,17 +192,8 @@ pub mod github_token {
         /// Set the caller's personal GitHub token. Loom selects it for ordinary
         /// interactive sessions this user launches; restricted sessions never use
         /// it.
-        #[operation(
-    id = "auth.github_token.set",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth github-token set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.github_token.set", actor = User, scope = Global, risk = Write,
+                    cli = "auth github-token set")]
         pub struct Input {
             /// The token value. On the command line this names a file, or `-`/omitted
             /// to read stdin, so the secret need not sit in shell history.
@@ -317,25 +210,9 @@ pub mod login {
 
     /// Exchange a username and password for a signed-in session.
     ///
-    /// `actor = Anonymous`: this is one of exactly two operations that create a
-    /// credential, running before any credential exists. This is asserted by
-    /// `anonymous_operations_are_pinned`.
-    ///
-    /// The CLI tool implements `loom login` separately by verifying a personal
-    /// token against [`auth.me`](super::me) and [`auth.tokens.list`](super::tokens::list),
-    /// then storing it locally. That's a hand-written Tier C client feature, so
-    /// this operation has no `cli` projection.
-    #[operation(
-    id = "auth.login",
-    actor = Anonymous,
-    io = Session,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Login;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// One of exactly two operations that create a credential, so it runs
+    /// before any credential exists.
+    #[operation(id = "auth.login", actor = Anonymous, io = Session, scope = Global, risk = Write)]
     pub struct Input {
         pub username: String,
         pub password: String,
@@ -348,17 +225,7 @@ pub mod logout {
     use super::prelude::*;
 
     /// End the caller's signed-in session.
-    #[operation(
-    id = "auth.logout",
-    actor = User,
-    io = Session,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Logout;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "auth.logout", actor = User, io = Session, scope = Global, risk = Write)]
     pub struct Input {}
 
     /// The caller's identity after logout (`authenticated: false`).
@@ -369,17 +236,7 @@ pub mod me {
     use super::prelude::*;
 
     /// Who the caller is, and which sign-in methods the server offers.
-    #[operation(
-    id = "auth.me",
-    actor = Anonymous,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "auth whoami",
-)]
-    pub struct Me;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "auth.me", actor = Anonymous, scope = Global, risk = Read, cli = "auth whoami")]
     pub struct Input {}
 
     pub type Output = MeView;
@@ -389,17 +246,8 @@ pub mod set_password {
     use super::prelude::*;
 
     /// Set or change the caller's own password.
-    #[operation(
-    id = "auth.set_password",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth password",
-)]
-    pub struct SetPassword;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "auth.set_password", actor = User, scope = Global, risk = Write,
+                cli = "auth password")]
     pub struct Input {
         /// The new password (minimum 8 characters).
         pub new_password: String,
@@ -416,17 +264,8 @@ pub mod tokens {
 
         /// Mint a new personal API token. The plaintext is returned once — the
         /// server keeps only a hash.
-        #[operation(
-    id = "auth.tokens.create",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "token add",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.tokens.create", actor = User, scope = Global, risk = Write,
+                    cli = "token add")]
         pub struct Input {
             /// A label to recognise the token by (e.g. `github-actions`).
             #[operand(positional)]
@@ -443,17 +282,8 @@ pub mod tokens {
 
         /// List the caller's own personal API tokens (metadata only; secrets are
         /// never returned).
-        #[operation(
-    id = "auth.tokens.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "token ls",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.tokens.list", actor = User, scope = Global, risk = Read,
+                    cli = "token ls")]
         pub struct Input {}
 
         pub type Output = Vec<TokenView>;
@@ -463,17 +293,8 @@ pub mod tokens {
         use super::prelude::*;
 
         /// Revoke one of the caller's own personal API tokens.
-        #[operation(
-    id = "auth.tokens.revoke",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "token rm",
-)]
-        pub struct Revoke;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.tokens.revoke", actor = User, scope = Global, risk = Write,
+                    cli = "token rm")]
         pub struct Input {
             /// The token id (from `token ls`).
             #[operand(positional)]
@@ -491,17 +312,8 @@ pub mod users {
         use super::prelude::*;
 
         /// Add a new operator to the approved allowlist.
-        #[operation(
-    id = "auth.users.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth users add",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.users.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "auth users add", default = custom)]
         pub struct Input {
             #[operand(positional)]
             pub username: String,
@@ -533,17 +345,8 @@ pub mod users {
         use super::prelude::*;
 
         /// List the approved operators.
-        #[operation(
-    id = "auth.users.list",
-    actor = Admin,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "auth users ls",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.users.list", actor = Admin, scope = Global, risk = Read,
+                    cli = "auth users ls")]
         pub struct Input {}
 
         pub type Output = Vec<UserView>;
@@ -553,17 +356,8 @@ pub mod users {
         use super::prelude::*;
 
         /// Remove an approved operator. A caller may not remove themself.
-        #[operation(
-    id = "auth.users.remove",
-    actor = Admin,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-    cli = "auth users rm",
-)]
-        pub struct Remove;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.users.remove", actor = Admin, scope = Global, risk = Destructive,
+                    cli = "auth users rm")]
         pub struct Input {
             #[operand(positional)]
             pub username: String,
@@ -577,17 +371,8 @@ pub mod users {
 
         /// Change an operator's role. Existing cookies and personal tokens observe
         /// the change on their next request.
-        #[operation(
-    id = "auth.users.set_role",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "auth users role",
-)]
-        pub struct SetRole;
-
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "auth.users.set_role", actor = Admin, scope = Global, risk = Write,
+                    cli = "auth users role", default = custom)]
         pub struct Input {
             #[operand(positional)]
             pub username: String,
@@ -610,27 +395,27 @@ pub mod users {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <me::Me as Operation>::SPEC,
-    <login::Login as Operation>::SPEC,
-    <logout::Logout as Operation>::SPEC,
-    <federate::Federate as Operation>::SPEC,
-    <automation_token::AutomationToken as Operation>::SPEC,
-    <set_password::SetPassword as Operation>::SPEC,
-    <tokens::list::List as Operation>::SPEC,
-    <tokens::create::Create as Operation>::SPEC,
-    <tokens::revoke::Revoke as Operation>::SPEC,
-    <federations::list::List as Operation>::SPEC,
-    <federations::create::Create as Operation>::SPEC,
-    <federations::remove::Remove as Operation>::SPEC,
-    <users::list::List as Operation>::SPEC,
-    <users::create::Create as Operation>::SPEC,
-    <users::set_role::SetRole as Operation>::SPEC,
-    <users::remove::Remove as Operation>::SPEC,
-    <github_token::get::Get as Operation>::SPEC,
-    <github_token::set::Set as Operation>::SPEC,
-    <github_token::remove::Remove as Operation>::SPEC,
-    <github_config::get::Get as Operation>::SPEC,
-    <github_config::set::Set as Operation>::SPEC,
+    me::SPEC,
+    login::SPEC,
+    logout::SPEC,
+    federate::SPEC,
+    automation_token::SPEC,
+    set_password::SPEC,
+    tokens::list::SPEC,
+    tokens::create::SPEC,
+    tokens::revoke::SPEC,
+    federations::list::SPEC,
+    federations::create::SPEC,
+    federations::remove::SPEC,
+    users::list::SPEC,
+    users::create::SPEC,
+    users::set_role::SPEC,
+    users::remove::SPEC,
+    github_token::get::SPEC,
+    github_token::set::SPEC,
+    github_token::remove::SPEC,
+    github_config::get::SPEC,
+    github_config::set::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

@@ -181,7 +181,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
         .unwrap();
     let issue = ts
         .client
-        .invoke::<weaver_api::operations::issues::create::Create>(
+        .invoke::<weaver_api::operations::issues::create::Op>(
             &weaver_api::operations::issues::create::Input {
                 title: "close through MCP".to_string(),
                 branch: created.branch.id.clone(),

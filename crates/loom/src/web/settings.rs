@@ -27,7 +27,6 @@ async fn settings_envelope_core(db: &Db) -> ApiResult<SettingsEnvelope> {
     Ok(SettingsEnvelope { settings })
 }
 
-/// `settings.get`.
 pub(super) async fn get_settings_operation(
     context: OperationContext,
     _input: settings_operations::get::Input,
@@ -167,7 +166,6 @@ async fn preferences_envelope(db: &Db, username: &str) -> ApiResult<UserPreferen
     Ok(UserPreferencesEnvelope { preferences })
 }
 
-/// `preferences.get`.
 async fn get_preferences_operation(
     context: OperationContext,
     _input: preferences_operations::get::Input,
@@ -276,19 +274,17 @@ async fn apply_legacy_agent_patch(db: &Db, changes: &[config::Change]) -> anyhow
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<settings_operations::get::Get, _, _>(get_settings_operation),
-        register::<settings_operations::patch::Patch, _, _>(patch_settings_operation),
-        register::<settings_operations::env::list::List, _, _>(
+        register::<settings_operations::get::Op, _, _>(get_settings_operation),
+        register::<settings_operations::patch::Op, _, _>(patch_settings_operation),
+        register::<settings_operations::env::list::Op, _, _>(
             super::env::list_settings_env_operation,
         ),
-        register::<settings_operations::env::set::Set, _, _>(
-            super::env::set_settings_env_operation,
-        ),
-        register::<settings_operations::env::delete::Delete, _, _>(
+        register::<settings_operations::env::set::Op, _, _>(super::env::set_settings_env_operation),
+        register::<settings_operations::env::delete::Op, _, _>(
             super::env::delete_settings_env_operation,
         ),
-        register::<preferences_operations::get::Get, _, _>(get_preferences_operation),
-        register::<preferences_operations::patch::Patch, _, _>(patch_preferences_operation),
+        register::<preferences_operations::get::Op, _, _>(get_preferences_operation),
+        register::<preferences_operations::patch::Op, _, _>(patch_preferences_operation),
     ]
 }
 

@@ -12,7 +12,7 @@ use super::{require_session, ApiResult};
 /// (The handler is `context_get` because `self` cannot name a Rust module.)
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![register::<
-        weaver_api::operations::sessions::context::Get,
+        weaver_api::operations::sessions::context::Op,
         _,
         _,
     >(context_get)]
@@ -45,9 +45,9 @@ fn self_context_view(base: &str, session: &Session, branch: &Branch) -> SelfCont
         // context, so a session credential POSTing `{}` to it gets its own channel,
         // its own artifacts, its own session.
         links: SelfContextLinks {
-            channel: channels::get::Get::SPEC.path().to_string(),
-            artifacts: artifacts::list::List::SPEC.path().to_string(),
-            session: sessions::get::Get::SPEC.path().to_string(),
+            channel: channels::get::Op::SPEC.path().to_string(),
+            artifacts: artifacts::list::Op::SPEC.path().to_string(),
+            session: sessions::get::Op::SPEC.path().to_string(),
         },
     }
 }

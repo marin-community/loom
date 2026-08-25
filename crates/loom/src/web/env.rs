@@ -32,7 +32,6 @@ async fn env_vars(db: &Db) -> ApiResult<Vec<AgentEnvVarView>> {
 // this facade is a sub-resource of `settings`, not its own bundle.
 // ---------------------------------------------------------------------------
 
-/// `settings.env.list`.
 pub(super) async fn list_settings_env_operation(
     context: OperationContext,
     _input: settings_env_operations::list::Input,

@@ -30,9 +30,9 @@ use super::{ApiResult, AppState};
 /// is bound in `web/diagnostics.rs`).
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<task_operations::list::List, _, _>(list_tasks),
-        register::<log_operations::list::List, _, _>(list_logs_operation),
-        register::<diagnostics_operations::status::Status, _, _>(status_operation),
+        register::<task_operations::list::Op, _, _>(list_tasks),
+        register::<log_operations::list::Op, _, _>(list_logs_operation),
+        register::<diagnostics_operations::status::Op, _, _>(status_operation),
     ]
 }
 
@@ -87,7 +87,6 @@ fn log_line_view(line: LogLine) -> log_operations::list::LogLineView {
     }
 }
 
-/// `logs.list`.
 async fn list_logs_operation(
     context: OperationContext,
     input: log_operations::list::Input,
@@ -104,7 +103,7 @@ pub(super) async fn logs_stream(
     Extension(principal): Extension<Principal>,
     Query(input): Query<log_operations::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    super::encodings::authorized::<log_operations::stream::Stream>(&st, &principal, input).await?;
+    super::encodings::authorized::<log_operations::stream::Op>(&st, &principal, input).await?;
     let redactor = log_redactor(&st.db, &principal).await?;
     let stream = BroadcastStream::new(logs::buffer().subscribe()).filter_map(move |result| {
         // A lagged subscriber yields Err; skip the gap (the client can re-snapshot).
@@ -200,7 +199,6 @@ fn status_view() -> diagnostics_operations::status::Output {
     }
 }
 
-/// `diagnostics.status`.
 async fn status_operation(
     _context: OperationContext,
     _input: diagnostics_operations::status::Input,

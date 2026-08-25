@@ -101,9 +101,7 @@ fn mounted_encodings() -> Vec<&'static str> {
 /// `shell.restart` is ordinary JSON; it is bound here because its sibling
 /// `shell.terminal` is a websocket and the bundle should have one home.
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![ops::register::<shell::restart::Restart, _, _>(
-        restart_shell,
-    )]
+    vec![ops::register::<shell::restart::Op, _, _>(restart_shell)]
 }
 
 async fn restart_shell(
@@ -126,7 +124,7 @@ async fn session_raw_file(
     Extension(principal): Extension<Principal>,
     Query(input): Query<sessions::raw::Input>,
 ) -> ApiResult<Response> {
-    let input = authorized::<sessions::raw::Raw>(&st, &principal, input).await?;
+    let input = authorized::<sessions::raw::Op>(&st, &principal, input).await?;
     super::sessions::raw_session_bytes(&st, &input).await
 }
 
@@ -135,7 +133,7 @@ async fn artifact_raw_image(
     Extension(principal): Extension<Principal>,
     Query(input): Query<artifacts::raw::Input>,
 ) -> ApiResult<Response> {
-    let input = authorized::<artifacts::raw::Raw>(&st, &principal, input).await?;
+    let input = authorized::<artifacts::raw::Op>(&st, &principal, input).await?;
     super::artifacts::raw_artifact_bytes(&st, &input).await
 }
 
@@ -145,7 +143,7 @@ async fn write_scratch_file(
     Query(input): Query<sessions::scratch::write::Input>,
     body: Bytes,
 ) -> ApiResult<axum::Json<weaver_api::dto::ScratchWriteResult>> {
-    let input = authorized::<sessions::scratch::write::Write>(&st, &principal, input).await?;
+    let input = authorized::<sessions::scratch::write::Op>(&st, &principal, input).await?;
     super::scratch::write_scratch_bytes(&st, &input, &body)
         .await
         .map(axum::Json)
@@ -164,7 +162,7 @@ async fn session_terminal(
     Query(input): Query<sessions::terminal::Input>,
     headers: HeaderMap,
 ) -> Response {
-    let input = match authorized::<sessions::terminal::Terminal>(&st, &principal, input).await {
+    let input = match authorized::<sessions::terminal::Op>(&st, &principal, input).await {
         Ok(input) => input,
         Err(error) => return error.into_response(),
     };
@@ -179,11 +177,10 @@ async fn session_shell_terminal(
     Query(input): Query<sessions::shells::terminal::Input>,
     headers: HeaderMap,
 ) -> Response {
-    let input =
-        match authorized::<sessions::shells::terminal::Terminal>(&st, &principal, input).await {
-            Ok(input) => input,
-            Err(error) => return error.into_response(),
-        };
+    let input = match authorized::<sessions::shells::terminal::Op>(&st, &principal, input).await {
+        Ok(input) => input,
+        Err(error) => return error.into_response(),
+    };
     let editor = EditorState::from_ref(&st);
     crate::terminal::session_shell_ws(ws, &editor, &input.session, input.index, &headers).await
 }
@@ -195,7 +192,7 @@ async fn shell_terminal(
     Query(input): Query<shell::terminal::Input>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = authorized::<shell::terminal::Terminal>(&st, &principal, input).await {
+    if let Err(error) = authorized::<shell::terminal::Op>(&st, &principal, input).await {
         return error.into_response();
     }
     let editor = EditorState::from_ref(&st);
@@ -248,17 +245,17 @@ mod tests {
                 });
         }
 
-        check::<events::stream::Stream>();
-        check::<logs::stream::Stream>();
-        check::<session_layout::events::Events>();
-        check::<sessions::events::stream::Stream>();
-        check::<sessions::chat::stream::Stream>();
-        check::<sessions::terminal::Terminal>();
-        check::<sessions::shells::terminal::Terminal>();
-        check::<shell::terminal::Terminal>();
-        check::<sessions::raw::Raw>();
-        check::<sessions::scratch::write::Write>();
-        check::<artifacts::raw::Raw>();
+        check::<events::stream::Op>();
+        check::<logs::stream::Op>();
+        check::<session_layout::events::Op>();
+        check::<sessions::events::stream::Op>();
+        check::<sessions::chat::stream::Op>();
+        check::<sessions::terminal::Op>();
+        check::<sessions::shells::terminal::Op>();
+        check::<shell::terminal::Op>();
+        check::<sessions::raw::Op>();
+        check::<sessions::scratch::write::Op>();
+        check::<artifacts::raw::Op>();
     }
 
     /// The other half: an operand a caller *does* name arrives intact.

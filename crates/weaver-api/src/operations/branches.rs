@@ -3,7 +3,7 @@
 //! Most operations are `actor = SessionSelf` scoped to the caller's own branch.
 //! `branches.list` is fleet-wide (`scope = Global`).
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -18,17 +18,9 @@ pub mod events {
         ///
         /// The branch-scoped twin of `sessions.events.create`; `branches.events.list`
         /// reads the same log this appends to.
-        #[operation(
-    id = "branches.events.create",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches events create",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.events.create", actor = SessionSelf, scope = Branch,
+                    risk = Write, grants = ["loom/branches/write@v1"],
+                    cli = "branches events create")]
         pub struct Input {
             /// The event kind, e.g. an agent hook name.
             pub kind: String,
@@ -46,17 +38,8 @@ pub mod events {
         use super::prelude::*;
 
         /// List recent durable events on a branch (newest first, last 200 entries).
-        #[operation(
-    id = "branches.events.list",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/branches/read@v1"],
-    cli = "branches events list",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.events.list", actor = SessionSelf, scope = Branch, risk = Read,
+                    grants = ["loom/branches/read@v1"], cli = "branches events list")]
         pub struct Input {
             #[operand(context)]
             pub branch: String,
@@ -70,17 +53,8 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one branch.
-    #[operation(
-    id = "branches.get",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/branches/read@v1"],
-    cli = "branches get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "branches.get", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/branches/read@v1"], cli = "branches get")]
     pub struct Input {
         #[operand(context)]
         pub branch: String,
@@ -97,20 +71,9 @@ pub mod issues {
 
         /// List work items claimed by this branch — the session's working set.
         ///
-        /// Distinct from `issues.list` (repository-scoped, keyed by `repo_root`):
-        /// this is the branch-scoped view `GET /branches/{id}/issues` served, which
-        /// no operation in the `issues` bundle currently covers.
-        #[operation(
-    id = "branches.issues.list",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/branches/read@v1"],
-    cli = "branches issues list",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        /// Branch-scoped, unlike `issues.list`, which is keyed by `repo_root`.
+        #[operation(id = "branches.issues.list", actor = SessionSelf, scope = Branch, risk = Read,
+                    grants = ["loom/branches/read@v1"], cli = "branches issues list")]
         pub struct Input {
             /// Include closed work items.
             #[operand(default = false)]
@@ -127,17 +90,8 @@ pub mod list {
     use super::prelude::*;
 
     /// List every branch loom is tracking (fleet-wide, unfiltered).
-    #[operation(
-    id = "branches.list",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/branches/read@v1"],
-    cli = "branches list",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "branches.list", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/branches/read@v1"], cli = "branches list")]
     pub struct Input {}
 
     pub type Output = Vec<BranchView>;
@@ -153,18 +107,9 @@ pub mod slack {
         ///
         /// Without `thread`, replies to the branch's own Slack wiring; with `thread`,
         /// targets a delivered thread.
-        #[operation(
-    id = "branches.slack.reply",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = ExternalWrite,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches slack reply",
-    mcp = "loom_messaging::slack_reply",
-)]
-        pub struct Reply;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.slack.reply", actor = SessionSelf, scope = Branch,
+                    risk = ExternalWrite, grants = ["loom/branches/write@v1"],
+                    cli = "branches slack reply", mcp = "loom_messaging::slack_reply")]
         pub struct Input {
             /// The message text.
             #[operand(positional)]
@@ -193,17 +138,8 @@ pub mod status {
         /// The branch-scoped twin of `sessions.status.set`, for a target with no live
         /// session bound to it (a finished session, or an id naming another branch
         /// entirely).
-        #[operation(
-    id = "branches.status.set",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches status set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.status.set", actor = SessionSelf, scope = Branch, risk = Write,
+                    grants = ["loom/branches/write@v1"], cli = "branches status set")]
         pub struct Input {
             /// The attention level: `ok`, `attention`, or `blocked`.
             #[operand(long = "tag")]
@@ -227,17 +163,8 @@ pub mod tags {
 
         /// Remove one free-form tag from a branch — the branch-scoped twin of
         /// `sessions.tags.delete`.
-        #[operation(
-    id = "branches.tags.delete",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches tags delete",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.tags.delete", actor = SessionSelf, scope = Branch, risk = Write,
+                    grants = ["loom/branches/write@v1"], cli = "branches tags delete")]
         pub struct Input {
             /// The tag key to remove.
             #[operand(positional)]
@@ -257,17 +184,8 @@ pub mod tags {
         /// Set one free-form tag on a branch — the branch-scoped twin of
         /// `sessions.tags.set`, for a target with no live session bound to it (a
         /// finished session, or an id naming another branch entirely).
-        #[operation(
-    id = "branches.tags.set",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches tags set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "branches.tags.set", actor = SessionSelf, scope = Branch, risk = Write,
+                    grants = ["loom/branches/write@v1"], cli = "branches tags set")]
         pub struct Input {
             /// The tag key.
             #[operand(positional)]
@@ -295,17 +213,8 @@ pub mod update {
     ///
     /// Title updates require `expected_title` and `expected_title_provenance`
     /// to detect and reject concurrent renames.
-    #[operation(
-    id = "branches.update",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/branches/write@v1"],
-    cli = "branches update",
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "branches.update", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/branches/write@v1"], cli = "branches update")]
     pub struct Input {
         pub title: Option<String>,
         /// Required with `title`.
@@ -323,16 +232,16 @@ pub mod update {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <status::set::Set as Operation>::SPEC,
-    <slack::reply::Reply as Operation>::SPEC,
-    <events::list::List as Operation>::SPEC,
-    <events::create::Create as Operation>::SPEC,
-    <tags::set::Set as Operation>::SPEC,
-    <tags::delete::Delete as Operation>::SPEC,
-    <issues::list::List as Operation>::SPEC,
+    list::SPEC,
+    get::SPEC,
+    update::SPEC,
+    status::set::SPEC,
+    slack::reply::SPEC,
+    events::list::SPEC,
+    events::create::SPEC,
+    tags::set::SPEC,
+    tags::delete::SPEC,
+    issues::list::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

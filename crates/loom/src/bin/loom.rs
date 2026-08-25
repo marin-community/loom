@@ -1988,7 +1988,7 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
         PermissionsCmd::Show { session, json } => {
             let session = github_access_session(session)?;
             let view = client
-                .invoke::<perm_ops::effective::get::Get>(&perm_ops::effective::get::Input {
+                .invoke::<perm_ops::effective::get::Op>(&perm_ops::effective::get::Input {
                     session,
                 })
                 .await?;
@@ -2017,7 +2017,7 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
         }
         PermissionsCmd::Explain { operation } => {
             let operation = client
-                .invoke::<perm_ops::explain::Explain>(&perm_ops::explain::Input { operation })
+                .invoke::<perm_ops::explain::Op>(&perm_ops::explain::Input { operation })
                 .await
                 .with_context(|| {
                     "unknown operation — run `loom help --json` to list operation ids"
@@ -2034,14 +2034,12 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
             } => {
                 let session = github_access_session(session)?;
                 let request = client
-                    .invoke::<perm_ops::requests::create::Create>(
-                        &perm_ops::requests::create::Input {
-                            repository,
-                            reason,
-                            mode,
-                            session,
-                        },
-                    )
+                    .invoke::<perm_ops::requests::create::Op>(&perm_ops::requests::create::Input {
+                        repository,
+                        reason,
+                        mode,
+                        session,
+                    })
                     .await?;
                 println!(
                     "request {} pending — {} {}",
@@ -2057,7 +2055,7 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
         } => {
             let session = github_access_session(session)?;
             let requests = client
-                .invoke::<perm_ops::requests::list::List>(&perm_ops::requests::list::Input {
+                .invoke::<perm_ops::requests::list::Op>(&perm_ops::requests::list::Input {
                     state,
                     session,
                 })

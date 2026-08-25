@@ -129,15 +129,13 @@ impl Topic {
     async fn authorize(&self, st: &AppState, principal: &Principal) -> ApiResult<()> {
         match self {
             Self::Layout => {
-                authorized::<session_layout::events::Events>(st, principal, Default::default())
-                    .await?;
+                authorized::<session_layout::events::Op>(st, principal, Default::default()).await?;
             }
             Self::Logs => {
-                authorized::<log_operations::stream::Stream>(st, principal, Default::default())
-                    .await?;
+                authorized::<log_operations::stream::Op>(st, principal, Default::default()).await?;
             }
             Self::Session(key) => {
-                authorized::<sessions::events::stream::Stream>(
+                authorized::<sessions::events::stream::Op>(
                     st,
                     principal,
                     sessions::events::stream::Input {
@@ -147,7 +145,7 @@ impl Topic {
                 .await?;
             }
             Self::Chat(key) => {
-                authorized::<sessions::chat::stream::Stream>(
+                authorized::<sessions::chat::stream::Op>(
                     st,
                     principal,
                     sessions::chat::stream::Input {
@@ -174,7 +172,7 @@ pub(super) async fn events_mux(
     Extension(principal): Extension<Principal>,
     Query(input): Query<events::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    let input = authorized::<events::stream::Stream>(&st, &principal, input).await?;
+    let input = authorized::<events::stream::Op>(&st, &principal, input).await?;
     let raw: Vec<&str> = input
         .topics
         .split(',')

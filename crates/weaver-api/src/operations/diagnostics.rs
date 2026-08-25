@@ -7,7 +7,7 @@
 //! which is the log text itself. Both back the same Settings → Diagnostics
 //! page.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -16,16 +16,7 @@ pub mod get {
 
     /// The aggregated fleet diagnostics snapshot: session/profile capacity,
     /// automation run health, migration state, and federation mappings.
-    #[operation(
-    id = "diagnostics.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "diagnostics.get", actor = User, scope = Global, risk = Read)]
     pub struct Input {}
 
     pub type Output = DiagnosticsView;
@@ -36,16 +27,7 @@ pub mod status {
 
     /// Build and process identity for a human operator's debug panel: which
     /// version and image are running, and since when.
-    #[operation(
-    id = "diagnostics.status",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct Status;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "diagnostics.status", actor = User, scope = Global, risk = Read)]
     pub struct Input {}
 
     /// A small "what am I looking at" status blob for the debug panel: build and
@@ -65,10 +47,7 @@ pub mod status {
     }
 }
 
-static OPERATIONS: &[&OperationSpec] = &[
-    <get::Get as Operation>::SPEC,
-    <status::Status as Operation>::SPEC,
-];
+static OPERATIONS: &[&OperationSpec] = &[get::SPEC, status::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

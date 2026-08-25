@@ -68,10 +68,10 @@ async fn custom_agents_view(db: &Db) -> ApiResult<CustomAgentsView> {
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<ops::list::List, _, _>(list_operation),
-        register::<ops::custom::create::Create, _, _>(custom_create_operation),
-        register::<ops::custom::update::Update, _, _>(custom_update_operation),
-        register::<ops::custom::delete::Delete, _, _>(custom_delete_operation),
+        register::<ops::list::Op, _, _>(list_operation),
+        register::<ops::custom::create::Op, _, _>(custom_create_operation),
+        register::<ops::custom::update::Op, _, _>(custom_update_operation),
+        register::<ops::custom::delete::Op, _, _>(custom_delete_operation),
     ]
 }
 
@@ -102,7 +102,6 @@ async fn list_operation(
     })
 }
 
-/// `agents.custom.create`.
 async fn custom_create_operation(
     context: OperationContext,
     input: ops::custom::create::Input,
@@ -160,7 +159,6 @@ async fn custom_update_operation(
     custom_agents_view(&st.db).await
 }
 
-/// `agents.custom.delete`.
 async fn custom_delete_operation(
     context: OperationContext,
     input: ops::custom::delete::Input,

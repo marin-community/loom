@@ -54,7 +54,7 @@ pub(super) async fn session_layout_events(
     Query(input): Query<events::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     // `actor = User` ensures only signed-in operators can access their own dashboard state.
-    super::encodings::authorized::<events::Events>(&st, &principal, input).await?;
+    super::encodings::authorized::<events::Op>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
         if event.kind != "session_layout" {
@@ -92,28 +92,26 @@ async fn mutation_result(
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<get::Get, _, _>(get_operation),
-        register::<spaces::create::Create, _, _>(spaces_create_operation),
-        register::<spaces::update::Update, _, _>(spaces_update_operation),
-        register::<spaces::delete::Delete, _, _>(spaces_delete_operation),
-        register::<groups::create::Create, _, _>(groups_create_operation),
-        register::<groups::update::Update, _, _>(groups_update_operation),
-        register::<groups::delete::Delete, _, _>(groups_delete_operation),
-        register::<groups::preference::set::Set, _, _>(groups_preference_set_operation),
-        register::<r#move::Move, _, _>(move_operation),
-        register::<reorder::Reorder, _, _>(reorder_operation),
-        register::<restore::Restore, _, _>(restore_operation),
-        register::<defaults::set::Set, _, _>(defaults_set_operation),
-        register::<defaults::delete::Delete, _, _>(defaults_delete_operation),
+        register::<get::Op, _, _>(get_operation),
+        register::<spaces::create::Op, _, _>(spaces_create_operation),
+        register::<spaces::update::Op, _, _>(spaces_update_operation),
+        register::<spaces::delete::Op, _, _>(spaces_delete_operation),
+        register::<groups::create::Op, _, _>(groups_create_operation),
+        register::<groups::update::Op, _, _>(groups_update_operation),
+        register::<groups::delete::Op, _, _>(groups_delete_operation),
+        register::<groups::preference::set::Op, _, _>(groups_preference_set_operation),
+        register::<r#move::Op, _, _>(move_operation),
+        register::<reorder::Op, _, _>(reorder_operation),
+        register::<restore::Op, _, _>(restore_operation),
+        register::<defaults::set::Op, _, _>(defaults_set_operation),
+        register::<defaults::delete::Op, _, _>(defaults_delete_operation),
     ]
 }
 
-/// `session_layout.get`.
 async fn get_operation(context: OperationContext, _input: get::Input) -> ApiResult<get::Output> {
     Ok(session_layout::get_layout(&context.state.db, &context.principal.username).await?)
 }
 
-/// `session_layout.spaces.create`.
 async fn spaces_create_operation(
     context: OperationContext,
     input: spaces::create::Input,
@@ -128,7 +126,6 @@ async fn spaces_create_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.spaces.update`.
 async fn spaces_update_operation(
     context: OperationContext,
     input: spaces::update::Input,
@@ -143,7 +140,6 @@ async fn spaces_update_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.spaces.delete`.
 async fn spaces_delete_operation(
     context: OperationContext,
     input: spaces::delete::Input,
@@ -158,7 +154,6 @@ async fn spaces_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.create`.
 async fn groups_create_operation(
     context: OperationContext,
     input: groups::create::Input,
@@ -174,7 +169,6 @@ async fn groups_create_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.update`.
 async fn groups_update_operation(
     context: OperationContext,
     input: groups::update::Input,
@@ -189,7 +183,6 @@ async fn groups_update_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.delete`.
 async fn groups_delete_operation(
     context: OperationContext,
     input: groups::delete::Input,
@@ -220,7 +213,6 @@ async fn groups_preference_set_operation(
     .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
-/// `session_layout.move`.
 async fn move_operation(
     context: OperationContext,
     input: r#move::Input,
@@ -237,7 +229,6 @@ async fn move_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.reorder`.
 async fn reorder_operation(
     context: OperationContext,
     input: reorder::Input,
@@ -255,7 +246,6 @@ async fn reorder_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.restore`.
 async fn restore_operation(
     context: OperationContext,
     input: restore::Input,
@@ -270,7 +260,6 @@ async fn restore_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.defaults.set`.
 async fn defaults_set_operation(
     context: OperationContext,
     input: defaults::set::Input,
@@ -287,7 +276,6 @@ async fn defaults_set_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.defaults.delete`.
 async fn defaults_delete_operation(
     context: OperationContext,
     input: defaults::delete::Input,

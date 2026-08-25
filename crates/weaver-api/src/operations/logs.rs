@@ -6,7 +6,7 @@
 //! fleet health snapshot and build/process identity are in the separate
 //! `diagnostics` bundle.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -14,19 +14,7 @@ pub mod list {
     use super::prelude::*;
 
     /// A snapshot of the most recent server log lines, oldest first.
-    ///
-    /// `actor = User`: the snapshot counterpart of `logs.stream` — same policy,
-    /// same reasoning (see that operation's doc comment).
-    #[operation(
-    id = "logs.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "logs.list", actor = User, scope = Global, risk = Read)]
     pub struct Input {
         /// Most-recent lines to return. Clamped to the buffer size; defaults to
         /// 500.
@@ -56,29 +44,13 @@ pub mod stream {
     use super::prelude::*;
 
     /// Tail the server log as it is written.
-    ///
-    /// `actor = User`: human-only self-service debugging; no session grant can
-    /// reach the log routes.
-    #[operation(
-    id = "logs.stream",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    io = Stream,
-)]
-    pub struct Stream;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "logs.stream", actor = User, scope = Global, risk = Read, io = Stream)]
     pub struct Input {}
 
     pub type Output = ();
 }
 
-static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <stream::Stream as Operation>::SPEC,
-];
+static OPERATIONS: &[&OperationSpec] = &[list::SPEC, stream::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

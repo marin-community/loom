@@ -3,7 +3,7 @@
 //! Named documents an agent (or the user) writes to weaver — plus the
 //! anchored review threads discussed against them.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -11,18 +11,9 @@ pub mod delete {
     use super::prelude::*;
 
     /// Delete an artifact and its complete revision history.
-    #[operation(
-    id = "artifacts.delete",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Destructive,
-    grants = ["loom/artifacts/write@v1"],
-    cli = "artifacts delete",
-    mcp = "loom_artifact::delete",
-)]
-    pub struct Delete;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "artifacts.delete", actor = SessionSelf, scope = Branch, risk = Destructive,
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts delete",
+                mcp = "loom_artifact::delete")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -42,18 +33,9 @@ pub mod get {
     use super::prelude::*;
 
     /// Read one artifact or immutable revision.
-    #[operation(
-    id = "artifacts.get",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-    cli = "artifacts get",
-    mcp = "loom_artifact::get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "artifacts.get", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts get",
+                mcp = "loom_artifact::get")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -75,18 +57,9 @@ pub mod history {
     use super::prelude::*;
 
     /// List immutable artifact revisions.
-    #[operation(
-    id = "artifacts.history",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-    cli = "artifacts history",
-    mcp = "loom_artifact::history",
-)]
-    pub struct History;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "artifacts.history", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts history",
+                mcp = "loom_artifact::history")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -106,18 +79,9 @@ pub mod list {
     use super::prelude::*;
 
     /// List branch and repository-scoped artifacts.
-    #[operation(
-    id = "artifacts.list",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-    cli = "artifacts list",
-    mcp = "loom_artifact::list",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "artifacts.list", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts list",
+                mcp = "loom_artifact::list")]
     pub struct Input {
         /// When true, list every artifact in the repository. By default, list
         /// only this branch's own artifacts and the repository-shared ones.
@@ -135,21 +99,10 @@ pub mod raw {
 
     /// An image artifact's decoded bytes, for an `<img src>`.
     ///
-    /// `io = Download` because the browser's image loader issues a `GET` and
-    /// expects `image/png` — a bare binary payload, not a JSON envelope.
-    /// [`super::get`] provides the same artifact as JSON; the two operations offer
-    /// different encodings of the same data.
-    #[operation(
-    id = "artifacts.raw",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-    io = Download,
-)]
-    pub struct Raw;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// `io = Download`: the browser's image loader issues a `GET` and expects
+    /// `image/png`. `artifacts.get` returns the same artifact as JSON.
+    #[operation(id = "artifacts.raw", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/artifacts/read@v1"], io = Download)]
     pub struct Input {
         /// The artifact's name.
         //
@@ -182,18 +135,6 @@ pub mod threads {
 
         use super::prelude::*;
 
-        /// Start or reply to an artifact review thread.
-        #[operation(
-    id = "artifacts.threads.comment",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/artifacts/write@v1"],
-    cli = "artifacts comment",
-    mcp = "loom_artifact::comment",
-)]
-        pub struct Comment;
-
         /// Where a comment attaches: a fresh anchored thread, or a reply to one
         /// already open.
         #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -209,7 +150,10 @@ pub mod threads {
             Reply { thread_id: i64 },
         }
 
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        /// Start or reply to an artifact review thread.
+        #[operation(id = "artifacts.threads.comment", actor = SessionSelf, scope = Branch,
+                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts comment",
+                    mcp = "loom_artifact::comment", default = custom)]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -243,18 +187,9 @@ pub mod threads {
         use super::prelude::*;
 
         /// List anchored artifact review threads.
-        #[operation(
-    id = "artifacts.threads.list",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-    cli = "artifacts threads",
-    mcp = "loom_artifact::threads",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "artifacts.threads.list", actor = SessionSelf, scope = Branch, risk = Read,
+                    grants = ["loom/artifacts/read@v1"], cli = "artifacts threads",
+                    mcp = "loom_artifact::threads")]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -274,18 +209,9 @@ pub mod threads {
         use super::prelude::*;
 
         /// Resolve an artifact review thread.
-        #[operation(
-    id = "artifacts.threads.resolve",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/artifacts/write@v1"],
-    cli = "artifacts resolve",
-    mcp = "loom_artifact::resolve",
-)]
-        pub struct Resolve;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "artifacts.threads.resolve", actor = SessionSelf, scope = Branch,
+                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts resolve",
+                    mcp = "loom_artifact::resolve")]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -312,16 +238,8 @@ pub mod url {
     /// knows the externally-visible origin (the operator's `auth.base_url`, else
     /// the request's own Host), so resolving it is the server's job — the twin of
     /// `sessions.url`, whose `SessionUrlView` (`{url}`) this reuses unchanged.
-    #[operation(
-    id = "artifacts.url",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-)]
-    pub struct Url;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "artifacts.url", actor = SessionSelf, scope = Branch, risk = Read,
+                grants = ["loom/artifacts/read@v1"])]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -338,21 +256,11 @@ pub mod write {
 
     /// Create an artifact or append a guarded revision.
     ///
-    /// The API accepts `content` as a JSON string. The CLI tool supports reading
-    /// from a file or stdin via `#[operand(from_file)]` for convenience, but this
-    /// is a client-side transformation — the wire format remains a JSON string.
-    #[operation(
-    id = "artifacts.write",
-    actor = SessionSelf,
-    scope = Branch,
-    risk = Write,
-    grants = ["loom/artifacts/write@v1"],
-    cli = "artifacts write",
-    mcp = "loom_artifact::write",
-)]
-    pub struct Write;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// The wire format is always a JSON string. Reading `content` from a file
+    /// or stdin is a convenience the command line applies before sending.
+    #[operation(id = "artifacts.write", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts write",
+                mcp = "loom_artifact::write")]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -385,16 +293,16 @@ pub mod write {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <raw::Raw as Operation>::SPEC,
-    <write::Write as Operation>::SPEC,
-    <delete::Delete as Operation>::SPEC,
-    <history::History as Operation>::SPEC,
-    <url::Url as Operation>::SPEC,
-    <threads::list::List as Operation>::SPEC,
-    <threads::comment::Comment as Operation>::SPEC,
-    <threads::resolve::Resolve as Operation>::SPEC,
+    list::SPEC,
+    get::SPEC,
+    raw::SPEC,
+    write::SPEC,
+    delete::SPEC,
+    history::SPEC,
+    url::SPEC,
+    threads::list::SPEC,
+    threads::comment::SPEC,
+    threads::resolve::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

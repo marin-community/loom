@@ -5,7 +5,7 @@
 //! name. Secret environment values are write-only: every read-side view
 //! carries metadata only, never a stored value.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -16,17 +16,8 @@ pub mod clone {
     /// optionally composing its write-only environment in the same transaction.
     /// If the profile changed since the caller reviewed it, this returns a
     /// fresh preview instead of silently applying a stale composition.
-    #[operation(
-    id = "profiles.clone",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "profiles clone",
-)]
-    pub struct Clone;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.clone", actor = Admin, scope = Global, risk = Write,
+                cli = "profiles clone")]
     pub struct Input {
         /// The profile being cloned.
         #[operand(positional)]
@@ -62,17 +53,8 @@ pub mod create {
     use super::prelude::*;
 
     /// Create a named session-launch profile.
-    #[operation(
-    id = "profiles.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "profiles create",
-)]
-    pub struct Create;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.create", actor = Admin, scope = Global, risk = Write,
+                cli = "profiles create")]
     pub struct Input {
         /// The profile's name.
         #[operand(positional)]
@@ -129,18 +111,8 @@ pub mod delete {
     use super::prelude::*;
 
     /// Permanently delete a named launch profile.
-    #[operation(
-    id = "profiles.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-    cli = "profiles delete",
-    cli_alias = "rm",
-)]
-    pub struct Delete;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.delete", actor = Admin, scope = Global, risk = Destructive,
+                cli = "profiles delete", cli_alias = "rm")]
     pub struct Input {
         /// The profile's name.
         #[operand(positional)]
@@ -155,17 +127,8 @@ pub mod effective {
 
     /// Resolve one profile's exact non-secret policy — MCP snapshot, runtime
     /// permissions, and MCP server processes — without launching a session.
-    #[operation(
-    id = "profiles.effective",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "profiles effective",
-)]
-    pub struct Effective;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.effective", actor = User, scope = Global, risk = Read,
+                cli = "profiles effective")]
     pub struct Input {
         /// The profile's name.
         #[operand(positional)]
@@ -183,18 +146,8 @@ pub mod env {
         use super::prelude::*;
 
         /// Remove one profile's write-only environment variable.
-        #[operation(
-    id = "profiles.env.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "profiles env delete",
-    cli_alias = "rm",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "profiles.env.delete", actor = Admin, scope = Global, risk = Write,
+                    cli = "profiles env delete", cli_alias = "rm")]
         pub struct Input {
             /// The owning profile's name.
             #[operand(positional)]
@@ -213,17 +166,8 @@ pub mod env {
         /// Set one profile's write-only environment variable from a literal
         /// value or GCP Secret Manager reference — exactly one of the two is
         /// required.
-        #[operation(
-    id = "profiles.env.set",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "profiles env set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "profiles.env.set", actor = Admin, scope = Global, risk = Write,
+                    cli = "profiles env set")]
         pub struct Input {
             /// The owning profile's name.
             #[operand(positional)]
@@ -247,17 +191,8 @@ pub mod get {
 
     /// Show one named launch profile. Secret environment values are never
     /// returned.
-    #[operation(
-    id = "profiles.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "profiles get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.get", actor = User, scope = Global, risk = Read,
+                cli = "profiles get")]
     pub struct Input {
         /// The profile's name.
         #[operand(positional)]
@@ -272,18 +207,8 @@ pub mod list {
 
     /// List named launch profiles. Secret environment values are never
     /// returned.
-    #[operation(
-    id = "profiles.list",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "profiles list",
-    cli_alias = "ls",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.list", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "profiles list", cli_alias = "ls")]
     pub struct Input {}
 
     pub type Output = Vec<ProfileView>;
@@ -293,17 +218,8 @@ pub mod update {
     use super::prelude::*;
 
     /// Replace a named session-launch profile's policy.
-    #[operation(
-    id = "profiles.update",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "profiles update",
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "profiles.update", actor = Admin, scope = Global, risk = Write,
+                cli = "profiles update")]
     pub struct Input {
         /// The profile's name.
         #[operand(positional)]
@@ -360,15 +276,15 @@ pub mod update {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <effective::Effective as Operation>::SPEC,
-    <create::Create as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <delete::Delete as Operation>::SPEC,
-    <clone::Clone as Operation>::SPEC,
-    <env::set::Set as Operation>::SPEC,
-    <env::delete::Delete as Operation>::SPEC,
+    list::SPEC,
+    get::SPEC,
+    effective::SPEC,
+    create::SPEC,
+    update::SPEC,
+    delete::SPEC,
+    clone::SPEC,
+    env::set::SPEC,
+    env::delete::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

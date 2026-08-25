@@ -145,7 +145,6 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
     })
 }
 
-/// `profiles.list`.
 pub(super) async fn list_profiles_operation(
     context: OperationContext,
     _input: profiles_operations::list::Input,
@@ -158,7 +157,6 @@ pub(super) async fn list_profiles_operation(
     Ok(views)
 }
 
-/// `profiles.get`.
 pub(super) async fn get_profile_operation(
     context: OperationContext,
     input: profiles_operations::get::Input,
@@ -200,7 +198,6 @@ async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileVi
     })
 }
 
-/// `profiles.effective`.
 pub(super) async fn effective_profile_operation(
     context: OperationContext,
     input: profiles_operations::effective::Input,
@@ -213,7 +210,6 @@ pub(super) async fn effective_profile_operation(
     effective(st, item).await
 }
 
-/// `profiles.create`.
 pub(super) async fn create_profile_operation(
     context: OperationContext,
     input: profiles_operations::create::Input,
@@ -235,7 +231,6 @@ pub(super) async fn create_profile_operation(
     }
 }
 
-/// `profiles.update`.
 pub(super) async fn update_profile_operation(
     context: OperationContext,
     input: profiles_operations::update::Input,
@@ -269,7 +264,6 @@ pub(super) async fn update_profile_operation(
     view(st, item).await
 }
 
-/// `profiles.clone`.
 pub(super) async fn clone_profile_operation(
     context: OperationContext,
     input: profiles_operations::clone::Input,
@@ -433,7 +427,6 @@ pub(super) async fn clone_profile_operation(
     }
 }
 
-/// `profiles.delete`.
 pub(super) async fn delete_profile_operation(
     context: OperationContext,
     input: profiles_operations::delete::Input,
@@ -451,7 +444,6 @@ pub(super) async fn delete_profile_operation(
     }
 }
 
-/// `profiles.env.set`.
 pub(super) async fn set_profile_env_operation(
     context: OperationContext,
     input: profiles_operations::env::set::Input,
@@ -478,7 +470,6 @@ pub(super) async fn set_profile_env_operation(
     view(st, item).await
 }
 
-/// `profiles.env.delete`.
 pub(super) async fn delete_profile_env_operation(
     context: OperationContext,
     input: profiles_operations::env::delete::Input,
@@ -504,14 +495,14 @@ pub(super) async fn delete_profile_env_operation(
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<profiles_operations::list::List, _, _>(list_profiles_operation),
-        register::<profiles_operations::get::Get, _, _>(get_profile_operation),
-        register::<profiles_operations::effective::Effective, _, _>(effective_profile_operation),
-        register::<profiles_operations::create::Create, _, _>(create_profile_operation),
-        register::<profiles_operations::update::Update, _, _>(update_profile_operation),
-        register::<profiles_operations::delete::Delete, _, _>(delete_profile_operation),
-        register::<profiles_operations::clone::Clone, _, _>(clone_profile_operation),
-        register::<profiles_operations::env::set::Set, _, _>(set_profile_env_operation),
-        register::<profiles_operations::env::delete::Delete, _, _>(delete_profile_env_operation),
+        register::<profiles_operations::list::Op, _, _>(list_profiles_operation),
+        register::<profiles_operations::get::Op, _, _>(get_profile_operation),
+        register::<profiles_operations::effective::Op, _, _>(effective_profile_operation),
+        register::<profiles_operations::create::Op, _, _>(create_profile_operation),
+        register::<profiles_operations::update::Op, _, _>(update_profile_operation),
+        register::<profiles_operations::delete::Op, _, _>(delete_profile_operation),
+        register::<profiles_operations::clone::Op, _, _>(clone_profile_operation),
+        register::<profiles_operations::env::set::Op, _, _>(set_profile_env_operation),
+        register::<profiles_operations::env::delete::Op, _, _>(delete_profile_env_operation),
     ]
 }

@@ -749,7 +749,7 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // Intentional work items only: ordinary session delegation is represented
     // by child channels and never appears here.
     let issues = client
-        .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
+        .invoke::<issue_ops::list::Op>(&issue_ops::list::Input {
             repo_root: b.repo_root.clone(),
             all: false,
             backlog: false,
@@ -1344,20 +1344,18 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
             }
             let i = if repo {
                 client
-                    .invoke::<issue_ops::backlog::create::Create>(
-                        &issue_ops::backlog::create::Input {
-                            tags: Vec::new(),
-                            title: title.clone(),
-                            body: body.unwrap_or_default(),
-                            github_issue: github,
-                            repo_root: b.repo_root.clone(),
-                            source_branch: Some(b.branch.clone()),
-                        },
-                    )
+                    .invoke::<issue_ops::backlog::create::Op>(&issue_ops::backlog::create::Input {
+                        tags: Vec::new(),
+                        title: title.clone(),
+                        body: body.unwrap_or_default(),
+                        github_issue: github,
+                        repo_root: b.repo_root.clone(),
+                        source_branch: Some(b.branch.clone()),
+                    })
                     .await?
             } else {
                 client
-                    .invoke::<issue_ops::create::Create>(&issue_ops::create::Input {
+                    .invoke::<issue_ops::create::Op>(&issue_ops::create::Input {
                         title: title.clone(),
                         body: body.unwrap_or_default(),
                         github_issue: github,
@@ -1375,7 +1373,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         } => {
             let target = branch.unwrap_or_else(|| b.branch.clone());
             let issues = client
-                .invoke::<issue_ops::list::List>(&issue_ops::list::Input {
+                .invoke::<issue_ops::list::Op>(&issue_ops::list::Input {
                     repo_root: b.repo_root.clone(),
                     all,
                     backlog: false,
@@ -1389,7 +1387,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         }
         IssueCmd::Show { id } => {
             let i = client
-                .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+                .invoke::<issue_ops::get::Op>(&issue_ops::get::Input {
                     id,
                     repo_root: b.repo_root.clone(),
                 })
@@ -1470,7 +1468,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         }
         IssueCmd::Close { ids } => {
             let result = client
-                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
+                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Close,
                     repo_root: b.repo_root.clone(),
@@ -1480,7 +1478,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         }
         IssueCmd::Reopen { ids } => {
             let result = client
-                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
+                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Reopen,
                     repo_root: b.repo_root.clone(),
@@ -1490,7 +1488,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
         }
         IssueCmd::Rm { ids } => {
             let result = client
-                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
+                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Delete,
                     repo_root: b.repo_root.clone(),
@@ -1521,7 +1519,7 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
                 );
             }
             let result = client
-                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
+                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Tag {
                         key: key.to_string(),
@@ -1547,7 +1545,7 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
         IssueTagCmd::Rm { args } => {
             let (ids, key) = parse_issue_tag_delete_args(args)?;
             let result = client
-                .invoke::<issue_ops::actions::Actions>(&issue_ops::actions::Input {
+                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
                     ids,
                     action: IssueAction::Untag { key: key.clone() },
                     repo_root: repo_root.to_string(),
@@ -1557,7 +1555,7 @@ async fn cmd_issue_tag(client: &Client, repo_root: &str, cmd: IssueTagCmd) -> Re
         }
         IssueTagCmd::Ls { id } => {
             let i = client
-                .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+                .invoke::<issue_ops::get::Op>(&issue_ops::get::Input {
                     id,
                     repo_root: repo_root.to_string(),
                 })
@@ -1993,7 +1991,7 @@ async fn cmd_issue_wait(
     closed_only: bool,
 ) -> Result<()> {
     let issue = client
-        .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+        .invoke::<issue_ops::get::Op>(&issue_ops::get::Input {
             id,
             repo_root: repo_root.to_string(),
         })
@@ -2023,7 +2021,7 @@ async fn cmd_issue_wait(
         };
         tokio::time::sleep(nap).await;
         let cur = client
-            .invoke::<issue_ops::get::Get>(&issue_ops::get::Input {
+            .invoke::<issue_ops::get::Op>(&issue_ops::get::Input {
                 id,
                 repo_root: repo_root.to_string(),
             })

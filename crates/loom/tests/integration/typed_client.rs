@@ -205,20 +205,18 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(request_operation.path, "/api/permissions/requests/create");
 
     let request = session
-        .invoke::<permission_ops::requests::create::Create>(
-            &permission_ops::requests::create::Input {
-                repository: "acme/widgets".to_string(),
-                reason: "update the shared client".to_string(),
-                mode: "write".to_string(),
-                session: created.id.clone(),
-            },
-        )
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            repository: "acme/widgets".to_string(),
+            reason: "update the shared client".to_string(),
+            mode: "write".to_string(),
+            session: created.id.clone(),
+        })
         .await
         .unwrap();
     assert_eq!(request.state, "pending");
     assert_eq!(
         session
-            .invoke::<permission_ops::effective::get::Get>(&permission_ops::effective::get::Input {
+            .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
                 session: created.id.clone(),
             })
             .await
@@ -231,7 +229,7 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(tag_value(&branch, "attention"), Some("attention"));
 
     let error = session
-        .invoke::<permission_ops::requests::deny::Deny>(&permission_ops::requests::deny::Input {
+        .invoke::<permission_ops::requests::deny::Op>(&permission_ops::requests::deny::Input {
             request: request.id.clone(),
             reason: String::new(),
         })

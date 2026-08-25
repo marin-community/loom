@@ -521,32 +521,31 @@ async fn submitted_draft_conflict(st: &AppState, item: &review::Review) -> AppEr
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<weaver_api::operations::reviews::get::Get, _, _>(get_operation),
-        register::<weaver_api::operations::reviews::update::Update, _, _>(update_operation),
-        register::<weaver_api::operations::reviews::discard::Discard, _, _>(discard_operation),
-        register::<weaver_api::operations::reviews::retarget::Retarget, _, _>(retarget_operation),
-        register::<weaver_api::operations::reviews::list::List, _, _>(list_operation),
-        register::<weaver_api::operations::reviews::create::Create, _, _>(create_operation),
-        register::<weaver_api::operations::reviews::comments::create::Create, _, _>(
+        register::<weaver_api::operations::reviews::get::Op, _, _>(get_operation),
+        register::<weaver_api::operations::reviews::update::Op, _, _>(update_operation),
+        register::<weaver_api::operations::reviews::discard::Op, _, _>(discard_operation),
+        register::<weaver_api::operations::reviews::retarget::Op, _, _>(retarget_operation),
+        register::<weaver_api::operations::reviews::list::Op, _, _>(list_operation),
+        register::<weaver_api::operations::reviews::create::Op, _, _>(create_operation),
+        register::<weaver_api::operations::reviews::comments::create::Op, _, _>(
             comments_create_operation,
         ),
-        register::<weaver_api::operations::reviews::comments::update::Update, _, _>(
+        register::<weaver_api::operations::reviews::comments::update::Op, _, _>(
             comments_update_operation,
         ),
-        register::<weaver_api::operations::reviews::comments::delete::Delete, _, _>(
+        register::<weaver_api::operations::reviews::comments::delete::Op, _, _>(
             comments_delete_operation,
         ),
-        register::<weaver_api::operations::reviews::comments::resolve::Resolve, _, _>(
+        register::<weaver_api::operations::reviews::comments::resolve::Op, _, _>(
             comments_resolve_operation,
         ),
-        register::<weaver_api::operations::reviews::submit::Submit, _, _>(submit_operation),
-        register::<weaver_api::operations::reviews::retry_delivery::RetryDelivery, _, _>(
+        register::<weaver_api::operations::reviews::submit::Op, _, _>(submit_operation),
+        register::<weaver_api::operations::reviews::retry_delivery::Op, _, _>(
             retry_delivery_operation,
         ),
     ]
 }
 
-/// `reviews.get`.
 async fn get_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::get::Input,
@@ -560,7 +559,6 @@ async fn get_operation(
     durable_review_dto(&st, &item).await
 }
 
-/// `reviews.update`.
 async fn update_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::update::Input,
@@ -607,7 +605,6 @@ async fn update_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.discard`.
 async fn discard_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::discard::Input,
@@ -631,7 +628,6 @@ async fn discard_operation(
     Ok(weaver_api::operations::reviews::discard::Output { discarded: true })
 }
 
-/// `reviews.retarget`.
 async fn retarget_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::retarget::Input,
@@ -673,7 +669,6 @@ async fn retarget_operation(
     Ok(review_dto(&updated, &current))
 }
 
-/// `reviews.list`.
 async fn list_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::list::Input,
@@ -688,7 +683,6 @@ async fn list_operation(
     list_for(&st, &principal, &session, &branch, &q).await
 }
 
-/// `reviews.create`.
 async fn create_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::create::Input,
@@ -704,7 +698,6 @@ async fn create_operation(
     create_for(&st, &principal, &session, &branch, &body).await
 }
 
-/// `reviews.comments.update`.
 async fn comments_update_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::update::Input,
@@ -763,7 +756,6 @@ async fn comments_update_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.comments.delete`.
 async fn comments_delete_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::delete::Input,
@@ -789,7 +781,6 @@ async fn comments_delete_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.comments.resolve`.
 async fn comments_resolve_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::resolve::Input,
@@ -816,7 +807,6 @@ async fn comments_resolve_operation(
     Ok(comment_dto(&comment))
 }
 
-/// `reviews.comments.create`.
 async fn comments_create_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::comments::create::Input,
@@ -854,7 +844,6 @@ async fn comments_create_operation(
     durable_review_dto(&st, &updated).await
 }
 
-/// `reviews.submit`.
 async fn submit_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::submit::Input,
@@ -916,7 +905,6 @@ async fn submit_operation(
     durable_review_dto(&st, &refreshed).await
 }
 
-/// `reviews.retry_delivery`.
 async fn retry_delivery_operation(
     context: OperationContext,
     input: weaver_api::operations::reviews::retry_delivery::Input,

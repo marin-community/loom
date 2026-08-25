@@ -21,30 +21,26 @@ use super::{
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<permission_operations::explain::Explain, _, _>(explain_operation),
-        register::<permission_operations::effective::get::Get, _, _>(
+        register::<permission_operations::explain::Op, _, _>(explain_operation),
+        register::<permission_operations::effective::get::Op, _, _>(
             effective_permissions_operation,
         ),
-        register::<permission_operations::requests::list::List, _, _>(
+        register::<permission_operations::requests::list::Op, _, _>(
             list_permission_requests_operation,
         ),
-        register::<permission_operations::requests::create::Create, _, _>(
+        register::<permission_operations::requests::create::Op, _, _>(
             create_permission_request_operation,
         ),
-        register::<permission_operations::requests::approve::Approve, _, _>(
+        register::<permission_operations::requests::approve::Op, _, _>(
             approve_permission_request_operation,
         ),
-        register::<permission_operations::requests::deny::Deny, _, _>(
+        register::<permission_operations::requests::deny::Op, _, _>(
             deny_permission_request_operation,
         ),
-        register::<permission_operations::github::token::Token, _, _>(github_token_operation),
-        register::<permission_operations::github::grant::Grant, _, _>(
-            grant_github_access_operation,
-        ),
-        register::<permission_operations::github::revoke::Revoke, _, _>(
-            revoke_github_access_operation,
-        ),
-        register::<permission_operations::github::restricted::invoke::Invoke, _, _>(
+        register::<permission_operations::github::token::Op, _, _>(github_token_operation),
+        register::<permission_operations::github::grant::Op, _, _>(grant_github_access_operation),
+        register::<permission_operations::github::revoke::Op, _, _>(revoke_github_access_operation),
+        register::<permission_operations::github::restricted::invoke::Op, _, _>(
             restricted_github_invoke_operation,
         ),
     ]

@@ -882,7 +882,7 @@ pub(super) async fn events_sse(
     Query(input): Query<ops::events::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
     let input =
-        super::encodings::authorized::<ops::events::stream::Stream>(&st, &principal, input).await?;
+        super::encodings::authorized::<ops::events::stream::Op>(&st, &principal, input).await?;
     let branch = require_branch(&st.db, &input.session).await?;
     let id = branch.id;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(move |result| {
@@ -1033,7 +1033,7 @@ pub(super) async fn chat_stream(
     Query(input): Query<ops::chat::stream::Input>,
 ) -> ApiResult<impl IntoResponse> {
     let input =
-        super::encodings::authorized::<ops::chat::stream::Stream>(&st, &principal, input).await?;
+        super::encodings::authorized::<ops::chat::stream::Op>(&st, &principal, input).await?;
     let (session, _) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
     let boxed: Pin<Box<dyn Stream<Item = Result<sse::Event, Infallible>> + Send>> =
@@ -1119,55 +1119,55 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     let mut bound = vec![
-        register::<ops::list::List, _, _>(op_list),
-        register::<ops::summary::list::List, _, _>(op_summary_list),
-        register::<ops::get::Get, _, _>(op_get),
-        register::<ops::launch::Launch, _, _>(op_launch),
-        register::<ops::launches::resolve::Resolve, _, _>(op_launches_resolve),
-        register::<ops::send::Send, _, _>(op_send),
-        register::<ops::interrupt::Interrupt, _, _>(op_interrupt),
-        register::<ops::preview::Preview, _, _>(op_preview),
-        register::<ops::events::list::List, _, _>(op_events_list),
-        register::<ops::events::create::Create, _, _>(op_events_create),
-        register::<ops::history::list::List, _, _>(op_history_list),
-        register::<ops::history::search::Search, _, _>(op_history_search),
-        register::<ops::status::get::Get, _, _>(op_status_get),
-        register::<ops::status::set::Set, _, _>(op_status_set),
-        register::<ops::tags::list::List, _, _>(op_tags_list),
-        register::<ops::tags::set::Set, _, _>(op_tags_set),
-        register::<ops::tags::delete::Delete, _, _>(op_tags_delete),
-        register::<ops::tags::replace::Replace, _, _>(op_tags_replace),
-        register::<ops::adopt::Adopt, _, _>(op_adopt),
-        register::<ops::archive::Archive, _, _>(op_archive),
-        register::<ops::recover::Recover, _, _>(op_recover),
-        register::<ops::handoff::Handoff, _, _>(op_handoff),
-        register::<ops::chat::Chat, _, _>(op_chat),
-        register::<ops::conversation::Conversation, _, _>(op_conversation),
-        register::<ops::files::Files, _, _>(op_files),
-        register::<ops::mode::Mode, _, _>(op_mode),
-        register::<ops::url::Url, _, _>(op_url),
-        register::<ops::ide_info::IdeInfo, _, _>(op_ide_info),
-        register::<ops::shells::list::List, _, _>(op_shells_list),
-        register::<ops::shells::delete::Delete, _, _>(op_shells_delete),
-        register::<ops::update::Update, _, _>(op_update),
-        register::<ops::delete::Delete, _, _>(op_delete),
-        register::<ops::config::set::Set, _, _>(op_config_set),
-        register::<ops::conversation::block::Block, _, _>(op_conversation_block),
-        register::<ops::github::refresh::Refresh, _, _>(op_github_refresh),
-        register::<ops::github::set::Set, _, _>(op_github_set),
-        register::<ops::github::clear::Clear, _, _>(op_github_clear),
-        register::<ops::github::labels::add::Add, _, _>(op_github_labels_add),
-        register::<ops::github::access::list::List, _, _>(
+        register::<ops::list::Op, _, _>(op_list),
+        register::<ops::summary::list::Op, _, _>(op_summary_list),
+        register::<ops::get::Op, _, _>(op_get),
+        register::<ops::launch::Op, _, _>(op_launch),
+        register::<ops::launches::resolve::Op, _, _>(op_launches_resolve),
+        register::<ops::send::Op, _, _>(op_send),
+        register::<ops::interrupt::Op, _, _>(op_interrupt),
+        register::<ops::preview::Op, _, _>(op_preview),
+        register::<ops::events::list::Op, _, _>(op_events_list),
+        register::<ops::events::create::Op, _, _>(op_events_create),
+        register::<ops::history::list::Op, _, _>(op_history_list),
+        register::<ops::history::search::Op, _, _>(op_history_search),
+        register::<ops::status::get::Op, _, _>(op_status_get),
+        register::<ops::status::set::Op, _, _>(op_status_set),
+        register::<ops::tags::list::Op, _, _>(op_tags_list),
+        register::<ops::tags::set::Op, _, _>(op_tags_set),
+        register::<ops::tags::delete::Op, _, _>(op_tags_delete),
+        register::<ops::tags::replace::Op, _, _>(op_tags_replace),
+        register::<ops::adopt::Op, _, _>(op_adopt),
+        register::<ops::archive::Op, _, _>(op_archive),
+        register::<ops::recover::Op, _, _>(op_recover),
+        register::<ops::handoff::Op, _, _>(op_handoff),
+        register::<ops::chat::Op, _, _>(op_chat),
+        register::<ops::conversation::Op, _, _>(op_conversation),
+        register::<ops::files::Op, _, _>(op_files),
+        register::<ops::mode::Op, _, _>(op_mode),
+        register::<ops::url::Op, _, _>(op_url),
+        register::<ops::ide_info::Op, _, _>(op_ide_info),
+        register::<ops::shells::list::Op, _, _>(op_shells_list),
+        register::<ops::shells::delete::Op, _, _>(op_shells_delete),
+        register::<ops::update::Op, _, _>(op_update),
+        register::<ops::delete::Op, _, _>(op_delete),
+        register::<ops::config::set::Op, _, _>(op_config_set),
+        register::<ops::conversation::block::Op, _, _>(op_conversation_block),
+        register::<ops::github::refresh::Op, _, _>(op_github_refresh),
+        register::<ops::github::set::Op, _, _>(op_github_set),
+        register::<ops::github::clear::Op, _, _>(op_github_clear),
+        register::<ops::github::labels::add::Op, _, _>(op_github_labels_add),
+        register::<ops::github::access::list::Op, _, _>(
             super::github_access::list_github_access_operation,
         ),
-        register::<ops::handoff::resolve::Resolve, _, _>(op_handoff_resolve),
-        register::<ops::prompt::create::Create, _, _>(op_prompt_create),
-        register::<ops::prompt::retract::Retract, _, _>(op_prompt_retract),
-        register::<ops::resumption_cue::get::Get, _, _>(op_resumption_cue_get),
-        register::<ops::resumption_cue::ensure::Ensure, _, _>(op_resumption_cue_ensure),
-        register::<ops::permissions::answer::Answer, _, _>(op_permissions_answer),
-        register::<ops::title::regenerate::Regenerate, _, _>(op_title_regenerate),
-        register::<ops::title::generation::set::Set, _, _>(op_title_generation_set),
+        register::<ops::handoff::resolve::Op, _, _>(op_handoff_resolve),
+        register::<ops::prompt::create::Op, _, _>(op_prompt_create),
+        register::<ops::prompt::retract::Op, _, _>(op_prompt_retract),
+        register::<ops::resumption_cue::get::Op, _, _>(op_resumption_cue_get),
+        register::<ops::resumption_cue::ensure::Op, _, _>(op_resumption_cue_ensure),
+        register::<ops::permissions::answer::Op, _, _>(op_permissions_answer),
+        register::<ops::title::regenerate::Op, _, _>(op_title_regenerate),
+        register::<ops::title::generation::set::Op, _, _>(op_title_generation_set),
     ];
     bound.extend(super::session_summary::bound_operations());
     bound.extend(super::changes::bound_operations());
@@ -1232,13 +1232,11 @@ async fn op_summary_list(
     .await
 }
 
-/// `sessions.get`.
 async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<SessionView> {
     let (session, branch) = require_session(&context.state.db, &input.session).await?;
     session_view(&context.state.db, &session, &branch).await
 }
 
-/// `sessions.launch`.
 async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiResult<SessionView> {
     let st = context.state;
     let req = CreateReq {
@@ -1343,7 +1341,6 @@ async fn op_send(
     })
 }
 
-/// `sessions.interrupt`.
 async fn op_interrupt(
     context: OperationContext,
     input: ops::interrupt::Input,
@@ -1365,7 +1362,6 @@ async fn op_interrupt(
     Ok(SessionInterruptResult { interrupted: true })
 }
 
-/// `sessions.preview`.
 async fn op_preview(
     context: OperationContext,
     input: ops::preview::Input,
@@ -1386,7 +1382,6 @@ async fn op_preview(
     Ok(SessionPreviewResult { screen })
 }
 
-/// `sessions.events.list`.
 async fn op_events_list(
     context: OperationContext,
     input: ops::events::list::Input,
@@ -1415,7 +1410,6 @@ async fn op_events_create(
     Ok(event)
 }
 
-/// `sessions.history.list`.
 async fn op_history_list(
     context: OperationContext,
     input: ops::history::list::Input,
@@ -1437,7 +1431,6 @@ async fn op_history_list(
     .map_err(history_error)
 }
 
-/// `sessions.history.search`.
 async fn op_history_search(
     context: OperationContext,
     input: ops::history::search::Input,
@@ -1555,7 +1548,6 @@ async fn op_tags_list(
     super::branch_view(&context.state.db, &branch).await
 }
 
-/// `sessions.tags.set`.
 async fn op_tags_set(
     context: OperationContext,
     input: ops::tags::set::Input,
@@ -1596,7 +1588,6 @@ async fn op_tags_set(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.tags.delete`.
 async fn op_tags_delete(
     context: OperationContext,
     input: ops::tags::delete::Input,
@@ -1614,7 +1605,6 @@ async fn op_tags_delete(
     super::branch_view(&st.db, &branch).await
 }
 
-/// `sessions.launches.resolve`.
 async fn op_launches_resolve(
     context: OperationContext,
     input: ops::launches::resolve::Input,
@@ -1635,7 +1625,6 @@ async fn op_launches_resolve(
     .view)
 }
 
-/// `sessions.adopt`.
 async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiResult<SessionView> {
     let st = &context.state;
     let (session, branch) = require_session(&st.db, &input.session).await?;
@@ -1644,7 +1633,6 @@ async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiRes
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.archive`.
 async fn op_archive(
     context: OperationContext,
     input: ops::archive::Input,
@@ -1711,7 +1699,6 @@ async fn op_archive_launch_attempt(
     })
 }
 
-/// `sessions.recover`.
 async fn op_recover(
     context: OperationContext,
     input: ops::recover::Input,
@@ -1727,7 +1714,6 @@ async fn op_recover(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.handoff`.
 async fn op_handoff(
     context: OperationContext,
     input: ops::handoff::Input,
@@ -1749,7 +1735,6 @@ async fn op_handoff(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.chat`.
 async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResult<SessionChatView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -1809,7 +1794,6 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
     })
 }
 
-/// `sessions.conversation`.
 async fn op_conversation(
     context: OperationContext,
     input: ops::conversation::Input,
@@ -1828,7 +1812,6 @@ async fn op_conversation(
     .map_err(|error| AppError::internal("conversation processing failed", error))
 }
 
-/// `sessions.files`.
 async fn op_files(
     context: OperationContext,
     input: ops::files::Input,
@@ -1878,7 +1861,6 @@ async fn op_files(
     Ok(SessionFilesView { files })
 }
 
-/// `sessions.mode`.
 async fn op_mode(
     context: OperationContext,
     input: ops::mode::Input,
@@ -1942,7 +1924,6 @@ pub(super) async fn raw_session_bytes(
         .into_response())
 }
 
-/// `sessions.url`.
 async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<SessionUrlView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -1952,7 +1933,6 @@ async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<
     })
 }
 
-/// `sessions.ide_info`.
 async fn op_ide_info(
     context: OperationContext,
     _input: ops::ide_info::Input,
@@ -1963,7 +1943,6 @@ async fn op_ide_info(
     Ok(serde_json::from_value(value)?)
 }
 
-/// `sessions.shells.list`.
 async fn op_shells_list(
     context: OperationContext,
     input: ops::shells::list::Input,
@@ -1984,7 +1963,6 @@ async fn op_shells_delete(
     Ok(crate::shell::list_debug(&session.id).await)
 }
 
-/// `sessions.update`.
 async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiResult<SessionView> {
     let st = &context.state;
     let (initial_session, _) = require_session(&st.db, &input.session).await?;
@@ -2064,7 +2042,6 @@ async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiR
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.delete`.
 async fn op_delete(
     context: OperationContext,
     input: ops::delete::Input,
@@ -2117,7 +2094,6 @@ async fn op_delete_launch_attempt(
     })
 }
 
-/// `sessions.config.set`.
 async fn op_config_set(
     context: OperationContext,
     input: ops::config::set::Input,
@@ -2142,7 +2118,6 @@ async fn op_config_set(
     })
 }
 
-/// `sessions.conversation.block`.
 async fn op_conversation_block(
     context: OperationContext,
     input: ops::conversation::block::Input,
@@ -2159,7 +2134,6 @@ async fn op_conversation_block(
         .ok_or_else(|| AppError::not_found("conversation block"))
 }
 
-/// `sessions.github.refresh`.
 async fn op_github_refresh(
     context: OperationContext,
     input: ops::github::refresh::Input,
@@ -2173,7 +2147,6 @@ async fn op_github_refresh(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.set`.
 async fn op_github_set(
     context: OperationContext,
     input: ops::github::set::Input,
@@ -2196,7 +2169,6 @@ async fn op_github_set(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.clear`.
 async fn op_github_clear(
     context: OperationContext,
     input: ops::github::clear::Input,
@@ -2212,7 +2184,6 @@ async fn op_github_clear(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.github.labels.add`.
 async fn op_github_labels_add(
     context: OperationContext,
     input: ops::github::labels::add::Input,
@@ -2256,7 +2227,6 @@ async fn op_github_labels_add(
     })
 }
 
-/// `sessions.handoff.resolve`.
 async fn op_handoff_resolve(
     context: OperationContext,
     input: ops::handoff::resolve::Input,
@@ -2326,7 +2296,6 @@ async fn op_prompt_create(
     })
 }
 
-/// `sessions.prompt.retract`.
 async fn op_prompt_retract(
     context: OperationContext,
     input: ops::prompt::retract::Input,
@@ -2342,7 +2311,6 @@ async fn op_prompt_retract(
     Ok(ops::prompt::retract::RetractResult { text })
 }
 
-/// `sessions.resumption_cue.get`.
 async fn op_resumption_cue_get(
     context: OperationContext,
     input: ops::resumption_cue::get::Input,
@@ -2352,7 +2320,6 @@ async fn op_resumption_cue_get(
     Ok(crate::metadata_assist::current_cue(&st.db, &session, &branch).await?)
 }
 
-/// `sessions.resumption_cue.ensure`.
 async fn op_resumption_cue_ensure(
     context: OperationContext,
     input: ops::resumption_cue::ensure::Input,
@@ -2362,7 +2329,6 @@ async fn op_resumption_cue_ensure(
     Ok(crate::metadata_assist::ensure_cue(&st.db, &st.acp, &session, &branch, input.force).await?)
 }
 
-/// `sessions.permissions.answer`.
 async fn op_permissions_answer(
     context: OperationContext,
     input: ops::permissions::answer::Input,
@@ -2403,7 +2369,6 @@ async fn op_permissions_answer(
     }
 }
 
-/// `sessions.title.regenerate`.
 async fn op_title_regenerate(
     context: OperationContext,
     input: ops::title::regenerate::Input,
@@ -2423,7 +2388,6 @@ async fn op_title_regenerate(
     session_view(&st.db, &session, &branch).await
 }
 
-/// `sessions.title.generation.set`.
 async fn op_title_generation_set(
     context: OperationContext,
     input: ops::title::generation::set::Input,

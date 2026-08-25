@@ -2,7 +2,7 @@
 //! built-in adapters, versioned capability sets, and operator-authored
 //! custom servers.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -15,17 +15,8 @@ pub mod custom {
         use super::prelude::*;
 
         /// Add an operator-authored custom MCP server.
-        #[operation(
-    id = "mcps.custom.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "mcps custom create",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "mcps.custom.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "mcps custom create")]
         pub struct Input {
             /// Absolute identity, e.g. `/engineering/search/docs`.
             #[operand(positional)]
@@ -52,18 +43,8 @@ pub mod custom {
         use super::prelude::*;
 
         /// Permanently remove an operator-authored custom MCP server.
-        #[operation(
-    id = "mcps.custom.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-    cli = "mcps custom delete",
-    cli_alias = "rm",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "mcps.custom.delete", actor = Admin, scope = Global, risk = Destructive,
+                    cli = "mcps custom delete", cli_alias = "rm")]
         pub struct Input {
             /// Absolute identity, e.g. `/engineering/search/docs`.
             #[operand(positional)]
@@ -78,17 +59,8 @@ pub mod custom {
 
         /// Show one operator-authored custom MCP server's latest definition and
         /// validation state.
-        #[operation(
-    id = "mcps.custom.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "mcps custom get",
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "mcps.custom.get", actor = User, scope = Global, risk = Read,
+                    cli = "mcps custom get")]
         pub struct Input {
             /// Absolute identity, e.g. `/engineering/search/docs`.
             #[operand(positional)]
@@ -102,18 +74,8 @@ pub mod custom {
         use super::prelude::*;
 
         /// List operator-authored custom MCP servers.
-        #[operation(
-    id = "mcps.custom.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "mcps custom list",
-    cli_alias = "ls",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "mcps.custom.list", actor = User, scope = Global, risk = Read,
+                    cli = "mcps custom list", cli_alias = "ls")]
         pub struct Input {}
 
         pub type Output = Vec<CustomMcpView>;
@@ -124,17 +86,8 @@ pub mod custom {
 
         /// Replace an operator-authored custom MCP server's definition, producing a
         /// new validated revision.
-        #[operation(
-    id = "mcps.custom.update",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "mcps custom update",
-)]
-        pub struct Update;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "mcps.custom.update", actor = Admin, scope = Global, risk = Write,
+                    cli = "mcps custom update")]
         pub struct Input {
             /// Absolute identity, e.g. `/engineering/search/docs`.
             #[operand(positional)]
@@ -163,29 +116,19 @@ pub mod get {
 
     /// The trusted MCP registry: built-in adapters, versioned capability sets,
     /// and operator-authored custom servers.
-    #[operation(
-    id = "mcps.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "mcps get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "mcps.get", actor = User, scope = Global, risk = Read, cli = "mcps get")]
     pub struct Input {}
 
     pub type Output = McpRegistryView;
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <get::Get as Operation>::SPEC,
-    <custom::list::List as Operation>::SPEC,
-    <custom::get::Get as Operation>::SPEC,
-    <custom::create::Create as Operation>::SPEC,
-    <custom::update::Update as Operation>::SPEC,
-    <custom::delete::Delete as Operation>::SPEC,
+    get::SPEC,
+    custom::list::SPEC,
+    custom::get::SPEC,
+    custom::create::SPEC,
+    custom::update::SPEC,
+    custom::delete::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

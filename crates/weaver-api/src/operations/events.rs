@@ -6,7 +6,7 @@
 //! that the response is an event stream, so a custom handler serves it rather
 //! than the generic JSON dispatcher.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -15,24 +15,11 @@ pub mod stream {
 
     /// Subscribe to one or more event topics over a single SSE connection.
     ///
-    /// This operation is a *container*: reaching it grants nothing, because every
-    /// topic in `topics` is separately authorized against the declaration of the
-    /// single-topic stream it stands in for (see `Topic::authorize` in
-    /// `loom::web::eventmux`). The grant named here is the floor those topics
-    /// share — `layout` and `logs` are `User`-only and out of a session's reach
-    /// entirely, so the only topics a session credential can name are `session:`
-    /// and `chat:`, and both require the session read grant.
-    #[operation(
-    id = "events.stream",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    io = Stream,
-)]
-    pub struct Stream;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Reaching this operation grants nothing on its own: every topic in
+    /// `topics` is authorized separately against the single-topic stream it
+    /// stands in for. The grant named here is the floor those topics share.
+    #[operation(id = "events.stream", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/sessions/read@v1"], io = Stream)]
     pub struct Input {
         /// Comma-separated topic list: `layout`, `logs`, `session:<key>`,
         /// `chat:<key>`. Empty parks the connection on keep-alive.
@@ -47,7 +34,7 @@ pub mod stream {
     pub type Output = ();
 }
 
-static OPERATIONS: &[&OperationSpec] = &[<stream::Stream as Operation>::SPEC];
+static OPERATIONS: &[&OperationSpec] = &[stream::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

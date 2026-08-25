@@ -1,7 +1,7 @@
 //! Creator-private draft feedback that, once submitted, becomes a durable
 //! review delivered into the reviewed session's own conversation.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -14,19 +14,10 @@ pub mod comments {
 
         /// Append an anchored feedback comment to a draft review.
         ///
-        /// Operator-only: a review's comments are private to the human drafting them
-        /// until `reviews.submit` delivers the whole thing, so a session credential —
-        /// even the reviewed session's own — may not add one.
-        #[operation(
-    id = "reviews.comments.create",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+        /// A review's comments stay private to the operator drafting them until
+        /// `reviews.submit` delivers the whole thing.
+        #[operation(id = "reviews.comments.create", actor = User, scope = Global, risk = Write,
+                    default = custom)]
         pub struct Input {
             /// The review to comment on.
             #[operand(positional)]
@@ -69,18 +60,9 @@ pub mod comments {
 
         /// Remove a draft review comment.
         ///
-        /// Operator-only and limited to the review's own creator — drafts are
-        /// private. Rejected once the review has left `draft` status.
-        #[operation(
-    id = "reviews.comments.delete",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        /// Limited to the review's own creator, and rejected once the review
+        /// has left `draft` status.
+        #[operation(id = "reviews.comments.delete", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The review the comment belongs to.
             #[operand(positional)]
@@ -100,19 +82,10 @@ pub mod comments {
 
         /// Mark a comment on a submitted review resolved or unresolved.
         ///
-        /// Operator-only, but — unlike the other `reviews.comments.*` operations —
-        /// not limited to the review's own creator: any human operator may resolve a
-        /// comment on any submitted review.
-        #[operation(
-    id = "reviews.comments.resolve",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Resolve;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        /// Any operator may resolve a comment on any submitted review — unlike the
+        /// other `reviews.comments.*` operations, this one is not limited to the
+        /// creator.
+        #[operation(id = "reviews.comments.resolve", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The submitted review the comment belongs to.
             #[operand(positional)]
@@ -135,16 +108,7 @@ pub mod comments {
         /// `anchor` together — a partial anchor replacement is rejected.
         ///
         /// Operator-only. Rejected once the review has left `draft` status.
-        #[operation(
-    id = "reviews.comments.update",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Update;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "reviews.comments.update", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The review the comment belongs to.
             #[operand(positional)]
@@ -173,22 +137,8 @@ pub mod create {
 
     /// Create or reuse a draft review over a session's artifact or its
     /// change-set, seeding it against the currently-visible subject version.
-    ///
-    /// Operator-only: a review's draft belongs to the human operator who starts it,
-    /// so a session credential may not start one.
-    ///
-    /// `session` names the session whose artifact or change-set is under review,
-    /// not the caller's own.
-    #[operation(
-    id = "reviews.create",
-    actor = User,
-    scope = Session,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Create;
-
-    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "reviews.create", actor = User, scope = Session, risk = Write,
+                default = custom)]
     pub struct Input {
         /// The session whose artifact or change-set is under review.
         #[operand(positional)]
@@ -222,18 +172,9 @@ pub mod discard {
 
     /// Permanently discard a draft review.
     ///
-    /// Operator-only, limited to the review's own creator. Rejected once the
-    /// review has left `draft` status.
-    #[operation(
-    id = "reviews.discard",
-    actor = User,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-)]
-    pub struct Discard;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Limited to the review's own creator, and rejected once the review has left
+    /// `draft` status.
+    #[operation(id = "reviews.discard", actor = User, scope = Global, risk = Destructive)]
     pub struct Input {
         /// The draft review to discard.
         #[operand(positional)]
@@ -254,18 +195,9 @@ pub mod get {
     /// Fetch a durable review by id, refreshed against its subject's current
     /// version.
     ///
-    /// Operator-only: a submitted review is visible to any human operator, and a
-    /// draft only to the operator who created it.
-    #[operation(
-    id = "reviews.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// A submitted review is visible to any operator; a draft only to the
+    /// operator who created it.
+    #[operation(id = "reviews.get", actor = User, scope = Global, risk = Read)]
     pub struct Input {
         /// The review to fetch.
         #[operand(positional)]
@@ -283,16 +215,8 @@ pub mod list {
     /// Reachable by both the reviewed session's own credential and a human
     /// operator: sessions may see submitted feedback on their own work, but not
     /// draft reviews from other operators.
-    #[operation(
-    id = "reviews.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/artifacts/read@v1"],
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "reviews.list", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/artifacts/read@v1"], default = custom)]
     pub struct Input {
         pub subject_kind: ReviewSubjectKindDto,
         /// The artifact name for `subject_kind = "artifact"`, or `"changes"` for
@@ -322,18 +246,9 @@ pub mod retarget {
     /// artifact's latest revision, or the branch's current change-set — in one
     /// step, without touching anything else.
     ///
-    /// Operator-only and limited to the review's own creator — drafts are
-    /// private. Rejected once the review has left `draft` status.
-    #[operation(
-    id = "reviews.retarget",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Retarget;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Limited to the review's own creator, and rejected once the review has left
+    /// `draft` status.
+    #[operation(id = "reviews.retarget", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         /// The draft review to retarget.
         #[operand(positional)]
@@ -350,19 +265,9 @@ pub mod retry_delivery {
 
     /// Retry a submitted review's delivery after it failed.
     ///
-    /// Operator-only, and — unlike `reviews.comments.create` and
-    /// `reviews.submit` — not limited to the review's own creator: any human
-    /// operator may retry delivery of any submitted review.
-    #[operation(
-    id = "reviews.retry_delivery",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct RetryDelivery;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Any operator may retry delivery of any submitted review — unlike
+    /// `reviews.submit`, this one is not limited to the creator.
+    #[operation(id = "reviews.retry_delivery", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         /// The submitted review whose delivery failed.
         #[operand(positional)]
@@ -378,18 +283,8 @@ pub mod submit {
     /// Submit a review's draft, delivering its structured feedback into the
     /// reviewed session's own conversation.
     ///
-    /// Operator-only and limited to the review's own creator — only the
-    /// creator may submit it.
-    #[operation(
-    id = "reviews.submit",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Submit;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Limited to the review's own creator.
+    #[operation(id = "reviews.submit", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         /// The review to submit.
         #[operand(positional)]
@@ -411,18 +306,9 @@ pub mod update {
     /// Edit a draft review's summary, or retarget it onto a caller-supplied
     /// subject version.
     ///
-    /// Operator-only and limited to the review's own creator — drafts are
-    /// private. Rejected once the review has left `draft` status.
-    #[operation(
-    id = "reviews.update",
-    actor = User,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Limited to the review's own creator, and rejected once the review has left
+    /// `draft` status.
+    #[operation(id = "reviews.update", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         /// The draft review to update.
         #[operand(positional)]
@@ -440,18 +326,18 @@ pub mod update {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <get::Get as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <discard::Discard as Operation>::SPEC,
-    <retarget::Retarget as Operation>::SPEC,
-    <list::List as Operation>::SPEC,
-    <create::Create as Operation>::SPEC,
-    <comments::create::Create as Operation>::SPEC,
-    <comments::update::Update as Operation>::SPEC,
-    <comments::delete::Delete as Operation>::SPEC,
-    <comments::resolve::Resolve as Operation>::SPEC,
-    <submit::Submit as Operation>::SPEC,
-    <retry_delivery::RetryDelivery as Operation>::SPEC,
+    get::SPEC,
+    update::SPEC,
+    discard::SPEC,
+    retarget::SPEC,
+    list::SPEC,
+    create::SPEC,
+    comments::create::SPEC,
+    comments::update::SPEC,
+    comments::delete::SPEC,
+    comments::resolve::SPEC,
+    submit::SPEC,
+    retry_delivery::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

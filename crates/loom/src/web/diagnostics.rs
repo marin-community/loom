@@ -427,7 +427,7 @@ async fn metric_snapshot(db: &Db) -> Result<DiagnosticsView> {
 /// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`.
 /// Its sibling `diagnostics.status` is bound in `web/logview.rs`.
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![register::<diagnostics_operations::get::Get, _, _>(
+    vec![register::<diagnostics_operations::get::Op, _, _>(
         diagnostics_operation,
     )]
 }

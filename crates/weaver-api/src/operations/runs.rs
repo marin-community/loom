@@ -7,7 +7,7 @@
 //! to the runtime (`actor = Internal`), while the read side is an operator
 //! diagnostic surface (`actor = User`).
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -18,19 +18,9 @@ pub mod create {
     /// session: the entry point GitHub Actions, ops scripts, and Grafana alerts
     /// call through their federated automation credential.
     ///
-    /// `actor = Internal`: the runtime is the only real caller, presenting an
-    /// automation bearer token minted by `auth.automation_token`. `Admin` can
-    /// still reach it directly.
-    #[operation(
-    id = "runs.create",
-    actor = Internal,
-    scope = Global,
-    risk = Write,
-    grants = [],
-)]
-    pub struct Create;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// The runtime is the only real caller, presenting an automation bearer token
+    /// minted by `auth.automation_token`. `Admin` can still reach it directly.
+    #[operation(id = "runs.create", actor = Internal, scope = Global, risk = Write)]
     pub struct Input {
         /// Launch profile the run executes under.
         pub profile: String,
@@ -63,19 +53,7 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one automation-triggered run by id.
-    ///
-    /// `actor = User`, matching `runs.list`.
-    #[operation(
-    id = "runs.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "runs get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "runs.get", actor = User, scope = Global, risk = Read, cli = "runs get")]
     pub struct Input {
         /// The run id.
         #[operand(positional)]
@@ -90,29 +68,13 @@ pub mod list {
 
     /// List automation-triggered runs (GitHub Actions / ops / Grafana
     /// deliveries): their status, launched session, and outcome.
-    ///
-    /// An operator observability read: `actor = User`, so `Admin`/`User` only.
-    #[operation(
-    id = "runs.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "runs list",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "runs.list", actor = User, scope = Global, risk = Read, cli = "runs list")]
     pub struct Input {}
 
     pub type Output = Vec<RunView>;
 }
 
-static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <create::Create as Operation>::SPEC,
-];
+static OPERATIONS: &[&OperationSpec] = &[list::SPEC, get::SPEC, create::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

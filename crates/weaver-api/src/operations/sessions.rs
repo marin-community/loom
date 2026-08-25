@@ -5,7 +5,7 @@
 //! includes an explicit `bundle = "sessions"` declaration to prevent the id
 //! prefix from being inferred.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -14,17 +14,8 @@ pub mod adopt {
 
     /// Rejoin an orphaned session to the active fleet: recreate its terminal (or
     /// resume its ACP runtime) in place, without touching the worktree or branch.
-    #[operation(
-    id = "sessions.adopt",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions adopt",
-)]
-    pub struct Adopt;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.adopt", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions adopt")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -38,17 +29,8 @@ pub mod archive {
 
     /// Archive a session: tear down its terminal and worktree, keeping the branch,
     /// its commits, the session row, and run history. The inverse of `recover`.
-    #[operation(
-    id = "sessions.archive",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions archive",
-)]
-    pub struct Archive;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.archive", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions archive")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -61,17 +43,8 @@ pub mod changes {
     use super::prelude::*;
 
     /// The session's uncommitted worktree changes against its base branch.
-    #[operation(
-    id = "sessions.changes",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions changes",
-)]
-    pub struct Changes;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.changes", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions changes")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -91,17 +64,8 @@ pub mod chat {
         /// Subscribe to an ACP session's assistant token deltas.
         ///
         /// Available only for ACP sessions. Terminal sessions have no token stream.
-        #[operation(
-    id = "sessions.chat.stream",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    io = Stream,
-)]
-        pub struct Stream;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.chat.stream", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], io = Stream)]
         pub struct Input {
             #[serde(default)]
             #[operand(context)]
@@ -113,17 +77,8 @@ pub mod chat {
 
     /// The journaled ACP conversation plus the agent-owned composer metadata,
     /// paged newest-first.
-    #[operation(
-    id = "sessions.chat",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions chat",
-)]
-    pub struct Chat;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.chat", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions chat")]
     pub struct Input {
         /// Page before this turn (paired with `before_seq`).
         pub before_turn: Option<i64>,
@@ -145,16 +100,8 @@ pub mod config {
         /// Change one agent-owned session configuration selector. Waits for the
         /// adapter's response and returns its full refreshed option list (also
         /// broadcast to chat clients as a `metadata` event).
-        #[operation(
-    id = "sessions.config.set",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.config.set", actor = SessionSelf, scope = Session, risk = Write,
+                    grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// Which configuration selector to change.
             #[operand(positional)]
@@ -182,22 +129,12 @@ pub mod context {
     use super::prelude::*;
 
     /// Resolve this caller's session, branch, repository, channel, and links.
-    #[operation(
     // `self` cannot be a Rust module name — not even as a raw identifier — so an
     // id of `self.get` could never live in the file its name promises. The CLI
     // still spells it `loom context` and MCP still calls it `loom_context::get`:
     // projections are named independently of identity, which is the point.
-    id = "sessions.context",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "context",
-    mcp = "loom_context::get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.context", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "context", mcp = "loom_context::get")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -217,16 +154,8 @@ pub mod conversation {
 
         /// Fetch a full conversation block that was elided in the main conversation
         /// view, addressed by message and block position.
-        #[operation(
-    id = "sessions.conversation.block",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-)]
-        pub struct Block;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.conversation.block", actor = SessionSelf, scope = Session,
+                    risk = Read, grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             /// Which message in the conversation.
             #[operand(positional)]
@@ -244,17 +173,8 @@ pub mod conversation {
     /// transcript when present, else the capture archived alongside it. Oversized
     /// tool payloads are elided to a preview naming `sessions.conversation.block`
     /// and the coordinates that fetch the rest.
-    #[operation(
-    id = "sessions.conversation",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions conversation",
-)]
-    pub struct Conversation;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.conversation", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions conversation")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -270,16 +190,8 @@ pub mod delete {
     /// `keep_branch` is set, the branch and its commits too. The session row and
     /// run history are removed as well. This is irreversible; see `sessions.archive`
     /// to keep session data.
-    #[operation(
-    id = "sessions.delete",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Destructive,
-    grants = ["loom/sessions/write@v1"],
-)]
-    pub struct Delete;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.delete", actor = SessionSelf, scope = Session, risk = Destructive,
+                grants = ["loom/sessions/write@v1"])]
     pub struct Input {
         /// Keep the branch (and its commits) instead of deleting it along with
         /// the session.
@@ -291,7 +203,7 @@ pub mod delete {
 
     /// Result of `sessions.delete`. `kind` is `"session"` for a real session or
     /// `"launch_attempt"` when the id named a reservation that never became one,
-    /// mirroring [`super::archive::Archive`]'s result.
+    /// mirroring [`super::archive::Op`]'s result.
     #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
     pub struct DeleteResult {
         pub deleted: bool,
@@ -310,17 +222,8 @@ pub mod events {
         use super::prelude::*;
 
         /// Record a trusted agent lifecycle event.
-        #[operation(
-    id = "sessions.events.create",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "hook",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.events.create", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"], cli = "hook")]
         pub struct Input {
             /// The event kind, e.g. an agent hook name.
             #[operand(long = "event")]
@@ -339,17 +242,8 @@ pub mod events {
         use super::prelude::*;
 
         /// List recent durable session events.
-        #[operation(
-    id = "sessions.events.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions events",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.events.list", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "sessions events")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -362,25 +256,8 @@ pub mod events {
         use super::prelude::*;
 
         /// Subscribe to one session's live event feed.
-        ///
-        /// Session is provided as an operand (not a path segment) to follow the standard
-        /// route pattern.
-        ///
-        /// `io = Stream` changes exactly one thing: the response encoding, so a custom
-        /// handler serves it instead of the JSON dispatcher. The actor policy, the
-        /// grants, and the resource scope are read from this declaration by that
-        /// handler — see `loom::web::encodings`.
-        #[operation(
-    id = "sessions.events.stream",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    io = Stream,
-)]
-        pub struct Stream;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.events.stream", actor = SessionSelf, scope = Session,
+                    risk = Read, grants = ["loom/sessions/read@v1"], io = Stream)]
         pub struct Input {
             //
             // `serde(default)` because a stream's operands arrive in the query string,
@@ -401,17 +278,8 @@ pub mod files {
 
     /// Worktree file completion for the chat composer: tracked plus unignored
     /// untracked paths, optionally filtered by a case-insensitive substring.
-    #[operation(
-    id = "sessions.files",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions files",
-)]
-    pub struct Files;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.files", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions files")]
     pub struct Input {
         /// Case-insensitive substring filter. Blank matches everything.
         #[operand(default = String::new())]
@@ -427,18 +295,8 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one session and its branch projection.
-    #[operation(
-    id = "sessions.get",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions get",
-    mcp = "loom_session::get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.get", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions get", mcp = "loom_session::get")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -466,20 +324,11 @@ pub mod github {
 
             /// List the repository access a session has been granted.
             ///
-            /// `actor = User` and no grant: this is a human read *about* an agent, not
-            /// something the agent can introspect about itself. A session that wants to
-            /// know what it may reach asks GitHub, or fails and reads the error.
-            #[operation(
-    id = "sessions.github.access.list",
-    actor = User,
-    scope = Session,
-    risk = Read,
-    grants = [],
-    cli = "sessions github access",
-)]
-            pub struct List;
-
-            #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+            /// A human read *about* an agent, not something the agent can
+            /// introspect about itself. A session that wants to know what it
+            /// may reach asks GitHub, or fails and reads the error.
+            #[operation(id = "sessions.github.access.list", actor = User, scope = Session,
+                        risk = Read, cli = "sessions github access")]
             pub struct Input {
                 /// A visible session id.
                 #[operand(positional)]
@@ -495,16 +344,8 @@ pub mod github {
 
         /// Clear an explicit PR mapping and return to automatic current-open-PR
         /// discovery.
-        #[operation(
-    id = "sessions.github.clear",
-    actor = SessionSelf,
-    scope = Session,
-    risk = ExternalWrite,
-    grants = ["loom/github/use@v1"],
-)]
-        pub struct Clear;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.github.clear", actor = SessionSelf, scope = Session,
+                    risk = ExternalWrite, grants = ["loom/github/use@v1"])]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -522,16 +363,8 @@ pub mod github {
             ///
             /// Provides a Loom-owned interface for watch programs to add labels without
             /// needing direct GitHub credentials.
-            #[operation(
-    id = "sessions.github.labels.add",
-    actor = SessionSelf,
-    scope = Session,
-    risk = ExternalWrite,
-    grants = ["loom/github/use@v1"],
-)]
-            pub struct Add;
-
-            #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+            #[operation(id = "sessions.github.labels.add", actor = SessionSelf, scope = Session,
+                        risk = ExternalWrite, grants = ["loom/github/use@v1"])]
             pub struct Input {
                 /// 1 to 10 label names to add to the pull request.
                 #[serde(default)]
@@ -557,16 +390,8 @@ pub mod github {
         /// Re-fetch the pull request currently associated with a session (by
         /// explicit mapping, or by automatic current-open-PR discovery) and refresh
         /// its cached status.
-        #[operation(
-    id = "sessions.github.refresh",
-    actor = SessionSelf,
-    scope = Session,
-    risk = ExternalWrite,
-    grants = ["loom/github/use@v1"],
-)]
-        pub struct Refresh;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.github.refresh", actor = SessionSelf, scope = Session,
+                    risk = ExternalWrite, grants = ["loom/github/use@v1"])]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -581,16 +406,8 @@ pub mod github {
         /// Pin a session's branch to an explicit pull request and fetch it
         /// immediately. The mapping is persisted only after GitHub confirms the
         /// number, so a typo never replaces a working association with a dead one.
-        #[operation(
-    id = "sessions.github.set",
-    actor = SessionSelf,
-    scope = Session,
-    risk = ExternalWrite,
-    grants = ["loom/github/use@v1"],
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.github.set", actor = SessionSelf, scope = Session,
+                    risk = ExternalWrite, grants = ["loom/github/use@v1"])]
         pub struct Input {
             /// The pull request number to pin to.
             #[operand(positional)]
@@ -618,16 +435,8 @@ pub mod handoff {
         /// Read`: a session entitled to hand itself off gains no new surface by
         /// previewing what that would produce, matching the reasoning documented on
         /// `sessions.launches.resolve`.
-        #[operation(
-    id = "sessions.handoff.resolve",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Resolve;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.handoff.resolve", actor = SessionSelf, scope = Session,
+                    risk = Read, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// The profile and per-launch overrides to resolve.
             #[operand(skip_cli)]
@@ -641,17 +450,8 @@ pub mod handoff {
 
     /// Replace the provider behind an idle ACP session while preserving Loom's
     /// stable session/branch/worktree identity and canonical journal.
-    #[operation(
-    id = "sessions.handoff",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions handoff",
-)]
-    pub struct Handoff;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.handoff", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions handoff")]
     pub struct Input {
         /// Runtime selector (deprecated; use `selection` instead).
         #[operand(default = String::new())]
@@ -685,17 +485,8 @@ pub mod history {
         use super::prelude::*;
 
         /// Page normalized session history records.
-        #[operation(
-    id = "sessions.history.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    mcp = "loom_session::history",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.history.list", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], mcp = "loom_session::history")]
         pub struct Input {
             /// Page backward from this cursor (exclusive). Omit for the newest tail.
             pub before: Option<String>,
@@ -716,17 +507,8 @@ pub mod history {
         use super::prelude::*;
 
         /// Search normalized session history records.
-        #[operation(
-    id = "sessions.history.search",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    mcp = "loom_session::search",
-)]
-        pub struct Search;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.history.search", actor = SessionSelf, scope = Session,
+                    risk = Read, grants = ["loom/sessions/read@v1"], mcp = "loom_session::search")]
         pub struct Input {
             /// Case-insensitive literal search text.
             pub q: String,
@@ -751,19 +533,8 @@ pub mod ide_info {
 
     /// Whether the embedded editor (code-server) is enabled and runnable on this
     /// host, so a client can decide whether to offer it.
-    ///
-    /// Host-level configuration; no session needs to be named.
-    #[operation(
-    id = "sessions.ide_info",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions ide-info",
-)]
-    pub struct IdeInfo;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.ide_info", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions ide-info")]
     pub struct Input {}
 
     pub type Output = SessionIdeInfoView;
@@ -773,17 +544,8 @@ pub mod interrupt {
     use super::prelude::*;
 
     /// Interrupt a session's active turn.
-    #[operation(
-    id = "sessions.interrupt",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions interrupt",
-)]
-    pub struct Interrupt;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.interrupt", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions interrupt")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -796,17 +558,8 @@ pub mod launch {
     use super::prelude::*;
 
     /// Launch a child session from a task or claimed work item.
-    #[operation(
-    id = "sessions.launch",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "launch",
-)]
-    pub struct Launch;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.launch", actor = SessionSelf, scope = Global, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "launch")]
     pub struct Input {
         /// One-line task label for the new session.
         ///
@@ -899,16 +652,8 @@ pub mod launches {
         ///
         /// Read-only. A session authorized to delegate a child launch may preview
         /// the template it would launch with.
-        #[operation(
-    id = "sessions.launches.resolve",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Resolve;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.launches.resolve", actor = SessionSelf, scope = Global,
+                    risk = Read, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// The profile and per-launch overrides to resolve.
             #[operand(skip_cli)]
@@ -923,17 +668,8 @@ pub mod list {
     use super::prelude::*;
 
     /// List and search visible sessions.
-    #[operation(
-    id = "sessions.list",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions list",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.list", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions list")]
     pub struct Input {
         /// Case-insensitive search over title, goal, branch, and tags.
         #[operand(default = String::new())]
@@ -977,17 +713,8 @@ pub mod mode {
 
     /// Change an ACP session's permission mode (`session/set_mode`), journaling a
     /// `mode_change` block.
-    #[operation(
-    id = "sessions.mode",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions mode",
-)]
-    pub struct Mode;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.mode", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions mode")]
     pub struct Input {
         /// The mode id to switch to, as advertised by the adapter's metadata.
         #[operand(positional)]
@@ -1012,18 +739,7 @@ pub mod permissions {
 
         /// Answer a pending in-flight ACP permission prompt by its chosen option:
         /// 404 for an unknown request id, 409 when it was already resolved.
-        ///
-        /// Human-only. Agents cannot resolve their own permission prompts.
-        #[operation(
-    id = "sessions.permissions.answer",
-    actor = User,
-    scope = Session,
-    risk = Write,
-    grants = [],
-)]
-        pub struct Answer;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.permissions.answer", actor = User, scope = Session, risk = Write)]
         pub struct Input {
             /// The live permission request to answer.
             #[operand(positional)]
@@ -1051,17 +767,8 @@ pub mod preview {
     use super::prelude::*;
 
     /// Read a bounded terminal preview.
-    #[operation(
-    id = "sessions.preview",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions preview",
-)]
-    pub struct Preview;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.preview", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions preview")]
     pub struct Input {
         /// Extra scrollback lines to include above the visible screen (0 = just
         /// the visible pane).
@@ -1087,16 +794,8 @@ pub mod prompt {
         ///
         /// Provenance is derived from the credential: `manual` for a human operator,
         /// `agent` otherwise.
-        #[operation(
-    id = "sessions.prompt.create",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.prompt.create", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// The message text.
             #[operand(positional)]
@@ -1134,16 +833,8 @@ pub mod prompt {
         /// Pull unseen next-turn feedback back out of the durable queue for editing.
         /// The ACP task owns the consume so this action is serialized with automatic
         /// dispatch at a turn boundary.
-        #[operation(
-    id = "sessions.prompt.retract",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Retract;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.prompt.retract", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1165,19 +856,10 @@ pub mod raw {
     /// Raw bytes of a worktree file, with a guessed content type — for inline
     /// image previews and downloads. Always reads the working tree, never a git ref.
     ///
-    /// `io = Download` because the browser fetches this resource directly and needs
-    /// raw bytes rather than a JSON envelope.
-    #[operation(
-    id = "sessions.raw",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    io = Download,
-)]
-    pub struct Raw;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// `io = Download`: the browser fetches this directly and needs raw bytes
+    /// rather than a JSON envelope.
+    #[operation(id = "sessions.raw", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], io = Download)]
     pub struct Input {
         /// Worktree-relative path to read.
         //
@@ -1201,17 +883,8 @@ pub mod recover {
     /// Recover an archived session: rebuild its worktree from the kept branch, then
     /// resume the agent. For a live (non-archived) session, restart its ACP
     /// runtime instead. The inverse of `archive`.
-    #[operation(
-    id = "sessions.recover",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions recover",
-)]
-    pub struct Recover;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.recover", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions recover")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -1229,16 +902,8 @@ pub mod resumption_cue {
         /// Generate the session's resumption cue if it is missing or stale. `force`
         /// regenerates it unconditionally; otherwise the configured inactivity
         /// threshold applies, as on the on-return path.
-        #[operation(
-    id = "sessions.resumption_cue.ensure",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Ensure;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.resumption_cue.ensure", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// Regenerate unconditionally instead of respecting the inactivity
             /// threshold.
@@ -1255,16 +920,8 @@ pub mod resumption_cue {
         use super::prelude::*;
 
         /// The session's current resumption cue, if one has been generated.
-        #[operation(
-    id = "sessions.resumption_cue.get",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.resumption_cue.get", actor = SessionSelf, scope = Session,
+                    risk = Read, grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1282,17 +939,9 @@ pub mod scratch {
         use super::prelude::*;
 
         /// Delete one Scratch file.
-        #[operation(
-    id = "sessions.scratch.delete",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Destructive,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions scratch delete",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.scratch.delete", actor = SessionSelf, scope = Session,
+                    risk = Destructive, grants = ["loom/sessions/write@v1"],
+                    cli = "sessions scratch delete")]
         pub struct Input {
             /// The file name to delete.
             #[operand(positional)]
@@ -1308,17 +957,8 @@ pub mod scratch {
         use super::prelude::*;
 
         /// Shared upload limits for launch-time and live-session Scratch attachments.
-        #[operation(
-    id = "sessions.scratch.limits",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "sessions scratch limits",
-)]
-        pub struct Limits;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.scratch.limits", actor = User, scope = Global, risk = Read,
+                    cli = "sessions scratch limits")]
         pub struct Input {}
 
         pub type Output = ScratchLimitsView;
@@ -1328,17 +968,8 @@ pub mod scratch {
         use super::prelude::*;
 
         /// List a session's Scratch files.
-        #[operation(
-    id = "sessions.scratch.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions scratch list",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.scratch.list", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "sessions scratch list")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1358,17 +989,8 @@ pub mod scratch {
         /// other road — `sessions.launch` carries them base64-encoded inside its JSON,
         /// because there one request has to carry several files *and* the rest of the
         /// launch configuration.
-        #[operation(
-    id = "sessions.scratch.write",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    io = Upload,
-)]
-        pub struct Write;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.scratch.write", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"], io = Upload)]
         pub struct Input {
             /// The file name to write, a single path component.
             //
@@ -1391,17 +1013,8 @@ pub mod send {
     use super::prelude::*;
 
     /// Deliver a new prompt to a session.
-    #[operation(
-    id = "sessions.send",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions send",
-)]
-    pub struct Send;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.send", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions send")]
     pub struct Input {
         /// The text to type into the agent's pane.
         #[operand(positional)]
@@ -1426,16 +1039,8 @@ pub mod shells {
         use super::prelude::*;
 
         /// Close one of a session's worktree debug shells, killing its supervisor.
-        #[operation(
-    id = "sessions.shells.delete",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.shells.delete", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             /// Which of the session's debug shells to close.
             #[operand(positional)]
@@ -1454,17 +1059,8 @@ pub mod shells {
 
         /// The live worktree debug-shell indices for a session, so a client re-opens
         /// the shell tabs after a reload. Never spawns.
-        #[operation(
-    id = "sessions.shells.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions shells",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.shells.list", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "sessions shells")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1481,17 +1077,8 @@ pub mod shells {
         /// The target is a plain login shell in the session's worktree, spawned on first
         /// attach. This is `risk = ExternalWrite` because it runs arbitrary commands as
         /// the operator inside the session's checkout.
-        #[operation(
-    id = "sessions.shells.terminal",
-    actor = SessionSelf,
-    scope = Session,
-    risk = ExternalWrite,
-    grants = ["loom/sessions/write@v1"],
-    io = Duplex,
-)]
-        pub struct Terminal;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.shells.terminal", actor = SessionSelf, scope = Session,
+                    risk = ExternalWrite, grants = ["loom/sessions/write@v1"], io = Duplex)]
         pub struct Input {
             /// Which of the session's debug shells; several may run at once.
             #[serde(default)]
@@ -1513,18 +1100,9 @@ pub mod status {
         use super::prelude::*;
 
         /// Read the session's durable attention level and status message.
-        #[operation(
-    id = "sessions.status.get",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "status get",
-    mcp = "loom_session::status_get",
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.status.get", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "status get",
+                    mcp = "loom_session::status_get")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1537,18 +1115,9 @@ pub mod status {
         use super::prelude::*;
 
         /// Update the durable attention level and status message.
-        #[operation(
-    id = "sessions.status.set",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "status set",
-    mcp = "loom_session::status_set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.status.set", actor = SessionSelf, scope = Session, risk = Write,
+                    grants = ["loom/sessions/write@v1"], cli = "status set",
+                    mcp = "loom_session::status_set")]
         pub struct Input {
             /// The attention level: `ok`, `attention`, or `blocked`.
             #[operand(long = "tag")]
@@ -1570,18 +1139,9 @@ pub mod summary {
         use super::prelude::*;
 
         /// Return the current goal, status, inbox, artifacts, issues, and next actions.
-        #[operation(
-    id = "sessions.summary.get",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "summary",
-    mcp = "loom_session::summary",
-)]
-        pub struct Get;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.summary.get", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "summary",
+                    mcp = "loom_session::summary")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1595,20 +1155,11 @@ pub mod summary {
 
         /// The fleet index: one compact row per visible session.
         ///
-        /// A reduced projection to keep responses compact. Full session context is
-        /// available separately via `sessions.get` to avoid accidentally fetching
-        /// the large projection when the compact view is all that is needed.
-        #[operation(
-    id = "sessions.summary.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "sessions summaries",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        /// A reduced projection, so a caller that only needs the compact view
+        /// does not pay for the full one. `sessions.get` returns the whole
+        /// context.
+        #[operation(id = "sessions.summary.list", actor = User, scope = Global, risk = Read,
+                    cli = "sessions summaries")]
         pub struct Input {
             /// Include archived rows alongside active work.
             #[operand(default = false)]
@@ -1644,17 +1195,8 @@ pub mod tags {
         use super::prelude::*;
 
         /// Remove one free-form session tag.
-        #[operation(
-    id = "sessions.tags.delete",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions tags delete",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.tags.delete", actor = SessionSelf, scope = Session, risk = Write,
+                    grants = ["loom/sessions/write@v1"], cli = "sessions tags delete")]
         pub struct Input {
             /// The tag key to remove.
             #[operand(positional)]
@@ -1672,17 +1214,8 @@ pub mod tags {
         use super::prelude::*;
 
         /// List free-form tags on a session.
-        #[operation(
-    id = "sessions.tags.list",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions tags list",
-)]
-        pub struct List;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.tags.list", actor = SessionSelf, scope = Session, risk = Read,
+                    grants = ["loom/sessions/read@v1"], cli = "sessions tags list")]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1696,25 +1229,12 @@ pub mod tags {
 
         /// Atomically replace one author's complete tag set on a session.
         ///
-        /// All rows authored by `by` are replaced in a single transaction, ensuring
-        /// that a stale update cannot delete a key another actor took over after the
-        /// fleet snapshot. This atomic guarantee is required for the watch system to
-        /// avoid race conditions.
-        ///
-        /// `clear` names exact `(key, value)` pairs to drop in the same transaction,
-        /// so a real status can replace a lifecycle mark (e.g., `idle: idle`) without
-        /// removing someone else's newer value.
-        #[operation(
-    id = "sessions.tags.replace",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions tags replace",
-)]
-        pub struct Replace;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        /// Every row authored by `by` is replaced in one transaction, so a
+        /// stale update cannot delete a key another actor took over since the
+        /// caller last looked.
+        #[operation(id = "sessions.tags.replace", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"],
+                    cli = "sessions tags replace")]
         pub struct Input {
             /// The complete tag set this author now asserts.
             #[operand(json, default = Vec::new())]
@@ -1735,17 +1255,8 @@ pub mod tags {
         use super::prelude::*;
 
         /// Set one free-form session tag.
-        #[operation(
-    id = "sessions.tags.set",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    cli = "sessions tags set",
-)]
-        pub struct Set;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.tags.set", actor = SessionSelf, scope = Session, risk = Write,
+                    grants = ["loom/sessions/write@v1"], cli = "sessions tags set")]
         pub struct Input {
             /// The tag key.
             #[operand(positional)]
@@ -1771,23 +1282,10 @@ pub mod terminal {
 
     /// Attach to a session's agent terminal over a websocket.
     ///
-    /// `io = Duplex` because the response is a protocol upgrade served by a custom
-    /// handler. Registering it here declares the actor policy, resource scope, and
-    /// operands explicitly.
-    ///
-    /// `risk = Write` because this is a real PTY: whoever holds it types as the
-    /// agent's user.
-    #[operation(
-    id = "sessions.terminal",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-    io = Duplex,
-)]
-    pub struct Terminal;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// `io = Duplex`: the response is a protocol upgrade, served by a custom
+    /// handler.
+    #[operation(id = "sessions.terminal", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], io = Duplex)]
     pub struct Input {
         #[serde(default)]
         #[operand(context)]
@@ -1807,16 +1305,8 @@ pub mod title {
             use super::prelude::*;
 
             /// Toggle whether Loom generates this session's title automatically.
-            #[operation(
-    id = "sessions.title.generation.set",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-            pub struct Set;
-
-            #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+            #[operation(id = "sessions.title.generation.set", actor = SessionSelf, scope = Session,
+                        risk = Write, grants = ["loom/sessions/write@v1"])]
             pub struct Input {
                 /// Whether automatic title generation is enabled.
                 #[operand(positional)]
@@ -1834,16 +1324,8 @@ pub mod title {
 
         /// Regenerate a session's title immediately, bypassing the confidence guard
         /// that normally throttles automatic generation.
-        #[operation(
-    id = "sessions.title.regenerate",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-        pub struct Regenerate;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "sessions.title.regenerate", actor = SessionSelf, scope = Session,
+                    risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1859,16 +1341,8 @@ pub mod update {
     /// Update a session's branch-level fields (title, goal, description) and its
     /// durable status. Attention level is managed via tags operations
     /// (`sessions.tags.set`/`sessions.tags.delete`).
-    #[operation(
-    id = "sessions.update",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Write,
-    grants = ["loom/sessions/write@v1"],
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.update", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"])]
     pub struct Input {
         /// New durable status (the fleet lifecycle marker).
         pub status: Option<String>,
@@ -1898,17 +1372,8 @@ pub mod url {
     /// The externally-visible dashboard URL for a session. The agent inside a
     /// session only knows its loopback API address, so only the server can resolve
     /// this — from the configured `auth.base_url`, or the address it is bound to.
-    #[operation(
-    id = "sessions.url",
-    actor = SessionSelf,
-    scope = Session,
-    risk = Read,
-    grants = ["loom/sessions/read@v1"],
-    cli = "sessions url",
-)]
-    pub struct Url;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "sessions.url", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions url")]
     pub struct Input {
         #[operand(context)]
         pub session: String,
@@ -1918,68 +1383,68 @@ pub mod url {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <context::Get as Operation>::SPEC,
-    <summary::get::Get as Operation>::SPEC,
-    <summary::list::List as Operation>::SPEC,
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <launch::Launch as Operation>::SPEC,
-    <launches::resolve::Resolve as Operation>::SPEC,
-    <send::Send as Operation>::SPEC,
-    <interrupt::Interrupt as Operation>::SPEC,
-    <preview::Preview as Operation>::SPEC,
-    <events::list::List as Operation>::SPEC,
-    <events::create::Create as Operation>::SPEC,
-    <history::list::List as Operation>::SPEC,
-    <history::search::Search as Operation>::SPEC,
-    <status::get::Get as Operation>::SPEC,
-    <status::set::Set as Operation>::SPEC,
-    <tags::list::List as Operation>::SPEC,
-    <tags::set::Set as Operation>::SPEC,
-    <tags::replace::Replace as Operation>::SPEC,
-    <tags::delete::Delete as Operation>::SPEC,
-    <adopt::Adopt as Operation>::SPEC,
-    <archive::Archive as Operation>::SPEC,
-    <recover::Recover as Operation>::SPEC,
-    <handoff::Handoff as Operation>::SPEC,
-    <handoff::resolve::Resolve as Operation>::SPEC,
-    <changes::Changes as Operation>::SPEC,
-    <chat::Chat as Operation>::SPEC,
-    <conversation::Conversation as Operation>::SPEC,
-    <conversation::block::Block as Operation>::SPEC,
-    <files::Files as Operation>::SPEC,
-    <mode::Mode as Operation>::SPEC,
-    <raw::Raw as Operation>::SPEC,
-    <url::Url as Operation>::SPEC,
-    <ide_info::IdeInfo as Operation>::SPEC,
-    <shells::list::List as Operation>::SPEC,
-    <shells::delete::Delete as Operation>::SPEC,
-    <scratch::limits::Limits as Operation>::SPEC,
-    <scratch::list::List as Operation>::SPEC,
-    <scratch::write::Write as Operation>::SPEC,
-    <scratch::delete::Delete as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <delete::Delete as Operation>::SPEC,
-    <config::set::Set as Operation>::SPEC,
-    <github::refresh::Refresh as Operation>::SPEC,
-    <github::set::Set as Operation>::SPEC,
-    <github::clear::Clear as Operation>::SPEC,
-    <github::access::list::List as Operation>::SPEC,
-    <github::labels::add::Add as Operation>::SPEC,
-    <prompt::create::Create as Operation>::SPEC,
-    <prompt::retract::Retract as Operation>::SPEC,
-    <resumption_cue::get::Get as Operation>::SPEC,
-    <resumption_cue::ensure::Ensure as Operation>::SPEC,
-    <permissions::answer::Answer as Operation>::SPEC,
-    <title::regenerate::Regenerate as Operation>::SPEC,
-    <title::generation::set::Set as Operation>::SPEC,
+    context::SPEC,
+    summary::get::SPEC,
+    summary::list::SPEC,
+    list::SPEC,
+    get::SPEC,
+    launch::SPEC,
+    launches::resolve::SPEC,
+    send::SPEC,
+    interrupt::SPEC,
+    preview::SPEC,
+    events::list::SPEC,
+    events::create::SPEC,
+    history::list::SPEC,
+    history::search::SPEC,
+    status::get::SPEC,
+    status::set::SPEC,
+    tags::list::SPEC,
+    tags::set::SPEC,
+    tags::replace::SPEC,
+    tags::delete::SPEC,
+    adopt::SPEC,
+    archive::SPEC,
+    recover::SPEC,
+    handoff::SPEC,
+    handoff::resolve::SPEC,
+    changes::SPEC,
+    chat::SPEC,
+    conversation::SPEC,
+    conversation::block::SPEC,
+    files::SPEC,
+    mode::SPEC,
+    raw::SPEC,
+    url::SPEC,
+    ide_info::SPEC,
+    shells::list::SPEC,
+    shells::delete::SPEC,
+    scratch::limits::SPEC,
+    scratch::list::SPEC,
+    scratch::write::SPEC,
+    scratch::delete::SPEC,
+    update::SPEC,
+    delete::SPEC,
+    config::set::SPEC,
+    github::refresh::SPEC,
+    github::set::SPEC,
+    github::clear::SPEC,
+    github::access::list::SPEC,
+    github::labels::add::SPEC,
+    prompt::create::SPEC,
+    prompt::retract::SPEC,
+    resumption_cue::get::SPEC,
+    resumption_cue::ensure::SPEC,
+    permissions::answer::SPEC,
+    title::regenerate::SPEC,
+    title::generation::set::SPEC,
     // Non-JSON: SSE feeds and terminal websockets. Registered exactly like the
     // rest — only the response encoding differs, so a custom handler in
     // `loom::web::encodings` serves them off these same declarations.
-    <events::stream::Stream as Operation>::SPEC,
-    <chat::stream::Stream as Operation>::SPEC,
-    <terminal::Terminal as Operation>::SPEC,
-    <shells::terminal::Terminal as Operation>::SPEC,
+    events::stream::SPEC,
+    chat::stream::SPEC,
+    terminal::SPEC,
+    shells::terminal::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

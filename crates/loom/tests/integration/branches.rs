@@ -171,7 +171,7 @@ async fn cross_repo_board_and_issue_tags() {
     // key touches the route.
     let tag_key = "priority / now?#";
     let tagged = client
-        .invoke::<tags::set::Set>(&tags::set::Input {
+        .invoke::<tags::set::Op>(&tags::set::Input {
             id: issue_id,
             key: tag_key.to_string(),
             value: "high".to_string(),
@@ -191,7 +191,7 @@ async fn cross_repo_board_and_issue_tags() {
 
     // An empty value is rejected (clear the tag instead).
     let bad = client
-        .invoke::<tags::set::Set>(&tags::set::Input {
+        .invoke::<tags::set::Op>(&tags::set::Input {
             id: issue_id,
             key: tag_key.to_string(),
             value: String::new(),
@@ -203,7 +203,7 @@ async fn cross_repo_board_and_issue_tags() {
 
     // Clearing removes the label.
     let cleared = client
-        .invoke::<tags::delete::Delete>(&tags::delete::Input {
+        .invoke::<tags::delete::Op>(&tags::delete::Input {
             id: issue_id,
             key: tag_key.to_string(),
             repo_root: repo_root.clone(),
@@ -219,7 +219,7 @@ async fn cross_repo_board_and_issue_tags() {
             ids,
             repo_root: repo_root.clone(),
         };
-        async move { client.invoke::<close::Close>(&input).await }
+        async move { client.invoke::<close::Op>(&input).await }
     };
     let closed = close(vec![issue_id]).await.unwrap();
     assert_eq!(closed.issues[0].status, "closed");
@@ -228,7 +228,7 @@ async fn cross_repo_board_and_issue_tags() {
         "closing an already-closed issue retains atomic action validation"
     );
     let reopened = client
-        .invoke::<reopen::Reopen>(&reopen::Input {
+        .invoke::<reopen::Op>(&reopen::Input {
             ids: vec![issue_id],
             repo_root: repo_root.clone(),
         })

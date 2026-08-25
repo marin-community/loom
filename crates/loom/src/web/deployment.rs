@@ -180,7 +180,7 @@ pub(super) async fn reconcile_deployment_operation(
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![register::<reconcile::Reconcile, _, _>(
+    vec![register::<reconcile::Op, _, _>(
         reconcile_deployment_operation,
     )]
 }

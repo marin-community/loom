@@ -117,7 +117,6 @@ async fn slack_connection_status_view(
     }
 }
 
-/// `slack.connection_status`.
 async fn slack_connection_status_operation(
     context: OperationContext,
     _input: slack_operations::connection_status::Input,
@@ -143,23 +142,22 @@ async fn slack_connection_status_operation(
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<ops::list::List, _, _>(list_operation),
-        register::<ops::get::Get, _, _>(get_operation),
-        register::<ops::update::Update, _, _>(update_operation),
-        register::<ops::status::set::Set, _, _>(status_set_operation),
-        register::<ops::slack::reply::Reply, _, _>(slack_reply_operation),
-        register::<ops::events::list::List, _, _>(events_list_operation),
-        register::<ops::events::create::Create, _, _>(events_create_operation),
-        register::<ops::tags::set::Set, _, _>(tags_set_operation),
-        register::<ops::tags::delete::Delete, _, _>(tags_delete_operation),
-        register::<ops::issues::list::List, _, _>(issues_list_operation),
-        register::<slack_operations::connection_status::ConnectionStatus, _, _>(
+        register::<ops::list::Op, _, _>(list_operation),
+        register::<ops::get::Op, _, _>(get_operation),
+        register::<ops::update::Op, _, _>(update_operation),
+        register::<ops::status::set::Op, _, _>(status_set_operation),
+        register::<ops::slack::reply::Op, _, _>(slack_reply_operation),
+        register::<ops::events::list::Op, _, _>(events_list_operation),
+        register::<ops::events::create::Op, _, _>(events_create_operation),
+        register::<ops::tags::set::Op, _, _>(tags_set_operation),
+        register::<ops::tags::delete::Op, _, _>(tags_delete_operation),
+        register::<ops::issues::list::Op, _, _>(issues_list_operation),
+        register::<slack_operations::connection_status::Op, _, _>(
             slack_connection_status_operation,
         ),
     ]
 }
 
-/// `branches.list`.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -173,7 +171,6 @@ async fn list_operation(
     Ok(out)
 }
 
-/// `branches.get`.
 async fn get_operation(
     context: OperationContext,
     input: ops::get::Input,
@@ -183,7 +180,6 @@ async fn get_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.update`.
 async fn update_operation(
     context: OperationContext,
     input: ops::update::Input,
@@ -280,7 +276,6 @@ async fn update_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.status.set`.
 async fn status_set_operation(
     context: OperationContext,
     input: ops::status::set::Input,
@@ -456,7 +451,6 @@ async fn events_list_operation(
     Ok(events::history(&st.db, &branch.id, 200).await?)
 }
 
-/// `branches.events.create`.
 async fn events_create_operation(
     context: OperationContext,
     input: ops::events::create::Input,
@@ -472,7 +466,6 @@ async fn events_create_operation(
     Ok(event)
 }
 
-/// `branches.tags.set`.
 async fn tags_set_operation(
     context: OperationContext,
     input: ops::tags::set::Input,
@@ -519,7 +512,6 @@ async fn tags_set_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.tags.delete`.
 async fn tags_delete_operation(
     context: OperationContext,
     input: ops::tags::delete::Input,

@@ -13,9 +13,9 @@ use super::{ApiResult, AppError, AppState};
 /// `remove_federation`) are handled by a separate bundle.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<run_operations::list::List, _, _>(list_runs),
-        register::<run_operations::get::Get, _, _>(get_run),
-        register::<run_operations::create::Create, _, _>(create_run),
+        register::<run_operations::list::Op, _, _>(list_runs),
+        register::<run_operations::get::Op, _, _>(get_run),
+        register::<run_operations::create::Op, _, _>(create_run),
     ]
 }
 

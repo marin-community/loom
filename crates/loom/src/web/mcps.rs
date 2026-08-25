@@ -7,7 +7,6 @@ use weaver_api::{CustomMcpDeleteResult, CustomMcpReq, CustomMcpView, McpRegistry
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError};
 
-/// `mcps.get`.
 pub(super) async fn get_mcp_registry_operation(
     context: OperationContext,
     _input: mcps_operations::get::Input,
@@ -18,7 +17,6 @@ pub(super) async fn get_mcp_registry_operation(
     Ok(registry)
 }
 
-/// `mcps.custom.list`.
 pub(super) async fn list_custom_mcps_operation(
     context: OperationContext,
     _input: mcps_operations::custom::list::Input,
@@ -26,7 +24,6 @@ pub(super) async fn list_custom_mcps_operation(
     Ok(crate::custom_mcp::list(&context.state.db).await?)
 }
 
-/// `mcps.custom.create`.
 pub(super) async fn create_custom_mcp_operation(
     context: OperationContext,
     input: mcps_operations::custom::create::Input,
@@ -91,7 +88,6 @@ pub(super) async fn update_custom_mcp_operation(
         .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
-/// `mcps.custom.delete`.
 pub(super) async fn delete_custom_mcp_operation(
     context: OperationContext,
     input: mcps_operations::custom::delete::Input,
@@ -119,11 +115,11 @@ pub(super) async fn delete_custom_mcp_operation(
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<mcps_operations::get::Get, _, _>(get_mcp_registry_operation),
-        register::<mcps_operations::custom::list::List, _, _>(list_custom_mcps_operation),
-        register::<mcps_operations::custom::get::Get, _, _>(get_custom_mcp_operation),
-        register::<mcps_operations::custom::create::Create, _, _>(create_custom_mcp_operation),
-        register::<mcps_operations::custom::update::Update, _, _>(update_custom_mcp_operation),
-        register::<mcps_operations::custom::delete::Delete, _, _>(delete_custom_mcp_operation),
+        register::<mcps_operations::get::Op, _, _>(get_mcp_registry_operation),
+        register::<mcps_operations::custom::list::Op, _, _>(list_custom_mcps_operation),
+        register::<mcps_operations::custom::get::Op, _, _>(get_custom_mcp_operation),
+        register::<mcps_operations::custom::create::Op, _, _>(create_custom_mcp_operation),
+        register::<mcps_operations::custom::update::Op, _, _>(update_custom_mcp_operation),
+        register::<mcps_operations::custom::delete::Op, _, _>(delete_custom_mcp_operation),
     ]
 }

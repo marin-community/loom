@@ -4,7 +4,7 @@
 //! watch, arm/disarm it, fire a round on demand, and inspect its round
 //! history.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -13,18 +13,9 @@ pub mod create {
 
     /// Register a watch.
     ///
-    /// Admin only. Watches are fleet-wide configuration.
-    #[operation(
-    id = "watches.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "watch add",
-)]
-    pub struct Create;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    /// Watches are fleet-wide configuration, not per-session.
+    #[operation(id = "watches.create", actor = Admin, scope = Global, risk = Write,
+                cli = "watch add")]
     pub struct Input {
         /// The watch's unique name.
         #[operand(positional)]
@@ -68,19 +59,8 @@ pub mod delete {
     use super::prelude::*;
 
     /// Remove a watch.
-    ///
-    /// Operator-only, same reasoning as `watches.create`.
-    #[operation(
-    id = "watches.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-    cli = "watch rm",
-)]
-    pub struct Delete;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.delete", actor = Admin, scope = Global, risk = Destructive,
+                cli = "watch rm")]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -94,17 +74,7 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one watch by id or name.
-    #[operation(
-    id = "watches.get",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "watch get",
-)]
-    pub struct Get;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.get", actor = User, scope = Global, risk = Read, cli = "watch get")]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -118,17 +88,7 @@ pub mod list {
     use super::prelude::*;
 
     /// List every registered watch: name, enabled, trigger, program, last outcome.
-    #[operation(
-    id = "watches.list",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "watch ls",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.list", actor = User, scope = Global, risk = Read, cli = "watch ls")]
     pub struct Input {}
 
     pub type Output = Vec<WatchView>;
@@ -138,18 +98,8 @@ pub mod programs {
     use super::prelude::*;
 
     /// List the builtin watch programs that ship with loom.
-    #[operation(
-    id = "watches.programs",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "watch programs",
-    view = View,
-)]
-    pub struct Programs;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.programs", actor = User, scope = Global, risk = Read,
+                cli = "watch programs", view = View)]
     pub struct Input {}
 
     pub type Output = Vec<ProgramView>;
@@ -169,19 +119,7 @@ pub mod run {
 
     /// Fire a watch round now, in the daemon, and report its outcome. `dry_run`
     /// stubs every mutating action — the iteration primitive, safe to repeat.
-    ///
-    /// Operator-only, same reasoning as `watches.create`.
-    #[operation(
-    id = "watches.run",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "watch run",
-)]
-    pub struct Run;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.run", actor = Admin, scope = Global, risk = Write, cli = "watch run")]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -200,18 +138,8 @@ pub mod runs {
 
     /// Show a watch's round history: time, trigger reason, outcome, summary, and
     /// the captured stdout/stderr/exit status of each round.
-    #[operation(
-    id = "watches.runs",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-    cli = "watch runs",
-    cli_alias = "logs",
-)]
-    pub struct Runs;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.runs", actor = User, scope = Global, risk = Read, cli = "watch runs",
+                cli_alias = "logs")]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -227,20 +155,8 @@ pub mod update {
     use super::prelude::*;
 
     /// Update a watch's settings, optionally arm or disarm it via the `enabled` field.
-    ///
-    /// Operator-only for the same reason as `watches.create` — a `User` grant is
-    /// refused on every mutating `/watches/{id}` route.
-    #[operation(
-    id = "watches.update",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "watch update",
-)]
-    pub struct Update;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "watches.update", actor = Admin, scope = Global, risk = Write,
+                cli = "watch update")]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -276,14 +192,14 @@ pub mod update {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <get::Get as Operation>::SPEC,
-    <programs::Programs as Operation>::SPEC,
-    <create::Create as Operation>::SPEC,
-    <update::Update as Operation>::SPEC,
-    <delete::Delete as Operation>::SPEC,
-    <run::Run as Operation>::SPEC,
-    <runs::Runs as Operation>::SPEC,
+    list::SPEC,
+    get::SPEC,
+    programs::SPEC,
+    create::SPEC,
+    update::SPEC,
+    delete::SPEC,
+    run::SPEC,
+    runs::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

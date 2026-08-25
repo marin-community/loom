@@ -1,9 +1,10 @@
 //! The `#[operation(...)]` declaration.
 //!
-//! One attribute on a unit struct produces the descriptor *and* binds it to the
-//! `Input`/`Output` types beside it. Because the descriptor is emitted from the
-//! same item that names the types, a declaration cannot describe an operation
-//! that does not exist, and an operation cannot exist without a declaration.
+//! One attribute on the operation's `Input` struct produces everything else:
+//! the serde/schema/clap derives the transports read, the `Op` marker they are
+//! reached through, and the descriptor carrying identity and authority. An
+//! operation is its arguments plus a policy, and this is the one place both are
+//! written down.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -74,12 +75,11 @@ fn as_string_list(expr: &Expr) -> syn::Result<Vec<String>> {
 
 pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let args: Args = syn::parse2(args)?;
-    let item: ItemStruct = syn::parse2(item)?;
-    let name = &item.ident;
+    let mut item: ItemStruct = syn::parse2(item)?;
+    let input_ty = item.ident.clone();
+    let span = input_ty.span();
 
     let mut id = None;
-    let mut bundle = None;
-    let mut summary = None;
     let mut actor = None;
     let mut scope = None;
     let mut risk = None;
@@ -88,17 +88,14 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut cli = None;
     let mut cli_aliases = Vec::new();
     let mut mcp = None;
-    let mut input_ty = None;
-    let mut output_ty = None;
     let mut view_ty = None;
     let mut custom_render = false;
     let mut custom_scoped = false;
+    let mut custom_default = false;
 
     for entry in &args.entries {
         match entry.key.to_string().as_str() {
             "id" => id = Some(as_string(&entry.value)?),
-            "bundle" => bundle = Some(as_string(&entry.value)?),
-            "summary" => summary = Some(as_string(&entry.value)?),
             "actor" => actor = Some(as_ident(&entry.value)?),
             "scope" => scope = Some(as_ident(&entry.value)?),
             "risk" => risk = Some(as_ident(&entry.value)?),
@@ -106,13 +103,11 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "grants" => grants = as_string_list(&entry.value)?,
             "cli" => cli = Some(as_string(&entry.value)?),
             "cli_alias" => cli_aliases.push(as_string(&entry.value)?),
-            "cli_aliases" => cli_aliases = as_string_list(&entry.value)?,
             "mcp" => mcp = Some(as_string(&entry.value)?),
-            "input" => input_ty = Some(as_ident(&entry.value)?),
-            "output" => output_ty = Some(as_ident(&entry.value)?),
             "view" => view_ty = Some(as_ident(&entry.value)?),
             "render" => custom_render = as_ident(&entry.value)? == "custom",
             "scoped" => custom_scoped = as_ident(&entry.value)? == "custom",
+            "default" => custom_default = as_ident(&entry.value)? == "custom",
             other => {
                 return Err(syn::Error::new_spanned(
                     &entry.key,
@@ -123,39 +118,29 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     }
 
     let id = id.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs an `id`"))?;
-    // The bundle is the id's first dotted segment unless stated. One less thing
-    // to keep in agreement with the module path.
-    let bundle = bundle.unwrap_or_else(|| {
-        id.split('.')
-            .next()
-            .unwrap_or_default()
-            .replace('_', "-")
-            .to_string()
-    });
+    // The bundle is the id's first dotted segment. One less thing to keep in
+    // agreement with the module path.
+    let bundle = id
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .replace('_', "-")
+        .to_string();
     // The doc comment is the summary. Help text and the declaration cannot drift
     // apart if there is only one of them.
-    let summary = summary
-        .or_else(|| doc_comment(&item.attrs))
-        .ok_or_else(|| {
-            syn::Error::new_spanned(
-                &item,
-                "operation needs a doc comment or an explicit `summary`",
-            )
-        })?;
+    let summary = doc_comment(&item.attrs).ok_or_else(|| {
+        syn::Error::new_spanned(&item, "operation needs a doc comment to use as its summary")
+    })?;
 
     let actor =
         actor.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs an `actor`"))?;
-    let scope = scope.unwrap_or_else(|| Ident::new("Session", name.span()));
+    let scope = scope.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs a `scope`"))?;
     let risk = risk.ok_or_else(|| syn::Error::new_spanned(&item, "operation needs a `risk`"))?;
-    let io = io.unwrap_or_else(|| Ident::new("Json", name.span()));
+    let io = io.unwrap_or_else(|| Ident::new("Json", span));
 
-    let input_ty = input_ty.unwrap_or_else(|| Ident::new("Input", name.span()));
-    let output_ty = output_ty.unwrap_or_else(|| Ident::new("Output", name.span()));
-    let view_ty = view_ty.unwrap_or_else(|| Ident::new("NoView", name.span()));
-    let view_path = if view_ty == "NoView" {
-        quote!(::weaver_api::operations::NoView)
-    } else {
-        quote!(#view_ty)
+    let view_path = match &view_ty {
+        Some(view) => quote!(#view),
+        None => quote!(::weaver_api::operations::NoView),
     };
 
     let cli_tokens = match &cli {
@@ -167,12 +152,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     "`cli` must name at least one command segment",
                 ));
             }
-            let segments = segments
-                .iter()
-                .map(|segment| LitStr::new(segment, name.span()));
-            let aliases = cli_aliases
-                .iter()
-                .map(|alias| LitStr::new(alias, name.span()));
+            let segments = segments.iter().map(|segment| LitStr::new(segment, span));
+            let aliases = cli_aliases.iter().map(|alias| LitStr::new(alias, span));
             quote!(Some(::weaver_api::operations::CliProjection {
                 path: &[#(#segments),*],
                 aliases: &[#(#aliases),*],
@@ -194,8 +175,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             let (server, tool) = projection.split_once("::").ok_or_else(|| {
                 syn::Error::new_spanned(&item, "`mcp` looks like \"server::tool\"")
             })?;
-            let server = LitStr::new(server, name.span());
-            let tool = LitStr::new(tool, name.span());
+            let server = LitStr::new(server, span);
+            let tool = LitStr::new(tool, span);
             quote!(Some(::weaver_api::operations::McpProjection {
                 server: #server,
                 tool: #tool,
@@ -204,47 +185,33 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         None => quote!(None),
     };
 
-    let grant_literals = grants.iter().map(|grant| LitStr::new(grant, name.span()));
-
-    let attrs = &item.attrs;
-    let vis = &item.vis;
-
-    // A JSON renderer for free. `render = custom` opts out so a bundle can
-    // write a real one without a conflicting impl.
-    let render_impl = if custom_render {
-        quote!()
-    } else {
-        quote! {
-            impl ::weaver_api::operations::Render for #name {}
-        }
-    };
+    let grant_literals = grants.iter().map(|grant| LitStr::new(grant, span));
 
     // `Scoped` for free: every operation's resource check reduces to "which
     // context field names the resource", and that's exactly what `scope`
     // already says. `scoped = custom` opts out for the rare operation whose
     // resource isn't one of its own context fields.
+    let scope_ref = match scope.to_string().as_str() {
+        _ if custom_scoped => quote!(),
+        "Global" => quote!(::weaver_api::operations::ScopeRef::Global),
+        "Session" => quote!(::weaver_api::operations::ScopeRef::Session(&self.session)),
+        "Branch" => quote!(::weaver_api::operations::ScopeRef::Branch(&self.branch)),
+        "Repository" => quote!(::weaver_api::operations::ScopeRef::Repository(
+            &self.repo_root
+        )),
+        other => {
+            return Err(syn::Error::new_spanned(
+                &item,
+                format!(
+                    "no default `Scoped` impl for `scope = {other}`; add `scoped = custom` \
+                     and implement it by hand"
+                ),
+            ))
+        }
+    };
     let scoped_impl = if custom_scoped {
         quote!()
     } else {
-        let scope_ref = match scope.to_string().as_str() {
-            "Global" => quote!(::weaver_api::operations::ScopeRef::Global),
-            "Session" => quote!(::weaver_api::operations::ScopeRef::Session(&self.session)),
-            "Branch" => quote!(::weaver_api::operations::ScopeRef::Branch(&self.branch)),
-            "Repository" => {
-                quote!(::weaver_api::operations::ScopeRef::Repository(
-                    &self.repo_root
-                ))
-            }
-            other => {
-                return Err(syn::Error::new_spanned(
-                    &item,
-                    format!(
-                        "no default `Scoped` impl for `scope = {other}`; add `scoped = custom` \
-                         and implement it by hand"
-                    ),
-                ))
-            }
-        };
         quote! {
             impl ::weaver_api::operations::Scoped for #input_ty {
                 fn scope_ref(&self) -> ::weaver_api::operations::ScopeRef<'_> {
@@ -254,14 +221,50 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
+    // Every operation is reached through `Op`, so a caller writes
+    // `ops::branches::get::Op` and never has to learn a per-operation name.
+    let marker = Ident::new("Op", span);
+    let marker_doc = format!("The `{id}` operation.");
+    // `Default` completes the fields an MCP caller omitted (see the MCP
+    // dispatcher). `default = custom` opts out where a field's type has no
+    // sensible default of its own and the impl is written by hand.
+    let default_derive = if custom_default {
+        quote!()
+    } else {
+        quote!(Default,)
+    };
+
+    // A JSON renderer for free. `render = custom` opts out so a bundle can
+    // write a real one without a conflicting impl.
+    let render_impl = if custom_render {
+        quote!()
+    } else {
+        quote!(impl ::weaver_api::operations::Render for #marker {})
+    };
+
+    let attrs = std::mem::take(&mut item.attrs);
+    let vis = item.vis.clone();
+
     Ok(quote! {
         #(#attrs)*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        #vis struct #name;
+        #[derive(
+            Debug,
+            Clone,
+            #default_derive
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::schemars::JsonSchema,
+            ::loom_api_macros::Operands,
+        )]
+        #item
 
-        impl ::weaver_api::operations::Operation for #name {
+        #[doc = #marker_doc]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        #vis struct #marker;
+
+        impl ::weaver_api::operations::Operation for #marker {
             type Input = #input_ty;
-            type Output = #output_ty;
+            type Output = Output;
             type View = #view_path;
 
             const SPEC: &'static ::weaver_api::operations::OperationSpec =
@@ -280,6 +283,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     context: <#input_ty as ::weaver_api::operations::Operands>::CONTEXT,
                 };
         }
+
+        #[doc = #marker_doc]
+        #vis const SPEC: &'static ::weaver_api::operations::OperationSpec =
+            <#marker as ::weaver_api::operations::Operation>::SPEC;
 
         #render_impl
 

@@ -7,7 +7,7 @@
 //! not a per-branch action a signed-in user takes on their own behalf,
 //! exactly like `watches.create`.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -20,19 +20,8 @@ pub mod custom {
         /// Define a new custom agent — a name, a label, and a shell command per
         /// launch stage — so it appears in the picker beside the builtin
         /// `claude`/`codex` without a code change.
-        ///
-        /// Operator-only: `actor = Admin`, so only `Admin` may create one.
-        #[operation(
-    id = "agents.custom.create",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "agents custom create",
-)]
-        pub struct Create;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "agents.custom.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "agents custom create")]
         pub struct Input {
             /// The new agent's unique id. Must not shadow a builtin (`claude`,
             /// `codex`) or the retired `concierge` name.
@@ -69,19 +58,8 @@ pub mod custom {
 
         /// Remove a custom agent. Removing an absent name is a no-op. Sessions
         /// already launched with it are unaffected.
-        ///
-        /// Operator-only, same reasoning as `agents.custom.create`.
-        #[operation(
-    id = "agents.custom.delete",
-    actor = Admin,
-    scope = Global,
-    risk = Destructive,
-    grants = [],
-    cli = "agents custom delete",
-)]
-        pub struct Delete;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "agents.custom.delete", actor = Admin, scope = Global, risk = Destructive,
+                    cli = "agents custom delete")]
         pub struct Input {
             /// The custom agent's name.
             #[operand(positional)]
@@ -96,19 +74,8 @@ pub mod custom {
 
         /// Replace an existing custom agent's definition. The name is immutable; a
         /// builtin or unknown name is rejected.
-        ///
-        /// Operator-only, same reasoning as `agents.custom.create`.
-        #[operation(
-    id = "agents.custom.update",
-    actor = Admin,
-    scope = Global,
-    risk = Write,
-    grants = [],
-    cli = "agents custom update",
-)]
-        pub struct Update;
-
-        #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+        #[operation(id = "agents.custom.update", actor = Admin, scope = Global, risk = Write,
+                    cli = "agents custom update")]
         pub struct Input {
             /// The custom agent's name.
             #[operand(positional)]
@@ -143,17 +110,8 @@ pub mod list {
 
     /// List available agent runtimes: builtins, operator-defined custom agents,
     /// and the configured default.
-    #[operation(
-    id = "agents.list",
-    actor = SessionSelf,
-    scope = Global,
-    risk = Read,
-    grants = ["loom/agents/read@v1"],
-    cli = "agents list",
-)]
-    pub struct List;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "agents.list", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/agents/read@v1"], cli = "agents list")]
     pub struct Input {}
 
     pub type Output = AgentsView;
@@ -164,23 +122,7 @@ pub mod oneshot {
 
     /// Run a one-shot ACP prompt through a registered agent runtime and return its
     /// text — the judgement-call primitive watch programs call.
-    ///
-    /// `actor = User`: a signed-in user may call this.
-    ///
-    /// `risk = ExternalWrite`: without a `profile` the prompt runs with no branch
-    /// or session sandbox and no automation-safe policy constraining it — the
-    /// same blast radius as `shell.terminal`, just LLM-issued instructions rather
-    /// than operator-typed ones.
-    #[operation(
-    id = "agents.oneshot",
-    actor = User,
-    scope = Global,
-    risk = ExternalWrite,
-    grants = [],
-)]
-    pub struct Oneshot;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "agents.oneshot", actor = User, scope = Global, risk = ExternalWrite)]
     pub struct Input {
         /// The prompt to run.
         #[operand(positional)]
@@ -210,11 +152,11 @@ pub mod oneshot {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
-    <list::List as Operation>::SPEC,
-    <custom::create::Create as Operation>::SPEC,
-    <custom::update::Update as Operation>::SPEC,
-    <custom::delete::Delete as Operation>::SPEC,
-    <oneshot::Oneshot as Operation>::SPEC,
+    list::SPEC,
+    custom::create::SPEC,
+    custom::update::SPEC,
+    custom::delete::SPEC,
+    oneshot::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

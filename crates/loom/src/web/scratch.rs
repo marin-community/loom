@@ -33,9 +33,9 @@ fn scratch_limits_view() -> ScratchLimitsView {
 /// calls [`write_scratch_bytes`] below.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<ops::scratch::limits::Limits, _, _>(op_scratch_limits),
-        register::<ops::scratch::list::List, _, _>(op_scratch_list),
-        register::<ops::scratch::delete::Delete, _, _>(op_scratch_delete),
+        register::<ops::scratch::limits::Op, _, _>(op_scratch_limits),
+        register::<ops::scratch::list::Op, _, _>(op_scratch_list),
+        register::<ops::scratch::delete::Op, _, _>(op_scratch_delete),
     ]
 }
 
@@ -48,7 +48,6 @@ async fn op_scratch_limits(
     Ok(scratch_limits_view())
 }
 
-/// `sessions.scratch.list`.
 async fn op_scratch_list(
     context: OperationContext,
     input: ops::scratch::list::Input,
@@ -96,7 +95,6 @@ pub(super) async fn write_scratch_bytes(
     })
 }
 
-/// `sessions.scratch.delete`.
 async fn op_scratch_delete(
     context: OperationContext,
     input: ops::scratch::delete::Input,

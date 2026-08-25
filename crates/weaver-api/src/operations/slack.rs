@@ -7,7 +7,7 @@
 //! server-wide (no branch), whereas the Slack write operation is
 //! `branches.slack.reply`, which is branch-specific.
 
-use super::registry::{Operation, OperationSpec};
+use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
@@ -17,16 +17,7 @@ pub mod connection_status {
     /// Slack integration status: which credentials are set, whether `auth.test`
     /// resolves a live bot identity, the configured access boundary, and the
     /// Socket Mode supervisor's live health.
-    #[operation(
-    id = "slack.connection_status",
-    actor = User,
-    scope = Global,
-    risk = Read,
-    grants = [],
-)]
-    pub struct ConnectionStatus;
-
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, Operands)]
+    #[operation(id = "slack.connection_status", actor = User, scope = Global, risk = Read)]
     pub struct Input {}
 
     /// The identity `auth.test` resolves, when a bot token is configured.
@@ -78,7 +69,7 @@ pub mod connection_status {
     }
 }
 
-static OPERATIONS: &[&OperationSpec] = &[<connection_status::ConnectionStatus as Operation>::SPEC];
+static OPERATIONS: &[&OperationSpec] = &[connection_status::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

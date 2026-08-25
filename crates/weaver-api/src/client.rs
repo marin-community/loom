@@ -179,7 +179,7 @@ impl Client {
 
     pub async fn self_context(&self) -> Result<SelfContextView> {
         use crate::operations::sessions::context;
-        self.invoke::<context::Get>(&context::Input {
+        self.invoke::<context::Op>(&context::Input {
             session: String::new(),
         })
         .await
@@ -199,7 +199,7 @@ impl Client {
     /// session's effective repositories (`permissions.github.token`).
     pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
         use crate::operations::permissions::github::token;
-        self.invoke::<token::Token>(&token::Input {
+        self.invoke::<token::Op>(&token::Input {
             session: session_id.to_string(),
         })
         .await
@@ -212,7 +212,7 @@ impl Client {
         session_id: &str,
     ) -> Result<Vec<SessionGithubAccessView>> {
         use crate::operations::sessions::github::access::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             session: session_id.to_string(),
         })
         .await
@@ -230,13 +230,13 @@ impl Client {
     ) -> Result<SessionGithubAccessView> {
         use crate::operations::permissions::github::{grant, revoke};
         if request.mode == "write" {
-            self.invoke::<grant::Grant>(&grant::Input {
+            self.invoke::<grant::Op>(&grant::Input {
                 repository: request.repository.clone(),
                 session: session_id.to_string(),
             })
             .await
         } else {
-            self.invoke::<revoke::Revoke>(&revoke::Input {
+            self.invoke::<revoke::Op>(&revoke::Input {
                 repository: request.repository.clone(),
                 session: session_id.to_string(),
             })
@@ -256,14 +256,14 @@ impl Client {
         use crate::operations::permissions::requests::{approve, deny};
         match request.decision.trim() {
             "approve" => {
-                self.invoke::<approve::Approve>(&approve::Input {
+                self.invoke::<approve::Op>(&approve::Input {
                     request: request_id.to_string(),
                     reason: request.reason.clone(),
                 })
                 .await
             }
             "deny" => {
-                self.invoke::<deny::Deny>(&deny::Input {
+                self.invoke::<deny::Op>(&deny::Input {
                     request: request_id.to_string(),
                     reason: request.reason.clone(),
                 })
@@ -285,7 +285,7 @@ impl Client {
         options: &SearchSessionsOptions,
     ) -> Result<Vec<SessionView>> {
         use crate::operations::sessions::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             q: options.query.clone(),
             history: options.history,
             archived_only: options.archived_only,
@@ -302,7 +302,7 @@ impl Client {
 
     pub async fn get_session_layout(&self) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::get;
-        self.invoke::<get::Get>(&get::Input {}).await
+        self.invoke::<get::Op>(&get::Input {}).await
     }
 
     pub async fn create_session_space(
@@ -310,7 +310,7 @@ impl Client {
         req: &CreateSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::spaces::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: req.name.clone(),
             expected_revision: req.expected_revision,
         })
@@ -323,7 +323,7 @@ impl Client {
         req: &UpdateSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::spaces::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             id: id.to_string(),
             name: req.name.clone(),
             expected_revision: req.expected_revision,
@@ -337,7 +337,7 @@ impl Client {
         req: &DeleteSessionSpaceReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::spaces::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             id: id.to_string(),
             destination_group_id: req.destination_group_id.clone(),
             expected_revision: req.expected_revision,
@@ -350,7 +350,7 @@ impl Client {
         req: &CreateSessionGroupReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::groups::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             space_id: req.space_id.clone(),
             name: req.name.clone(),
             expected_revision: req.expected_revision,
@@ -364,7 +364,7 @@ impl Client {
         req: &UpdateSessionGroupReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::groups::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             id: id.to_string(),
             name: req.name.clone(),
             expected_revision: req.expected_revision,
@@ -378,7 +378,7 @@ impl Client {
         req: &DeleteSessionGroupReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::groups::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             id: id.to_string(),
             destination_group_id: req.destination_group_id.clone(),
             expected_revision: req.expected_revision,
@@ -391,7 +391,7 @@ impl Client {
         req: &ReorderSessionLayoutReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::reorder;
-        self.invoke::<reorder::Reorder>(&reorder::Input {
+        self.invoke::<reorder::Op>(&reorder::Input {
             kind: req.kind,
             id: req.id.clone(),
             before_id: req.before_id.clone(),
@@ -403,7 +403,7 @@ impl Client {
 
     pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::r#move;
-        self.invoke::<r#move::Move>(&r#move::Input {
+        self.invoke::<r#move::Op>(&r#move::Input {
             session_ids: req.session_ids.clone(),
             destination_group_id: req.destination_group_id.clone(),
             before_session_id: req.before_session_id.clone(),
@@ -417,7 +417,7 @@ impl Client {
         req: &RestoreSessionGroupsReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::restore;
-        self.invoke::<restore::Restore>(&restore::Input {
+        self.invoke::<restore::Op>(&restore::Input {
             groups: req.groups.clone(),
             expected_revision: req.expected_revision,
         })
@@ -430,7 +430,7 @@ impl Client {
         req: &SessionGroupPreferenceReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::groups::preference::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             id: id.to_string(),
             collapsed: req.collapsed,
         })
@@ -442,7 +442,7 @@ impl Client {
         req: &SetSessionPlacementDefaultReq,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::defaults::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             selector_kind: req.selector_kind,
             selector_value: req.selector_value.clone(),
             group_id: req.group_id.clone(),
@@ -458,7 +458,7 @@ impl Client {
         expected_revision: i64,
     ) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::defaults::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             selector_kind: kind,
             selector_value: value.to_string(),
             expected_revision,
@@ -470,7 +470,7 @@ impl Client {
     /// (`sessions.get`).
     pub async fn get_session(&self, key: &str) -> Result<SessionView> {
         use crate::operations::sessions::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             session: key.to_string(),
         })
         .await
@@ -479,7 +479,7 @@ impl Client {
     /// Catch-up summary for one session (`sessions.summary.get`).
     pub async fn session_summary(&self, key: &str) -> Result<SessionCatchupView> {
         use crate::operations::sessions::summary::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             session: key.to_string(),
         })
         .await
@@ -495,7 +495,7 @@ impl Client {
         kinds: &[String],
     ) -> Result<HistoryPageView> {
         use crate::operations::sessions::history::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             before: before.map(str::to_string),
             limit: limit.map(|l| l as i64),
             kinds: kinds.to_vec(),
@@ -515,7 +515,7 @@ impl Client {
         kinds: &[String],
     ) -> Result<HistoryPageView> {
         use crate::operations::sessions::history::search;
-        self.invoke::<search::Search>(&search::Input {
+        self.invoke::<search::Op>(&search::Input {
             q: search.to_string(),
             before: before.map(str::to_string),
             limit: limit.map(|l| l as i64),
@@ -528,7 +528,7 @@ impl Client {
     /// Launch a new session (`sessions.launch`).
     pub async fn create_session(&self, req: &CreateReq) -> Result<SessionView> {
         use crate::operations::sessions::launch;
-        self.invoke::<launch::Launch>(&launch::Input {
+        self.invoke::<launch::Op>(&launch::Input {
             title: req.title.clone(),
             goal: req.goal.clone(),
             repo: req.repo.clone(),
@@ -562,7 +562,7 @@ impl Client {
         req: &ResolveLaunchReq,
     ) -> Result<ResolvedLaunchView> {
         use crate::operations::sessions::launches::resolve;
-        self.invoke::<resolve::Resolve>(&resolve::Input {
+        self.invoke::<resolve::Op>(&resolve::Input {
             selection: req.selection.clone(),
         })
         .await
@@ -577,7 +577,7 @@ impl Client {
         req: &ResolveLaunchReq,
     ) -> Result<ResolvedLaunchView> {
         use crate::operations::sessions::handoff::resolve;
-        self.invoke::<resolve::Resolve>(&resolve::Input {
+        self.invoke::<resolve::Op>(&resolve::Input {
             selection: req.selection.clone(),
             session: key.to_string(),
         })
@@ -589,7 +589,7 @@ impl Client {
     /// `PatchSessionReq`'s `park`/`sort_order` are not forwarded to the operation.
     pub async fn patch_session(&self, key: &str, req: &PatchSessionReq) -> Result<SessionView> {
         use crate::operations::sessions::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             status: req.status.clone(),
             title: req.title.clone(),
             expected_title: req.expected_title.clone(),
@@ -605,7 +605,7 @@ impl Client {
     /// (`sessions.title.regenerate`).
     pub async fn regenerate_session_title(&self, key: &str) -> Result<SessionView> {
         use crate::operations::sessions::title::regenerate;
-        self.invoke::<regenerate::Regenerate>(&regenerate::Input {
+        self.invoke::<regenerate::Op>(&regenerate::Input {
             session: key.to_string(),
         })
         .await
@@ -618,7 +618,7 @@ impl Client {
         req: &SetTitleGenerationReq,
     ) -> Result<SessionView> {
         use crate::operations::sessions::title::generation::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             enabled: req.enabled,
             session: key.to_string(),
         })
@@ -628,7 +628,7 @@ impl Client {
     /// The session's current resumption cue (`sessions.resumption_cue.get`).
     pub async fn get_resumption_cue(&self, key: &str) -> Result<ResumptionCueView> {
         use crate::operations::sessions::resumption_cue::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             session: key.to_string(),
         })
         .await
@@ -642,7 +642,7 @@ impl Client {
         req: &EnsureResumptionCueReq,
     ) -> Result<ResumptionCueView> {
         use crate::operations::sessions::resumption_cue::ensure;
-        self.invoke::<ensure::Ensure>(&ensure::Input {
+        self.invoke::<ensure::Op>(&ensure::Input {
             force: req.force,
             session: key.to_string(),
         })
@@ -653,7 +653,7 @@ impl Client {
     /// loom session, worktree, branch, and canonical journal (`sessions.handoff`).
     pub async fn handoff_session(&self, key: &str, req: &HandoffReq) -> Result<SessionView> {
         use crate::operations::sessions::handoff;
-        self.invoke::<handoff::Handoff>(&handoff::Input {
+        self.invoke::<handoff::Op>(&handoff::Input {
             agent: req.agent.clone(),
             model: req.model.clone(),
             effort: req.effort.clone(),
@@ -681,7 +681,7 @@ impl Client {
         by: Option<&str>,
     ) -> Result<SessionView> {
         use crate::operations::sessions::tags::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             key: tag_key.to_string(),
             value: value.to_string(),
             note: note.to_string(),
@@ -699,7 +699,7 @@ impl Client {
     /// the ability to explicitly remove tags, both required by the status watch.
     pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
         use crate::operations::sessions::tags::replace;
-        self.invoke::<replace::Replace>(&replace::Input {
+        self.invoke::<replace::Op>(&replace::Input {
             tags: req.tags.clone(),
             clear: req.clear.clone(),
             by: req.by.clone(),
@@ -720,7 +720,7 @@ impl Client {
         by: Option<&str>,
     ) -> Result<SessionView> {
         use crate::operations::sessions::tags::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             key: tag_key.to_string(),
             by: by.map(str::to_string),
             session: key.to_string(),
@@ -754,7 +754,7 @@ impl Client {
     pub async fn nudge(&self, key: &str, req: &SendReq) -> Result<Value> {
         use crate::operations::sessions::send;
         let result = self
-            .invoke::<send::Send>(&send::Input {
+            .invoke::<send::Op>(&send::Input {
                 text: req.text.clone(),
                 submit: Some(req.submit),
                 by: req.by.clone(),
@@ -769,7 +769,7 @@ impl Client {
     pub async fn interrupt(&self, key: &str) -> Result<Value> {
         use crate::operations::sessions::interrupt;
         let result = self
-            .invoke::<interrupt::Interrupt>(&interrupt::Input {
+            .invoke::<interrupt::Op>(&interrupt::Input {
                 session: key.to_string(),
             })
             .await?;
@@ -781,7 +781,7 @@ impl Client {
     pub async fn preview(&self, key: &str, lines: usize) -> Result<String> {
         use crate::operations::sessions::preview;
         let result = self
-            .invoke::<preview::Preview>(&preview::Input {
+            .invoke::<preview::Op>(&preview::Input {
                 lines: lines as i64,
                 session: key.to_string(),
             })
@@ -793,7 +793,7 @@ impl Client {
     /// (`sessions.changes`).
     pub async fn changes(&self, key: &str) -> Result<crate::ChangeSetDto> {
         use crate::operations::sessions::changes;
-        self.invoke::<changes::Changes>(&changes::Input {
+        self.invoke::<changes::Op>(&changes::Input {
             session: key.to_string(),
         })
         .await
@@ -804,7 +804,7 @@ impl Client {
     /// unambiguous id prefix — no live session required.
     pub async fn branch_log(&self, key: &str) -> Result<Vec<weaver_core::events::Event>> {
         use crate::operations::branches::events::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             branch: key.to_string(),
         })
         .await
@@ -814,7 +814,7 @@ impl Client {
 
     pub async fn list_channels(&self, archived: bool) -> Result<Vec<ChannelView>> {
         use crate::operations::channels::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             archived,
             branch: String::new(),
         })
@@ -823,7 +823,7 @@ impl Client {
 
     pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
         use crate::operations::channels::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: req.name.clone(),
             topic: req.topic.clone(),
             repo_root: req.repo_root.clone().unwrap_or_default(),
@@ -834,7 +834,7 @@ impl Client {
 
     pub async fn get_channel(&self, id: &str) -> Result<ChannelView> {
         use crate::operations::channels::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             channel: id.to_string(),
             branch: String::new(),
         })
@@ -843,7 +843,7 @@ impl Client {
 
     pub async fn channel_bindings(&self, id: &str) -> Result<Vec<ChannelBindingView>> {
         use crate::operations::channels::bindings::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             channel: id.to_string(),
             branch: String::new(),
         })
@@ -861,7 +861,7 @@ impl Client {
         limit: usize,
     ) -> Result<Vec<ChannelMessageView>> {
         use crate::operations::channels::messages::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             channel: id.to_string(),
             after: after.max(0),
             limit: limit as i64,
@@ -878,7 +878,7 @@ impl Client {
         req: &CreateChannelMessageReq,
     ) -> Result<ChannelMessageView> {
         use crate::operations::channels::messages::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             channel: id.to_string(),
             body: req.body.clone(),
             kind: req.kind.clone(),
@@ -898,7 +898,7 @@ impl Client {
         session_id: Option<&str>,
     ) -> Result<ChannelSubscriptionView> {
         use crate::operations::channels::subscription::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             channel: id.to_string(),
             mode: mode.to_string(),
             session: session_id.map(str::to_string),
@@ -913,7 +913,7 @@ impl Client {
         seq: Option<i64>,
     ) -> Result<ChannelSubscriptionView> {
         use crate::operations::channels::read_marker::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             channel: id.to_string(),
             seq,
             branch: String::new(),
@@ -927,7 +927,7 @@ impl Client {
     /// session required (`branches.get`).
     pub async fn get_branch(&self, key: &str) -> Result<BranchView> {
         use crate::operations::branches::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             branch: key.to_string(),
         })
         .await
@@ -943,7 +943,7 @@ impl Client {
         message: &str,
     ) -> Result<BranchView> {
         use crate::operations::branches::status::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             level: level.to_string(),
             message: (!message.is_empty()).then(|| message.to_string()),
             branch: key.to_string(),
@@ -962,7 +962,7 @@ impl Client {
         by: &str,
     ) -> Result<BranchView> {
         use crate::operations::branches::tags::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             key: tag_key.to_string(),
             value: value.to_string(),
             note: note.to_string(),
@@ -976,7 +976,7 @@ impl Client {
     /// (`branches.tags.delete`).
     pub async fn clear_branch_tag(&self, key: &str, tag_key: &str, by: &str) -> Result<BranchView> {
         use crate::operations::branches::tags::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             key: tag_key.to_string(),
             by: Some(by.to_string()),
             branch: key.to_string(),
@@ -990,7 +990,7 @@ impl Client {
     pub async fn record_branch_event(&self, key: &str, kind: &str, data: Value) -> Result<Value> {
         use crate::operations::branches::events::create;
         let event = self
-            .invoke::<create::Create>(&create::Input {
+            .invoke::<create::Op>(&create::Input {
                 kind: kind.to_string(),
                 data,
                 branch: key.to_string(),
@@ -1008,7 +1008,7 @@ impl Client {
     /// every artifact in the repo regardless of scope (`artifacts.list`).
     pub async fn list_branch_artifacts(&self, key: &str, repo: bool) -> Result<Vec<ArtifactMeta>> {
         use crate::operations::artifacts::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             repo,
             branch: key.to_string(),
         })
@@ -1027,7 +1027,7 @@ impl Client {
         repo: bool,
     ) -> Result<ArtifactView> {
         use crate::operations::artifacts::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             name: name.to_string(),
             rev,
             repo,
@@ -1046,7 +1046,7 @@ impl Client {
         req: &ArtifactUpsertReq,
     ) -> Result<ArtifactView> {
         use crate::operations::artifacts::write;
-        self.invoke::<write::Write>(&write::Input {
+        self.invoke::<write::Op>(&write::Input {
             name: name.to_string(),
             content: req.content.clone(),
             title: req.title.clone(),
@@ -1065,7 +1065,7 @@ impl Client {
     pub async fn branch_artifact_url(&self, key: &str, name: &str) -> Result<String> {
         use crate::operations::artifacts::url;
         let view = self
-            .invoke::<url::Url>(&url::Input {
+            .invoke::<url::Op>(&url::Input {
                 name: name.to_string(),
                 branch: key.to_string(),
             })
@@ -1078,7 +1078,7 @@ impl Client {
     pub async fn delete_branch_artifact(&self, key: &str, name: &str, repo: bool) -> Result<Value> {
         use crate::operations::artifacts::delete;
         let result = self
-            .invoke::<delete::Delete>(&delete::Input {
+            .invoke::<delete::Op>(&delete::Input {
                 name: name.to_string(),
                 repo,
                 branch: key.to_string(),
@@ -1096,7 +1096,7 @@ impl Client {
     /// (`artifacts.threads.list`).
     pub async fn list_branch_threads(&self, key: &str, name: &str) -> Result<Vec<ThreadDto>> {
         use crate::operations::artifacts::threads::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             name: name.to_string(),
             open_only: false,
             branch: key.to_string(),
@@ -1115,7 +1115,7 @@ impl Client {
         body: &str,
     ) -> Result<ThreadDto> {
         use crate::operations::artifacts::threads::comment;
-        self.invoke::<comment::Comment>(&comment::Input {
+        self.invoke::<comment::Op>(&comment::Input {
             name: name.to_string(),
             body: body.to_string(),
             target: comment::CommentTarget::New { base_rev, anchor },
@@ -1136,7 +1136,7 @@ impl Client {
     ) -> Result<CommentDto> {
         use crate::operations::artifacts::threads::comment;
         let thread = self
-            .invoke::<comment::Comment>(&comment::Input {
+            .invoke::<comment::Op>(&comment::Input {
                 name: name.to_string(),
                 body: body.to_string(),
                 target: comment::CommentTarget::Reply { thread_id },
@@ -1159,7 +1159,7 @@ impl Client {
     ) -> Result<Value> {
         use crate::operations::artifacts::threads::resolve;
         let thread = self
-            .invoke::<resolve::Resolve>(&resolve::Input {
+            .invoke::<resolve::Op>(&resolve::Input {
                 name: name.to_string(),
                 thread_id,
                 branch: key.to_string(),
@@ -1179,7 +1179,7 @@ impl Client {
         subject_key: &str,
     ) -> Result<Vec<ReviewDto>> {
         use crate::operations::reviews::list;
-        self.invoke::<list::List>(&list::Input {
+        self.invoke::<list::Op>(&list::Input {
             subject_kind: review_subject_kind(subject_kind)?,
             subject_key: subject_key.to_string(),
             session: session.to_string(),
@@ -1193,7 +1193,7 @@ impl Client {
         req: &CreateReviewReq,
     ) -> Result<ReviewDto> {
         use crate::operations::reviews::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             session: session.to_string(),
             subject_kind: req.subject_kind,
             subject_key: req.subject_key.clone(),
@@ -1208,7 +1208,7 @@ impl Client {
         req: &AddReviewCommentReq,
     ) -> Result<ReviewDto> {
         use crate::operations::reviews::comments::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             id: review_id,
             expected_revision: req.expected_revision,
             subject_version: req.subject_version.clone(),
@@ -1221,7 +1221,7 @@ impl Client {
 
     pub async fn get_review(&self, review_id: i64) -> Result<ReviewDto> {
         use crate::operations::reviews::get;
-        self.invoke::<get::Get>(&get::Input { id: review_id }).await
+        self.invoke::<get::Op>(&get::Input { id: review_id }).await
     }
 
     pub async fn update_review_comment(
@@ -1231,7 +1231,7 @@ impl Client {
         req: &UpdateReviewCommentReq,
     ) -> Result<ReviewDto> {
         use crate::operations::reviews::comments::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             id: review_id,
             comment_id,
             expected_revision: req.expected_revision,
@@ -1245,7 +1245,7 @@ impl Client {
 
     pub async fn update_review(&self, review_id: i64, req: &UpdateReviewReq) -> Result<ReviewDto> {
         use crate::operations::reviews::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             id: review_id,
             expected_revision: req.expected_revision,
             summary: req.summary.clone(),
@@ -1261,7 +1261,7 @@ impl Client {
         expected_revision: i64,
     ) -> Result<ReviewDto> {
         use crate::operations::reviews::comments::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             id: review_id,
             comment_id,
             expected_revision,
@@ -1272,7 +1272,7 @@ impl Client {
     pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
         use crate::operations::reviews::discard;
         let result = self
-            .invoke::<discard::Discard>(&discard::Input {
+            .invoke::<discard::Op>(&discard::Input {
                 id: review_id,
                 expected_revision,
             })
@@ -1282,7 +1282,7 @@ impl Client {
 
     pub async fn submit_review(&self, review_id: i64, req: &SubmitReviewReq) -> Result<ReviewDto> {
         use crate::operations::reviews::submit;
-        self.invoke::<submit::Submit>(&submit::Input {
+        self.invoke::<submit::Op>(&submit::Input {
             id: review_id,
             expected_revision: req.expected_revision,
             acknowledge_outdated: req.acknowledge_outdated,
@@ -1296,7 +1296,7 @@ impl Client {
         expected_revision: i64,
     ) -> Result<ReviewDto> {
         use crate::operations::reviews::retarget;
-        self.invoke::<retarget::Retarget>(&retarget::Input {
+        self.invoke::<retarget::Op>(&retarget::Input {
             id: review_id,
             expected_revision,
         })
@@ -1310,7 +1310,7 @@ impl Client {
         resolved: bool,
     ) -> Result<ReviewCommentDto> {
         use crate::operations::reviews::comments::resolve;
-        self.invoke::<resolve::Resolve>(&resolve::Input {
+        self.invoke::<resolve::Op>(&resolve::Input {
             id: review_id,
             comment_id,
             resolved,
@@ -1331,7 +1331,7 @@ impl Client {
 
     pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
         use crate::operations::reviews::retry_delivery;
-        self.invoke::<retry_delivery::RetryDelivery>(&retry_delivery::Input { id: review_id })
+        self.invoke::<retry_delivery::Op>(&retry_delivery::Input { id: review_id })
             .await
     }
 
@@ -1353,7 +1353,7 @@ impl Client {
         {
             bail!("claimed_branch can only be cleared; launch a session to claim an issue");
         }
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             id,
             title: req.title.clone(),
             body: req.body.clone(),
@@ -1375,19 +1375,19 @@ impl Client {
     /// Human-readable redacted operational inventory (`diagnostics.get`).
     pub async fn diagnostics(&self) -> Result<DiagnosticsView> {
         use crate::operations::diagnostics::get;
-        self.invoke::<get::Get>(&get::Input {}).await
+        self.invoke::<get::Op>(&get::Input {}).await
     }
 
     /// Trusted MCP adapters and their provider-neutral capability sets
     /// (`mcps.get`).
     pub async fn mcp_registry(&self) -> Result<McpRegistryView> {
         use crate::operations::mcps::get;
-        self.invoke::<get::Get>(&get::Input {}).await
+        self.invoke::<get::Op>(&get::Input {}).await
     }
 
     pub async fn create_custom_mcp(&self, req: &CustomMcpReq) -> Result<CustomMcpView> {
         use crate::operations::mcps::custom::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             identity: req.identity.clone(),
             label: req.label.clone(),
             description: req.description.clone(),
@@ -1404,7 +1404,7 @@ impl Client {
         req: &CustomMcpReq,
     ) -> Result<CustomMcpView> {
         use crate::operations::mcps::custom::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             identity: identity.to_string(),
             label: req.label.clone(),
             description: req.description.clone(),
@@ -1418,7 +1418,7 @@ impl Client {
     pub async fn delete_custom_mcp(&self, identity: &str) -> Result<Value> {
         use crate::operations::mcps::custom::delete;
         let result = self
-            .invoke::<delete::Delete>(&delete::Input {
+            .invoke::<delete::Op>(&delete::Input {
                 identity: identity.to_string(),
             })
             .await?;
@@ -1429,12 +1429,12 @@ impl Client {
     /// (`profiles.list`).
     pub async fn list_profiles(&self) -> Result<Vec<ProfileView>> {
         use crate::operations::profiles::list;
-        self.invoke::<list::List>(&list::Input {}).await
+        self.invoke::<list::Op>(&list::Input {}).await
     }
 
     pub async fn get_profile(&self, name: &str) -> Result<ProfileView> {
         use crate::operations::profiles::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             name: name.to_string(),
         })
         .await
@@ -1442,7 +1442,7 @@ impl Client {
 
     pub async fn effective_profile(&self, name: &str) -> Result<EffectiveProfileView> {
         use crate::operations::profiles::effective;
-        self.invoke::<effective::Effective>(&effective::Input {
+        self.invoke::<effective::Op>(&effective::Input {
             name: name.to_string(),
         })
         .await
@@ -1450,7 +1450,7 @@ impl Client {
 
     pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
         use crate::operations::profiles::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: req.name.clone(),
             description: req.description.clone(),
             agent_kind: req.agent_kind.clone(),
@@ -1477,7 +1477,7 @@ impl Client {
 
     pub async fn put_profile(&self, name: &str, req: &ProfileReq) -> Result<ProfileView> {
         use crate::operations::profiles::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             name: name.to_string(),
             description: req.description.clone(),
             agent_kind: req.agent_kind.clone(),
@@ -1507,7 +1507,7 @@ impl Client {
     /// write-only environment in the same transaction (`profiles.clone`).
     pub async fn clone_profile(&self, source: &str, req: &CloneProfileReq) -> Result<ProfileView> {
         use crate::operations::profiles::clone;
-        self.invoke::<clone::Clone>(&clone::Input {
+        self.invoke::<clone::Op>(&clone::Input {
             source: source.to_string(),
             name: req.name.clone(),
             expected_profile_revision: req.expected_profile_revision,
@@ -1524,13 +1524,13 @@ impl Client {
     /// (`sessions.scratch.limits`).
     pub async fn scratch_limits(&self) -> Result<ScratchLimitsView> {
         use crate::operations::sessions::scratch::limits;
-        self.invoke::<limits::Limits>(&limits::Input {}).await
+        self.invoke::<limits::Op>(&limits::Input {}).await
     }
 
     pub async fn delete_profile(&self, name: &str) -> Result<Value> {
         use crate::operations::profiles::delete;
         let result = self
-            .invoke::<delete::Delete>(&delete::Input {
+            .invoke::<delete::Op>(&delete::Input {
                 name: name.to_string(),
             })
             .await?;
@@ -1544,7 +1544,7 @@ impl Client {
         value: &str,
     ) -> Result<ProfileView> {
         use crate::operations::profiles::env::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             profile: profile.to_string(),
             name: name.to_string(),
             value: Some(value.to_string()),
@@ -1560,7 +1560,7 @@ impl Client {
         secret_ref: &str,
     ) -> Result<ProfileView> {
         use crate::operations::profiles::env::set;
-        self.invoke::<set::Set>(&set::Input {
+        self.invoke::<set::Op>(&set::Input {
             profile: profile.to_string(),
             name: name.to_string(),
             value: None,
@@ -1571,7 +1571,7 @@ impl Client {
 
     pub async fn remove_profile_env(&self, profile: &str, name: &str) -> Result<ProfileView> {
         use crate::operations::profiles::env::delete;
-        self.invoke::<delete::Delete>(&delete::Input {
+        self.invoke::<delete::Op>(&delete::Input {
             profile: profile.to_string(),
             name: name.to_string(),
         })
@@ -1581,7 +1581,7 @@ impl Client {
     /// Every registered setting and its effective value (`settings.get`).
     pub async fn list_settings(&self) -> Result<SettingsEnvelope> {
         use crate::operations::settings::get;
-        self.invoke::<get::Get>(&get::Input {}).await
+        self.invoke::<get::Op>(&get::Input {}).await
     }
 
     /// Apply setting changes: a `null` value clears a key back to its default
@@ -1591,7 +1591,7 @@ impl Client {
         changes: serde_json::Map<String, Value>,
     ) -> Result<SettingsEnvelope> {
         use crate::operations::settings::patch;
-        self.invoke::<patch::Patch>(&patch::Input {
+        self.invoke::<patch::Op>(&patch::Input {
             changes: changes
                 .into_iter()
                 .map(|(key, value)| (key, Some(value)))
@@ -1605,13 +1605,13 @@ impl Client {
     /// List every watch (`watches.list`).
     pub async fn list_watches(&self) -> Result<Vec<WatchView>> {
         use crate::operations::watches::list;
-        self.invoke::<list::List>(&list::Input {}).await
+        self.invoke::<list::Op>(&list::Input {}).await
     }
 
     /// Get one watch by id or name (`watches.get`).
     pub async fn get_watch(&self, key: &str) -> Result<WatchView> {
         use crate::operations::watches::get;
-        self.invoke::<get::Get>(&get::Input {
+        self.invoke::<get::Op>(&get::Input {
             key: key.to_string(),
         })
         .await
@@ -1620,7 +1620,7 @@ impl Client {
     /// Register a watch (`watches.create`).
     pub async fn create_watch(&self, req: &CreateWatchReq) -> Result<WatchView> {
         use crate::operations::watches::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: req.name.clone(),
             trigger: req.trigger.clone(),
             scope: req.scope.clone(),
@@ -1639,7 +1639,7 @@ impl Client {
     /// Patch a watch (`watches.update`).
     pub async fn patch_watch(&self, key: &str, req: &PatchWatchReq) -> Result<WatchView> {
         use crate::operations::watches::update;
-        self.invoke::<update::Update>(&update::Input {
+        self.invoke::<update::Op>(&update::Input {
             key: key.to_string(),
             enabled: req.enabled,
             trigger: req.trigger.clone(),
@@ -1659,7 +1659,7 @@ impl Client {
     pub async fn delete_watch(&self, key: &str) -> Result<Value> {
         use crate::operations::watches::delete;
         let result = self
-            .invoke::<delete::Delete>(&delete::Input {
+            .invoke::<delete::Op>(&delete::Input {
                 key: key.to_string(),
             })
             .await?;
@@ -1671,7 +1671,7 @@ impl Client {
     pub async fn run_watch(&self, key: &str, req: &RunWatchReq) -> Result<Value> {
         use crate::operations::watches::run;
         let result = self
-            .invoke::<run::Run>(&run::Input {
+            .invoke::<run::Op>(&run::Input {
                 key: key.to_string(),
                 dry_run: req.dry_run,
             })
@@ -1686,7 +1686,7 @@ impl Client {
         req: &AutomationTokenReq,
     ) -> Result<AutomationTokenView> {
         use crate::operations::auth::automation_token;
-        self.invoke::<automation_token::AutomationToken>(&automation_token::Input {
+        self.invoke::<automation_token::Op>(&automation_token::Input {
             subject: req.subject.clone(),
             profiles: req.profiles.clone(),
             ttl_secs: req.ttl_secs,
@@ -1696,12 +1696,12 @@ impl Client {
 
     pub async fn list_federations(&self) -> Result<Vec<FederationView>> {
         use crate::operations::auth::federations::list;
-        self.invoke::<list::List>(&list::Input {}).await
+        self.invoke::<list::Op>(&list::Input {}).await
     }
 
     pub async fn add_federation(&self, req: &FederationReq) -> Result<FederationView> {
         use crate::operations::auth::federations::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: Some(req.name.clone()),
             provider: req.provider.clone(),
             issuer: req.issuer.clone(),
@@ -1721,14 +1721,14 @@ impl Client {
     pub async fn remove_federation(&self, id: &str) -> Result<Value> {
         use crate::operations::auth::federations::remove;
         let result = self
-            .invoke::<remove::Remove>(&remove::Input { id: id.to_string() })
+            .invoke::<remove::Op>(&remove::Input { id: id.to_string() })
             .await?;
         Ok(serde_json::to_value(result)?)
     }
 
     pub async fn reconcile_deployment(&self, req: &DeploymentReq) -> Result<DeploymentView> {
         use crate::operations::deployment::reconcile;
-        self.invoke::<reconcile::Reconcile>(&reconcile::Input {
+        self.invoke::<reconcile::Op>(&reconcile::Input {
             settings: req.settings.clone(),
             profiles: req.profiles.clone(),
             federations: req.federations.clone(),
@@ -1739,7 +1739,7 @@ impl Client {
 
     pub async fn create_run(&self, req: &RunReq) -> Result<RunView> {
         use crate::operations::runs::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             profile: req.profile.clone(),
             idempotency_key: req.idempotency_key.clone(),
             source: req.source.clone(),
@@ -1754,14 +1754,14 @@ impl Client {
     /// List the user-managed API tokens (`auth.tokens.list`).
     pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {
         use crate::operations::auth::tokens::list;
-        self.invoke::<list::List>(&list::Input {}).await
+        self.invoke::<list::Op>(&list::Input {}).await
     }
 
     /// Mint a new API token, returning the one-time plaintext
     /// (`auth.tokens.create`).
     pub async fn create_token(&self, req: &CreateTokenReq) -> Result<CreatedTokenView> {
         use crate::operations::auth::tokens::create;
-        self.invoke::<create::Create>(&create::Input {
+        self.invoke::<create::Op>(&create::Input {
             name: req.name.clone(),
             expires_in_days: req.expires_in_days,
         })
@@ -1772,7 +1772,7 @@ impl Client {
     pub async fn revoke_token(&self, id: &str) -> Result<Value> {
         use crate::operations::auth::tokens::revoke;
         let result = self
-            .invoke::<revoke::Revoke>(&revoke::Input { id: id.to_string() })
+            .invoke::<revoke::Op>(&revoke::Input { id: id.to_string() })
             .await?;
         Ok(serde_json::to_value(result)?)
     }

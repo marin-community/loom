@@ -681,17 +681,16 @@ fn repo_view(r: repo::ManagedRepo) -> RepoView {
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     let mut bound = vec![
-        register::<ops::list::List, _, _>(list_operation),
-        register::<ops::register::Register, _, _>(register_operation),
-        register::<ops::recent::Recent, _, _>(recent_operation),
-        register::<ops::branches::List, _, _>(branches_operation),
-        register::<ops::revisions::validate::Validate, _, _>(revisions_validate_operation),
+        register::<ops::list::Op, _, _>(list_operation),
+        register::<ops::register::Op, _, _>(register_operation),
+        register::<ops::recent::Op, _, _>(recent_operation),
+        register::<ops::branches::Op, _, _>(branches_operation),
+        register::<ops::revisions::validate::Op, _, _>(revisions_validate_operation),
     ];
     bound.extend(super::repo_env::bound_operations());
     bound
 }
 
-/// `repos.list`.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -701,7 +700,6 @@ async fn list_operation(
     Ok(repos.into_iter().map(repo_view).collect())
 }
 
-/// `repos.register`.
 async fn register_operation(
     context: OperationContext,
     input: ops::register::Input,
@@ -715,7 +713,6 @@ async fn register_operation(
     Ok(repo_view(managed))
 }
 
-/// `repos.recent`.
 async fn recent_operation(
     context: OperationContext,
     input: ops::recent::Input,
@@ -775,7 +772,6 @@ async fn branches_operation(
     Ok(out)
 }
 
-/// `repos.revisions.validate`.
 async fn revisions_validate_operation(
     _context: OperationContext,
     input: ops::revisions::validate::Input,

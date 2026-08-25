@@ -8,10 +8,9 @@ use super::{require_session, ApiResult};
 /// The `sessions.changes` operation binding, folded into the `sessions`
 /// bundle by [`super::sessions::bound_operations`].
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![register::<ops::changes::Changes, _, _>(op_changes)]
+    vec![register::<ops::changes::Op, _, _>(op_changes)]
 }
 
-/// `sessions.changes`.
 async fn op_changes(
     context: OperationContext,
     input: ops::changes::Input,

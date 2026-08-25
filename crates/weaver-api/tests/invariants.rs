@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use weaver_api::operations::{self, Operands, Operation, ViewFlags};
+use weaver_api::operations::{self, Operands, ViewFlags};
 
 /// Structural validity: unique ids, unique projections, grants present, and no
 /// MCP tool on anything an agent may not call.
@@ -176,7 +176,7 @@ fn cli_projections_are_well_formed() {
 fn one_declaration_produces_every_projection() {
     use operations::issues;
 
-    let spec = <issues::list::List as Operation>::SPEC;
+    let spec = issues::list::SPEC;
     assert_eq!(spec.path(), "/api/issues/list");
     assert_eq!(spec.cli.unwrap().invocation(), "loom issues list");
     assert_eq!(spec.cli.unwrap().aliases, &["ls"]);

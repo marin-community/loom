@@ -27,15 +27,15 @@ use super::{ApiResult, AppError, AppState};
 // state.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register::<watches_operations::list::List, _, _>(list_watches_operation),
-        register::<watches_operations::get::Get, _, _>(get_watch_operation),
-        register::<watches_operations::programs::Programs, _, _>(programs_operation),
-        register::<watches_operations::create::Create, _, _>(create_watch_operation),
-        register::<watches_operations::update::Update, _, _>(update_watch_operation),
-        register::<watches_operations::delete::Delete, _, _>(delete_watch_operation),
-        register::<watches_operations::run::Run, _, _>(run_watch_operation),
-        register::<watches_operations::runs::Runs, _, _>(watch_runs_operation),
-        register::<agents_operations::oneshot::Oneshot, _, _>(agent_oneshot_operation),
+        register::<watches_operations::list::Op, _, _>(list_watches_operation),
+        register::<watches_operations::get::Op, _, _>(get_watch_operation),
+        register::<watches_operations::programs::Op, _, _>(programs_operation),
+        register::<watches_operations::create::Op, _, _>(create_watch_operation),
+        register::<watches_operations::update::Op, _, _>(update_watch_operation),
+        register::<watches_operations::delete::Op, _, _>(delete_watch_operation),
+        register::<watches_operations::run::Op, _, _>(run_watch_operation),
+        register::<watches_operations::runs::Op, _, _>(watch_runs_operation),
+        register::<agents_operations::oneshot::Op, _, _>(agent_oneshot_operation),
     ]
 }
 
@@ -94,7 +94,6 @@ fn program_views() -> Vec<ProgramView> {
     crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
 }
 
-/// `watches.programs`.
 pub(super) async fn programs_operation(
     _context: OperationContext,
     _input: watches_operations::programs::Input,
@@ -117,7 +116,6 @@ async fn list_watches_core(st: &AppState) -> ApiResult<Vec<WatchView>> {
     Ok(out)
 }
 
-/// `watches.list`.
 pub(super) async fn list_watches_operation(
     context: OperationContext,
     _input: watches_operations::list::Input,
@@ -182,7 +180,6 @@ async fn create_watch_core(st: &AppState, req: CreateWatchReq) -> ApiResult<Watc
     watch_view(&st.db, &o).await
 }
 
-/// `watches.create`.
 pub(super) async fn create_watch_operation(
     context: OperationContext,
     input: watches_operations::create::Input,
@@ -229,7 +226,6 @@ async fn get_watch_core(st: &AppState, key: &str) -> ApiResult<WatchView> {
     watch_view(&st.db, &o).await
 }
 
-/// `watches.get`.
 pub(super) async fn get_watch_operation(
     context: OperationContext,
     input: watches_operations::get::Input,
@@ -285,7 +281,6 @@ async fn patch_watch_core(st: &AppState, key: &str, req: PatchWatchReq) -> ApiRe
     watch_view(&st.db, &o).await
 }
 
-/// `watches.update`.
 pub(super) async fn update_watch_operation(
     context: OperationContext,
     input: watches_operations::update::Input,
@@ -315,7 +310,6 @@ async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteRes
     })
 }
 
-/// `watches.delete`.
 pub(super) async fn delete_watch_operation(
     context: OperationContext,
     input: watches_operations::delete::Input,
@@ -414,7 +408,6 @@ async fn agent_oneshot_core(
         .await)
 }
 
-/// `agents.oneshot`.
 async fn agent_oneshot_operation(
     context: OperationContext,
     input: agents_operations::oneshot::Input,
@@ -455,7 +448,6 @@ async fn watch_runs_core(
     Ok(runs.into_iter().map(WatchRunView::from).collect())
 }
 
-/// `watches.runs`.
 pub(super) async fn watch_runs_operation(
     context: OperationContext,
     input: watches_operations::runs::Input,
