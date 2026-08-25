@@ -823,6 +823,15 @@ mod tests {
     /// route it replaced stopped advertising that explanation to an agent.
     /// `artifacts.write`, `channels.archive`/`channels.create` and their
     /// legacy `mcp/*@v1` twins were the only descriptions that changed.
+    ///
+    /// Re-pinned again when `mcp/artifact/*@v1` and `mcp/channel/*@v1` stopped
+    /// restating their tool lists and became aliases of the canonical sets they
+    /// were renamed from — the previous re-pin left them hand-authored, which
+    /// meant an operation joining `loom/artifacts/read@v1` would silently not
+    /// join the older name for it. Membership is unchanged in all four; they
+    /// now carry the derived alphabetical order rather than the order someone
+    /// typed (artifacts' read set was `[list, get, history, threads]`, now
+    /// `[get, history, list, threads]`).
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -851,11 +860,11 @@ mod tests {
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:8e0aaa5aa62d047e71ed60f93ce28145cfd94ca083b148e9a6732951756a3d4d",
+                "sha256:97e6303f0979ec2aa6ec7e89b047b3c85a4f489047d2f3648f2167be2e4d7ad2",
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:e2e84b022c03e482922a6aaf966db27fb329fb5863a762176f6ea559150b7477",
+                "sha256:fad8463c646f951fe2c8b98bff654b428c01577b7c870a769a4ddad42ae17461",
             ),
             (
                 "loom/artifacts/read@v1",
@@ -867,11 +876,11 @@ mod tests {
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:06c5c612abcb6bc9c17c2f543276619bcc006423b6a11c1379405b76775a7179",
+                "sha256:7630e097d07c396f1f0430e1b5daae30ee4997e00e6cff1ead27f7dbdf133141",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:898c1f154c1c9696567581eea5ada77ab5659ce6f4cfa33a6e29dbbd31b0a188",
+                "sha256:42d6c1d42c43d6634b87fff67f87e2a5f0d0879ed4787c6b633d30889a04157d",
             ),
             (
                 "loom/issues/read@v1",

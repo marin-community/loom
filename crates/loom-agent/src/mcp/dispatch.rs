@@ -278,6 +278,35 @@ pub(crate) fn derive_capability_sets(
         .collect()
 }
 
+/// Re-publish derived sets under names they were renamed away from.
+///
+/// A set that was renamed is still the same set: a session pinned to
+/// `mcp/artifact/read@v1` must resolve exactly what `loom/artifacts/read@v1`
+/// resolves, including operations registered since the rename. Restating the
+/// tool list under the old name would freeze it at the membership it had on
+/// the day the alias was written.
+pub(crate) fn alias_capability_sets(
+    sets: &[CapabilitySet],
+    renamed: &[(&'static str, &'static str)],
+) -> Vec<CapabilitySet> {
+    renamed
+        .iter()
+        .map(|(before, after)| {
+            let set = sets
+                .iter()
+                .find(|set| set.name == *after)
+                .unwrap_or_else(|| panic!("`{before}` names `{after}`, which no operation grants"));
+            CapabilitySet {
+                name: before,
+                group: set.group,
+                version: set.version,
+                description: set.description,
+                tools: set.tools,
+            }
+        })
+        .collect()
+}
+
 /// Whether `rule` (a Claude permission rule, `mcp__<server>__<tool>`) names one
 /// of `server`'s registered MCP tools. Derived from the registry.
 pub(crate) fn is_permission_rule(server: &str, rule: &str) -> bool {

@@ -22,26 +22,11 @@ const TOOL_NAMES: [&str; 8] = [
     "list", "get", "write", "delete", "history", "threads", "comment", "resolve",
 ];
 
-// Existing pinned sessions keep their exact identities during the CLI/MCP
-// migration: `mcp/artifact/*@v1` predates the `loom/artifacts/*@v1` grant
-// names and has no registry counterpart to derive from.
-const LEGACY_READ_TOOLS: &[&str] = &["list", "get", "history", "threads"];
-const LEGACY_WRITE_TOOLS: &[&str] = &["write", "delete", "comment", "resolve"];
-const LEGACY_CAPABILITY_SETS: &[CapabilitySet] = &[
-    CapabilitySet {
-        name: "mcp/artifact/read@v1",
-        group: "artifact",
-        version: "v1",
-        description: "List and read versioned artifacts and their discussions.",
-        tools: LEGACY_READ_TOOLS,
-    },
-    CapabilitySet {
-        name: "mcp/artifact/write@v1",
-        group: "artifact",
-        version: "v1",
-        description: "Write, delete, comment on, and resolve versioned artifacts.",
-        tools: LEGACY_WRITE_TOOLS,
-    },
+// The names these sets carried before the `loom/` rename. Sessions pinned to
+// one still resolve it.
+const RENAMED: &[(&str, &str)] = &[
+    ("mcp/artifact/read@v1", "loom/artifacts/read@v1"),
+    ("mcp/artifact/write@v1", "loom/artifacts/write@v1"),
 ];
 
 pub(super) const ADAPTER: Adapter = Adapter {
@@ -57,20 +42,15 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 /// Capability sets are derived from the registry: every `artifacts.*` operation
-/// whose MCP projection targets this server contributes its tool to the set named
-/// by its grant.
+/// whose MCP projection targets this server contributes its tool to the set
+/// named by its grant, plus the same sets under the names they were renamed
+/// away from.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
         let mut sets =
             super::dispatch::derive_capability_sets(SERVER_NAME, "artifact", describe_capability);
-        sets.extend(LEGACY_CAPABILITY_SETS.iter().map(|set| CapabilitySet {
-            name: set.name,
-            group: set.group,
-            version: set.version,
-            description: set.description,
-            tools: set.tools,
-        }));
+        sets.extend(super::dispatch::alias_capability_sets(&sets, RENAMED));
         sets
     })
 }
