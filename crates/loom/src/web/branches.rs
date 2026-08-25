@@ -1,7 +1,7 @@
 use serde_json::json;
 use weaver_api::operations::branches as ops;
 use weaver_api::operations::slack as slack_operations;
-use weaver_api::{BranchView, CreateChannelMessageReq};
+use weaver_api::BranchView;
 use weaver_core::branch::{TitleProvenance, TitleUpdate};
 use weaver_core::{branch as branch_mod, config, tags};
 
@@ -11,6 +11,7 @@ use super::operations::{register, Bound, OperationContext};
 use super::{author_or_manual, branch_view, require_branch};
 use super::{ApiResult, AppError, AppState};
 use axum::http::StatusCode;
+use weaver_api::operations::channels;
 
 // ---------------------------------------------------------------------------
 // Branches
@@ -377,13 +378,15 @@ async fn slack_reply_operation(
             .ok_or_else(|| AppError::not_found("channel"))?;
         let author =
             crate::channels::Subject::new(crate::channels::SubjectKind::Session, &channel_id);
-        let request = CreateChannelMessageReq {
+        let request = channels::messages::create::Input {
             kind: "result".to_string(),
             urgency: "normal".to_string(),
             body: text.to_string(),
             payload: json!({ "compatibility_source": "slack_reply" }),
             reply_to: None,
             idempotency_key: input.idempotency_key,
+            // The channel and branch are passed to `append_and_deliver` directly.
+            ..Default::default()
         };
         let (inserted, message) =
             super::channels::append_and_deliver(&st, &channel_id, &channel, &author, &request)

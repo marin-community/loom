@@ -63,8 +63,7 @@ where
     Bound {
         operation: O::SPEC,
         invoke: Arc::new(move |context, input| {
-            let decoded =
-                serde_json::from_value::<O::Input>(apply_defaults::<O::Input>(O::SPEC, input));
+            let decoded = serde_json::from_value::<O::Input>(input);
             Box::pin(async move {
                 let mut input = decoded.map_err(|error| {
                     AppError::bad_request(format!("invalid arguments for {}: {error}", O::SPEC.id))
@@ -145,53 +144,6 @@ async fn session_context(context: &OperationContext) -> ApiResult<Option<Context
         branch_name,
         session: session_id.clone(),
     }))
-}
-
-/// Fill in what a caller may legitimately omit, before decoding.
-///
-/// Two kinds of field: the operand defaults an operation declares, and the
-/// context fields the dispatcher owns. Neither is something a caller must send,
-/// and `serde` rejects a missing field regardless — so both are supplied here,
-/// once, for every transport that reaches this dispatcher.
-fn apply_defaults<I: Operands>(spec: &'static OperationSpec, input: Value) -> Value {
-    with_context_defaults(spec, with_operand_defaults::<I>(input))
-}
-
-/// Apply the declared `#[operand(default = ...)]` values.
-fn with_operand_defaults<I: Operands>(mut input: Value) -> Value {
-    let Some(object) = input.as_object_mut() else {
-        return input;
-    };
-    if let Value::Object(defaults) = I::wire_defaults() {
-        for (name, value) in defaults {
-            object.entry(name).or_insert(value);
-        }
-    }
-    input
-}
-
-/// Supply the context fields a caller was never told about.
-///
-/// Context fields are dispatcher-supplied, so they are stripped from the schema
-/// `/api/operations` publishes — which means a REST caller reading that schema
-/// has no way to know they exist. Without this, every context-carrying
-/// operation answers a perfectly well-formed request with
-/// `invalid arguments: missing field `repo_root``.
-///
-/// Absent means empty, and empty means unscoped: a session credential is then
-/// refused by the scope check rather than admitted by it, so omitting the field
-/// can only ever narrow what a caller reaches. The CLI and MCP dispatchers
-/// still fill these in properly via `Operands::fill_context`.
-fn with_context_defaults(spec: &'static OperationSpec, mut input: Value) -> Value {
-    let Some(object) = input.as_object_mut() else {
-        return input;
-    };
-    for field in spec.context {
-        object
-            .entry(field.name)
-            .or_insert_with(|| Value::String(String::new()));
-    }
-    input
 }
 
 /// The single authorization decision for a registered operation.

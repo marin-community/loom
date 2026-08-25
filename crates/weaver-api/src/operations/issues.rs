@@ -23,6 +23,7 @@ pub mod actions {
     pub struct Input {
         /// The work items to act on. Either every id succeeds or none does.
         #[operand(long = "id")]
+        #[schemars(inner(range(min = 1)))]
         pub ids: Vec<i64>,
         /// The action to apply — `close`, `reopen`, `delete`, `tag`, or `untag`.
         /// On the command line this takes a JSON object, because a tagged union is
@@ -58,6 +59,7 @@ pub mod backlog {
         pub struct Input {
             /// One-line summary of the work.
             #[operand(positional)]
+            #[schemars(length(min = 1))]
             pub title: String,
             /// Optional detail.
             #[operand(default = String::new())]
@@ -119,6 +121,7 @@ pub mod close {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
         #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
         pub ids: Vec<i64>,
         #[operand(context)]
         pub repo_root: String,
@@ -137,6 +140,7 @@ pub mod create {
     pub struct Input {
         /// One-line summary of the work.
         #[operand(positional)]
+        #[schemars(length(min = 1))]
         pub title: String,
         /// Optional detail.
         #[operand(default = String::new())]
@@ -160,6 +164,7 @@ pub mod delete {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
         #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
         pub ids: Vec<i64>,
         #[operand(context)]
         pub repo_root: String,
@@ -177,6 +182,7 @@ pub mod get {
     pub struct Input {
         /// A Loom work-item id.
         #[operand(positional)]
+        #[schemars(range(min = 1))]
         pub id: i64,
         #[operand(context)]
         pub repo_root: String,
@@ -231,6 +237,7 @@ pub mod reopen {
         /// One or more Loom work-item ids. Applied atomically: either every id
         /// succeeds or none does.
         #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
         pub ids: Vec<i64>,
         #[operand(context)]
         pub repo_root: String,
@@ -252,9 +259,11 @@ pub mod tags {
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
+            #[schemars(range(min = 1))]
             pub id: i64,
             /// The tag key to remove.
             #[operand(positional)]
+            #[schemars(length(min = 1))]
             pub key: String,
             #[operand(context)]
             pub repo_root: String,
@@ -272,12 +281,15 @@ pub mod tags {
         pub struct Input {
             /// A Loom work-item id.
             #[operand(positional)]
+            #[schemars(range(min = 1))]
             pub id: i64,
             /// The tag key.
             #[operand(positional)]
+            #[schemars(length(min = 1))]
             pub key: String,
             /// The tag value. Use `issues tag delete` to clear a tag.
             #[operand(positional)]
+            #[schemars(length(min = 1))]
             pub value: String,
             /// One-line reason accompanying the tag.
             #[operand(default = String::new())]
@@ -303,12 +315,15 @@ pub mod update {
     pub struct Input {
         /// A Loom work-item id.
         #[operand(positional)]
+        #[schemars(range(min = 1))]
         pub id: i64,
         /// Replace the one-line summary.
+        #[schemars(length(min = 1))]
         pub title: Option<String>,
         /// Replace the detail body.
         pub body: Option<String>,
         /// `open` or `closed`.
+        #[schemars(extend("enum" = ["open", "closed"]))]
         pub status: Option<String>,
         /// GitHub issue mapping as `owner/name#number`. An empty string clears the
         /// mapping; omitting the field leaves it unchanged.

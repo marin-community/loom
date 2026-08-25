@@ -23,11 +23,11 @@ use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, db, events, git, github, repo};
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, CreateReq, HandoffReq,
-    HistoryPageView, ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult,
-    SessionChatView, SessionCreatorFilter, SessionFilesView, SessionIdeInfoView,
-    SessionInterruptResult, SessionModeResult, SessionPreviewResult, SessionSearchAttention,
-    SessionSearchStatus, SessionSendResult, SessionSummaryView, SessionUrlView, SessionView,
+    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, HistoryPageView,
+    ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView,
+    SessionCreatorFilter, SessionFilesView, SessionIdeInfoView, SessionInterruptResult,
+    SessionModeResult, SessionPreviewResult, SessionSearchAttention, SessionSearchStatus,
+    SessionSendResult, SessionSummaryView, SessionUrlView, SessionView,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -1239,34 +1239,15 @@ async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<
 
 async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiResult<SessionView> {
     let st = context.state;
-    let req = CreateReq {
-        title: input.title,
-        goal: input.goal,
-        repo: input.repo,
-        cwd: input.cwd,
-        base: input.base,
-        agent: input.agent,
-        protocol: input.protocol,
-        mode: input.mode,
-        class: input.class,
-        profile: input.profile,
-        claim_issue: input.claim_issue,
-        issue: input.issue,
-        parent_branch: input.parent_branch,
-        name: input.name,
-        existing_branch: input.existing_branch,
-        github_issue: input.github_issue,
-        model: input.model,
-        effort: input.effort,
-        selection: input.selection,
-        scratch: input.scratch,
-        expected_profile_revision: input.expected_profile_revision,
-        expected_resolver_revision: input.expected_resolver_revision,
-    };
-    if let Some(repo_input) = req.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(repo_input) = input
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         ensure_repo_registered(&st.db, repo_input).await?;
     }
-    let delegated = req
+    let delegated = input
         .parent_branch
         .as_deref()
         .map(str::trim)
@@ -1277,7 +1258,7 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
     let actor = crate::provision::Actor::from_principal(&context.principal, delegated).ok_or_else(
         || AppError::new(StatusCode::FORBIDDEN, "credential cannot launch a session"),
     )?;
-    let created = crate::provision::create(st.clone(), req, actor)
+    let created = crate::provision::create(st.clone(), input, actor)
         .await
         .map_err(super::provision_error)?;
     session_view(&st.db, &created.session, &created.branch).await
@@ -1720,16 +1701,7 @@ async fn op_handoff(
 ) -> ApiResult<SessionView> {
     let st = &context.state;
     let (initial_session, _) = require_session(&st.db, &input.session).await?;
-    let req = HandoffReq {
-        agent: input.agent,
-        model: input.model,
-        effort: input.effort,
-        mode: input.mode,
-        selection: input.selection,
-        expected_profile_revision: input.expected_profile_revision,
-        expected_resolver_revision: input.expected_resolver_revision,
-    };
-    let (session, branch) = crate::handoff::handoff_session(st, initial_session, req)
+    let (session, branch) = crate::handoff::handoff_session(st, initial_session, input)
         .await
         .map_err(map_handoff_error)?;
     session_view(&st.db, &session, &branch).await

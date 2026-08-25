@@ -37,7 +37,7 @@ pub mod clone {
         /// profile's policy verbatim; source revision and environment copy
         /// remain server-owned and atomic either way.
         #[operand(json, default = None)]
-        pub template: Option<ProfileReq>,
+        pub template: Option<super::update::Input>,
         /// Copy the source's write-only environment; ignored when `environment` is present.
         #[operand(default = false)]
         pub copy_environment: bool,
@@ -98,6 +98,7 @@ pub mod create {
         /// token.
         pub github_repositories: Vec<String>,
         /// Provider-specific fallback permissions.
+        #[serde(alias = "allowed_tools")]
         pub runtime_permissions: Vec<String>,
         /// Provider-neutral MCP selection: `none`, `all`, or `groups`.
         #[operand(json, default = McpAccess::default())]
@@ -263,6 +264,7 @@ pub mod update {
         /// token.
         pub github_repositories: Vec<String>,
         /// Provider-specific fallback permissions.
+        #[serde(alias = "allowed_tools")]
         pub runtime_permissions: Vec<String>,
         /// Provider-neutral MCP selection: `none`, `all`, or `groups`.
         #[operand(json, default = McpAccess::default())]

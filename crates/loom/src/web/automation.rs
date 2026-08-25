@@ -1,6 +1,6 @@
 use axum::{extract::State, http::StatusCode, Json};
 use weaver_api::operations::runs as run_operations;
-use weaver_api::{AutomationTokenView, FederateReq, RunReq, RunView, SlackThreadRef};
+use weaver_api::{AutomationTokenView, FederateReq, RunView, SlackThreadRef};
 
 use crate::auth::{Grant, Principal};
 
@@ -155,7 +155,7 @@ async fn route_slack_thread(
 
 async fn launch_run(
     st: &AppState,
-    req: RunReq,
+    req: run_operations::create::Input,
     subject: String,
     profiles: Vec<String>,
     run: crate::runs::Run,
@@ -219,7 +219,7 @@ async fn launch_run(
 
 async fn prompt_channel_run(
     st: &AppState,
-    req: &RunReq,
+    req: &run_operations::create::Input,
     run: crate::runs::Run,
 ) -> ApiResult<RunView> {
     let Some(session) = crate::session::get(&st.db, &run.session_id)
@@ -287,7 +287,7 @@ async fn dispatch_channel_run(
     profiles: Vec<String>,
     run: crate::runs::Run,
 ) -> ApiResult<RunView> {
-    let req: RunReq = serde_json::from_str(&run.request_json)?;
+    let req: run_operations::create::Input = serde_json::from_str(&run.request_json)?;
     match crate::runs::route_channel(&st.db, &run.id).await? {
         crate::runs::ChannelAction::Launch(run) => {
             launch_run(st, req, subject, profiles, run, LaunchFailure::Retryable).await
@@ -305,7 +305,7 @@ async fn dispatch_channel_run(
 async fn create_run_core(
     st: &AppState,
     principal: &Principal,
-    mut req: RunReq,
+    mut req: run_operations::create::Input,
     subject: String,
     profiles: Vec<String>,
 ) -> ApiResult<RunView> {
@@ -474,18 +474,9 @@ pub(super) async fn create_run(
     context: OperationContext,
     input: run_operations::create::Input,
 ) -> ApiResult<RunView> {
-    let req = RunReq {
-        profile: input.profile,
-        idempotency_key: input.idempotency_key,
-        source: input.source,
-        watch_id: input.watch_id,
-        channel: input.channel,
-        slack: input.slack,
-        session: input.session,
-    };
-    let profile = req.profile.trim().to_string();
+    let profile = input.profile.trim().to_string();
     let (subject, profiles) = run_identity(&context.principal, &profile)?;
-    create_run_core(&context.state, &context.principal, req, subject, profiles).await
+    create_run_core(&context.state, &context.principal, input, subject, profiles).await
 }
 
 /// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`

@@ -2,8 +2,8 @@ use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    ArtifactTextAnchorDto, ChangeAnchorDto, CreateReviewReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewCommentDto, ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto,
+    ArtifactTextAnchorDto, ChangeAnchorDto, ReviewAnchorDto, ReviewAnchorKindDto, ReviewCommentDto,
+    ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch::Branch;
@@ -15,6 +15,7 @@ use crate::session::Session;
 
 use super::operations::{register, Bound, OperationContext};
 use super::{require_session, ApiResult, AppError, AppState};
+use weaver_api::operations::reviews;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReviewListQuery {
@@ -328,7 +329,7 @@ async fn create_for(
     principal: &Principal,
     session: &Session,
     branch: &Branch,
-    body: &CreateReviewReq,
+    body: &reviews::create::Input,
 ) -> ApiResult<ReviewDto> {
     require_operator(principal)?;
     let (subject_kind, subject_id, subject_key, subject_label, subject_version, current_version) =
@@ -690,12 +691,7 @@ async fn create_operation(
     let st = context.state;
     let principal = context.principal;
     let (session, branch) = require_session(&st.db, &input.session).await?;
-    let body = CreateReviewReq {
-        subject_kind: input.subject_kind,
-        subject_key: input.subject_key,
-        subject_version: input.subject_version,
-    };
-    create_for(&st, &principal, &session, &branch, &body).await
+    create_for(&st, &principal, &session, &branch, &input).await
 }
 
 async fn comments_update_operation(

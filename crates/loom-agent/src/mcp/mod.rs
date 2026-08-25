@@ -877,6 +877,22 @@ mod tests {
     /// shapes are declared next to the operation that serves them. The
     /// advertised schemas therefore changed in every set containing those
     /// tools; membership is identical in all 23.
+    ///
+    /// Re-pinned again after `#[operation]` started emitting each declared
+    /// `#[operand(default = ...)]` as the field's `serde` default. `schemars`
+    /// reads `serde` attributes, so until now a field with a declared default
+    /// was still advertised `required`: 23 of the 48 built-in tools demanded
+    /// arguments their own operation called optional (`channel/send` wanted
+    /// `channel`, `kind`, `urgency`, and `payload`; `channel/read` wanted all
+    /// five of its operands; `issue/add` wanted `body`). Those fields are now
+    /// optional and carry their declared `default` in the schema. The same
+    /// re-pin restores the bounds the earlier port to the generic dispatcher
+    /// dropped — `channel`'s kind/urgency/mode enums and body, name, topic and
+    /// idempotency-key lengths, `artifact`'s name and revision bounds,
+    /// `issue`'s id and key/value minimums, `permission`'s `owner/repo`
+    /// pattern and reason length — each declared on the operand rather than in
+    /// the adapter. Membership is identical in all 23 sets and no tool
+    /// description changed.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -897,79 +913,79 @@ mod tests {
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:256e58a4ba152e18a0cd3a2cff5280df509283c45dd44482a43c70e01e28b9d0",
+                "sha256:5b0d55410134f443d8c0bc0b53b247e1ee6de63386ee089496a25f8e2364708c",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:1b09eb4edd3314c5c93e1f15cb1f7e7af1bd58203d23d15987d3f41e0eb6abd6",
+                "sha256:95e0a083ba39bffb11d7157e3b8e11aab347e66b524f9cd86ac4db83cad65973",
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:8e0aaa5aa62d047e71ed60f93ce28145cfd94ca083b148e9a6732951756a3d4d",
+                "sha256:db2a76d69832ccd618b0fc7b24c3cf7ad10a1a0b0f801fbeaf9155a839558d5c",
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:e2e84b022c03e482922a6aaf966db27fb329fb5863a762176f6ea559150b7477",
+                "sha256:8a018f5a160e9c06d94fcc24e0b5e732ef805076d859304acf5f05e7ccaaf10c",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:9aabc312b0ab288bcaf65a41ddb02bc54c15095bb92d4d4b29ef802c1c881c5a",
+                "sha256:2a5902dfa1a0e095c325d378cb99db76a916adf9bb485575d435afa8998c0279",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:5c41decc1f0a1c731f10e8814c8cb3edde58ef14de9aa6da753040e6a8afdd28",
+                "sha256:eb99a64c4ed0e1c0c6e9dd8205f7491c06871349c857563a78f1de83fc2cd5ab",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:06c5c612abcb6bc9c17c2f543276619bcc006423b6a11c1379405b76775a7179",
+                "sha256:1ee173fad1b1b4474e0f12715dfc65107d60bdd1a7452f3da1b3ae0c0374eb05",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:898c1f154c1c9696567581eea5ada77ab5659ce6f4cfa33a6e29dbbd31b0a188",
+                "sha256:6c1bba5084c89410121584af895eb0bebe686ed0d6ee6d47ed578014fc504d9a",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:bc4524487cd476c3883a035740ceb5a747efd0645e2f89b10a86370f1002b627",
+                "sha256:8584e4af702fa12f19a66987f59d140ca1878ad409fdc7b68e11d0041a70f2c9",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:3d523c1c205981a58712426e1413250163ec4b68d8e162c4ba55e7ca58851c74",
+                "sha256:302b931d0d3eb704983d5b5be6849dfc30628e0e6b212978746a53fc75af2a5f",
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:2049883722e6c8597bd57083a87fa36d6831924f527d2561f8203d31c284de78",
+                "sha256:cc47eeda03188f47b2b0958c61ed9e829132bfef24ae41b09b9a7bb7986b1575",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:b67c485ee11023a78b126889b83b36082bdeb74b0cab3e110e778893d4394e80",
+                "sha256:2f26b50b697d9ae0e7a02c577ab5e5f90ead070016e59c78b228b7440442d589",
             ),
             (
                 "mcp/session/read@v1",
-                "sha256:72360110714cb5a44e0a2663169a9f727318e5ecfc7eea0c1f03771e53db208e",
+                "sha256:3bf5d560a5e7ac939dbd3358d5bf04a0b5bb0b95f5163df789a18d632a118ee3",
             ),
             (
                 "mcp/session/status@v1",
-                "sha256:503ab98ee04a494b9f62d6aaee7d80d4efe8769da1eadbcfcff465311d4a6748",
+                "sha256:e9a555691d74aedd50894e7e1726ddbe0f778eb0b1b955a1b45f0d3f2b028067",
             ),
             (
                 "mcp/history/self@v1",
-                "sha256:368060a4f0ed056c8b05da07d5ff549912d135421468669e8b1d006b5e60531f",
+                "sha256:57c6f4d3e48b93266ddf1ecd5c2ee60f68dd0c268a0682dba93a84fa4f57c0f4",
             ),
             (
                 "mcp/messaging/status@v1",
-                "sha256:888b17981c9f2e850b7d289cb3a9f274f006a2d9528a3e681f2c741aa5275bcb",
+                "sha256:1b133a74973b3b4b24efbae183cf55c59fb8d7e2010d044f3d955a0e663252cf",
             ),
             (
                 "mcp/slack/message@v1",
-                "sha256:d6a87b8d9ef7645ccaa7032b3dbb7cc641724cff7f15a53d30c1e34f7e76a475",
+                "sha256:e141c4a828f3d5bab35526b8cfcf54e61fcb89eeb3f99f65590a1e90ca707e3a",
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:a27288df3e294bbceabb04bfe693b999396e68a648914c9c38c9e95b6d558b06",
+                "sha256:4939df1955fd91c32ff026ca4aef015e532be9551409bcb62dab2548e0250f3b",
             ),
             (
                 "loom/permissions/request@v1",
-                "sha256:1cc1e36de9d7563301cebc1c565aa4a99409cd7fdc007ac5803c257357a6a73e",
+                "sha256:465e7053731ceb1b047001d79751825f83518a6fb60cdc65ec2dd0502acdc83d",
             ),
         ]
         .into_iter()

@@ -32,6 +32,7 @@ pub mod explain {
     pub struct Input {
         /// The operation id to explain, e.g. `issues.tags.set`.
         #[operand(positional)]
+        #[schemars(length(min = 1))]
         pub operation: String,
     }
 
@@ -251,11 +252,14 @@ pub mod requests {
         pub struct Input {
             /// The `owner/repo` slug to request write access to.
             #[operand(positional)]
+            #[schemars(regex(pattern = r"^[^/]+/[^/]+$"))]
             pub repository: String,
             /// Why the task needs this repository.
+            #[schemars(length(min = 1, max = 4096))]
             pub reason: String,
             /// Currently only `write` is accepted.
             #[operand(default = "write")]
+            #[schemars(extend("enum" = ["write"]))]
             pub mode: String,
             #[operand(context)]
             pub session: String,
@@ -291,6 +295,7 @@ pub mod requests {
                     cli = "permissions requests")]
         pub struct Input {
             /// Restrict to `pending`, `approved`, or `denied`. Omit to list all.
+            #[schemars(extend("enum" = ["pending", "approved", "denied"]))]
             pub state: Option<String>,
             #[operand(context)]
             pub session: String,
@@ -302,6 +307,9 @@ pub mod requests {
 
 /// Maximum byte length of a permission-request reason.
 pub const MAX_REASON_LEN: usize = 4_096;
+// `requests::create::Input` spells this bound as a schemars literal, which
+// cannot reference a constant.
+const _: () = assert!(MAX_REASON_LEN == 4_096);
 
 static OPERATIONS: &[&OperationSpec] = &[
     effective::get::SPEC,

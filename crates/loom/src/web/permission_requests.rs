@@ -2,7 +2,7 @@
 
 use serde_json::json;
 use weaver_api::operations::permissions as permission_operations;
-use weaver_api::{CreateChannelMessageReq, EffectivePermissionsView, PermissionRequestView};
+use weaver_api::{EffectivePermissionsView, PermissionRequestView};
 use weaver_core::{branch as branch_mod, tags};
 
 use crate::{
@@ -18,6 +18,7 @@ use super::{
     restricted_github_invoke_operation, revoke_github_access_operation, validate_github_write,
     ApiResult, AppError, AppState,
 };
+use weaver_api::operations::channels;
 
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
@@ -292,7 +293,7 @@ async fn apply_permission_decision(
     };
     if let Some(channel) = crate::channels::access(&st.db, &session.id).await? {
         let author = Subject::new(SubjectKind::User, &principal.username);
-        let message = CreateChannelMessageReq {
+        let message = channels::messages::create::Input {
             kind: "system".to_string(),
             urgency: "normal".to_string(),
             body,
@@ -303,6 +304,8 @@ async fn apply_permission_decision(
             }),
             reply_to: None,
             idempotency_key: Some(format!("permission-decision:{}", decided.id)),
+            // The channel and branch are passed to `append_and_deliver` directly.
+            ..Default::default()
         };
         let (inserted, message) =
             append_and_deliver(st, &session.id, &channel, &author, &message).await?;

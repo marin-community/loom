@@ -181,7 +181,7 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
         .unwrap();
     profile.github_repositories = vec!["acme/widgets".to_string()];
     loom::profile::upsert(&ts.state.db, &profile).await.unwrap();
-    // The webhook builds a CreateReq with no agent, so it uses `agent.default`;
+    // The webhook builds a sessions::launch::Input with no agent, so it uses `agent.default`;
     // pin it to `shell` so the test doesn't try to launch a real claude.
     ts.client
         .post(

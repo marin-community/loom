@@ -1413,7 +1413,7 @@ async fn launch_inner(
         .trim()
         .to_string();
     let branch_exists = crate::git::branch_exists(&repo_root, &branch_ref).await;
-    let mut req = weaver_api::dto::CreateReq {
+    let mut req = weaver_api::operations::sessions::launch::Input {
         repo: Some(repo.to_string()),
         goal: Some(goal),
         profile: Some(profile.clone()),

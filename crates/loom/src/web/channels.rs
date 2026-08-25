@@ -7,7 +7,7 @@ use serde_json::json;
 use weaver_api::operations::channels as ops;
 use weaver_api::{
     ChannelArchiveResult, ChannelBindingView, ChannelMessageView, ChannelSubscriptionView,
-    ChannelView, CreateChannelMessageReq, SendReq,
+    ChannelView, SendReq,
 };
 
 use crate::{
@@ -67,7 +67,7 @@ pub(super) async fn append_and_deliver(
     id: &str,
     channel: &channels::ChannelAccess,
     author: &Subject,
-    req: &CreateChannelMessageReq,
+    req: &ops::messages::create::Input,
 ) -> ApiResult<(bool, ChannelMessageView)> {
     if channel.state != channels::OPEN_STATE {
         return Err(AppError::conflict("channel is archived"));
@@ -448,15 +448,8 @@ pub(super) async fn create_channel_message_operation(
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
     let channel = require_channel(&st, &principal, &channel_id).await?;
     let author = principal_subject(&principal);
-    let req = CreateChannelMessageReq {
-        kind: input.kind,
-        urgency: input.urgency,
-        body: input.body,
-        payload: input.payload,
-        reply_to: input.reply_to,
-        idempotency_key: input.idempotency_key,
-    };
-    let (inserted, message) = append_and_deliver(&st, &channel_id, &channel, &author, &req).await?;
+    let (inserted, message) =
+        append_and_deliver(&st, &channel_id, &channel, &author, &input).await?;
     record_channel_message_event(&st, &channel_id, &author, &message, inserted).await;
     Ok(message)
 }

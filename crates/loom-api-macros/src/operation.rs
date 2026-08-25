@@ -11,10 +11,10 @@ use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Expr, ExprArray, ExprLit, Ident, ItemStruct, Lit, LitStr, Token,
+    Expr, ExprArray, ExprLit, Ident, ItemStruct, Lit, LitStr, Meta, Token,
 };
 
-use crate::field::doc_comment;
+use crate::field::{doc_comment, outer_ident};
 
 struct Args {
     entries: Punctuated<Entry, Token![,]>,
@@ -225,6 +225,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         quote!(impl ::weaver_api::operations::Render for #marker {})
     };
 
+    let defaults = serde_defaults(&mut item)?;
+
     let attrs = std::mem::take(&mut item.attrs);
     let vis = item.vis.clone();
 
@@ -240,6 +242,8 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             ::loom_api_macros::Operands,
         )]
         #item
+
+        #(#defaults)*
 
         #[doc = #marker_doc]
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,4 +278,102 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
         #scoped_impl
     })
+}
+
+/// Give every field a caller may omit the `serde` default it already declares.
+///
+/// `#[operand(default = ...)]` used to be honoured only by the dispatchers,
+/// which merged the declared values into the JSON before handing it to `serde`.
+/// That left two things wrong. `schemars` reads `serde` attributes, so a field
+/// with a declared default was still advertised as `required` — an MCP tool
+/// demanded arguments the operation had said were optional. And an `Input`
+/// nested inside another operation's `Input` never reached a dispatcher at all,
+/// so it could only be deserialized fully spelled out.
+///
+/// Declaring the default where `serde` can see it fixes both, and the schema
+/// gains the `default` keyword for free. The dispatchers no longer merge
+/// anything.
+fn serde_defaults(item: &mut ItemStruct) -> syn::Result<Vec<TokenStream>> {
+    let struct_ty = item.ident.clone();
+    let mut functions = Vec::new();
+    for field in item.fields.iter_mut() {
+        let operand = crate::field::parse(field)?;
+        let Some(default) = operand.default else {
+            // A context field is never sent by a caller, and an absent
+            // `Option`, `Vec`, or `bool` has an obvious meaning. Anything else
+            // stays required.
+            if !has_serde_default(&field.attrs)
+                && (operand.context.is_some()
+                    || matches!(
+                        outer_ident(&field.ty).as_deref(),
+                        Some("Option" | "Vec" | "bool")
+                    ))
+            {
+                field.attrs.push(syn::parse_quote!(#[serde(default)]));
+            }
+            continue;
+        };
+        // A hand-written `#[serde(default)]` on a field that also declares one
+        // would resolve to `Default::default()` and quietly disagree with the
+        // declaration. The declaration wins; anything else in the same
+        // attribute (an `alias`, say) is kept.
+        strip_serde_default(&mut field.attrs);
+        let ty = &field.ty;
+        let name = &operand.ident;
+        let function = Ident::new(
+            &format!("__default_{struct_ty}_{name}"),
+            proc_macro2::Span::call_site(),
+        );
+        let path = function.to_string();
+        field
+            .attrs
+            .push(syn::parse_quote!(#[serde(default = #path)]));
+        functions.push(quote! {
+            #[doc(hidden)]
+            #[allow(non_snake_case)]
+            fn #function() -> #ty {
+                ::core::convert::Into::into(#default)
+            }
+        });
+    }
+    Ok(functions)
+}
+
+/// Whether `serde` already has a default for this field.
+fn has_serde_default(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        attr.path().is_ident("serde")
+            && serde_entries(attr).is_some_and(|entries| entries.iter().any(is_default_entry))
+    })
+}
+
+/// Drop `default` from every `#[serde(...)]` on this field, keeping the rest.
+fn strip_serde_default(attrs: &mut Vec<syn::Attribute>) {
+    attrs.retain_mut(|attr| {
+        if !attr.path().is_ident("serde") {
+            return true;
+        }
+        let Some(entries) = serde_entries(attr) else {
+            return true;
+        };
+        let kept = entries
+            .into_iter()
+            .filter(|entry| !is_default_entry(entry))
+            .collect::<Punctuated<Meta, Token![,]>>();
+        if kept.is_empty() {
+            return false;
+        }
+        *attr = syn::parse_quote!(#[serde(#kept)]);
+        true
+    });
+}
+
+fn serde_entries(attr: &syn::Attribute) -> Option<Vec<Meta>> {
+    attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        .ok()
+        .map(|entries| entries.into_iter().collect())
+}
+
+fn is_default_entry(entry: &Meta) -> bool {
+    entry.path().is_ident("default")
 }

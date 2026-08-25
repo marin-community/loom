@@ -10,7 +10,7 @@ use serial_test::serial;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
-use weaver_api::{CreateChannelMessageReq, DecidePermissionRequestReq, SettingKind, SettingSource};
+use weaver_api::{DecidePermissionRequestReq, SettingKind, SettingSource};
 
 use weaver_api::operations::permissions as permission_ops;
 
@@ -35,7 +35,7 @@ async fn typed_create_list_get_and_mark() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    // Typed create: build a CreateReq, get a SessionView back.
+    // Typed create: build a sessions::launch::Input, get a SessionView back.
     let created = client
         .invoke::<sessions::launch::Op>(&sessions::launch::Input {
             goal: (Some("typed client round-trip".to_string())).clone(),
@@ -103,38 +103,22 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(bindings[0].label, "this session");
 
     // Retrying an append with the same key returns the original durable item.
-    let result_request = CreateChannelMessageReq {
+    let result_request = channels::messages::create::Input {
+        channel: id.to_string(),
         kind: "result".to_string(),
         urgency: "normal".to_string(),
         body: "done once".to_string(),
         payload: serde_json::json!({}),
         reply_to: None,
         idempotency_key: Some("typed-result-once".to_string()),
+        branch: String::new(),
     };
     let first = session_client
-        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
-            channel: id.to_string(),
-            body: result_request.body.clone(),
-            kind: result_request.kind.clone(),
-            urgency: result_request.urgency.clone(),
-            payload: result_request.payload.clone(),
-            reply_to: result_request.reply_to.clone(),
-            idempotency_key: result_request.idempotency_key.clone(),
-            branch: String::new(),
-        })
+        .invoke::<channels::messages::create::Op>(&result_request)
         .await
         .unwrap();
     let retry = session_client
-        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
-            channel: id.to_string(),
-            body: result_request.body.clone(),
-            kind: result_request.kind.clone(),
-            urgency: result_request.urgency.clone(),
-            payload: result_request.payload.clone(),
-            reply_to: result_request.reply_to.clone(),
-            idempotency_key: result_request.idempotency_key.clone(),
-            branch: String::new(),
-        })
+        .invoke::<channels::messages::create::Op>(&result_request)
         .await
         .unwrap();
     assert_eq!(retry.id, first.id);
@@ -370,25 +354,18 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     .await
     .unwrap();
     let client = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
-    let request = CreateChannelMessageReq {
+    let request = channels::messages::create::Input {
+        channel: created.id.to_string(),
         kind: "result".to_string(),
         urgency: "normal".to_string(),
         body: "the canonical answer".to_string(),
         payload: json!({}),
         reply_to: None,
         idempotency_key: Some("answer-once".to_string()),
+        branch: String::new(),
     };
     let message = client
-        .invoke::<channels::messages::create::Op>(&channels::messages::create::Input {
-            channel: created.id.to_string(),
-            body: request.body.clone(),
-            kind: request.kind.clone(),
-            urgency: request.urgency.clone(),
-            payload: request.payload.clone(),
-            reply_to: request.reply_to.clone(),
-            idempotency_key: request.idempotency_key.clone(),
-            branch: String::new(),
-        })
+        .invoke::<channels::messages::create::Op>(&request)
         .await
         .unwrap();
     assert_eq!(message.deliveries.len(), 1);

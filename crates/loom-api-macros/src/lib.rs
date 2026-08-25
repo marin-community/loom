@@ -110,27 +110,6 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     });
     let context_fills = operands.iter().map(source_setter);
 
-    // The wire counterpart of clap's defaults, emitted from the very same
-    // expression so a value a caller may omit means the same thing on the
-    // command line and over HTTP.
-    let wire_defaults = operands.iter().filter_map(|operand| {
-        let name = &operand.name;
-        let value = if let Some(default) = &operand.default {
-            {
-                let ty = &operand.ty;
-                quote!(::serde_json::to_value::<#ty>(::core::convert::Into::into(#default))
-                    .unwrap_or(::serde_json::Value::Null))
-            }
-        } else if operand.kind.is_optional() {
-            quote!(::serde_json::Value::Null)
-        } else if operand.kind.is_multi() {
-            quote!(::serde_json::Value::Array(::std::vec::Vec::new()))
-        } else {
-            return None;
-        };
-        Some(quote!(object.insert(::std::string::String::from(#name), #value);))
-    });
-
     Ok(quote! {
         impl ::weaver_api::operations::Operands for #name {
             const CONTEXT: &'static [::weaver_api::operations::ContextField] =
@@ -162,12 +141,6 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
 
             fn from_matches(matches: &::clap::ArgMatches) -> ::core::result::Result<Self, String> {
                 Ok(Self { #(#builders)* })
-            }
-
-            fn wire_defaults() -> ::serde_json::Value {
-                let mut object = ::serde_json::Map::new();
-                #(#wire_defaults)*
-                ::serde_json::Value::Object(object)
             }
 
             fn fill_context(

@@ -1,9 +1,9 @@
 //! Versioned artifact operations, served by the generic registry dispatcher.
 //!
-//! Every tool here is a registered `artifacts.*` operation, and `tools/list`
-//! is `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`. `delete`,
-//! `history`, `threads`, `comment`, and `resolve` route straight through
-//! `super::dispatch::call_tool`. The schema carries all the shape these tools need.
+//! Every tool here is a registered `artifacts.*` operation, and `tools/list` is
+//! read off [`exports`]. `delete`, `history`, `threads`, `comment`, and
+//! `resolve` route straight through `super::dispatch::call_tool`. The schema
+//! carries all the shape these tools need.
 //!
 //! `list`, `get`, and `write` are hand-written because they resolve each artifact's
 //! dashboard `url` with a second REST call (`Client::branch_artifact_url`) and merge

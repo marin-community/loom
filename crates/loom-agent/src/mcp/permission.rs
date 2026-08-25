@@ -2,8 +2,8 @@
 //! dispatcher.
 //!
 //! Every tool here is a registered `permissions.*` operation: `tools/list` is
-//! `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`, and `tools/call`
-//! is `super::dispatch::call_tool`, which renders each operation's own JSON as
+//! read off [`exports`], and `tools/call` is `super::dispatch::call_tool`,
+//! which renders each operation's own JSON as
 //! the response — no per-tool summary formatting lives here.
 //! `permissions.requests.approve`/`.deny` stay unreachable through this
 //! adapter because they are `actor = User`, not `SessionSelf`: the registry

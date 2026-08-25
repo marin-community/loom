@@ -65,9 +65,11 @@ pub mod create {
     pub struct Input {
         /// The new channel's name.
         #[operand(positional)]
+        #[schemars(length(min = 1, max = 120))]
         pub name: String,
         /// Optional topic description.
         #[operand(default = String::new())]
+        #[schemars(length(max = 4096))]
         pub topic: String,
         /// The repository the channel belongs to. Resolved from the calling
         /// session when it has one.
@@ -135,19 +137,24 @@ pub mod messages {
             pub channel: String,
             /// The message body.
             #[operand(positional)]
+            #[schemars(length(min = 1, max = 262_144))]
             pub body: String,
             /// `message`, `status`, or `result`.
             #[operand(default = String::from("message"))]
+            #[schemars(extend("enum" = ["message", "status", "result"]))]
             pub kind: String,
             /// `normal`, `attention`, or `blocked`.
             #[operand(default = String::from("normal"))]
+            #[schemars(extend("enum" = ["normal", "attention", "blocked"]))]
             pub urgency: String,
             /// Arbitrary structured payload alongside the body.
             #[operand(json, default = serde_json::json!({}))]
             pub payload: serde_json::Value,
             /// Reply to an existing message in this channel.
+            #[schemars(length(min = 1))]
             pub reply_to: Option<String>,
             /// Retry-safe key scoped to the channel.
+            #[schemars(length(min = 1, max = 255))]
             pub idempotency_key: Option<String>,
             #[operand(context)]
             pub branch: String,
@@ -170,12 +177,19 @@ pub mod messages {
             pub channel: String,
             /// Only return items after this sequence number.
             #[operand(default = 0)]
+            #[schemars(range(min = 0))]
             pub after: i64,
             /// Maximum number of items to return.
             #[operand(default = 100)]
+            #[schemars(range(min = 1, max = 500))]
             pub limit: i64,
             /// Restrict to these message kinds (`goal`, `message`, `status`,
             /// `result`, `system`).
+            #[schemars(extend("uniqueItems" = true))]
+            #[schemars(extend("items" = {
+                "type": "string",
+                "enum": ["goal", "message", "status", "result", "system"]
+            }))]
             pub kinds: Vec<String>,
             /// Read without advancing this session's read marker.
             #[operand(default = false)]
@@ -204,6 +218,7 @@ pub mod read_marker {
             pub channel: String,
             /// Mark read through this sequence; omission advances through the
             /// latest message.
+            #[schemars(range(min = 0))]
             pub seq: Option<i64>,
             #[operand(context)]
             pub branch: String,
@@ -229,8 +244,10 @@ pub mod subscription {
             pub channel: String,
             /// `observe` or `deliver`.
             #[operand(default = String::from("observe"))]
+            #[schemars(extend("enum" = ["observe", "deliver"]))]
             pub mode: String,
             /// Subscribe this descendant session instead of the caller.
+            #[schemars(length(min = 1))]
             pub session: Option<String>,
             #[operand(context)]
             pub branch: String,
@@ -253,14 +270,17 @@ pub mod wait {
         pub channel: String,
         /// Wait for items after this sequence; omission starts from the
         /// channel's latest known message.
+        #[schemars(range(min = 0))]
         pub after: Option<i64>,
         /// Wake only for this message kind, e.g. `result`.
+        #[schemars(extend("enum" = ["goal", "message", "status", "result", "system"]))]
         pub kind: Option<String>,
         /// Wake only for `attention` or `blocked` urgency.
         #[operand(default = false)]
         pub urgent: bool,
         /// Seconds to wait before giving up.
         #[operand(default = 1800)]
+        #[schemars(range(min = 1, max = 3600))]
         pub timeout: i64,
         #[operand(context)]
         pub branch: String,

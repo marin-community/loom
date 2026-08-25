@@ -1,8 +1,7 @@
 //! Durable channel operations, served by the generic registry dispatcher.
 //!
-//! Every tool here is a registered `channels.*` operation: `tools/list` is
-//! `weaver_api::mcp_tools_ordered(SERVER_NAME, TOOL_NAMES)`, and `tools/call`
-//! is `super::dispatch::call_tool`. Argument shaping — resolving
+//! Every tool here is a registered `channels.*` operation: `tools/list` and
+//! `tools/call` are both read off [`exports`]. Argument shaping — resolving
 //! `channel == "self"`, bounding `read`'s scan window, running `wait`'s poll
 //! loop — belongs in the operation handler, not here: see
 //! `channels.messages.list` and `channels.wait` in

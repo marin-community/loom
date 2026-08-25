@@ -7,7 +7,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use weaver_api::operations::repos as ops;
-use weaver_api::{CreateReq, RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
+use weaver_api::{RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
 
 use crate::backend;
 use crate::git;
@@ -20,6 +20,7 @@ use super::auth::public_base;
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 use crate::lifecycle::auto_archive;
+use weaver_api::operations::sessions;
 
 // ---------------------------------------------------------------------------
 // Recent repositories
@@ -400,7 +401,7 @@ async fn handle_trigger(
         weaver_core::config::DEFAULT_GITHUB_PROFILE,
     )
     .await;
-    let mut req = CreateReq {
+    let mut req = sessions::launch::Input {
         repo: Some(slug.slug()),
         title: Some(event.issue.title.clone()),
         goal: Some(trigger_goal(&slug.slug(), is_pr, number, &event, &author)),

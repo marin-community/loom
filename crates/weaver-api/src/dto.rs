@@ -1020,58 +1020,6 @@ pub struct ScratchLimitsView {
     pub max_name_bytes: usize,
 }
 
-/// Body for creating or replacing a profile.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ProfileReq {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub agent_kind: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub effort: String,
-    #[serde(default)]
-    pub protocol: String,
-    #[serde(default)]
-    pub mode: String,
-    #[serde(default = "default_class")]
-    pub class: String,
-    #[serde(default)]
-    pub strict: bool,
-    #[serde(default)]
-    pub env_clear: bool,
-    #[serde(default)]
-    pub ambient_allowlist: Vec<String>,
-    #[serde(default)]
-    pub idle_archive_secs: Option<i64>,
-    #[serde(default)]
-    pub max_concurrent: i64,
-    #[serde(default)]
-    pub turn_budget: Option<i64>,
-    #[serde(default = "default_prelude")]
-    pub prelude: String,
-    /// Organization-owned instructions appended to this profile's opening
-    /// prompt for every launch origin.
-    #[serde(default)]
-    pub instructions: String,
-    #[serde(default)]
-    pub restricted: bool,
-    /// Repositories for which Loom may broker a short-lived GitHub App token.
-    #[serde(default)]
-    pub github_repositories: Vec<String>,
-    /// Provider-specific fallback permissions. New integrations should use
-    /// `mcp_access`; `allowed_tools` remains a read-compatible input alias.
-    #[serde(default, alias = "allowed_tools")]
-    pub runtime_permissions: Vec<String>,
-    #[serde(default)]
-    pub mcp_access: McpAccess,
-    /// Optimistic update guard. Omitted remains compatible with older clients;
-    /// interactive editors always send the revision they loaded.
-    #[serde(default)]
-    pub expected_revision: Option<i64>,
-}
-
 /// A short-lived GitHub App installation token brokered for one session.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubTokenView {
@@ -1209,7 +1157,7 @@ pub struct DeploymentProfileEnvReq {
 /// One named profile and its authoritative write-only environment declaration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentProfileReq {
-    pub profile: ProfileReq,
+    pub profile: crate::operations::profiles::update::Input,
     #[serde(default)]
     pub env: Vec<DeploymentProfileEnvReq>,
 }
@@ -1269,39 +1217,8 @@ pub struct SlackThreadRef {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RunReq {
-    pub profile: String,
-    /// Caller-selected durable key. Verified GitHub callers may leave this
-    /// blank to use repository/run/attempt, or provide a bounded deterministic
-    /// key (for example an issue body hash) that Loom namespaces to the verified
-    /// identity.
-    #[serde(default)]
-    pub idempotency_key: String,
-    #[serde(default = "actions_source")]
-    pub source: String,
-    #[serde(default)]
-    pub watch_id: Option<String>,
-    /// Stable conversation route for related automation deliveries. Each
-    /// idempotency key remains a distinct run; channel deliveries reuse one
-    /// live ACP session.
-    #[serde(default)]
-    pub channel: Option<String>,
-    /// The Slack thread this delivery was announced in. Loom routes the thread to
-    /// the session the run lands on, which lets that session reply there and
-    /// lets a `@bot` mention in the thread reach it — without re-pointing the
-    /// session's single `slack` status-card wiring.
-    #[serde(default)]
-    pub slack: Option<SlackThreadRef>,
-    pub session: CreateReq,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RestrictedGithubToolView {
     pub text: String,
-}
-
-fn actions_source() -> String {
-    "actions".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1843,15 +1760,6 @@ pub struct ReviewDto {
     pub legacy: bool,
 }
 
-/// Create or recover the caller's one draft for a session/subject.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateReviewReq {
-    pub subject_kind: ReviewSubjectKindDto,
-    /// Artifact name for `subject_kind = "artifact"`.
-    pub subject_key: String,
-    pub subject_version: String,
-}
-
 // ---------------------------------------------------------------------------
 // Changes — one bounded, typed snapshot of the session worktree relative to
 // its real branch base.
@@ -2135,9 +2043,10 @@ pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
 pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
 pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
-// `branches.slack.reply` and `channels.messages.create` spell this bound as a
-// schemars literal, which cannot reference a constant.
+// `branches.slack.reply` and `channels.messages.create` spell these bounds as
+// schemars literals, which cannot reference a constant.
 const _: () = assert!(CHANNEL_IDEMPOTENCY_KEY_MAX_LEN == 255);
+const _: () = assert!(CHANNEL_MESSAGE_LIMIT_MAX == 500);
 pub const CHANNEL_SLACK_ORIGIN_BINDING_ID: &str = "slack:origin";
 
 pub fn channel_session_binding_id(session_id: &str) -> String {
@@ -2278,30 +2187,6 @@ pub struct ChannelSubscriptionView {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateChannelMessageReq {
-    #[serde(default = "default_channel_message_kind")]
-    pub kind: String,
-    #[serde(default = "default_channel_urgency")]
-    pub urgency: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub payload: Value,
-    #[serde(default)]
-    pub reply_to: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
-fn default_channel_message_kind() -> String {
-    CHANNEL_DEFAULT_MESSAGE_KIND.to_string()
-}
-
-fn default_channel_urgency() -> String {
-    CHANNEL_DEFAULT_URGENCY.to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Request payloads
 // ---------------------------------------------------------------------------
@@ -2313,98 +2198,6 @@ pub struct ScratchUpload {
     pub name: String,
     #[serde(default)]
     pub content_base64: String,
-}
-
-/// Body for `POST /api/sessions`: launch a new session.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateReq {
-    /// The repo to fork the session's worktree from, as a local path. Ignored
-    /// when `repo` (a managed repo) is set; otherwise required.
-    #[serde(default)]
-    pub cwd: String,
-    /// An optional **managed** repository to launch against: a GitHub `owner/name`
-    /// slug or URL. When set, loom resolves it against the registered repo
-    /// allowlist, clones it into the managed repo store if absent (else fetches),
-    /// and uses that checkout as the repo root — `cwd` is then ignored. Unset (the
-    /// default) keeps the historical behaviour: fork from `cwd`'s repo.
-    #[serde(default)]
-    pub repo: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub goal: Option<String>,
-    #[serde(default)]
-    pub base: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub issue: Option<i64>,
-    /// A GitHub issue number the caller already holds the content of (the
-    /// `@loom` trigger, whose webhook payload carries the thread): recorded on
-    /// the compatibility work item as its GitHub link, with none of `issue`'s
-    /// fetch-and-seed. Ignored when `issue` is set.
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    /// A pre-existing weaver backlog item to claim for this session. Seeds
-    /// title/goal/description and stamps `claimed_branch`; ordinary launches
-    /// do not create a work item.
-    #[serde(default)]
-    pub claim_issue: Option<i64>,
-    #[serde(default)]
-    pub existing_branch: Option<String>,
-    /// The branch (id or name) of the agent launching this session, when it is
-    /// itself a weaver session delegating work. It defines the session-tree
-    /// parent and, for an explicitly claimed/imported work item, that item's
-    /// `source_branch`. The `loom` CLI fills this from `$WEAVER_BRANCH`; a
-    /// human/dashboard launch leaves it unset.
-    #[serde(default)]
-    pub parent_branch: Option<String>,
-    /// Model selector accepted by the selected agent type; blank/absent uses
-    /// the agent runtime's default.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Reasoning effort ('low' | 'medium' | 'high' | 'xhigh' | 'max');
-    /// blank/absent uses the agent runtime's default.
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Reference files to drop into the new worktree's `scratch/` directory
-    /// before the agent launches. Empty/absent for a plain session.
-    #[serde(default)]
-    pub scratch: Vec<ScratchUpload>,
-    /// Execution-backend override: `"terminal"` forces the PTY fallback for a
-    /// builtin; `"acp"` opts in explicitly. Blank/absent uses the agent's
-    /// declared default (acp for the builtins). Rejected for agents that don't
-    /// support the requested backend.
-    #[serde(default)]
-    pub protocol: Option<String>,
-    /// The ACP launch permission posture (`auto` | `bypassPermissions` |
-    /// `acceptEdits` | `default` | `plan`). Blank/absent uses the configured
-    /// `agent.mode` (which defaults to `auto`: a background classifier vets each
-    /// tool call and escalates only risky actions). Ignored for a terminal launch.
-    #[serde(default)]
-    pub mode: Option<String>,
-    /// Session class override: `"interactive"` or `"automation"` (anything else
-    /// is rejected). Blank/absent derives from the launch origin
-    /// (watch/actions/ops/grafana → automation, else interactive).
-    /// Automation-class sessions remain in the default human fleet; survey
-    /// callers can explicitly request `automation=false`.
-    #[serde(default)]
-    pub class: Option<String>,
-    /// Named launch profile. Blank/absent selects `default`.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Canonical launch selection. Requires both expected revisions returned by
-    /// `/api/session-launches/resolve`. Flattened fields remain compatible.
-    #[serde(default)]
-    pub selection: Option<LaunchSelection>,
-    /// Revisions returned by the last resolve preview. Canonical input requires
-    /// both; drift returns 409 with a fresh preview.
-    #[serde(default)]
-    pub expected_profile_revision: Option<i64>,
-    #[serde(default)]
-    pub expected_resolver_revision: Option<String>,
 }
 
 /// Body for `POST /api/sessions/{id}/handoff`. Canonical `selection` requires

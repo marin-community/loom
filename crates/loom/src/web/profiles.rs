@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
     EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileDeleteResult,
-    ProfileEnvView, ProfileReq, ProfileView,
+    ProfileEnvView, ProfileView,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -10,7 +10,7 @@ use crate::profile::{self, Profile, ProfileInput};
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
-pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
+pub(super) fn input(req: profiles_operations::update::Input, name: String) -> ProfileInput {
     ProfileInput {
         name,
         description: req.description,

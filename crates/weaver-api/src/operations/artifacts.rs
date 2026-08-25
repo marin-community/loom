@@ -16,6 +16,7 @@ pub mod delete {
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
         pub name: String,
         /// When true, delete the repository-shared artifact. By default, delete
         /// this branch's own copy.
@@ -37,8 +38,10 @@ pub mod get {
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
         pub name: String,
         /// Select an immutable past revision instead of the latest.
+        #[schemars(range(min = 1))]
         pub rev: Option<i64>,
         /// When true, read the repository-shared artifact. By default, resolve
         /// this branch's own copy first.
@@ -60,6 +63,7 @@ pub mod history {
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
         pub name: String,
         /// When true, list the repository-shared artifact's history. By default,
         /// list this branch's own copy.
@@ -101,16 +105,12 @@ pub mod raw {
                 grants = ["loom/artifacts/read@v1"], io = Download)]
     pub struct Input {
         /// The artifact's name.
-        //
-        // `serde(default)` because a download's operands arrive in the query string,
-        // which axum extracts before any default-filling could run.
-        #[serde(default)]
         #[operand(default = String::new())]
+        #[schemars(length(min = 1, max = 255))]
         pub name: String,
         /// Pin an immutable past revision instead of the latest.
-        #[serde(default)]
+        #[schemars(range(min = 1))]
         pub rev: Option<i64>,
-        #[serde(default)]
         #[operand(context)]
         pub branch: String,
     }
@@ -139,11 +139,15 @@ pub mod threads {
             /// Open a new thread anchored to a quoted span of the artifact.
             New {
                 /// The artifact revision the anchor was taken from.
+                #[schemars(range(min = 1))]
                 base_rev: i64,
                 anchor: AnchorDto,
             },
             /// Reply to an already-open thread.
-            Reply { thread_id: i64 },
+            Reply {
+                #[schemars(range(min = 1))]
+                thread_id: i64,
+            },
         }
 
         /// Start or reply to an artifact review thread.
@@ -152,9 +156,11 @@ pub mod threads {
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
+            #[schemars(length(min = 1, max = 255))]
             pub name: String,
             /// The comment text.
             #[operand(positional)]
+            #[schemars(length(min = 1))]
             pub body: String,
             /// Start a new thread or reply to one. On the command line this takes a
             /// JSON object, because a tagged union is not a flag.
@@ -187,6 +193,7 @@ pub mod threads {
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
+            #[schemars(length(min = 1, max = 255))]
             pub name: String,
             /// When true, list only unresolved threads. By default, include all threads.
             /// Resolved threads appear collapsed in the dashboard, not hidden.
@@ -208,9 +215,11 @@ pub mod threads {
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
+            #[schemars(length(min = 1, max = 255))]
             pub name: String,
             /// The thread to resolve.
             #[operand(positional)]
+            #[schemars(range(min = 1))]
             pub thread_id: i64,
             #[operand(context)]
             pub branch: String,
@@ -256,6 +265,7 @@ pub mod write {
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
         pub name: String,
         /// The artifact body. On the command line this names a file, or `-`/omitted
         /// to read stdin.
@@ -263,15 +273,18 @@ pub mod write {
         pub content: String,
         /// Display title. Defaults to the existing title, or the name for a new
         /// artifact.
+        #[schemars(length(max = 4096))]
         pub title: Option<String>,
         /// Content kind, e.g. `markdown` or `image`.
         ///
         /// When omitted, the artifact keeps its current kind. This must be optional
         /// because a default value would silently change existing `plan` or `image`
         /// artifacts to markdown on every update that omits this field.
+        #[schemars(length(min = 1))]
         pub kind: Option<String>,
         /// Optimistic-concurrency guard: `0` guards creation; a later revision
         /// number rejects a stale edit instead of silently overwriting it.
+        #[schemars(range(min = 0))]
         pub base_rev: Option<i64>,
         /// Write the repository-shared artifact instead of this branch's own
         /// copy.

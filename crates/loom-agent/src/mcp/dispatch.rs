@@ -101,10 +101,7 @@ where
                         missing.join(", ")
                     );
                 }
-                let defaults = serde_json::to_value(O::Input::default())
-                    .map_err(|error| anyhow!("building defaults for {}: {error}", O::SPEC.id))?;
-                let merged = merge_defaults(arguments, defaults);
-                let mut input: O::Input = serde_json::from_value(merged)
+                let mut input: O::Input = serde_json::from_value(arguments)
                     .map_err(|error| anyhow!("invalid arguments for {}: {error}", O::SPEC.id))?;
                 // Context is fetched once by the caller and handed down to all
                 // operations in a single request.
@@ -135,22 +132,6 @@ fn missing_required(schema: &Value, arguments: &Value) -> Vec<String> {
         .filter(|name| object.is_none_or(|object| !object.contains_key(*name)))
         .map(str::to_string)
         .collect()
-}
-
-/// Complete the caller's arguments with `Input::default()` for every field the
-/// caller left out — context fields and declared-default fields alike. Values
-/// the caller did supply always win.
-fn merge_defaults(mut arguments: Value, defaults: Value) -> Value {
-    let Value::Object(default_fields) = defaults else {
-        return arguments;
-    };
-    let Some(given) = arguments.as_object_mut() else {
-        return Value::Object(default_fields);
-    };
-    for (name, value) in default_fields {
-        given.entry(name).or_insert(value);
-    }
-    arguments
 }
 
 /// Resolve `tool` against this adapter's exports, fetch context if the
@@ -332,14 +313,5 @@ mod tests {
             vec!["id".to_string()]
         );
         assert!(missing_required(&schema, &serde_json::json!({ "id": 7 })).is_empty());
-    }
-
-    #[test]
-    fn merge_defaults_keeps_caller_values() {
-        let arguments = serde_json::json!({ "all": true });
-        let defaults = serde_json::json!({ "all": false, "repo_root": "" });
-        let merged = merge_defaults(arguments, defaults);
-        assert_eq!(merged["all"], serde_json::json!(true));
-        assert_eq!(merged["repo_root"], serde_json::json!(""));
     }
 }

@@ -96,9 +96,6 @@ pub struct Operand {
     pub skip_cli: bool,
     /// CLI-only: interpret this string as a file path or stdin.
     pub from_file: bool,
-    /// The declared field type, used to type-annotate the wire default so a
-    /// bare `None` or `BTreeMap::new()` still infers.
-    pub ty: syn::Type,
 }
 
 impl Operand {
@@ -139,7 +136,6 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
         short: None,
         skip_cli: false,
         from_file: false,
-        ty: field.ty.clone(),
         name,
         ident,
     };
@@ -201,6 +197,18 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
     }
 
     Ok(operand)
+}
+
+/// The outermost type constructor's name, as written.
+///
+/// Syntactic like [`classify`], and used for the same reason: to decide whether
+/// a field has a meaningful empty value (`None`, `[]`, `false`) that a caller
+/// may leave out.
+pub fn outer_ident(ty: &Type) -> Option<String> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    Some(path.path.segments.last()?.ident.to_string())
 }
 
 /// Classify a field's type by its surface tokens.

@@ -43,7 +43,7 @@ pub mod create {
         pub slack: Option<SlackThreadRef>,
         /// The session to launch.
         #[operand(json)]
-        pub session: CreateReq,
+        pub session: crate::operations::sessions::launch::Input,
     }
 
     pub type Output = RunView;

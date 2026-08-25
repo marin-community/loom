@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use serde_json::json;
-use weaver_api::{CreateReq, LaunchOverrides, LaunchSelection, ResolvedLaunchView};
+use weaver_api::{LaunchOverrides, LaunchSelection, ResolvedLaunchView};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance};
 use weaver_core::tags;
@@ -15,6 +15,7 @@ use crate::runtime::{configure_session_github_auth, layer_launch_environment, se
 use crate::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
+use weaver_api::operations::sessions;
 
 #[derive(Debug)]
 pub enum ProvisionError {
@@ -392,7 +393,7 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
-fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
+fn legacy_launch_selection(req: &sessions::launch::Input) -> LaunchSelection {
     let nonempty = |value: &Option<String>| {
         value
             .as_ref()
@@ -416,7 +417,7 @@ fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
     }
 }
 
-fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
+fn create_selection(req: &sessions::launch::Input) -> Result<LaunchSelection> {
     let Some(selection) = &req.selection else {
         return Ok(legacy_launch_selection(req));
     };
@@ -448,11 +449,19 @@ fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
 /// An `async fn` body is emitted where it is awaited, and since every caller
 /// is itself `async fn`, the whole chain would otherwise bubble into the root
 /// `loom` crate — inflating LLVM IR on every rebuild.
-pub fn create(st: AppState, req: CreateReq, actor: Actor) -> BoxFut<'static, Result<Provisioned>> {
+pub fn create(
+    st: AppState,
+    req: sessions::launch::Input,
+    actor: Actor,
+) -> BoxFut<'static, Result<Provisioned>> {
     Box::pin(create_inner(st, req, actor))
 }
 
-async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
+async fn create_inner(
+    st: AppState,
+    req: sessions::launch::Input,
+    actor: Actor,
+) -> Result<Provisioned> {
     let created_by = actor.display_creator();
     let origin = actor.origin();
     tracing::info!(
@@ -1523,7 +1532,7 @@ mod tests {
 
     #[test]
     fn legacy_create_preserves_explicit_agent_default_selectors() {
-        let req = CreateReq {
+        let req = sessions::launch::Input {
             profile: Some(" template ".to_string()),
             agent: Some(" ".to_string()),
             model: Some(" ".to_string()),
