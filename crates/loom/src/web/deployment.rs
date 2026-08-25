@@ -1,17 +1,21 @@
 use std::collections::BTreeSet;
 
 use weaver_api::operations::deployment::reconcile;
-use weaver_api::{DeploymentReq, DeploymentView};
+use weaver_api::DeploymentView;
 
 use crate::config;
 
 use super::operations::{register, Bound, OperationContext};
 use super::{profiles, ApiResult, AppError, AppState};
+use weaver_api::operations::deployment;
 
 /// Reconcile the runtime resources declared by a deployment stack. This is the
 /// API-first boundary Pulumi's startup generation calls through the local Loom
 /// CLI; the manifest contains references and policy, never secret values.
-async fn reconcile_deployment_core(st: &AppState, req: DeploymentReq) -> ApiResult<DeploymentView> {
+async fn reconcile_deployment_core(
+    st: &AppState,
+    req: deployment::reconcile::Input,
+) -> ApiResult<DeploymentView> {
     let mut setting_values = Vec::with_capacity(req.settings.len());
     for (key, declared) in &req.settings {
         if config::spec(key).is_none() {
@@ -165,13 +169,7 @@ pub(super) async fn reconcile_deployment_operation(
     context: OperationContext,
     input: reconcile::Input,
 ) -> ApiResult<DeploymentView> {
-    let req = DeploymentReq {
-        settings: input.settings,
-        profiles: input.profiles,
-        federations: input.federations,
-        prune: input.prune,
-    };
-    reconcile_deployment_core(&context.state, req).await
+    reconcile_deployment_core(&context.state, input).await
 }
 
 // ---------------------------------------------------------------------------

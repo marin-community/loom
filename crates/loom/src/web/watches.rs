@@ -3,10 +3,7 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
-use weaver_api::{
-    CreateWatchReq, PatchWatchReq, ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView,
-    WatchView,
-};
+use weaver_api::{ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchView};
 use weaver_core::watch::{self as watch_store, Watch};
 
 use crate::agent;
@@ -123,7 +120,10 @@ pub(super) async fn list_watches_operation(
     list_watches_core(&context.state).await
 }
 
-async fn create_watch_core(st: &AppState, req: CreateWatchReq) -> ApiResult<WatchView> {
+async fn create_watch_core(
+    st: &AppState,
+    req: watches_operations::create::Input,
+) -> ApiResult<WatchView> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("name must not be empty"));
@@ -184,20 +184,7 @@ pub(super) async fn create_watch_operation(
     context: OperationContext,
     input: watches_operations::create::Input,
 ) -> ApiResult<WatchView> {
-    let req = CreateWatchReq {
-        name: input.name,
-        trigger: input.trigger,
-        scope: input.scope,
-        program: input.program,
-        params: input.params,
-        capabilities: input.capabilities,
-        profile: input.profile,
-        model: input.model,
-        effort: input.effort,
-        cooldown_secs: input.cooldown_secs,
-        enabled: input.enabled,
-    };
-    create_watch_core(&context.state, req).await
+    create_watch_core(&context.state, input).await
 }
 
 /// The program's default trigger (a builtin's suggested manifest), used as the
@@ -233,7 +220,11 @@ pub(super) async fn get_watch_operation(
     get_watch_core(&context.state, &input.key).await
 }
 
-async fn patch_watch_core(st: &AppState, key: &str, req: PatchWatchReq) -> ApiResult<WatchView> {
+async fn patch_watch_core(
+    st: &AppState,
+    req: watches_operations::update::Input,
+) -> ApiResult<WatchView> {
+    let key = req.key.as_str();
     let o = require_watch(&st.db, key).await?;
 
     if let Some(program) = &req.program {
@@ -285,19 +276,7 @@ pub(super) async fn update_watch_operation(
     context: OperationContext,
     input: watches_operations::update::Input,
 ) -> ApiResult<WatchView> {
-    let req = PatchWatchReq {
-        enabled: input.enabled,
-        trigger: input.trigger,
-        scope: input.scope,
-        program: input.program,
-        params: input.params,
-        capabilities: input.capabilities,
-        profile: input.profile,
-        model: input.model,
-        effort: input.effort,
-        cooldown_secs: input.cooldown_secs,
-    };
-    patch_watch_core(&context.state, &input.key, req).await
+    patch_watch_core(&context.state, input).await
 }
 
 async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteResult> {

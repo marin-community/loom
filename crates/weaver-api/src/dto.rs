@@ -960,30 +960,6 @@ pub struct ResolvedLaunchView {
     pub errors: Vec<String>,
 }
 
-/// Body for `profiles.clone`. Creation is insert-only and
-/// atomic; the caller may submit the fully edited proposed template.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CloneProfileReq {
-    pub name: String,
-    pub expected_profile_revision: i64,
-    /// Resolver fingerprint from the composition the caller reviewed. A custom
-    /// agent/MCP/policy-default drift returns 409 with a fresh preview.
-    pub expected_resolver_revision: String,
-    #[serde(default)]
-    pub overrides: LaunchOverrides,
-    /// Optional editable template proposal. When present, policy/lifecycle/MCP
-    /// fields are validated as submitted while source revision and environment
-    /// copy remain server-owned and atomic.
-    #[serde(default)]
-    pub template: Option<ProfileReq>,
-    #[serde(default)]
-    pub copy_environment: bool,
-    /// Editable write-only environment composition. Omission uses the
-    /// `copy_environment` field for backward compatibility.
-    #[serde(default)]
-    pub environment: Option<CloneProfileEnvironmentReq>,
-}
-
 /// Atomic environment composition for a cloned profile. Inherited values are
 /// copied server-side; literal values and secret references are write-only.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2723,63 +2699,6 @@ pub struct AgentEnvVarView {
     pub name: String,
     pub value: String,
     pub updated_at: String,
-}
-
-/// Body for `POST /api/watches`. JSON-bearing fields take structured JSON
-/// (`trigger`/`scope`/`params`), which the server serializes into the stored
-/// text columns. Optional fields fall back to the model's defaults.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateWatchReq {
-    pub name: String,
-    #[serde(default)]
-    pub trigger: Option<Value>,
-    #[serde(default)]
-    pub scope: Option<Value>,
-    #[serde(default)]
-    pub program: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub cooldown_secs: Option<i64>,
-    /// Whether the watch fires as soon as it is created. Omitted by API
-    /// clients that want the model default (disabled); the loom UI sends `true`
-    /// so a watcher picked from the builtin registry is live without a separate
-    /// manual enable.
-    #[serde(default)]
-    pub enabled: Option<bool>,
-}
-
-/// Body for `PATCH /api/watches/{id}`: every mutable field optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PatchWatchReq {
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub trigger: Option<Value>,
-    #[serde(default)]
-    pub scope: Option<Value>,
-    #[serde(default)]
-    pub program: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub cooldown_secs: Option<i64>,
 }
 
 /// Body for `POST /api/watches/{id}/run`.

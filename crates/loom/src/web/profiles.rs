@@ -1,8 +1,8 @@
 use axum::http::StatusCode;
 use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
-    CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView,
-    ProfileDeleteResult, ProfileEnvView, ProfileReq, ProfileView,
+    EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileDeleteResult,
+    ProfileEnvView, ProfileReq, ProfileView,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -269,17 +269,8 @@ pub(super) async fn clone_profile_operation(
     input: profiles_operations::clone::Input,
 ) -> ApiResult<ProfileView> {
     let source_name = input.source;
-    let req = CloneProfileReq {
-        name: input.name,
-        expected_profile_revision: input.expected_profile_revision,
-        expected_resolver_revision: input.expected_resolver_revision,
-        overrides: input.overrides,
-        template: input.template,
-        copy_environment: input.copy_environment,
-        environment: input.environment,
-    };
     let st = &context.state;
-    let target_name = req.name.trim().to_string();
+    let target_name = input.name.trim().to_string();
     let _permits = st
         .launch_gate
         .acquire_profiles([source_name.as_str(), target_name.as_str()])
@@ -290,13 +281,13 @@ pub(super) async fn clone_profile_operation(
     let source = profile::get(&st.db, &source_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    if source.revision != req.expected_profile_revision {
+    if source.revision != input.expected_profile_revision {
         let current = view(st, source).await?;
         let fresh = super::launches::resolve_launch(
             st,
             &LaunchSelection {
                 profile: source_name.clone(),
-                overrides: req.overrides.clone(),
+                overrides: input.overrides.clone(),
             },
             &crate::launch::ResolveOptions {
                 ignore_capacity: true,
@@ -306,7 +297,7 @@ pub(super) async fn clone_profile_operation(
         .await?;
         return Err(AppError::conflict(format!(
             "profile '{source_name}' changed from revision {} to revision {}",
-            req.expected_profile_revision, current.revision
+            input.expected_profile_revision, current.revision
         ))
         .with_fields(serde_json::json!({
             "profile": current,
@@ -328,7 +319,7 @@ pub(super) async fn clone_profile_operation(
         st,
         &LaunchSelection {
             profile: source_name.clone(),
-            overrides: req.overrides.clone(),
+            overrides: input.overrides.clone(),
         },
         &crate::launch::ResolveOptions {
             ignore_capacity: true,
@@ -345,7 +336,7 @@ pub(super) async fn clone_profile_operation(
             )));
         }
     };
-    if resolved.view.resolver_revision != req.expected_resolver_revision {
+    if resolved.view.resolver_revision != input.expected_resolver_revision {
         return Err(AppError::conflict(
             "profile resolver changed after preview; review the fresh resolution",
         )
@@ -357,8 +348,8 @@ pub(super) async fn clone_profile_operation(
                 .with_fields(serde_json::json!({ "preview": resolved.view })),
         );
     }
-    let has_template = req.template.is_some();
-    let mut cloned = match req.template {
+    let has_template = input.template.is_some();
+    let mut cloned = match input.template {
         Some(template) => self::input(template, target_name.clone()),
         None => source
             .as_input()
@@ -381,16 +372,16 @@ pub(super) async fn clone_profile_operation(
     let prepared = profile::prepare_input(&st.db, &cloned)
         .await
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let environment = req
+    let environment = input
         .environment
         .unwrap_or_else(|| weaver_api::CloneProfileEnvironmentReq {
-            inherit: req.copy_environment,
+            inherit: input.copy_environment,
             ..Default::default()
         });
     match profile::create_clone_prepared(
         &st.db,
         &source_name,
-        req.expected_profile_revision,
+        input.expected_profile_revision,
         prepared,
         &environment,
     )
@@ -404,7 +395,7 @@ pub(super) async fn clone_profile_operation(
                 st,
                 &LaunchSelection {
                     profile: source_name.clone(),
-                    overrides: req.overrides,
+                    overrides: input.overrides,
                 },
                 &crate::launch::ResolveOptions {
                     ignore_capacity: true,
@@ -414,7 +405,7 @@ pub(super) async fn clone_profile_operation(
             .await?;
             Err(AppError::conflict(format!(
                 "profile '{source_name}' changed from revision {} to revision {}",
-                req.expected_profile_revision, current.revision
+                input.expected_profile_revision, current.revision
             ))
             .with_fields(serde_json::json!({
                 "profile": current,
