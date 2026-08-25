@@ -15,17 +15,15 @@ use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
     AutomationTokenReq, AutomationTokenView, BranchView, ChannelBindingView, ChannelMessageView,
     ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
-    CreateChannelReq, CreateReq, CreateReviewReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
-    CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView,
-    DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq, FederationReq, FederationView,
-    GithubTokenView, HandoffReq, HistoryPageView, IssueView, McpRegistryView, MoveSessionsReq,
-    PatchIssueReq, PatchSessionReq, PatchWatchReq, PermissionRequestView, ProfileReq, ProfileView,
-    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ResumptionCueView, ReviewCommentDto,
-    ReviewDto, ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView,
-    SearchSessionsOptions, SelfContextView, SendReq, SessionCatchupView, SessionGithubAccessView,
-    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq,
-    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, ThreadDto, TokenView,
-    UpdateReviewCommentReq, UpdateReviewReq, WatchView,
+    CreateChannelReq, CreateReq, CreateReviewReq, CreateTokenReq, CreatedTokenView, CustomMcpReq,
+    CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView, DiagnosticsView,
+    EffectiveProfileView, FederationReq, FederationView, GithubTokenView, HandoffReq,
+    McpRegistryView, MoveSessionsReq, PermissionRequestView, ProfileReq, ProfileView,
+    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ReviewCommentDto, ReviewDto,
+    ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions,
+    SelfContextView, SendReq, SessionGithubAccessView, SessionLayoutView,
+    SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq, SettingsEnvelope,
+    SubmitReviewReq, ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -338,55 +336,6 @@ impl Client {
         .await
     }
 
-    /// Catch-up summary for one session (`sessions.summary.get`).
-    pub async fn session_summary(&self, key: &str) -> Result<SessionCatchupView> {
-        use crate::operations::sessions::summary::get;
-        self.invoke::<get::Op>(&get::Input {
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Page normalized records for one session (`sessions.history.list`).
-    /// `before` is the exclusive opaque cursor returned by the preceding page.
-    pub async fn get_session_history(
-        &self,
-        key: &str,
-        before: Option<&str>,
-        limit: Option<usize>,
-        kinds: &[String],
-    ) -> Result<HistoryPageView> {
-        use crate::operations::sessions::history::list;
-        self.invoke::<list::Op>(&list::Input {
-            before: before.map(str::to_string),
-            limit: limit.map(|l| l as i64),
-            kinds: kinds.to_vec(),
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Case-insensitive literal search over one session's normalized records
-    /// (`sessions.history.search`).
-    pub async fn search_session_history(
-        &self,
-        key: &str,
-        search: &str,
-        before: Option<&str>,
-        limit: Option<usize>,
-        kinds: &[String],
-    ) -> Result<HistoryPageView> {
-        use crate::operations::sessions::history::search;
-        self.invoke::<search::Op>(&search::Input {
-            q: search.to_string(),
-            before: before.map(str::to_string),
-            limit: limit.map(|l| l as i64),
-            kinds: kinds.to_vec(),
-            session: key.to_string(),
-        })
-        .await
-    }
-
     /// Launch a new session (`sessions.launch`).
     pub async fn create_session(&self, req: &CreateReq) -> Result<SessionView> {
         use crate::operations::sessions::launch;
@@ -446,71 +395,6 @@ impl Client {
         .await
     }
 
-    /// Patch a session's lifecycle / branch fields (`sessions.update`).
-    ///
-    /// `PatchSessionReq`'s `park`/`sort_order` are not forwarded to the operation.
-    pub async fn patch_session(&self, key: &str, req: &PatchSessionReq) -> Result<SessionView> {
-        use crate::operations::sessions::update;
-        self.invoke::<update::Op>(&update::Input {
-            status: req.status.clone(),
-            title: req.title.clone(),
-            expected_title: req.expected_title.clone(),
-            expected_title_provenance: req.expected_title_provenance.clone(),
-            goal: req.goal.clone(),
-            description: req.description.clone(),
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Regenerate a session's title now, bypassing the confidence guard
-    /// (`sessions.title.regenerate`).
-    pub async fn regenerate_session_title(&self, key: &str) -> Result<SessionView> {
-        use crate::operations::sessions::title::regenerate;
-        self.invoke::<regenerate::Op>(&regenerate::Input {
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Toggle automatic title generation (`sessions.title.generation.set`).
-    pub async fn set_session_title_generation(
-        &self,
-        key: &str,
-        req: &SetTitleGenerationReq,
-    ) -> Result<SessionView> {
-        use crate::operations::sessions::title::generation::set;
-        self.invoke::<set::Op>(&set::Input {
-            enabled: req.enabled,
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// The session's current resumption cue (`sessions.resumption_cue.get`).
-    pub async fn get_resumption_cue(&self, key: &str) -> Result<ResumptionCueView> {
-        use crate::operations::sessions::resumption_cue::get;
-        self.invoke::<get::Op>(&get::Input {
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Generate the resumption cue if it is missing or stale
-    /// (`sessions.resumption_cue.ensure`).
-    pub async fn ensure_resumption_cue(
-        &self,
-        key: &str,
-        req: &EnsureResumptionCueReq,
-    ) -> Result<ResumptionCueView> {
-        use crate::operations::sessions::resumption_cue::ensure;
-        self.invoke::<ensure::Op>(&ensure::Input {
-            force: req.force,
-            session: key.to_string(),
-        })
-        .await
-    }
-
     /// Replace the provider behind a live ACP session while preserving the
     /// loom session, worktree, branch, and canonical journal (`sessions.handoff`).
     pub async fn handoff_session(&self, key: &str, req: &HandoffReq) -> Result<SessionView> {
@@ -552,22 +436,6 @@ impl Client {
         })
         .await?;
         self.get_session(key).await
-    }
-
-    /// Atomically replace every tag authored by `by` on a session. Exact
-    /// `(key, value)` entries in `clear` are removed in the same transaction.
-    ///
-    /// `sessions.tags.replace`. Per-key `set`/`delete` calls lose atomicity and
-    /// the ability to explicitly remove tags, both required by the status watch.
-    pub async fn set_tags(&self, key: &str, req: &SetTagsReq) -> Result<SessionView> {
-        use crate::operations::sessions::tags::replace;
-        self.invoke::<replace::Op>(&replace::Input {
-            tags: req.tags.clone(),
-            clear: req.clear.clone(),
-            by: req.by.clone(),
-            session: key.to_string(),
-        })
-        .await
     }
 
     /// Clear a tag on a session (`sessions.tags.delete`) — how a loud axis
@@ -1180,17 +1048,6 @@ impl Client {
         .await
     }
 
-    /// Compatibility alias for [`Self::set_review_comment_resolution`].
-    pub async fn resolve_review_comment(
-        &self,
-        review_id: i64,
-        comment_id: i64,
-        resolved: bool,
-    ) -> Result<ReviewCommentDto> {
-        self.set_review_comment_resolution(review_id, comment_id, resolved)
-            .await
-    }
-
     pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
         use crate::operations::reviews::retry_delivery;
         self.invoke::<retry_delivery::Op>(&retry_delivery::Input { id: review_id })
@@ -1198,34 +1055,6 @@ impl Client {
     }
 
     // -- Issues ---------------------------------------------------------------
-
-    /// Patch a work item's title/body/status/GitHub mapping (`issues.update`).
-    ///
-    /// `PatchIssueReq::claimed_branch` had exactly one legal value — `null`,
-    /// meaning "return this to the backlog" — which the operation spells as the
-    /// `unclaim` operand. Naming a branch is still rejected: a claim is made by
-    /// launching a session against the item.
-    pub async fn patch_issue(&self, id: i64, req: &PatchIssueReq) -> Result<IssueView> {
-        use crate::operations::issues::update;
-        if req
-            .claimed_branch
-            .as_ref()
-            .and_then(|branch| branch.as_deref())
-            .is_some_and(|branch| !branch.trim().is_empty())
-        {
-            bail!("claimed_branch can only be cleared; launch a session to claim an issue");
-        }
-        self.invoke::<update::Op>(&update::Input {
-            id,
-            title: req.title.clone(),
-            body: req.body.clone(),
-            status: req.status.clone(),
-            github: req.github.clone(),
-            unclaim: req.claimed_branch.is_some(),
-            repo_root: String::new(),
-        })
-        .await
-    }
 
     // -- Settings -------------------------------------------------------------
 
@@ -1337,34 +1166,6 @@ impl Client {
         .await
     }
 
-    pub async fn put_profile(&self, name: &str, req: &ProfileReq) -> Result<ProfileView> {
-        use crate::operations::profiles::update;
-        self.invoke::<update::Op>(&update::Input {
-            name: name.to_string(),
-            description: req.description.clone(),
-            agent_kind: req.agent_kind.clone(),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            protocol: req.protocol.clone(),
-            mode: req.mode.clone(),
-            class: req.class.clone(),
-            strict: req.strict,
-            env_clear: req.env_clear,
-            ambient_allowlist: req.ambient_allowlist.clone(),
-            idle_archive_secs: req.idle_archive_secs,
-            max_concurrent: req.max_concurrent,
-            turn_budget: req.turn_budget,
-            prelude: req.prelude.clone(),
-            instructions: req.instructions.clone(),
-            restricted: req.restricted,
-            github_repositories: req.github_repositories.clone(),
-            runtime_permissions: req.runtime_permissions.clone(),
-            mcp_access: req.mcp_access.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
     /// Clone one profile's policy on the server, optionally copying its
     /// write-only environment in the same transaction (`profiles.clone`).
     pub async fn clone_profile(&self, source: &str, req: &CloneProfileReq) -> Result<ProfileView> {
@@ -1463,70 +1264,6 @@ impl Client {
     }
 
     // -- Watches ------------------------------------------------------
-
-    /// List every watch (`watches.list`).
-    pub async fn list_watches(&self) -> Result<Vec<WatchView>> {
-        use crate::operations::watches::list;
-        self.invoke::<list::Op>(&list::Input {}).await
-    }
-
-    /// Get one watch by id or name (`watches.get`).
-    pub async fn get_watch(&self, key: &str) -> Result<WatchView> {
-        use crate::operations::watches::get;
-        self.invoke::<get::Op>(&get::Input {
-            key: key.to_string(),
-        })
-        .await
-    }
-
-    /// Register a watch (`watches.create`).
-    pub async fn create_watch(&self, req: &CreateWatchReq) -> Result<WatchView> {
-        use crate::operations::watches::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: req.name.clone(),
-            trigger: req.trigger.clone(),
-            scope: req.scope.clone(),
-            program: req.program.clone(),
-            params: req.params.clone(),
-            capabilities: req.capabilities.clone(),
-            profile: req.profile.clone(),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            cooldown_secs: req.cooldown_secs,
-            enabled: req.enabled,
-        })
-        .await
-    }
-
-    /// Patch a watch (`watches.update`).
-    pub async fn patch_watch(&self, key: &str, req: &PatchWatchReq) -> Result<WatchView> {
-        use crate::operations::watches::update;
-        self.invoke::<update::Op>(&update::Input {
-            key: key.to_string(),
-            enabled: req.enabled,
-            trigger: req.trigger.clone(),
-            scope: req.scope.clone(),
-            program: req.program.clone(),
-            params: req.params.clone(),
-            capabilities: req.capabilities.clone(),
-            profile: req.profile.clone(),
-            model: req.model.clone(),
-            effort: req.effort.clone(),
-            cooldown_secs: req.cooldown_secs,
-        })
-        .await
-    }
-
-    /// Delete a watch (`watches.delete`).
-    pub async fn delete_watch(&self, key: &str) -> Result<Value> {
-        use crate::operations::watches::delete;
-        let result = self
-            .invoke::<delete::Op>(&delete::Input {
-                key: key.to_string(),
-            })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
 
     /// Fire a round now and return the raw `{run_id, outcome, summary}`
     /// (`watches.run`).

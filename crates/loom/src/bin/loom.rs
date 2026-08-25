@@ -1587,7 +1587,7 @@ enum ProfileEnvCmd {
 }
 
 /// Options for `loom watch add` — the flags build the trigger / scope /
-/// program / capability set the REST `CreateWatchReq` takes.
+/// program / capability set the `watches.create` operation takes.
 #[derive(Args)]
 struct AddOpts {
     /// The watch name (unique).

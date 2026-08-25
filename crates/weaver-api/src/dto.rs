@@ -1115,20 +1115,6 @@ pub struct PermissionRequestView {
     pub decision_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreatePermissionRequestReq {
-    /// Currently `github_repository`.
-    pub kind: String,
-    pub repository: String,
-    #[serde(default = "default_permission_request_mode")]
-    pub mode: String,
-    pub reason: String,
-}
-
-fn default_permission_request_mode() -> String {
-    "write".to_string()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DecidePermissionRequestReq {
     /// `approve` or `deny`.
@@ -1145,16 +1131,6 @@ pub struct EffectivePermissionsView {
     pub operations: Vec<String>,
     pub github_repositories: Vec<String>,
     pub pending_requests: Vec<PermissionRequestView>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PutProfileEnvReq {
-    /// A write-only literal. Exactly one of `value` and `secret_ref` is required.
-    #[serde(default)]
-    pub value: Option<String>,
-    /// A GCP Secret Manager version resource, resolved only at launch/respawn.
-    #[serde(default)]
-    pub secret_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1230,14 +1206,6 @@ pub struct FederationView {
     pub updated_at: String,
 }
 
-/// One named profile and its authoritative write-only environment declaration.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DeploymentProfileReq {
-    pub profile: ProfileReq,
-    #[serde(default)]
-    pub env: Vec<DeploymentProfileEnvReq>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentProfileEnvReq {
     pub name: String,
@@ -1246,6 +1214,14 @@ pub struct DeploymentProfileEnvReq {
     pub value: Option<String>,
     #[serde(default)]
     pub secret_ref: Option<String>,
+}
+
+/// One named profile and its authoritative write-only environment declaration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DeploymentProfileReq {
+    pub profile: ProfileReq,
+    #[serde(default)]
+    pub env: Vec<DeploymentProfileEnvReq>,
 }
 
 /// A scalar setting value in a JSON or YAML deployment manifest.
@@ -1327,15 +1303,6 @@ pub struct RunReq {
     #[serde(default)]
     pub slack: Option<SlackThreadRef>,
     pub session: CreateReq,
-}
-
-/// One invocation of Loom's fixed, session-scoped GitHub tool surface.
-/// `arguments` is validated against the named tool by the server; the generic
-/// envelope keeps MCP transport details out of the REST contract.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RestrictedGithubToolReq {
-    #[serde(default)]
-    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1554,13 +1521,6 @@ pub enum IssueAction {
         key: String,
     },
     Delete,
-}
-
-/// Body for `POST /api/issues/actions`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct IssueActionsReq {
-    pub ids: Vec<i64>,
-    pub action: IssueAction,
 }
 
 /// One ID or precondition reported in an atomic action error's `details`.
@@ -1930,17 +1890,6 @@ pub struct UpdateReviewReq {
     pub summary: Option<String>,
     #[serde(default)]
     pub subject_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedReviewRevisionReq {
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ResolveReviewCommentReq {
-    pub resolved: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -2402,27 +2351,6 @@ fn default_channel_urgency() -> String {
     CHANNEL_DEFAULT_URGENCY.to_string()
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetChannelSubscriptionReq {
-    #[serde(default = "default_channel_subscription_mode")]
-    pub mode: String,
-    /// Optional descendant session to subscribe. Omission updates the caller's
-    /// own subscription; admin callers may name any session.
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-fn default_channel_subscription_mode() -> String {
-    CHANNEL_DEFAULT_SUBSCRIPTION_MODE.to_string()
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetChannelReadMarkerReq {
-    /// Omission advances through the latest message in the response snapshot.
-    #[serde(default)]
-    pub seq: Option<i64>,
-}
-
 // ---------------------------------------------------------------------------
 // Request payloads
 // ---------------------------------------------------------------------------
@@ -2554,49 +2482,6 @@ pub struct HandoffReq {
     pub expected_resolver_revision: Option<String>,
 }
 
-/// Body for `PATCH /api/sessions/{id}`. Branch-level fields (goal/title/
-/// description) are forwarded to the underlying branch row. The attention *level*
-/// is set through the tags endpoints (`PUT/DELETE /sessions/{id}/tags/{key}`),
-/// not here.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PatchSessionReq {
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Required with `title`: the label/provenance the caller observed.
-    #[serde(default)]
-    pub expected_title: Option<String>,
-    #[serde(default)]
-    pub expected_title_provenance: Option<String>,
-    #[serde(default)]
-    pub goal: Option<String>,
-    /// The agent's current-state message — the prose shown beside the level.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Retained only to return an explicit compatibility error. Layout clients
-    /// must use the revisioned session-layout move API.
-    #[serde(default)]
-    pub park: Option<String>,
-    /// Retained only to return an explicit compatibility error. Layout clients
-    /// must use the revisioned session-layout move API.
-    #[serde(default)]
-    pub sort_order: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetTitleGenerationReq {
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct EnsureResumptionCueReq {
-    /// Explicit user request. False is the on-return path and respects the
-    /// configured inactivity threshold.
-    #[serde(default)]
-    pub force: bool,
-}
-
 // Reorder one space, or one group (optionally into another space).
 wire_enum!(SessionLayoutItemKind {
     Space => "space",
@@ -2626,21 +2511,6 @@ wire_enum!(SessionPlacementSelectorKind {
     Watch => "watch",
 });
 
-/// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`
-/// is the path segment; this carries the rest. For a loud key (`attention` |
-/// `triage`) `value` is `attention` | `blocked`. To return to calm, `DELETE` the tag.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct TagReq {
-    pub value: String,
-    /// One-line reason accompanying the tag.
-    #[serde(default)]
-    pub note: String,
-    /// Who is setting it (a watch name or `manual`); the server defaults a
-    /// missing author.
-    #[serde(default)]
-    pub by: Option<String>,
-}
-
 /// One desired tag in `PUT /api/sessions/{id}/tags`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagInput {
@@ -2656,20 +2526,6 @@ pub struct TagInput {
 pub struct TagMatch {
     pub key: String,
     pub value: String,
-}
-
-/// Body for `PUT /api/sessions/{id}/tags`: atomically replace the tags authored
-/// by `by` with `tags`. `clear` is reserved for exact-match lifecycle marks such
-/// as `idle: idle` that the caller is explicitly replacing too.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetTagsReq {
-    #[serde(default)]
-    pub tags: Vec<TagInput>,
-    #[serde(default)]
-    pub clear: Vec<TagMatch>,
-    /// The author whose existing tag set is replaced. Defaults to `manual`.
-    #[serde(default)]
-    pub by: Option<String>,
 }
 
 /// Body for `POST /api/sessions/{id}/send`: type a message into the agent pane.
@@ -2730,95 +2586,6 @@ pub struct SessionPreviewResult {
     pub screen: String,
 }
 
-/// Body for `POST /api/agent/oneshot`: run a fresh ACP prompt through a
-/// registered agent and return its text as `{output}` (`null` when the adapter
-/// is absent or fails — callers degrade gracefully).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AgentOneshotReq {
-    pub prompt: String,
-    /// Optional launch profile. When set, its runtime and policy are
-    /// authoritative; model and effort remain optional per-call overrides.
-    #[serde(default)]
-    pub profile: String,
-    /// Registered ACP runtime. Empty preserves the historical Claude default.
-    #[serde(default)]
-    pub agent: String,
-    /// Model override advertised by the runtime; empty keeps its ACP default.
-    #[serde(default)]
-    pub model: String,
-    /// Reasoning effort override advertised by the runtime; empty keeps its
-    /// ACP default.
-    #[serde(default)]
-    pub effort: String,
-}
-
-/// Issue fields nested in the input to `POST /api/issues/create`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateIssueReq {
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    #[serde(default)]
-    pub tags: Vec<IssueTagInput>,
-}
-
-/// Body for `PATCH /api/issues/{id}`: every mutable field optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct PatchIssueReq {
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    /// "open" or "closed".
-    #[serde(default)]
-    pub status: Option<String>,
-    /// GitHub issue mapping as `owner/name#number`. An empty string clears the
-    /// mapping; absent leaves it unchanged.
-    #[serde(default)]
-    pub github: Option<String>,
-    /// The branch currently working the issue. `null` clears the claim; absent
-    /// leaves it unchanged. Claims are created through session launch, so this
-    /// patch field deliberately supports clearing only.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_present_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub claimed_branch: Option<Option<String>>,
-}
-
-/// Preserve the PATCH distinction between an absent field and an explicit
-/// JSON `null`: serde's ordinary `Option<Option<T>>` handling maps both to the
-/// outer `None`.
-fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Ok(Some(Option::<T>::deserialize(deserializer)?))
-}
-
-/// Body for `POST /api/issues/backlog/create`: create an unclaimed repo-level
-/// backlog item.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateRepoIssueReq {
-    pub repo_root: String,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    /// The branch that filed this backlog item (provenance) — `None` for a
-    /// bare API call with no originating branch. When set and it resolves to
-    /// a live branch in this repo, an `issue_added` event is recorded there.
-    #[serde(default)]
-    pub source_branch: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<IssueTagInput>,
-}
-
 /// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
 /// a new revision (`author: user`). `title`/`kind` update the envelope; omit
 /// them to keep the current values.
@@ -2858,26 +2625,6 @@ pub struct ArtifactUpsertReq {
     /// the revision the caller edited. `None` preserves force-write behavior.
     #[serde(default)]
     pub base_rev: Option<i64>,
-}
-
-/// Body for `POST /api/branches/{id}/status`: set the agent's attention level
-/// and current-state message in one call. `level` is `ok` | `attention` |
-/// `blocked`; an absent or empty `message` leaves the previous one in place.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct BranchStatusReq {
-    pub level: String,
-    #[serde(default)]
-    pub message: Option<String>,
-}
-
-/// Body for `POST /api/branches/{id}/events`: append a raw event row (e.g. an
-/// agent hook). The one escape hatch for an event kind with no dedicated
-/// mutating route of its own.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateEventReq {
-    pub kind: String,
-    #[serde(default)]
-    pub data: Value,
 }
 
 wire_enum!(SettingKind {
@@ -3234,10 +2981,6 @@ wire_enum!(UserRole {
     User => "user",
 });
 
-fn default_user_role() -> UserRole {
-    UserRole::User
-}
-
 /// Which sign-in methods the server currently offers — what the login screen
 /// renders. `password` is always available (any user can be given one);
 /// `github` is true only once an OAuth app is configured.
@@ -3303,12 +3046,6 @@ pub struct LoginReq {
     pub password: String,
 }
 
-/// Body for `POST /api/auth/password` — set/change the caller's own password.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetPasswordReq {
-    pub new_password: String,
-}
-
 /// One approved operator (`GET /api/auth/users`). The password hash is never
 /// exposed — only whether one is set.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -3318,24 +3055,6 @@ pub struct UserView {
     pub has_password: bool,
     pub role: UserRole,
     pub created_at: String,
-}
-
-/// Body for `POST /api/auth/users` — approve a new operator.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct AddUserReq {
-    pub username: String,
-    #[serde(default)]
-    pub github_login: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default = "default_user_role")]
-    pub role: UserRole,
-}
-
-/// Body for `PUT /api/auth/users/{username}/role`.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetUserRoleReq {
-    pub role: UserRole,
 }
 
 /// `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret
@@ -3364,15 +3083,6 @@ pub struct GithubConfigView {
     /// `github.com/apps/{slug}` link. Empty when unknown (e.g. a hand-configured
     /// App, or one set up before the slug was recorded).
     pub app_slug: String,
-}
-
-/// Body for `PUT /api/auth/github/config`. The secret is write-only — send it to
-/// set it, omit it to leave the stored one untouched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetGithubConfigReq {
-    pub client_id: String,
-    #[serde(default)]
-    pub client_secret: Option<String>,
 }
 
 /// Whether the caller has a personal GitHub token on file, and when it last
