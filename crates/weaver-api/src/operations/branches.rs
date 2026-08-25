@@ -117,11 +117,13 @@ pub mod slack {
         pub struct Input {
             /// The message text.
             #[operand(positional)]
+            #[schemars(length(min = 1, max = 4000))]
             pub text: String,
             /// Delivered thread to reply in (optional).
             #[operand(json, default = None)]
             pub thread: Option<SlackThreadRef>,
             /// Dedupe key so a retried send doesn't double-post.
+            #[schemars(length(min = 1, max = 255))]
             pub idempotency_key: Option<String>,
             #[operand(context)]
             pub branch: String,
@@ -145,8 +147,9 @@ pub mod status {
         #[operation(id = "branches.status.set", actor = SessionSelf, scope = Branch, risk = Write,
                     grants = ["loom/branches/write@v1"], cli = "branches status set")]
         pub struct Input {
-            /// The attention level: `ok`, `attention`, or `blocked`.
+            /// The attention level.
             #[operand(long = "tag")]
+            #[schemars(extend("enum" = ["ok", "attention", "blocked"]))]
             pub level: String,
             /// The current-state message shown alongside the level. Absent/empty
             /// leaves the previous message in place.

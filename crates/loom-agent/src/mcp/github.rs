@@ -18,7 +18,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-use weaver_api::operations::permissions::github::restricted::invoke;
+use weaver_api::operations::permissions::github::restricted::{self, invoke};
 
 use super::{Adapter, CapabilitySet, ServeFuture};
 
@@ -26,20 +26,17 @@ const SERVER_NAME: &str = "loom_github";
 const COMMENT_TOOL_SET: &str = "mcp/github/comment";
 const COMMENT_TOOL_SET_V1: &str = "mcp/github/comment@v1";
 const LOOM_COMMENT_TOOL_SET_V1: &str = "loom/github/comment@v1";
-pub const BODY_MAX_BYTES: usize = 65_536;
-pub const TITLE_MAX_BYTES: usize = 256;
 const GITHUB_TOOL_NAMES: [&str; 6] = [
-    "issue_view",
-    "issue_comment",
-    "issue_edit",
-    "pr_view",
-    "pr_comment",
-    "pr_edit",
+    restricted::TOOLS[0].name,
+    restricted::TOOLS[1].name,
+    restricted::TOOLS[2].name,
+    restricted::TOOLS[3].name,
+    restricted::TOOLS[4].name,
+    restricted::TOOLS[5].name,
 ];
 
-/// Every tool here is hand-written against one operation whose boundary is
-/// the session's own allow-list rather than a grant, so there is nothing to
-/// export.
+/// Six tool names gated through one operation, so there is no name-to-operation
+/// pair to export.
 fn no_exports() -> &'static [super::dispatch::Export] {
     &[]
 }
@@ -117,63 +114,18 @@ fn serve_boxed() -> ServeFuture {
 }
 
 fn tools() -> Value {
-    let number = json!({ "type": "integer", "minimum": 1 });
-    let body = json!({ "type": "string", "maxLength": BODY_MAX_BYTES });
-    let title = json!({ "type": "string", "minLength": 1, "maxLength": TITLE_MAX_BYTES });
-    json!([
-        {
-            "name": GITHUB_TOOL_NAMES[0],
-            "description": "Read one issue in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number }, "required": ["number"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[1],
-            "description": "Post a comment on one issue in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[2],
-            "description": "Replace an issue body and optionally its title in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body, "title": title },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[3],
-            "description": "Read one pull request in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number }, "required": ["number"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[4],
-            "description": "Post a comment on one pull request in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[5],
-            "description": "Replace a pull-request body and optionally its title in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body, "title": title },
-                "required": ["number", "body"]
-            }
-        }
-    ])
+    Value::Array(
+        restricted::TOOLS
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.summary,
+                    "inputSchema": (tool.schema)(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn result(id: &Value, value: Value) -> Value {

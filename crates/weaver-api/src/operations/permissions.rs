@@ -65,6 +65,101 @@ pub mod github {
     pub mod restricted {
         //! The fixed-target GitHub surface exposed to policy-restricted sessions.
         pub(super) use super::prelude;
+
+        use serde::{Deserialize, Serialize};
+
+        pub const BODY_MAX_BYTES: usize = 65_536;
+        pub const TITLE_MAX_BYTES: usize = 256;
+
+        /// One issue or pull request in the repository fixed to the session.
+        #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct Target {
+            /// The issue or pull-request number.
+            #[schemars(range(min = 1))]
+            pub number: i64,
+        }
+
+        /// A comment to post on one.
+        #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct Comment {
+            /// The issue or pull-request number.
+            #[schemars(range(min = 1))]
+            pub number: i64,
+            /// The comment text.
+            #[schemars(length(max = 65_536))]
+            pub body: String,
+        }
+
+        /// A replacement body for one, optionally retitling it.
+        #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+        pub struct Edit {
+            /// The issue or pull-request number.
+            #[schemars(range(min = 1))]
+            pub number: i64,
+            /// The replacement body.
+            #[schemars(length(max = 65_536))]
+            pub body: String,
+            /// A replacement title. Omit to leave the title alone.
+            #[schemars(length(min = 1, max = 256))]
+            pub title: Option<String>,
+        }
+
+        // The bounds above are schemars literals, which cannot name a constant.
+        const _: () = assert!(BODY_MAX_BYTES == 65_536 && TITLE_MAX_BYTES == 256);
+
+        /// One fixed tool `invoke` serves: the name a transport advertises, what
+        /// it does, and the shape of the `arguments` it takes.
+        ///
+        /// `invoke` takes `arguments` as an opaque object because one operation
+        /// serves all six, so the shapes are declared here rather than by
+        /// whichever transport happens to expose them.
+        pub struct Tool {
+            pub name: &'static str,
+            pub summary: &'static str,
+            pub schema: fn() -> serde_json::Value,
+        }
+
+        fn schema_of<T: schemars::JsonSchema>() -> serde_json::Value {
+            serde_json::to_value(schemars::schema_for!(T))
+                .unwrap_or_else(|_| serde_json::json!({ "type": "object" }))
+        }
+
+        pub const TOOLS: &[Tool] = &[
+            Tool {
+                name: "issue_view",
+                summary: "Read one issue in the GitHub repository fixed to this session.",
+                schema: schema_of::<Target>,
+            },
+            Tool {
+                name: "issue_comment",
+                summary: "Post a comment on one issue in the GitHub repository fixed to \
+                          this session.",
+                schema: schema_of::<Comment>,
+            },
+            Tool {
+                name: "issue_edit",
+                summary: "Replace an issue body and optionally its title in the GitHub \
+                          repository fixed to this session.",
+                schema: schema_of::<Edit>,
+            },
+            Tool {
+                name: "pr_view",
+                summary: "Read one pull request in the GitHub repository fixed to this session.",
+                schema: schema_of::<Target>,
+            },
+            Tool {
+                name: "pr_comment",
+                summary: "Post a comment on one pull request in the GitHub repository fixed \
+                          to this session.",
+                schema: schema_of::<Comment>,
+            },
+            Tool {
+                name: "pr_edit",
+                summary: "Replace a pull-request body and optionally its title in the GitHub \
+                          repository fixed to this session.",
+                schema: schema_of::<Edit>,
+            },
+        ];
         pub mod invoke {
             use super::prelude::*;
 

@@ -481,21 +481,31 @@ pub mod handoff {
 pub mod history {
     //! Normalized, provider-neutral session history.
     pub(super) use super::prelude;
+
+    /// The bounds the operands below advertise. `loom_store::history::page`
+    /// enforces them; the schemars attributes have to spell the numbers as
+    /// literals, so this assertion keeps the two from drifting.
+    pub const MAX_LIMIT: usize = 200;
+    pub const MAX_QUERY_BYTES: usize = 1024;
+    const _: () = assert!(MAX_LIMIT == 200 && MAX_QUERY_BYTES == 1024);
     pub mod list {
         use super::prelude::*;
 
-        /// Page normalized session history records.
+        /// Page this session's normalized records, newest tail first; follow
+        /// `older_cursor` backward for the page before.
         #[operation(id = "sessions.history.list", actor = SessionSelf, scope = Session, risk = Read,
                     grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             /// Page backward from this cursor (exclusive). Omit for the newest tail.
+            #[schemars(length(min = 1))]
             pub before: Option<String>,
-            /// Maximum records to return (1-200).
+            /// Maximum records to return.
+            #[schemars(range(min = 1, max = 200))]
             pub limit: Option<i64>,
-            /// Restrict to these record kinds: `message`, `reasoning`, `tool_call`,
-            /// `tool_result`, `context`, `event`, or `image`.
+            /// Restrict to these record kinds.
             #[serde(default)]
-            pub kinds: Vec<String>,
+            #[schemars(extend("uniqueItems" = true))]
+            pub kinds: Vec<HistoryKind>,
             #[operand(context)]
             pub session: String,
         }
@@ -506,20 +516,24 @@ pub mod history {
     pub mod search {
         use super::prelude::*;
 
-        /// Search normalized session history records.
+        /// Search this session's normalized records for literal text, case
+        /// insensitively, paging the same way `sessions.history.list` does.
         #[operation(id = "sessions.history.search", actor = SessionSelf, scope = Session,
                     risk = Read, grants = ["loom/sessions/read@v1"])]
         pub struct Input {
             /// Case-insensitive literal search text.
+            #[schemars(length(min = 1, max = 1024))]
             pub q: String,
             /// Page backward from this cursor (exclusive). Omit for the newest tail.
+            #[schemars(length(min = 1))]
             pub before: Option<String>,
-            /// Maximum records to return (1-200).
+            /// Maximum records to return.
+            #[schemars(range(min = 1, max = 200))]
             pub limit: Option<i64>,
-            /// Restrict to these record kinds: `message`, `reasoning`, `tool_call`,
-            /// `tool_result`, `context`, `event`, or `image`.
+            /// Restrict to these record kinds.
             #[serde(default)]
-            pub kinds: Vec<String>,
+            #[schemars(extend("uniqueItems" = true))]
+            pub kinds: Vec<HistoryKind>,
             #[operand(context)]
             pub session: String,
         }
@@ -1117,10 +1131,12 @@ pub mod status {
         #[operation(id = "sessions.status.set", actor = SessionSelf, scope = Session, risk = Write,
                     grants = ["loom/sessions/write@v1"], cli = "status set")]
         pub struct Input {
-            /// The attention level: `ok`, `attention`, or `blocked`.
+            /// The attention level.
             #[operand(long = "tag")]
+            #[schemars(extend("enum" = ["ok", "attention", "blocked"]))]
             pub level: String,
             /// The current-state message shown alongside the level.
+            #[schemars(length(max = 4096))]
             pub message: Option<String>,
             #[operand(context)]
             pub session: String,

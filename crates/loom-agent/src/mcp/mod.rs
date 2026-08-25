@@ -865,15 +865,27 @@ mod tests {
     /// set's tools now follow the order its adapter advertises them in, which
     /// is the only order declared anywhere, rather than a second alphabetical
     /// one applied on the way out. Membership is identical in all 23 sets.
+    ///
+    /// Re-pinned again when the last three adapters that hand-wrote their
+    /// `tools/list` stopped. `history`, `messaging`, and `github` each
+    /// advertised bounds their operation did not carry — history's
+    /// `limit`/`kinds`/`q`, status's level enum and message length, slack's
+    /// text length, GitHub's `number`/`body`/`title` shapes — so the schema an
+    /// agent saw was written in the MCP layer while the server enforced the
+    /// same rule elsewhere. The bounds moved onto the operands, `kinds` became
+    /// a `HistoryKind` enum instead of `Vec<String>`, and the six GitHub tool
+    /// shapes are declared next to the operation that serves them. The
+    /// advertised schemas therefore changed in every set containing those
+    /// tools; membership is identical in all 23.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
                 "loom/github/comment@v1",
-                "sha256:acfda8c46064c15a88906ab939379235510067d389173db04b92fff8c63c7775",
+                "sha256:5566e4a295797b020dc93d4849168deca8470a43dd5186c0e0579902d5a99da4",
             ),
             (
                 "mcp/github/comment@v1",
-                "sha256:d18ed893185adb2817f65ee452a570d20342eafbd91a3e8f98450a0814755e78",
+                "sha256:a3e83e7c3a3bc69cdabda0540b5fc31c0398ca24d41f310a225ba1e1117af1de",
             ),
             (
                 "loom/context/read@v1",
@@ -925,31 +937,31 @@ mod tests {
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:953d645382b19e57c4b594d14590c5a8e4cc1b47c8d5ad6d8b264ca3cd756468",
+                "sha256:2049883722e6c8597bd57083a87fa36d6831924f527d2561f8203d31c284de78",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:4da539fad4645d5eb0a1483f88612d23784f3efa4d056bd177b76accd484c5e7",
+                "sha256:b67c485ee11023a78b126889b83b36082bdeb74b0cab3e110e778893d4394e80",
             ),
             (
                 "mcp/session/read@v1",
-                "sha256:bf0540c5743cb3b57128871d5db4af6ae26844d26b91aca06bea9a9afac75ae0",
+                "sha256:72360110714cb5a44e0a2663169a9f727318e5ecfc7eea0c1f03771e53db208e",
             ),
             (
                 "mcp/session/status@v1",
-                "sha256:7f23ff2bd1a1e0c68c7f4e01776b11e5f28e759b55c6bf66c6c1d8b09f9891b2",
+                "sha256:503ab98ee04a494b9f62d6aaee7d80d4efe8769da1eadbcfcff465311d4a6748",
             ),
             (
                 "mcp/history/self@v1",
-                "sha256:74c0cfd56c67e911f8278d214d4be2e7e146bf7f21929ced385c83a7c59db761",
+                "sha256:368060a4f0ed056c8b05da07d5ff549912d135421468669e8b1d006b5e60531f",
             ),
             (
                 "mcp/messaging/status@v1",
-                "sha256:972a36c8e9b973352faf4c8d636b418a28c83f6ce42bc654a44546b24c03368d",
+                "sha256:888b17981c9f2e850b7d289cb3a9f274f006a2d9528a3e681f2c741aa5275bcb",
             ),
             (
                 "mcp/slack/message@v1",
-                "sha256:e138ce624d742cb814a5239cc0711bc58618bb6cffeeeb8eeb15abebb63b3e83",
+                "sha256:d6a87b8d9ef7645ccaa7032b3dbb7cc641724cff7f15a53d30c1e34f7e76a475",
             ),
             (
                 "loom/permissions/read@v1",

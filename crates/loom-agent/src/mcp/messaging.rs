@@ -1,19 +1,7 @@
 //! Built-in session messaging MCP adapter.
-//!
-//! `slack_reply` is the registered `branches.slack.reply` operation
-//! (`mcp = "loom_messaging::slack_reply"`) and routes straight through
-//! `super::dispatch::call_tool`.
-//!
-//! `status_update` is hand-written because the allow-list check
-//! (`super::runtime_tool_allowed`) is keyed by the tool name it receives against
-//! `LOOM_MCP_ALLOWED_TOOLS`. Aliasing to `loom_session::status_set` would check
-//! for a name the allow-list never contains, causing a scoped session to reject
-//! the call. Both schemas are hand-written: `status_update` has no registered
-//! `loom_messaging::*` projection, and `slack_reply`'s `thread` shape and wording
-//! preserve what sessions pinned to `mcp/messaging/status@v1`/`mcp/slack/message@v1` see.
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::Result;
+use serde_json::Value;
 
 use std::sync::OnceLock;
 
@@ -26,9 +14,9 @@ const SERVER_NAME: &str = "loom_messaging";
 
 /// The tools this server exports, in the order it advertises them.
 ///
-/// `status_update` is the same operation as `loom_session::status_set`, served
-/// here under its own name; the handler below is hand-written because reaching
-/// it by name translation would defeat `super::runtime_tool_allowed`.
+/// `status_update` is `loom_session::status_set` under another name. The
+/// dispatcher checks the allow-list against the name it is handed, so serving
+/// it here needs no separate handler.
 fn exports() -> &'static [Export] {
     static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
     EXPORTS.get_or_init(|| {
@@ -100,48 +88,7 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    json!([
-        {
-            "name": "status_update",
-            "description": "Update this session's durable status. Configured GitHub and Slack status cards are updated automatically.",
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "level": { "type": "string", "enum": ["ok", "attention", "blocked"] },
-                    "message": { "type": "string", "maxLength": 4096 }
-                },
-                "required": ["level", "message"]
-            }
-        },
-        {
-            "name": "slack_reply",
-            "description": "Post a message to a Slack thread this session owns. Omit 'thread' for the thread fixed to this session. Pass 'thread' to answer in a thread an automation delivery announced to this session — an alert's own thread, whose channel and thread_ts arrive with the alert.",
-            "inputSchema": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "text": { "type": "string", "minLength": 1, "maxLength": 4000 },
-                    "idempotency_key": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": weaver_api::CHANNEL_IDEMPOTENCY_KEY_MAX_LEN,
-                        "description": "For the session's origin thread, retry safely with the same key."
-                    },
-                    "thread": {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "properties": {
-                            "channel": { "type": "string" },
-                            "thread_ts": { "type": "string" }
-                        },
-                        "required": ["channel", "thread_ts"]
-                    }
-                },
-                "required": ["text"]
-            }
-        }
-    ])
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
@@ -150,55 +97,7 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if super::dispatch::lookup(exports(), name).is_none() {
-        bail!("unknown messaging tool '{name}'");
-    }
-    if !super::runtime_tool_allowed(name) {
-        bail!("messaging tool '{name}' is not allowed by this session");
-    }
-    let client = super::runtime_client("messaging")?;
-    match name {
-        "status_update" => update_status(&client, arguments).await,
-        "slack_reply" => {
-            super::dispatch::call_tool(&client, SERVER_NAME, exports(), "slack_reply", arguments)
-                .await
-        }
-        _ => unreachable!(),
-    }
-}
-
-/// `sessions.status.set` (`loom_session::status_set`) is the same operation
-/// this tool exposes, but reached by name translation that would defeat
-/// `super::runtime_tool_allowed`'s allow-list check — see the module doc
-/// comment — so this calls the underlying REST route directly instead of
-/// `super::dispatch::call_tool`.
-async fn update_status(client: &weaver_api::Client, arguments: Value) -> Result<Value> {
-    let level = arguments
-        .get("level")
-        .and_then(Value::as_str)
-        .context("status_update requires level")?;
-    let message = arguments
-        .get("message")
-        .and_then(Value::as_str)
-        .context("status_update requires message")?;
-    if message.len() > 4096 {
-        bail!("status_update message must be at most 4096 bytes");
-    }
-    let session_id =
-        std::env::var("LOOM_SESSION_ID").context("messaging MCP is missing LOOM_SESSION_ID")?;
-    let session = client
-        .get_session(&session_id)
-        .await
-        .context("resolving the messaging MCP session")?;
-    client
-        .set_branch_status(&session.branch.id, level, message)
-        .await?;
-    let text = format!("status updated to {level}");
-    Ok(json!({
-        "content": [{ "type": "text", "text": text }],
-        "structuredContent": { "message": text },
-        "isError": false
-    }))
+    super::dispatch::call_adapter_tool("messaging", SERVER_NAME, exports(), name, arguments).await
 }
 
 fn serve_boxed() -> ServeFuture {

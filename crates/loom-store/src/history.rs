@@ -19,23 +19,13 @@ use crate::session::Session;
 use crate::Db;
 
 pub const DEFAULT_LIMIT: usize = 100;
-pub const MAX_LIMIT: usize = 200;
-pub const MAX_QUERY_BYTES: usize = 1024;
-pub const KINDS: &[&str] = &[
-    "message",
-    "reasoning",
-    "tool_call",
-    "tool_result",
-    "context",
-    "event",
-    "image",
-];
+pub use weaver_api::operations::sessions::history::{MAX_LIMIT, MAX_QUERY_BYTES};
 
 #[derive(Debug, Default)]
 pub struct PageOptions {
     pub before: Option<String>,
     pub limit: Option<usize>,
-    pub kinds: Vec<String>,
+    pub kinds: Vec<weaver_api::HistoryKind>,
     pub query: Option<String>,
 }
 
@@ -71,7 +61,12 @@ pub async fn page(
             "limit must be between 1 and {MAX_LIMIT}"
         )));
     }
-    let kinds = validate_kinds(&options.kinds)?;
+    let kinds: HashSet<&str> = options
+        .kinds
+        .iter()
+        .copied()
+        .map(weaver_api::HistoryKind::as_str)
+        .collect();
     let query = options
         .query
         .as_deref()
@@ -206,24 +201,6 @@ fn parse_acp_cursor(cursor: &str) -> Result<(i64, i64), PageError> {
 
 fn unknown_cursor() -> PageError {
     PageError::bad_request("before is not a cursor from this session history")
-}
-
-fn validate_kinds(kinds: &[String]) -> Result<HashSet<&str>, PageError> {
-    let mut out = HashSet::new();
-    for value in kinds {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if !KINDS.contains(&value) {
-            return Err(PageError::bad_request(format!(
-                "unknown history kind '{value}'; expected one of {}",
-                KINDS.join(", ")
-            )));
-        }
-        out.insert(value);
-    }
-    Ok(out)
 }
 
 /// A terminal provider's transcript, normalized. Unlike the ACP journal this has

@@ -67,10 +67,13 @@ fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArg
         "issue_comment" | "issue_edit" | "pr_comment" | "pr_edit"
     );
     match arguments.body.as_deref() {
-        Some(body) if body.len() > crate::mcp::github::BODY_MAX_BYTES => {
+        Some(body)
+            if body.len()
+                > weaver_api::operations::permissions::github::restricted::BODY_MAX_BYTES =>
+        {
             return Err(AppError::bad_request(format!(
                 "GitHub body must be at most {} bytes",
-                crate::mcp::github::BODY_MAX_BYTES
+                weaver_api::operations::permissions::github::restricted::BODY_MAX_BYTES
             )))
         }
         None if requires_body => {
@@ -79,11 +82,13 @@ fn validate_arguments(tool: &str, value: serde_json::Value) -> ApiResult<ToolArg
         _ => {}
     }
     if arguments.title.as_deref().is_some_and(|title| {
-        title.trim().is_empty() || title.len() > crate::mcp::github::TITLE_MAX_BYTES
+        title.trim().is_empty()
+            || title.len()
+                > weaver_api::operations::permissions::github::restricted::TITLE_MAX_BYTES
     }) {
         return Err(AppError::bad_request(format!(
             "GitHub title must be 1-{} bytes when provided",
-            crate::mcp::github::TITLE_MAX_BYTES
+            weaver_api::operations::permissions::github::restricted::TITLE_MAX_BYTES
         )));
     }
     if matches!(tool, "issue_view" | "pr_view")

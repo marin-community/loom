@@ -492,6 +492,34 @@ pub struct SessionLayoutView {
     pub defaults: Vec<SessionPlacementDefaultView>,
 }
 
+/// The kind of one normalized history record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryKind {
+    Message,
+    Reasoning,
+    ToolCall,
+    ToolResult,
+    Context,
+    Event,
+    Image,
+}
+
+impl HistoryKind {
+    /// The wire spelling, matching `HistoryRecordView::kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Reasoning => "reasoning",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::Context => "context",
+            Self::Event => "event",
+            Self::Image => "image",
+        }
+    }
+}
+
 /// One provider-neutral conversation record returned by the session history
 /// API. Optional fields are capability claims, not placeholders: notably,
 /// `tool_input` is absent when the source protocol did not provide invocation
@@ -2175,6 +2203,9 @@ pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
 pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
 pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
+// `branches.slack.reply` and `channels.messages.create` spell this bound as a
+// schemars literal, which cannot reference a constant.
+const _: () = assert!(CHANNEL_IDEMPOTENCY_KEY_MAX_LEN == 255);
 pub const CHANNEL_SLACK_ORIGIN_BINDING_ID: &str = "slack:origin";
 
 pub fn channel_session_binding_id(session_id: &str) -> String {
