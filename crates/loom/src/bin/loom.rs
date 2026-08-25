@@ -14,15 +14,13 @@ use loom::agent_cli::{
 };
 use serde_json::{json, Value};
 use weaver_api::operations::permissions as perm_ops;
+use weaver_api::operations::session_layout as layout;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, CreateSessionGroupReq,
-    CreateSessionSpaceReq, DecidePermissionRequestReq, DeleteSessionGroupReq,
-    DeleteSessionSpaceReq, MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq,
-    ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions,
-    SessionCreatorFilter, SessionGroupPreferenceReq, SessionLayoutItemKind, SessionLayoutView,
+    AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, DecidePermissionRequestReq,
+    MoveSessionsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
+    SearchSessionsOptions, SessionCreatorFilter, SessionLayoutItemKind, SessionLayoutView,
     SessionPlacementSelectorKind, SessionSearchAttention, SessionSearchStatus,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SubmitReviewReq,
-    UpdateReviewCommentReq, UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
+    SetSessionGithubAccessReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
 };
 
 use loom::client::{self, Client};
@@ -2620,7 +2618,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         SessionLayoutCmd::SpaceAdd { name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .create_session_space(&CreateSessionSpaceReq {
+                .invoke::<layout::spaces::create::Op>(&layout::spaces::create::Input {
                     name,
                     expected_revision,
                 })
@@ -2629,25 +2627,21 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         SessionLayoutCmd::SpaceRename { id, name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .update_session_space(
-                    &id,
-                    &UpdateSessionSpaceReq {
-                        name,
-                        expected_revision,
-                    },
-                )
+                .invoke::<layout::spaces::update::Op>(&layout::spaces::update::Input {
+                    id,
+                    name,
+                    expected_revision,
+                })
                 .await?
         }
         SessionLayoutCmd::SpaceDelete { id, to, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .delete_session_space(
-                    &id,
-                    &DeleteSessionSpaceReq {
-                        destination_group_id: to,
-                        expected_revision,
-                    },
-                )
+                .invoke::<layout::spaces::delete::Op>(&layout::spaces::delete::Input {
+                    id,
+                    destination_group_id: to,
+                    expected_revision,
+                })
                 .await?
         }
         SessionLayoutCmd::GroupAdd {
@@ -2657,7 +2651,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .create_session_group(&CreateSessionGroupReq {
+                .invoke::<layout::groups::create::Op>(&layout::groups::create::Input {
                     space_id: space,
                     name,
                     expected_revision,
@@ -2667,25 +2661,21 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         SessionLayoutCmd::GroupRename { id, name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .update_session_group(
-                    &id,
-                    &UpdateSessionGroupReq {
-                        name,
-                        expected_revision,
-                    },
-                )
+                .invoke::<layout::groups::update::Op>(&layout::groups::update::Input {
+                    id,
+                    name,
+                    expected_revision,
+                })
                 .await?
         }
         SessionLayoutCmd::GroupDelete { id, to, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .delete_session_group(
-                    &id,
-                    &DeleteSessionGroupReq {
-                        destination_group_id: to,
-                        expected_revision,
-                    },
-                )
+                .invoke::<layout::groups::delete::Op>(&layout::groups::delete::Input {
+                    id,
+                    destination_group_id: to,
+                    expected_revision,
+                })
                 .await?
         }
         SessionLayoutCmd::Reorder {
@@ -2697,7 +2687,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .reorder_session_layout(&ReorderSessionLayoutReq {
+                .invoke::<layout::reorder::Op>(&layout::reorder::Input {
                     kind,
                     id,
                     before_id: before,
@@ -2727,7 +2717,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
                 .context("restore snapshot must be a JSON array of group orders")?;
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .restore_session_groups(&RestoreSessionGroupsReq {
+                .invoke::<layout::restore::Op>(&layout::restore::Input {
                     groups,
                     expected_revision,
                 })
@@ -2735,17 +2725,21 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         }
         SessionLayoutCmd::Collapse { group } => {
             client
-                .set_session_group_preference(
-                    &group,
-                    &SessionGroupPreferenceReq { collapsed: true },
+                .invoke::<layout::groups::preference::set::Op>(
+                    &layout::groups::preference::set::Input {
+                        id: group,
+                        collapsed: true,
+                    },
                 )
                 .await?
         }
         SessionLayoutCmd::Expand { group } => {
             client
-                .set_session_group_preference(
-                    &group,
-                    &SessionGroupPreferenceReq { collapsed: false },
+                .invoke::<layout::groups::preference::set::Op>(
+                    &layout::groups::preference::set::Input {
+                        id: group,
+                        collapsed: false,
+                    },
                 )
                 .await?
         }
@@ -2757,7 +2751,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .set_session_placement_default(&SetSessionPlacementDefaultReq {
+                .invoke::<layout::defaults::set::Op>(&layout::defaults::set::Input {
                     selector_kind: kind,
                     selector_value: value,
                     group_id: to,

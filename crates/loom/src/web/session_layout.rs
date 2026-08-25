@@ -8,11 +8,7 @@ use axum::{
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use weaver_api::{
-    CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionLayoutView,
-    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
-};
+use weaver_api::{MoveSessionsReq, SessionLayoutView};
 
 use weaver_api::operations::session_layout::{
     defaults, events, get, groups, r#move, reorder, restore, spaces,
@@ -118,11 +114,7 @@ async fn spaces_create_operation(
 ) -> ApiResult<spaces::create::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = CreateSessionSpaceReq {
-        name: input.name,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::create_space(&st.db, &username, &req).await;
+    let result = session_layout::create_space(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -132,11 +124,7 @@ async fn spaces_update_operation(
 ) -> ApiResult<spaces::update::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = UpdateSessionSpaceReq {
-        name: input.name,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::update_space(&st.db, &username, &input.id, &req).await;
+    let result = session_layout::update_space(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -146,11 +134,7 @@ async fn spaces_delete_operation(
 ) -> ApiResult<spaces::delete::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = DeleteSessionSpaceReq {
-        destination_group_id: input.destination_group_id,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::delete_space(&st.db, &username, &input.id, &req).await;
+    let result = session_layout::delete_space(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -160,12 +144,7 @@ async fn groups_create_operation(
 ) -> ApiResult<groups::create::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = CreateSessionGroupReq {
-        space_id: input.space_id,
-        name: input.name,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::create_group(&st.db, &username, &req).await;
+    let result = session_layout::create_group(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -175,11 +154,7 @@ async fn groups_update_operation(
 ) -> ApiResult<groups::update::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = UpdateSessionGroupReq {
-        name: input.name,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::update_group(&st.db, &username, &input.id, &req).await;
+    let result = session_layout::update_group(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -189,11 +164,7 @@ async fn groups_delete_operation(
 ) -> ApiResult<groups::delete::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = DeleteSessionGroupReq {
-        destination_group_id: input.destination_group_id,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::delete_group(&st.db, &username, &input.id, &req).await;
+    let result = session_layout::delete_group(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -235,14 +206,7 @@ async fn reorder_operation(
 ) -> ApiResult<reorder::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = ReorderSessionLayoutReq {
-        kind: input.kind,
-        id: input.id,
-        before_id: input.before_id,
-        destination_space_id: input.destination_space_id,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::reorder(&st.db, &username, &req).await;
+    let result = session_layout::reorder(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -252,11 +216,7 @@ async fn restore_operation(
 ) -> ApiResult<restore::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = RestoreSessionGroupsReq {
-        groups: input.groups,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::restore_groups(&st.db, &username, &req).await;
+    let result = session_layout::restore_groups(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 
@@ -266,13 +226,7 @@ async fn defaults_set_operation(
 ) -> ApiResult<defaults::set::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = SetSessionPlacementDefaultReq {
-        selector_kind: input.selector_kind,
-        selector_value: input.selector_value,
-        group_id: input.group_id,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::set_default(&st.db, &username, &req).await;
+    let result = session_layout::set_default(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 

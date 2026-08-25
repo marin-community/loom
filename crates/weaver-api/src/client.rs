@@ -15,20 +15,17 @@ use crate::dto::{
     AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
     AutomationTokenReq, AutomationTokenView, BranchView, ChannelBindingView, ChannelMessageView,
     ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
-    CreateChannelReq, CreateReq, CreateReviewReq, CreateSessionGroupReq, CreateSessionSpaceReq,
-    CreateTokenReq, CreateWatchReq, CreatedTokenView, CustomMcpReq, CustomMcpView,
-    DecidePermissionRequestReq, DeleteSessionGroupReq, DeleteSessionSpaceReq, DeploymentReq,
-    DeploymentView, DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq, FederationReq,
-    FederationView, GithubTokenView, HandoffReq, HistoryPageView, IssueView, McpRegistryView,
-    MoveSessionsReq, PatchIssueReq, PatchSessionReq, PatchWatchReq, PermissionRequestView,
-    ProfileReq, ProfileView, ReadinessView, ReorderSessionLayoutReq, ResolveLaunchReq,
-    ResolvedLaunchView, RestoreSessionGroupsReq, ResumptionCueView, ReviewCommentDto, ReviewDto,
-    ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions,
-    SelfContextView, SendReq, SessionCatchupView, SessionGithubAccessView,
-    SessionGroupPreferenceReq, SessionLayoutView, SessionPlacementSelectorKind, SessionView,
-    SetSessionGithubAccessReq, SetSessionPlacementDefaultReq, SetTagsReq, SetTitleGenerationReq,
-    SettingsEnvelope, SubmitReviewReq, ThreadDto, TokenView, UpdateReviewCommentReq,
-    UpdateReviewReq, UpdateSessionGroupReq, UpdateSessionSpaceReq, WatchView,
+    CreateChannelReq, CreateReq, CreateReviewReq, CreateTokenReq, CreateWatchReq, CreatedTokenView,
+    CustomMcpReq, CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView,
+    DiagnosticsView, EffectiveProfileView, EnsureResumptionCueReq, FederationReq, FederationView,
+    GithubTokenView, HandoffReq, HistoryPageView, IssueView, McpRegistryView, MoveSessionsReq,
+    PatchIssueReq, PatchSessionReq, PatchWatchReq, PermissionRequestView, ProfileReq, ProfileView,
+    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ResumptionCueView, ReviewCommentDto,
+    ReviewDto, ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView,
+    SearchSessionsOptions, SelfContextView, SendReq, SessionCatchupView, SessionGithubAccessView,
+    SessionLayoutView, SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq,
+    SetTagsReq, SetTitleGenerationReq, SettingsEnvelope, SubmitReviewReq, ThreadDto, TokenView,
+    UpdateReviewCommentReq, UpdateReviewReq, WatchView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -305,147 +302,12 @@ impl Client {
         self.invoke::<get::Op>(&get::Input {}).await
     }
 
-    pub async fn create_session_space(
-        &self,
-        req: &CreateSessionSpaceReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::spaces::create;
-        self.invoke::<create::Op>(&create::Input {
-            name: req.name.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn update_session_space(
-        &self,
-        id: &str,
-        req: &UpdateSessionSpaceReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::spaces::update;
-        self.invoke::<update::Op>(&update::Input {
-            id: id.to_string(),
-            name: req.name.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn delete_session_space(
-        &self,
-        id: &str,
-        req: &DeleteSessionSpaceReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::spaces::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            id: id.to_string(),
-            destination_group_id: req.destination_group_id.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn create_session_group(
-        &self,
-        req: &CreateSessionGroupReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::groups::create;
-        self.invoke::<create::Op>(&create::Input {
-            space_id: req.space_id.clone(),
-            name: req.name.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn update_session_group(
-        &self,
-        id: &str,
-        req: &UpdateSessionGroupReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::groups::update;
-        self.invoke::<update::Op>(&update::Input {
-            id: id.to_string(),
-            name: req.name.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn delete_session_group(
-        &self,
-        id: &str,
-        req: &DeleteSessionGroupReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::groups::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            id: id.to_string(),
-            destination_group_id: req.destination_group_id.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn reorder_session_layout(
-        &self,
-        req: &ReorderSessionLayoutReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::reorder;
-        self.invoke::<reorder::Op>(&reorder::Input {
-            kind: req.kind,
-            id: req.id.clone(),
-            before_id: req.before_id.clone(),
-            destination_space_id: req.destination_space_id.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
     pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::r#move;
         self.invoke::<r#move::Op>(&r#move::Input {
             session_ids: req.session_ids.clone(),
             destination_group_id: req.destination_group_id.clone(),
             before_session_id: req.before_session_id.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn restore_session_groups(
-        &self,
-        req: &RestoreSessionGroupsReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::restore;
-        self.invoke::<restore::Op>(&restore::Input {
-            groups: req.groups.clone(),
-            expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn set_session_group_preference(
-        &self,
-        id: &str,
-        req: &SessionGroupPreferenceReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::groups::preference::set;
-        self.invoke::<set::Op>(&set::Input {
-            id: id.to_string(),
-            collapsed: req.collapsed,
-        })
-        .await
-    }
-
-    pub async fn set_session_placement_default(
-        &self,
-        req: &SetSessionPlacementDefaultReq,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::defaults::set;
-        self.invoke::<set::Op>(&set::Input {
-            selector_kind: req.selector_kind,
-            selector_value: req.selector_value.clone(),
-            group_id: req.group_id.clone(),
             expected_revision: req.expected_revision,
         })
         .await

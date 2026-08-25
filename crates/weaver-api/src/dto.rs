@@ -2597,65 +2597,11 @@ pub struct EnsureResumptionCueReq {
     pub force: bool,
 }
 
-/// Create a space and its useful empty Inbox group.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateSessionSpaceReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct UpdateSessionSpaceReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-/// Deleting a non-empty space atomically moves its sessions/defaults here.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DeleteSessionSpaceReq {
-    #[serde(default)]
-    pub destination_group_id: Option<String>,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct CreateSessionGroupReq {
-    pub space_id: String,
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct UpdateSessionGroupReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-/// Deleting a group never deletes sessions. A destination is required whenever
-/// the group owns placements or default-placement selectors.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DeleteSessionGroupReq {
-    #[serde(default)]
-    pub destination_group_id: Option<String>,
-    pub expected_revision: i64,
-}
-
 // Reorder one space, or one group (optionally into another space).
 wire_enum!(SessionLayoutItemKind {
     Space => "space",
     Group => "group",
 });
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ReorderSessionLayoutReq {
-    pub kind: SessionLayoutItemKind,
-    pub id: String,
-    #[serde(default)]
-    pub before_id: Option<String>,
-    #[serde(default)]
-    pub destination_space_id: Option<String>,
-    pub expected_revision: i64,
-}
 
 /// Atomically move one or more sessions to an exact group insertion point.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -2674,35 +2620,11 @@ pub struct SessionGroupOrderReq {
     pub session_ids: Vec<String>,
 }
 
-/// Atomically restore the complete membership and order of a set of groups.
-///
-/// The supplied groups must cover exactly the sessions currently placed in
-/// those groups. This makes an undo fail as a stale whole instead of partially
-/// overwriting an intervening placement.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RestoreSessionGroupsReq {
-    pub groups: Vec<SessionGroupOrderReq>,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SessionGroupPreferenceReq {
-    pub collapsed: bool,
-}
-
 wire_enum!(SessionPlacementSelectorKind {
     Origin => "origin",
     Profile => "profile",
     Watch => "watch",
 });
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetSessionPlacementDefaultReq {
-    pub selector_kind: SessionPlacementSelectorKind,
-    pub selector_value: String,
-    pub group_id: String,
-    pub expected_revision: i64,
-}
 
 /// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`
 /// is the path segment; this carries the rest. For a loud key (`attention` |

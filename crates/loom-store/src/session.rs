@@ -1643,7 +1643,7 @@ mod tests {
         let focused = crate::session_layout::create_group(
             &db,
             "test",
-            &weaver_api::CreateSessionGroupReq {
+            &weaver_api::operations::session_layout::groups::create::Input {
                 space_id: "space-user".to_string(),
                 name: "Focused".to_string(),
                 expected_revision: initial.revision,
@@ -1706,7 +1706,7 @@ mod tests {
             revision = crate::session_layout::set_default(
                 &db,
                 "test",
-                &weaver_api::SetSessionPlacementDefaultReq {
+                &weaver_api::operations::session_layout::defaults::set::Input {
                     selector_kind: kind,
                     selector_value: value.to_string(),
                     group_id: group_id.to_string(),
