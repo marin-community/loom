@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::sync::OnceLock;
 
 use weaver_api::operations::issues as issue_ops;
+use weaver_api::operations::{artifacts, branches, channels, permissions, settings};
 use weaver_api::{
     ArtifactUpsertReq, BranchView, Client, CreateChannelMessageReq, CreateChannelReq, IssueAction,
     IssueView, ThreadDto,
@@ -403,7 +404,11 @@ pub async fn run_tag(cmd: TagCmd) -> Result<()> {
 
 pub async fn run_summary() -> Result<()> {
     let client = client();
-    let branch = client.get_branch(&branch_key()?).await?;
+    let branch = client
+        .invoke::<branches::get::Op>(&branches::get::Input {
+            branch: (branch_key()?).to_string(),
+        })
+        .await?;
     print!("{}", render_summary(&client, &branch).await?);
     Ok(())
 }
@@ -503,7 +508,11 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
 async fn cmd_github_token() -> Result<()> {
     let session_id =
         std::env::var("LOOM_SESSION_ID").map_err(|_| anyhow!("$LOOM_SESSION_ID is not set"))?;
-    let credential = client().github_token(&session_id).await?;
+    let credential = client()
+        .invoke::<permissions::github::token::Op>(&permissions::github::token::Input {
+            session: session_id.to_string(),
+        })
+        .await?;
     println!("{}", credential.token);
     Ok(())
 }
@@ -643,7 +652,13 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // summary counts as reading this agent's inbox, so advance its own marker;
     // browser/user markers remain independent.
     if let Ok(channel_id) = channel_key(None) {
-        if let Ok(channel) = client.get_channel(&channel_id).await {
+        if let Ok(channel) = client
+            .invoke::<channels::get::Op>(&channels::get::Input {
+                channel: channel_id.to_string(),
+                branch: String::new(),
+            })
+            .await
+        {
             let urgent = if channel.unread_urgent_count > 0 {
                 format!(", {} urgent", channel.unread_urgent_count)
             } else {
@@ -677,7 +692,15 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
                     if let Some(last) = messages.last() {
                         // A catch-up remains useful if acknowledgement races a
                         // channel lifecycle change; the next summary retries.
-                        let _ = client.mark_channel_read(&channel_id, Some(last.seq)).await;
+                        let _ = client
+                            .invoke::<channels::read_marker::set::Op>(
+                                &channels::read_marker::set::Input {
+                                    channel: channel_id.to_string(),
+                                    seq: Some(last.seq),
+                                    branch: String::new(),
+                                },
+                            )
+                            .await;
                     }
                 }
             }
@@ -687,7 +710,10 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // Artifacts visible from this branch (its own + repo-shared) — the documents
     // the agent has written to Loom (designs, reports, the `plan`).
     let artifacts = client
-        .list_branch_artifacts(&b.id, false)
+        .invoke::<artifacts::list::Op>(&artifacts::list::Input {
+            repo: false,
+            branch: b.id.to_string(),
+        })
         .await
         .unwrap_or_default();
     match artifacts.as_slice() {
@@ -716,7 +742,14 @@ async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     // agent never re-opens the artifact that carries it.
     let mut open_threads: Vec<(String, ThreadDto)> = Vec::new();
     for a in &artifacts {
-        if let Ok(threads) = client.list_branch_threads(&b.id, &a.name).await {
+        if let Ok(threads) = client
+            .invoke::<artifacts::threads::list::Op>(&artifacts::threads::list::Input {
+                name: a.name.to_string(),
+                open_only: false,
+                branch: b.id.to_string(),
+            })
+            .await
+        {
             open_threads.extend(
                 threads
                     .into_iter()
@@ -879,7 +912,11 @@ fn cmd_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
 async fn cmd_where() -> Result<()> {
     let client = client();
     let key = branch_key()?;
-    let b = client.get_branch(&key).await?;
+    let b = client
+        .invoke::<branches::get::Op>(&branches::get::Input {
+            branch: key.to_string(),
+        })
+        .await?;
     println!("repo:      {}", b.repo_root);
     println!("branch:    {}", b.branch);
     println!("base:      {}", b.base_branch);
@@ -890,7 +927,11 @@ async fn cmd_where() -> Result<()> {
 async fn cmd_log(limit: i64) -> Result<()> {
     let client = client();
     let key = branch_key()?;
-    let mut history = client.branch_log(&key).await?;
+    let mut history = client
+        .invoke::<branches::events::list::Op>(&branches::events::list::Input {
+            branch: key.to_string(),
+        })
+        .await?;
     history.truncate(limit.max(0) as usize);
     if history.is_empty() {
         println!("(no events)");
@@ -946,7 +987,11 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
     if let Some(level) = level {
         return cmd_status_write(&client, &key, &level, &message).await;
     }
-    let b = client.get_branch(&key).await?;
+    let b = client
+        .invoke::<branches::get::Op>(&branches::get::Input {
+            branch: key.to_string(),
+        })
+        .await?;
     println!("repo:        {}", b.repo_root);
     println!("branch:      {}", b.branch);
     println!("base:        {}", b.base_branch);
@@ -1013,7 +1058,13 @@ async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str
     if level != "ok" && !tags::is_valid_value(tags::ATTENTION_KEY, &level) {
         bail!("unknown status '{level}' — expected one of ok, attention, blocked");
     }
-    client.set_branch_status(key, &level, message).await?;
+    client
+        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+            level: level.to_string(),
+            message: (!message.is_empty()).then(|| message.to_string()),
+            branch: key.to_string(),
+        })
+        .await?;
     let message = message.trim();
     if message.is_empty() {
         println!("status: {level}");
@@ -1032,10 +1083,18 @@ async fn resolve_tag_target(
 ) -> Result<BranchView> {
     match session {
         Some(key) => client
-            .get_branch(key)
+            .invoke::<branches::get::Op>(&branches::get::Input {
+                branch: key.to_string(),
+            })
             .await
             .map_err(|_| anyhow!("no session matching '{key}'")),
-        None => client.get_branch(current_key).await,
+        None => {
+            client
+                .invoke::<branches::get::Op>(&branches::get::Input {
+                    branch: current_key.to_string(),
+                })
+                .await
+        }
     }
 }
 
@@ -1067,7 +1126,13 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
                 bail!("a tag value cannot be empty — use `loom sessions tags delete {tag_key}` to clear it");
             }
             client
-                .set_branch_tag(&target.id, tag_key, value, note, by)
+                .invoke::<branches::tags::set::Op>(&branches::tags::set::Input {
+                    key: tag_key.to_string(),
+                    value: value.to_string(),
+                    note: note.to_string(),
+                    by: Some(by.to_string()),
+                    branch: target.id.to_string(),
+                })
                 .await?;
             if note.is_empty() {
                 println!("tag: {} → {tag_key} = {value} (by {by})", target.branch);
@@ -1085,7 +1150,11 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
             let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
             let tag_key = tag_key.trim();
             client
-                .clear_branch_tag(&target.id, tag_key, "manual")
+                .invoke::<branches::tags::delete::Op>(&branches::tags::delete::Input {
+                    key: tag_key.to_string(),
+                    by: Some("manual".to_string()),
+                    branch: target.id.to_string(),
+                })
                 .await?;
             println!("tag: {} → cleared {tag_key}", target.branch);
         }
@@ -1120,7 +1189,12 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
     let client = client();
     match cmd {
         ChannelCmd::Ls { all } => {
-            let channels = client.list_channels(all).await?;
+            let channels = client
+                .invoke::<channels::list::Op>(&channels::list::Input {
+                    archived: all,
+                    branch: String::new(),
+                })
+                .await?;
             if channels.is_empty() {
                 println!("(no channels)");
             }
@@ -1146,7 +1220,12 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
         }
         ChannelCmd::Get { channel } => {
             let id = channel_key(channel)?;
-            let channel = client.get_channel(&id).await?;
+            let channel = client
+                .invoke::<channels::get::Op>(&channels::get::Input {
+                    channel: id.to_string(),
+                    branch: String::new(),
+                })
+                .await?;
             println!("id:      {}", channel.id);
             println!("kind:    {}", channel.kind);
             println!("name:    {}", channel.name);
@@ -1154,7 +1233,12 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
             if !channel.topic.is_empty() {
                 println!("topic:   {}", channel.topic);
             }
-            let bindings = client.channel_bindings(&id).await?;
+            let bindings = client
+                .invoke::<channels::bindings::list::Op>(&channels::bindings::list::Input {
+                    channel: id.to_string(),
+                    branch: String::new(),
+                })
+                .await?;
             println!("bindings:");
             if bindings.is_empty() {
                 println!("  (none)");
@@ -1169,7 +1253,14 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                 bail!("channel name is required");
             }
             let repo_root = match branch_key() {
-                Ok(key) => Some(client.get_branch(&key).await?.repo_root),
+                Ok(key) => Some(
+                    client
+                        .invoke::<branches::get::Op>(&branches::get::Input {
+                            branch: key.to_string(),
+                        })
+                        .await?
+                        .repo_root,
+                ),
                 Err(_) => None,
             };
             let channel = client
@@ -1191,7 +1282,15 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
             print_channel_messages(&messages);
             if !peek {
                 if let Some(last) = messages.last() {
-                    client.mark_channel_read(&id, Some(last.seq)).await?;
+                    client
+                        .invoke::<channels::read_marker::set::Op>(
+                            &channels::read_marker::set::Input {
+                                channel: id.to_string(),
+                                seq: Some(last.seq),
+                                branch: String::new(),
+                            },
+                        )
+                        .await?;
                 }
             }
         }
@@ -1229,7 +1328,12 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
         } => {
             let id = channel_key(channel)?;
             let subscription = client
-                .set_channel_subscription(&id, &mode, session.as_deref())
+                .invoke::<channels::subscription::set::Op>(&channels::subscription::set::Input {
+                    channel: id.to_string(),
+                    mode: mode.to_string(),
+                    session: session.as_deref().map(str::to_string),
+                    branch: String::new(),
+                })
                 .await?;
             println!(
                 "{}  {}:{}  {} through {}",
@@ -1242,7 +1346,13 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
         }
         ChannelCmd::Ack { channel, seq } => {
             let id = channel_key(channel)?;
-            let subscription = client.mark_channel_read(&id, seq).await?;
+            let subscription = client
+                .invoke::<channels::read_marker::set::Op>(&channels::read_marker::set::Input {
+                    channel: id.to_string(),
+                    seq,
+                    branch: String::new(),
+                })
+                .await?;
             println!("{} read through {}", id, subscription.read_seq);
         }
         ChannelCmd::Wait {
@@ -1257,7 +1367,10 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
             let mut cursor = match after {
                 Some(seq) => seq.max(0),
                 None => client
-                    .get_channel(&id)
+                    .invoke::<channels::get::Op>(&channels::get::Input {
+                        channel: id.to_string(),
+                        branch: String::new(),
+                    })
                     .await?
                     .last_message
                     .map(|message| message.seq)
@@ -1269,7 +1382,15 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                 let messages = client.channel_messages(&id, cursor).await?;
                 if let Some(last) = messages.last() {
                     cursor = last.seq;
-                    client.mark_channel_read(&id, Some(cursor)).await?;
+                    client
+                        .invoke::<channels::read_marker::set::Op>(
+                            &channels::read_marker::set::Input {
+                                channel: id.to_string(),
+                                seq: Some(cursor),
+                                branch: String::new(),
+                            },
+                        )
+                        .await?;
                     let matching = messages
                         .iter()
                         .filter(|message| {
@@ -1330,7 +1451,11 @@ fn print_channel_messages(messages: &[weaver_api::ChannelMessageView]) {
 async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     let client = client();
     let key = branch_key()?;
-    let b = client.get_branch(&key).await?;
+    let b = client
+        .invoke::<branches::get::Op>(&branches::get::Input {
+            branch: key.to_string(),
+        })
+        .await?;
     match cmd {
         IssueCmd::Add {
             title,
@@ -1799,7 +1924,12 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             println!("{url}  (rev {}, {scope})", view.meta.rev);
         }
         ArtifactCmd::Ls { repo } => {
-            let artifacts = client.list_branch_artifacts(&key, repo).await?;
+            let artifacts = client
+                .invoke::<artifacts::list::Op>(&artifacts::list::Input {
+                    repo,
+                    branch: key.to_string(),
+                })
+                .await?;
             if artifacts.is_empty() {
                 println!("(no artifacts)");
                 return Ok(());
@@ -1821,7 +1951,12 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
         }
         ArtifactCmd::Show { name, rev, meta } => {
             let view = client
-                .get_branch_artifact(&key, name.trim(), rev, false)
+                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
+                    name: name.trim().to_string(),
+                    rev,
+                    repo: false,
+                    branch: key.to_string(),
+                })
                 .await?;
             if meta {
                 println!("id:      {}", view.meta.id);
@@ -1848,7 +1983,12 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             // Fetch first (branch-scoped resolution, matching `show`) so we can
             // report the scope/revision that got removed.
             let a = client
-                .get_branch_artifact(&key, name.trim(), None, repo)
+                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
+                    name: name.trim().to_string(),
+                    rev: None,
+                    repo,
+                    branch: key.to_string(),
+                })
                 .await
                 .map_err(|_| {
                     anyhow!("no artifact '{}' — see `loom artifacts list`", name.trim())
@@ -1864,7 +2004,12 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
         }
         ArtifactCmd::History { name, repo } => {
             let artifact = client
-                .get_branch_artifact(&key, name.trim(), None, repo)
+                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
+                    name: name.trim().to_string(),
+                    rev: None,
+                    repo,
+                    branch: key.to_string(),
+                })
                 .await?;
             for version in artifact.versions {
                 println!(
@@ -1900,18 +2045,29 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                              (or pass --thread <id> to reply)"
                         )
                     })?;
-                    let a = client.get_branch_artifact(&key, name, None, false).await?;
+                    let a = client
+                        .invoke::<artifacts::get::Op>(&artifacts::get::Input {
+                            name: name.to_string(),
+                            rev: None,
+                            repo: false,
+                            branch: key.to_string(),
+                        })
+                        .await?;
                     let t = client
-                        .create_branch_thread(
-                            &key,
-                            name,
-                            a.meta.rev,
-                            weaver_api::AnchorDto {
-                                quote,
-                                prefix,
-                                suffix,
+                        .invoke::<artifacts::threads::comment::Op>(
+                            &artifacts::threads::comment::Input {
+                                name: name.to_string(),
+                                body: body.to_string(),
+                                target: artifacts::threads::comment::CommentTarget::New {
+                                    base_rev: a.meta.rev,
+                                    anchor: (weaver_api::AnchorDto {
+                                        quote,
+                                        prefix,
+                                        suffix,
+                                    }),
+                                },
+                                branch: key.to_string(),
                             },
-                            &body,
                         )
                         .await?;
                     println!("opened thread {} on {name} (rev {})", t.id, a.meta.rev);
@@ -1926,7 +2082,13 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
         }
         ArtifactCmd::Threads { name, all } => {
             let name = name.trim();
-            let threads = client.list_branch_threads(&key, name).await?;
+            let threads = client
+                .invoke::<artifacts::threads::list::Op>(&artifacts::threads::list::Input {
+                    name: name.to_string(),
+                    open_only: false,
+                    branch: key.to_string(),
+                })
+                .await?;
             let threads: Vec<_> = if all {
                 threads
             } else {
@@ -1969,7 +2131,12 @@ fn ensure_issue_in_repo(i: &IssueView, repo_root: &str) -> Result<()> {
 /// turns an issue lookup into a poll of a delegated sub-tree.
 async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) -> Option<String> {
     let key = format!("{repo_root}:{claimed}");
-    let b = client.get_branch(&key).await.ok()?;
+    let b = client
+        .invoke::<branches::get::Op>(&branches::get::Input {
+            branch: key.to_string(),
+        })
+        .await
+        .ok()?;
     let attention = attention_of(&b);
     let status = if b.description.is_empty() {
         attention
@@ -2033,7 +2200,12 @@ async fn cmd_issue_wait(
         if !closed_only {
             if let Some(name) = cur.claimed_branch.as_deref() {
                 let key = format!("{repo_root}:{name}");
-                if let Ok(row) = client.get_branch(&key).await {
+                if let Ok(row) = client
+                    .invoke::<branches::get::Op>(&branches::get::Input {
+                        branch: key.to_string(),
+                    })
+                    .await
+                {
                     // The sub-agent wants the user when its `attention` tag is
                     // present with a loud value (`attention`/`blocked`); absence
                     // is the calm `ok` state.
@@ -2151,7 +2323,11 @@ async fn cmd_hook(event: String) -> Result<()> {
             // session is unchanged — replay a concise re-orientation (the
             // `loom summary` catch-up) rather than the full repository primer. On a
             // genuine start/resume/clear, inject the full primer.
-            let b = client.get_branch(&key).await?;
+            let b = client
+                .invoke::<branches::get::Op>(&branches::get::Input {
+                    branch: key.to_string(),
+                })
+                .await?;
             let context = if is_compact {
                 let summary = render_summary(&client, &b).await.unwrap_or_default();
                 compact_replay(&b, &summary)
@@ -2173,13 +2349,17 @@ async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     let client = client();
     match cmd {
         ConfigCmd::Ls => {
-            let settings = client.list_settings().await?;
+            let settings = client
+                .invoke::<settings::get::Op>(&settings::get::Input {})
+                .await?;
             for s in &settings.settings {
                 println!("{} = {}  ({})", s.key, s.value, s.source);
             }
         }
         ConfigCmd::Get { key } => {
-            let settings = client.list_settings().await?;
+            let settings = client
+                .invoke::<settings::get::Op>(&settings::get::Input {})
+                .await?;
             match settings.settings.iter().find(|s| s.key == key) {
                 Some(s) => println!("{}", s.value),
                 None => bail!("no setting '{key}' — see `loom settings list`"),

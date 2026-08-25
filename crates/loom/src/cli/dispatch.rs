@@ -9,6 +9,7 @@
 
 use anyhow::{anyhow, Result};
 use clap::{ArgMatches, Command};
+use weaver_api::operations::sessions;
 use weaver_api::operations::{
     ContextValues, Operands, Operation, OperationSpec, Render, ViewFlags,
 };
@@ -67,7 +68,11 @@ where
 }
 
 async fn resolve_context(client: &Client) -> Result<ContextValues> {
-    let context = client.self_context().await?;
+    let context = client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
+        .await?;
     Ok(ContextValues {
         repo_root: context.repo_root,
         branch: context.branch_id,

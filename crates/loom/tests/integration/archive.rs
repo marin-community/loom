@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use loom::backend;
 
 use crate::fixtures::{branch_tag, plant_claude_transcript, HomeGuard, TestServer};
+use weaver_api::operations::branches;
 
 /// Archiving captures the agent's conversation log: it locates the Claude Code
 /// transcript for the worktree (under `~/.claude/projects/<munged-cwd>/`),
@@ -280,7 +281,12 @@ async fn archive_keeps_branch_and_history() {
     // client uses the branch-owned operation; `sessions.events.list` wraps the
     // same handler keyed by session and must remain an exact compatibility
     // alias.
-    let branch_log = client.branch_log(&arch_id).await.unwrap();
+    let branch_log = client
+        .invoke::<branches::events::list::Op>(&branches::events::list::Input {
+            branch: arch_id.to_string(),
+        })
+        .await
+        .unwrap();
     let session_log = client
         .post("/api/sessions/events/list", json!({ "session": arch_id }))
         .await

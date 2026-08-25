@@ -19,6 +19,7 @@ use weaver_api::operations::artifacts;
 
 use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
+use weaver_api::operations::sessions;
 
 const SERVER_NAME: &str = "loom_artifact";
 
@@ -140,12 +141,21 @@ async fn with_dashboard_url(
     name: &str,
     arguments: Value,
 ) -> Result<Value> {
-    let context = client.self_context().await?;
+    let context = client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
+        .await?;
     let branch = context.branch_id;
     match name {
         "list" => {
             let repo = repo_scope(&arguments)?;
-            let mut artifacts = client.list_branch_artifacts(&branch, repo).await?;
+            let mut artifacts = client
+                .invoke::<artifacts::list::Op>(&artifacts::list::Input {
+                    repo,
+                    branch: branch.to_string(),
+                })
+                .await?;
             if repo {
                 artifacts.retain(|artifact| artifact.branch_id.is_none());
             }
@@ -167,7 +177,12 @@ async fn with_dashboard_url(
                 })
                 .transpose()?;
             let artifact = client
-                .get_branch_artifact(&branch, artifact_name, rev, repo_scope(&arguments)?)
+                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
+                    name: artifact_name.to_string(),
+                    rev,
+                    repo: (repo_scope(&arguments)?),
+                    branch: branch.to_string(),
+                })
                 .await?;
             let url = client.branch_artifact_url(&branch, artifact_name).await?;
             let value = json!({ "artifact": artifact, "url": url });

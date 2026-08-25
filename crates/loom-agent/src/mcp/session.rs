@@ -23,6 +23,7 @@ use weaver_api::operations::sessions;
 
 use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
+use weaver_api::operations::{branches, channels};
 
 const SERVER_NAME: &str = "loom_session";
 
@@ -151,11 +152,24 @@ async fn set_status(client: &weaver_api::Client, name: &str, arguments: Value) -
     if message.len() > 4096 {
         bail!("status message must be at most 4096 bytes");
     }
-    let context = client.self_context().await?;
-    let branch = client
-        .set_branch_status(&context.branch_id, level, message)
+    let context = client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
         .await?;
-    let channel = client.get_channel(&context.channel_id).await?;
+    let branch = client
+        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+            level: level.to_string(),
+            message: (!message.is_empty()).then(|| message.to_string()),
+            branch: context.branch_id.to_string(),
+        })
+        .await?;
+    let channel = client
+        .invoke::<channels::get::Op>(&channels::get::Input {
+            channel: context.channel_id.to_string(),
+            branch: String::new(),
+        })
+        .await?;
     let value = json!({ "branch": branch, "status_message": channel.last_message });
     super::structured_result(&format!("status updated to {level}"), &value)
 }

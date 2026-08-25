@@ -17,6 +17,7 @@ use weaver_api::{
 use weaver_api::operations::permissions as permission_ops;
 
 use crate::fixtures::TestServer;
+use weaver_api::operations::{branches, channels, sessions, settings};
 
 /// The value of a typed `BranchView`'s tag by key, or `None` when absent.
 fn tag_value<'a>(branch: &'a weaver_api::BranchView, key: &str) -> Option<&'a str> {
@@ -56,7 +57,13 @@ async fn typed_create_list_get_and_mark() {
 
     // Session creation atomically creates its same-id default channel and
     // immutable opening goal message.
-    let channels = client.list_channels(false).await.unwrap();
+    let channels = client
+        .invoke::<channels::list::Op>(&channels::list::Input {
+            archived: false,
+            branch: String::new(),
+        })
+        .await
+        .unwrap();
     let channel = channels
         .iter()
         .find(|channel| channel.id == id)
@@ -76,12 +83,23 @@ async fn typed_create_list_get_and_mark() {
             .unwrap();
     let session_client =
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
-    let context = session_client.self_context().await.unwrap();
+    let context = session_client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
+        .await
+        .unwrap();
     assert_eq!(context.session_id, id);
     assert_eq!(context.branch_id, created.branch.id);
     assert_eq!(context.channel_id, id);
     assert_eq!(context.links.channel, "/api/channels/get");
-    let bindings = session_client.channel_bindings(&id).await.unwrap();
+    let bindings = session_client
+        .invoke::<channels::bindings::list::Op>(&channels::bindings::list::Input {
+            channel: id.to_string(),
+            branch: String::new(),
+        })
+        .await
+        .unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].id, format!("session:{id}"));
     assert_eq!(bindings[0].label, "this session");
@@ -107,7 +125,14 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(retry.seq, first.seq);
     assert_eq!(
         session_client
-            .channel_messages_bounded(&id, 0, 1)
+            .invoke::<channels::messages::list::Op>(&channels::messages::list::Input {
+                channel: id.to_string(),
+                after: 0,
+                limit: 1_i64,
+                kinds: Vec::new(),
+                peek: false,
+                branch: String::new(),
+            })
             .await
             .unwrap()
             .len(),
@@ -120,7 +145,12 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(sessions[0].id, id);
 
     // Typed get by id.
-    let got = client.get_session(&id).await.unwrap();
+    let got = client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: id.to_string(),
+        })
+        .await
+        .unwrap();
     assert_eq!(got.id, id);
     assert!(
         tag_value(&got.branch, "attention").is_none(),
@@ -155,7 +185,11 @@ async fn typed_create_list_get_and_mark() {
     // Agent status is also a typed channel item while the compatibility tag
     // continues to drive the existing dashboard and mirrors.
     client
-        .set_branch_status(&created.branch.id, "attention", "review the boundary")
+        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+            level: "attention".to_string(),
+            message: Some("review the boundary".to_string()),
+            branch: created.branch.id.to_string(),
+        })
         .await
         .unwrap();
     let status = client.channel_messages(&id, first.seq).await.unwrap();
@@ -225,7 +259,13 @@ async fn operation_discovery_and_permission_request_round_trip() {
             .id,
         request.id
     );
-    let branch = session.get_session(&created.id).await.unwrap().branch;
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.to_string(),
+        })
+        .await
+        .unwrap()
+        .branch;
     assert_eq!(tag_value(&branch, "attention"), Some("attention"));
 
     let error = session
@@ -373,7 +413,10 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
     let ts = TestServer::start_api_only().await;
     let client = &ts.client;
 
-    let initial = client.list_settings().await.unwrap();
+    let initial = client
+        .invoke::<settings::get::Op>(&settings::get::Input {})
+        .await
+        .unwrap();
     let initial_setting = initial
         .settings
         .iter()
@@ -390,7 +433,15 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
 
     let mut changes = Map::new();
     changes.insert("server.auto_adopt".to_string(), Value::Bool(true));
-    let updated = client.patch_settings(changes).await.unwrap();
+    let updated = client
+        .invoke::<settings::patch::Op>(&settings::patch::Input {
+            changes: changes
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+        })
+        .await
+        .unwrap();
     let updated_setting = updated
         .settings
         .iter()

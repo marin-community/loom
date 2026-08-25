@@ -17,6 +17,7 @@ use weaver_api::{
 };
 
 use super::fixtures::TestServer;
+use weaver_api::operations::{reviews, sessions};
 
 async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionView {
     let branch =
@@ -46,7 +47,12 @@ async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionVie
     )
     .await
     .unwrap();
-    ts.client.get_session(id).await.unwrap()
+    ts.client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: id.to_string(),
+        })
+        .await
+        .unwrap()
 }
 
 async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
@@ -198,7 +204,11 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
     assert!(
         session_client
-            .list_session_reviews(&session.id, "artifact", "design")
+            .invoke::<reviews::list::Op>(&reviews::list::Input {
+                subject_kind: "artifact".parse().unwrap(),
+                subject_key: "design".to_string(),
+                session: session.id.to_string(),
+            })
             .await
             .unwrap()
             .is_empty(),
@@ -214,7 +224,11 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let bob =
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token.clone()));
     assert!(bob
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap()
         .is_empty());
@@ -316,7 +330,11 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_eq!(submitted.delivery_state, "queued");
     assert!(
         session_client
-            .list_session_reviews(&session.id, "artifact", "design")
+            .invoke::<reviews::list::Op>(&reviews::list::Input {
+                subject_kind: "artifact".parse().unwrap(),
+                subject_key: "design".to_string(),
+                session: session.id.to_string(),
+            })
             .await
             .unwrap()
             .iter()
@@ -367,23 +385,35 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_eq!((events, deliveries), (1, 1));
 
     let visible = bob
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap();
     assert!(visible.iter().any(|review| review.id == submitted.id));
     let comment_id = submitted.comments[0].id;
     assert_eq!(
-        bob.set_review_comment_resolution(submitted.id, comment_id, true)
-            .await
-            .unwrap()
-            .status,
+        bob.invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+            id: submitted.id,
+            comment_id,
+            resolved: true,
+        })
+        .await
+        .unwrap()
+        .status,
         "resolved"
     );
     assert_eq!(
-        bob.set_review_comment_resolution(submitted.id, comment_id, false)
-            .await
-            .unwrap()
-            .status,
+        bob.invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+            id: submitted.id,
+            comment_id,
+            resolved: false,
+        })
+        .await
+        .unwrap()
+        .status,
         "submitted"
     );
 
@@ -404,7 +434,11 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_cli_ok(&overall);
     let cli_draft = ts
         .client
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap()
         .into_iter()
@@ -476,7 +510,13 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let index_path = ts.repo_path().join(".git/index");
     let index_before = std::fs::read(&index_path).unwrap();
     let index_stat_before = std::fs::metadata(&index_path).unwrap();
-    let changes = ts.client.changes(&session.id).await.unwrap();
+    let changes = ts
+        .client
+        .invoke::<sessions::changes::Op>(&sessions::changes::Input {
+            session: session.id.to_string(),
+        })
+        .await
+        .unwrap();
     let version = changes.version.clone().unwrap();
     let readme = changes
         .files
@@ -631,7 +671,13 @@ async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> V
 async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     let ts = TestServer::start().await;
     super::acp::start_new(&ts, "acp-review", None, None).await;
-    let session = ts.client.get_session("acp-review").await.unwrap();
+    let session = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "acp-review".to_string(),
+        })
+        .await
+        .unwrap();
     seed_artifact(&ts, &session).await;
     ts.client
         .post(
@@ -706,7 +752,13 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     assert_eq!(inbox, ("consumed".to_string(), 1));
 
     super::acp::start_new(&ts, "acp-review-rehome", None, None).await;
-    let original = ts.client.get_session("acp-review-rehome").await.unwrap();
+    let original = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "acp-review-rehome".to_string(),
+        })
+        .await
+        .unwrap();
     seed_artifact(&ts, &original).await;
     ts.client
         .post(
@@ -834,7 +886,11 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     make_delivery_due(&ts.state.db, offline.id).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let review = ts.client.get_review(offline.id).await.unwrap();
+        let review = ts
+            .client
+            .invoke::<reviews::get::Op>(&reviews::get::Input { id: offline.id })
+            .await
+            .unwrap();
         let screen = ts.client.preview(&session.id, 1_000).await.unwrap();
         let marker_count = screen.matches(&offline.delivery_key).count();
         if review.delivery_state == "delivered" && marker_count == 1 {
@@ -852,7 +908,9 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     super::acp::start_new(&ts, "review-transport-failure", None, None).await;
     let incompatible = ts
         .client
-        .get_session("review-transport-failure")
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "review-transport-failure".to_string(),
+        })
         .await
         .unwrap();
     seed_artifact(&ts, &incompatible).await;
@@ -883,7 +941,7 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
         assert!(error.to_string().contains("pasting review feedback"));
         assert_eq!(
             ts.client
-                .get_review(failing.id)
+                .invoke::<reviews::get::Op>(&reviews::get::Input { id: failing.id })
                 .await
                 .unwrap()
                 .delivery_state,
@@ -892,7 +950,9 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     }
     assert_eq!(
         ts.client
-            .retry_review_delivery(failing.id)
+            .invoke::<reviews::retry_delivery::Op>(&reviews::retry_delivery::Input {
+                id: failing.id
+            })
             .await
             .unwrap()
             .delivery_state,

@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 
 use super::fixtures::TestServer;
+use weaver_api::operations::diagnostics;
 
 fn url(ts: &TestServer, path: &str) -> String {
     format!("http://{}{}", ts.addr, path)
@@ -70,7 +71,11 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
     seed_operational_state(&ts).await;
     let http = reqwest::Client::new();
 
-    let typed = ts.client.diagnostics().await.unwrap();
+    let typed = ts
+        .client
+        .invoke::<diagnostics::get::Op>(&diagnostics::get::Input {})
+        .await
+        .unwrap();
     assert_eq!(typed.profiles[0].active, 1);
     assert_eq!(typed.automation_runs.recent_failures.len(), 1);
 

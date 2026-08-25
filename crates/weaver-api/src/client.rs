@@ -12,18 +12,14 @@ use serde_json::Value;
 use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
-    AddReviewCommentReq, AnchorDto, ArtifactMeta, ArtifactUpsertReq, ArtifactView,
-    AutomationTokenReq, AutomationTokenView, BranchView, ChannelBindingView, ChannelMessageView,
-    ChannelSubscriptionView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
+    AddReviewCommentReq, ArtifactUpsertReq, ArtifactView, AutomationTokenReq, AutomationTokenView,
+    ChannelMessageView, ChannelView, CloneProfileReq, CommentDto, CreateChannelMessageReq,
     CreateChannelReq, CreateReq, CreateReviewReq, CreateTokenReq, CreatedTokenView, CustomMcpReq,
-    CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView, DiagnosticsView,
-    EffectiveProfileView, FederationReq, FederationView, GithubTokenView, HandoffReq,
-    McpRegistryView, MoveSessionsReq, PermissionRequestView, ProfileReq, ProfileView,
-    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ReviewCommentDto, ReviewDto,
-    ReviewSubjectKindDto, RunReq, RunView, RunWatchReq, ScratchLimitsView, SearchSessionsOptions,
-    SelfContextView, SendReq, SessionGithubAccessView, SessionLayoutView,
-    SessionPlacementSelectorKind, SessionView, SetSessionGithubAccessReq, SettingsEnvelope,
-    SubmitReviewReq, ThreadDto, TokenView, UpdateReviewCommentReq, UpdateReviewReq,
+    CustomMcpView, DecidePermissionRequestReq, DeploymentReq, DeploymentView, FederationReq,
+    FederationView, HandoffReq, MoveSessionsReq, PermissionRequestView, ProfileReq, ProfileView,
+    ReadinessView, ResolveLaunchReq, ResolvedLaunchView, ReviewDto, RunReq, RunView, RunWatchReq,
+    SearchSessionsOptions, SendReq, SessionGithubAccessView, SessionLayoutView, SessionView,
+    SetSessionGithubAccessReq, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -172,14 +168,6 @@ impl Client {
 
     // -- Sessions ---------------------------------------------------------
 
-    pub async fn self_context(&self) -> Result<SelfContextView> {
-        use crate::operations::sessions::context;
-        self.invoke::<context::Op>(&context::Input {
-            session: String::new(),
-        })
-        .await
-    }
-
     /// Discover the connected Loom server and its operation registry version.
     pub async fn api_meta(&self) -> Result<ApiMetaView> {
         self.get_typed("/api/meta").await
@@ -188,29 +176,6 @@ impl Client {
     /// List the transport-neutral operation catalogue advertised by the server.
     pub async fn operations(&self) -> Result<Vec<OperationView>> {
         self.get_typed("/api/operations").await
-    }
-
-    /// Broker a short-lived GitHub App installation token scoped to a
-    /// session's effective repositories (`permissions.github.token`).
-    pub async fn github_token(&self, session_id: &str) -> Result<GithubTokenView> {
-        use crate::operations::permissions::github::token;
-        self.invoke::<token::Op>(&token::Input {
-            session: session_id.to_string(),
-        })
-        .await
-    }
-
-    /// The repository access one session has been granted
-    /// (`sessions.github.access.list`).
-    pub async fn session_github_access(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<SessionGithubAccessView>> {
-        use crate::operations::sessions::github::access::list;
-        self.invoke::<list::Op>(&list::Input {
-            session: session_id.to_string(),
-        })
-        .await
     }
 
     /// Grant or revoke one session's override access to a GitHub repository.
@@ -270,18 +235,10 @@ impl Client {
 
     /// List visible sessions with default filters (`sessions.list`).
     pub async fn list_sessions(&self) -> Result<Vec<SessionView>> {
-        self.search_sessions(&SearchSessionsOptions::default())
-            .await
-    }
-
-    /// Search the documented fleet facets (`sessions.list`).
-    pub async fn search_sessions(
-        &self,
-        options: &SearchSessionsOptions,
-    ) -> Result<Vec<SessionView>> {
         use crate::operations::sessions::list;
+        let options = SearchSessionsOptions::default();
         self.invoke::<list::Op>(&list::Input {
-            q: options.query.clone(),
+            q: options.query,
             history: options.history,
             archived_only: options.archived_only,
             status: options.status,
@@ -295,11 +252,6 @@ impl Client {
 
     // -- Session layout ---------------------------------------------------
 
-    pub async fn get_session_layout(&self) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::get;
-        self.invoke::<get::Op>(&get::Input {}).await
-    }
-
     pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
         use crate::operations::session_layout::r#move;
         self.invoke::<r#move::Op>(&r#move::Input {
@@ -307,31 +259,6 @@ impl Client {
             destination_group_id: req.destination_group_id.clone(),
             before_session_id: req.before_session_id.clone(),
             expected_revision: req.expected_revision,
-        })
-        .await
-    }
-
-    pub async fn delete_session_placement_default(
-        &self,
-        kind: SessionPlacementSelectorKind,
-        value: &str,
-        expected_revision: i64,
-    ) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::defaults::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            selector_kind: kind,
-            selector_value: value.to_string(),
-            expected_revision,
-        })
-        .await
-    }
-
-    /// Get one session by key — id, branch id, branch name, or `repo:branch`
-    /// (`sessions.get`).
-    pub async fn get_session(&self, key: &str) -> Result<SessionView> {
-        use crate::operations::sessions::get;
-        self.invoke::<get::Op>(&get::Input {
-            session: key.to_string(),
         })
         .await
     }
@@ -412,12 +339,14 @@ impl Client {
         .await
     }
 
-    /// Set (upsert) a tag on a session (`sessions.tags.set`). For a loud key
-    /// (`attention` | `triage`) `value` is `attention` | `blocked`.
-    /// Use [`Client::clear_tag`] to return to calm.
+    /// Stamp a watch's mark on a session — the `triage` tag. A convenience
+    /// over [`Client::set_tag`] / [`Client::clear_tag`] that keeps the `mark`
+    /// capability name: a `level` of `attention`/`blocked` sets the tag, an empty
+    /// `level` (or `ok`) clears it.
+    /// Set one session tag and return the session as it now reads.
     ///
-    /// The operation answers with the branch projection it wrote, so the session
-    /// view this method promises is re-read afterwards.
+    /// Two round trips, not one: `sessions.tags.set` answers with the branch,
+    /// and callers of this want the session.
     pub async fn set_tag(
         &self,
         key: &str,
@@ -426,7 +355,7 @@ impl Client {
         note: &str,
         by: Option<&str>,
     ) -> Result<SessionView> {
-        use crate::operations::sessions::tags::set;
+        use crate::operations::sessions::{get, tags::set};
         self.invoke::<set::Op>(&set::Input {
             key: tag_key.to_string(),
             value: value.to_string(),
@@ -435,34 +364,32 @@ impl Client {
             session: key.to_string(),
         })
         .await?;
-        self.get_session(key).await
+        self.invoke::<get::Op>(&get::Input {
+            session: key.to_string(),
+        })
+        .await
     }
 
-    /// Clear a tag on a session (`sessions.tags.delete`) — how a loud axis
-    /// returns to calm (`ok`). `by` attributes the clear on the audit event (a
-    /// watch name); the server defaults `manual`.
-    ///
-    /// Re-reads the session view for the same reason as [`Client::set_tag`].
+    /// Clear one session tag and return the session as it now reads.
     pub async fn clear_tag(
         &self,
         key: &str,
         tag_key: &str,
         by: Option<&str>,
     ) -> Result<SessionView> {
-        use crate::operations::sessions::tags::delete;
+        use crate::operations::sessions::{get, tags::delete};
         self.invoke::<delete::Op>(&delete::Input {
             key: tag_key.to_string(),
             by: by.map(str::to_string),
             session: key.to_string(),
         })
         .await?;
-        self.get_session(key).await
+        self.invoke::<get::Op>(&get::Input {
+            session: key.to_string(),
+        })
+        .await
     }
 
-    /// Stamp a watch's mark on a session — the `triage` tag. A convenience
-    /// over [`Client::set_tag`] / [`Client::clear_tag`] that keeps the `mark`
-    /// capability name: a `level` of `attention`/`blocked` sets the tag, an empty
-    /// `level` (or `ok`) clears it.
     pub async fn mark(
         &self,
         key: &str,
@@ -519,37 +446,7 @@ impl Client {
         Ok(result.screen)
     }
 
-    /// Typed, bounded worktree changes relative to the session's local base
-    /// (`sessions.changes`).
-    pub async fn changes(&self, key: &str) -> Result<crate::ChangeSetDto> {
-        use crate::operations::sessions::changes;
-        self.invoke::<changes::Op>(&changes::Input {
-            session: key.to_string(),
-        })
-        .await
-    }
-
-    /// Recent events for a branch, newest first, capped at 200 server-side
-    /// (`branches.events.list`). `key` may be a branch id, `repo:branch`, or
-    /// unambiguous id prefix — no live session required.
-    pub async fn branch_log(&self, key: &str) -> Result<Vec<weaver_core::events::Event>> {
-        use crate::operations::branches::events::list;
-        self.invoke::<list::Op>(&list::Input {
-            branch: key.to_string(),
-        })
-        .await
-    }
-
     // -- Channels ----------------------------------------------------------
-
-    pub async fn list_channels(&self, archived: bool) -> Result<Vec<ChannelView>> {
-        use crate::operations::channels::list;
-        self.invoke::<list::Op>(&list::Input {
-            archived,
-            branch: String::new(),
-        })
-        .await
-    }
 
     pub async fn create_channel(&self, req: &CreateChannelReq) -> Result<ChannelView> {
         use crate::operations::channels::create;
@@ -562,39 +459,12 @@ impl Client {
         .await
     }
 
-    pub async fn get_channel(&self, id: &str) -> Result<ChannelView> {
-        use crate::operations::channels::get;
-        self.invoke::<get::Op>(&get::Input {
-            channel: id.to_string(),
-            branch: String::new(),
-        })
-        .await
-    }
-
-    pub async fn channel_bindings(&self, id: &str) -> Result<Vec<ChannelBindingView>> {
-        use crate::operations::channels::bindings::list;
-        self.invoke::<list::Op>(&list::Input {
-            channel: id.to_string(),
-            branch: String::new(),
-        })
-        .await
-    }
-
     pub async fn channel_messages(&self, id: &str, after: i64) -> Result<Vec<ChannelMessageView>> {
-        self.channel_messages_bounded(id, after, 100).await
-    }
-
-    pub async fn channel_messages_bounded(
-        &self,
-        id: &str,
-        after: i64,
-        limit: usize,
-    ) -> Result<Vec<ChannelMessageView>> {
         use crate::operations::channels::messages::list;
         self.invoke::<list::Op>(&list::Input {
             channel: id.to_string(),
             after: after.max(0),
-            limit: limit as i64,
+            limit: 100,
             kinds: Vec::new(),
             peek: false,
             branch: String::new(),
@@ -621,98 +491,7 @@ impl Client {
         .await
     }
 
-    pub async fn set_channel_subscription(
-        &self,
-        id: &str,
-        mode: &str,
-        session_id: Option<&str>,
-    ) -> Result<ChannelSubscriptionView> {
-        use crate::operations::channels::subscription::set;
-        self.invoke::<set::Op>(&set::Input {
-            channel: id.to_string(),
-            mode: mode.to_string(),
-            session: session_id.map(str::to_string),
-            branch: String::new(),
-        })
-        .await
-    }
-
-    pub async fn mark_channel_read(
-        &self,
-        id: &str,
-        seq: Option<i64>,
-    ) -> Result<ChannelSubscriptionView> {
-        use crate::operations::channels::read_marker::set;
-        self.invoke::<set::Op>(&set::Input {
-            channel: id.to_string(),
-            seq,
-            branch: String::new(),
-        })
-        .await
-    }
-
     // -- Branches -----------------------------------------------------------
-
-    /// Get one branch by id, `repo:branch`, or unambiguous id prefix — no live
-    /// session required (`branches.get`).
-    pub async fn get_branch(&self, key: &str) -> Result<BranchView> {
-        use crate::operations::branches::get;
-        self.invoke::<get::Op>(&get::Input {
-            branch: key.to_string(),
-        })
-        .await
-    }
-
-    /// Set the agent's attention level and current-state message in one call
-    /// (`branches.status.set`). `level` is `ok` | `attention` | `blocked`; an
-    /// empty `message` leaves the previous one in place.
-    pub async fn set_branch_status(
-        &self,
-        key: &str,
-        level: &str,
-        message: &str,
-    ) -> Result<BranchView> {
-        use crate::operations::branches::status::set;
-        self.invoke::<set::Op>(&set::Input {
-            level: level.to_string(),
-            message: (!message.is_empty()).then(|| message.to_string()),
-            branch: key.to_string(),
-        })
-        .await
-    }
-
-    /// Set (upsert) a tag on a branch, no live session required
-    /// (`branches.tags.set`).
-    pub async fn set_branch_tag(
-        &self,
-        key: &str,
-        tag_key: &str,
-        value: &str,
-        note: &str,
-        by: &str,
-    ) -> Result<BranchView> {
-        use crate::operations::branches::tags::set;
-        self.invoke::<set::Op>(&set::Input {
-            key: tag_key.to_string(),
-            value: value.to_string(),
-            note: note.to_string(),
-            by: Some(by.to_string()),
-            branch: key.to_string(),
-        })
-        .await
-    }
-
-    /// Clear a tag on a branch, no live session required
-    /// (`branches.tags.delete`).
-    pub async fn clear_branch_tag(&self, key: &str, tag_key: &str, by: &str) -> Result<BranchView> {
-        use crate::operations::branches::tags::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            key: tag_key.to_string(),
-            by: Some(by.to_string()),
-            branch: key.to_string(),
-        })
-        .await
-    }
 
     /// Append a raw event row to a branch's log — the escape hatch for an
     /// event kind with no dedicated mutating operation (e.g. an agent hook)
@@ -733,38 +512,6 @@ impl Client {
     //
     // The `artifacts.*` operations are addressed by branch, enabling the
     // `loom artifacts` CLI to target a branch with no active session.
-
-    /// List a branch's artifacts — its own plus repo-shared, or (`repo: true`)
-    /// every artifact in the repo regardless of scope (`artifacts.list`).
-    pub async fn list_branch_artifacts(&self, key: &str, repo: bool) -> Result<Vec<ArtifactMeta>> {
-        use crate::operations::artifacts::list;
-        self.invoke::<list::Op>(&list::Input {
-            repo,
-            branch: key.to_string(),
-        })
-        .await
-    }
-
-    /// Fetch an artifact's content. By default resolves branch-scoped first
-    /// then repo-shared (what `show` displays); `repo: true` targets the
-    /// repo-shared row of this name specifically. `rev` selects a revision;
-    /// `None` is the latest (`artifacts.get`).
-    pub async fn get_branch_artifact(
-        &self,
-        key: &str,
-        name: &str,
-        rev: Option<i64>,
-        repo: bool,
-    ) -> Result<ArtifactView> {
-        use crate::operations::artifacts::get;
-        self.invoke::<get::Op>(&get::Input {
-            name: name.to_string(),
-            rev,
-            repo,
-            branch: key.to_string(),
-        })
-        .await
-    }
 
     /// Write a new revision of an artifact, creating it if absent
     /// (`artifacts.write`). `author` is dropped: the operation derives the
@@ -822,38 +569,6 @@ impl Client {
     // Addressed by branch for `loom artifacts comment/resolve/threads`, which —
     // like every other `weaver` command — needs no live session.
 
-    /// Every thread on an artifact, open and resolved, each with its comments
-    /// (`artifacts.threads.list`).
-    pub async fn list_branch_threads(&self, key: &str, name: &str) -> Result<Vec<ThreadDto>> {
-        use crate::operations::artifacts::threads::list;
-        self.invoke::<list::Op>(&list::Input {
-            name: name.to_string(),
-            open_only: false,
-            branch: key.to_string(),
-        })
-        .await
-    }
-
-    /// Open a new thread anchored to a quoted span, seeded with its first
-    /// comment (`artifacts.threads.comment`, `target: {"kind": "new", ...}`).
-    pub async fn create_branch_thread(
-        &self,
-        key: &str,
-        name: &str,
-        base_rev: i64,
-        anchor: AnchorDto,
-        body: &str,
-    ) -> Result<ThreadDto> {
-        use crate::operations::artifacts::threads::comment;
-        self.invoke::<comment::Op>(&comment::Input {
-            name: name.to_string(),
-            body: body.to_string(),
-            target: comment::CommentTarget::New { base_rev, anchor },
-            branch: key.to_string(),
-        })
-        .await
-    }
-
     /// Append a reply to an existing thread (`artifacts.threads.comment`,
     /// `target: {"kind": "reply", ...}`). The operation answers with the whole
     /// thread for both targets, so the appended reply is its last comment.
@@ -900,23 +615,6 @@ impl Client {
 
     // -- Staged reviews ------------------------------------------------------
 
-    /// A session's reviews for one subject — an artifact, or its change-set
-    /// (`reviews.list`).
-    pub async fn list_session_reviews(
-        &self,
-        session: &str,
-        subject_kind: &str,
-        subject_key: &str,
-    ) -> Result<Vec<ReviewDto>> {
-        use crate::operations::reviews::list;
-        self.invoke::<list::Op>(&list::Input {
-            subject_kind: review_subject_kind(subject_kind)?,
-            subject_key: subject_key.to_string(),
-            session: session.to_string(),
-        })
-        .await
-    }
-
     pub async fn create_session_review(
         &self,
         session: &str,
@@ -949,11 +647,6 @@ impl Client {
         .await
     }
 
-    pub async fn get_review(&self, review_id: i64) -> Result<ReviewDto> {
-        use crate::operations::reviews::get;
-        self.invoke::<get::Op>(&get::Input { id: review_id }).await
-    }
-
     pub async fn update_review_comment(
         &self,
         review_id: i64,
@@ -984,21 +677,6 @@ impl Client {
         .await
     }
 
-    pub async fn delete_review_comment(
-        &self,
-        review_id: i64,
-        comment_id: i64,
-        expected_revision: i64,
-    ) -> Result<ReviewDto> {
-        use crate::operations::reviews::comments::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            id: review_id,
-            comment_id,
-            expected_revision,
-        })
-        .await
-    }
-
     pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
         use crate::operations::reviews::discard;
         let result = self
@@ -1020,40 +698,6 @@ impl Client {
         .await
     }
 
-    pub async fn retarget_review_to_current(
-        &self,
-        review_id: i64,
-        expected_revision: i64,
-    ) -> Result<ReviewDto> {
-        use crate::operations::reviews::retarget;
-        self.invoke::<retarget::Op>(&retarget::Input {
-            id: review_id,
-            expected_revision,
-        })
-        .await
-    }
-
-    pub async fn set_review_comment_resolution(
-        &self,
-        review_id: i64,
-        comment_id: i64,
-        resolved: bool,
-    ) -> Result<ReviewCommentDto> {
-        use crate::operations::reviews::comments::resolve;
-        self.invoke::<resolve::Op>(&resolve::Input {
-            id: review_id,
-            comment_id,
-            resolved,
-        })
-        .await
-    }
-
-    pub async fn retry_review_delivery(&self, review_id: i64) -> Result<ReviewDto> {
-        use crate::operations::reviews::retry_delivery;
-        self.invoke::<retry_delivery::Op>(&retry_delivery::Input { id: review_id })
-            .await
-    }
-
     // -- Issues ---------------------------------------------------------------
 
     // -- Settings -------------------------------------------------------------
@@ -1061,19 +705,6 @@ impl Client {
     /// Public database and migration readiness (`GET /api/ready`).
     pub async fn readiness(&self) -> Result<ReadinessView> {
         self.get_typed("/api/ready").await
-    }
-
-    /// Human-readable redacted operational inventory (`diagnostics.get`).
-    pub async fn diagnostics(&self) -> Result<DiagnosticsView> {
-        use crate::operations::diagnostics::get;
-        self.invoke::<get::Op>(&get::Input {}).await
-    }
-
-    /// Trusted MCP adapters and their provider-neutral capability sets
-    /// (`mcps.get`).
-    pub async fn mcp_registry(&self) -> Result<McpRegistryView> {
-        use crate::operations::mcps::get;
-        self.invoke::<get::Op>(&get::Input {}).await
     }
 
     pub async fn create_custom_mcp(&self, req: &CustomMcpReq) -> Result<CustomMcpView> {
@@ -1114,29 +745,6 @@ impl Client {
             })
             .await?;
         Ok(serde_json::to_value(result)?)
-    }
-
-    /// List named launch profiles. Secret environment values are withheld
-    /// (`profiles.list`).
-    pub async fn list_profiles(&self) -> Result<Vec<ProfileView>> {
-        use crate::operations::profiles::list;
-        self.invoke::<list::Op>(&list::Input {}).await
-    }
-
-    pub async fn get_profile(&self, name: &str) -> Result<ProfileView> {
-        use crate::operations::profiles::get;
-        self.invoke::<get::Op>(&get::Input {
-            name: name.to_string(),
-        })
-        .await
-    }
-
-    pub async fn effective_profile(&self, name: &str) -> Result<EffectiveProfileView> {
-        use crate::operations::profiles::effective;
-        self.invoke::<effective::Op>(&effective::Input {
-            name: name.to_string(),
-        })
-        .await
     }
 
     pub async fn create_profile(&self, req: &ProfileReq) -> Result<ProfileView> {
@@ -1183,13 +791,6 @@ impl Client {
         .await
     }
 
-    /// Return the upload limits shared by launch and live-session Scratch
-    /// (`sessions.scratch.limits`).
-    pub async fn scratch_limits(&self) -> Result<ScratchLimitsView> {
-        use crate::operations::sessions::scratch::limits;
-        self.invoke::<limits::Op>(&limits::Input {}).await
-    }
-
     pub async fn delete_profile(&self, name: &str) -> Result<Value> {
         use crate::operations::profiles::delete;
         let result = self
@@ -1198,69 +799,6 @@ impl Client {
             })
             .await?;
         Ok(serde_json::to_value(result)?)
-    }
-
-    pub async fn set_profile_env(
-        &self,
-        profile: &str,
-        name: &str,
-        value: &str,
-    ) -> Result<ProfileView> {
-        use crate::operations::profiles::env::set;
-        self.invoke::<set::Op>(&set::Input {
-            profile: profile.to_string(),
-            name: name.to_string(),
-            value: Some(value.to_string()),
-            secret_ref: None,
-        })
-        .await
-    }
-
-    pub async fn set_profile_env_secret(
-        &self,
-        profile: &str,
-        name: &str,
-        secret_ref: &str,
-    ) -> Result<ProfileView> {
-        use crate::operations::profiles::env::set;
-        self.invoke::<set::Op>(&set::Input {
-            profile: profile.to_string(),
-            name: name.to_string(),
-            value: None,
-            secret_ref: Some(secret_ref.to_string()),
-        })
-        .await
-    }
-
-    pub async fn remove_profile_env(&self, profile: &str, name: &str) -> Result<ProfileView> {
-        use crate::operations::profiles::env::delete;
-        self.invoke::<delete::Op>(&delete::Input {
-            profile: profile.to_string(),
-            name: name.to_string(),
-        })
-        .await
-    }
-
-    /// Every registered setting and its effective value (`settings.get`).
-    pub async fn list_settings(&self) -> Result<SettingsEnvelope> {
-        use crate::operations::settings::get;
-        self.invoke::<get::Op>(&get::Input {}).await
-    }
-
-    /// Apply setting changes: a `null` value clears a key back to its default
-    /// (`settings.patch`).
-    pub async fn patch_settings(
-        &self,
-        changes: serde_json::Map<String, Value>,
-    ) -> Result<SettingsEnvelope> {
-        use crate::operations::settings::patch;
-        self.invoke::<patch::Op>(&patch::Input {
-            changes: changes
-                .into_iter()
-                .map(|(key, value)| (key, Some(value)))
-                .collect(),
-        })
-        .await
     }
 
     // -- Watches ------------------------------------------------------
@@ -1291,11 +829,6 @@ impl Client {
             ttl_secs: req.ttl_secs,
         })
         .await
-    }
-
-    pub async fn list_federations(&self) -> Result<Vec<FederationView>> {
-        use crate::operations::auth::federations::list;
-        self.invoke::<list::Op>(&list::Input {}).await
     }
 
     pub async fn add_federation(&self, req: &FederationReq) -> Result<FederationView> {
@@ -1350,12 +883,6 @@ impl Client {
         .await
     }
 
-    /// List the user-managed API tokens (`auth.tokens.list`).
-    pub async fn list_tokens(&self) -> Result<Vec<TokenView>> {
-        use crate::operations::auth::tokens::list;
-        self.invoke::<list::Op>(&list::Input {}).await
-    }
-
     /// Mint a new API token, returning the one-time plaintext
     /// (`auth.tokens.create`).
     pub async fn create_token(&self, req: &CreateTokenReq) -> Result<CreatedTokenView> {
@@ -1379,14 +906,6 @@ impl Client {
 
 /// Parse the wire spelling of a review subject kind, which
 /// [`Client::list_session_reviews`] still takes as a plain string.
-fn review_subject_kind(kind: &str) -> Result<ReviewSubjectKindDto> {
-    match kind.trim() {
-        "artifact" => Ok(ReviewSubjectKindDto::Artifact),
-        "changes" => Ok(ReviewSubjectKindDto::Changes),
-        other => Err(anyhow!("unknown review subject kind `{other}`")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::Client;

@@ -14,7 +14,7 @@ use loom::agent_cli::{
 };
 use serde_json::{json, Value};
 use weaver_api::operations::permissions as perm_ops;
-use weaver_api::operations::session_layout as layout;
+use weaver_api::operations::session_layout;
 use weaver_api::{
     AddReviewCommentReq, ArtifactTextAnchorDto, CreateReviewReq, DecidePermissionRequestReq,
     MoveSessionsReq, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
@@ -24,6 +24,7 @@ use weaver_api::{
 };
 
 use loom::client::{self, Client};
+use weaver_api::operations::{auth, branches, mcps, profiles, reviews, sessions};
 use weaver_core::db::Db;
 
 #[derive(Parser)]
@@ -2186,7 +2187,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
     match cmd {
         ReviewCmd::Ls { session, artifact } => {
             let reviews = client
-                .list_session_reviews(&session, "artifact", &artifact)
+                .invoke::<reviews::list::Op>(&reviews::list::Input {
+                    subject_kind: "artifact".parse().map_err(anyhow::Error::msg)?,
+                    subject_key: artifact.to_string(),
+                    session: session.to_string(),
+                })
                 .await?;
             if reviews.is_empty() {
                 println!("(no reviews)");
@@ -2215,7 +2220,9 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             Ok(())
         }
         ReviewCmd::Show { review_id } => {
-            let review = client.get_review(review_id).await?;
+            let review = client
+                .invoke::<reviews::get::Op>(&reviews::get::Input { id: review_id })
+                .await?;
             println!("{}", serde_json::to_string_pretty(&review)?);
             Ok(())
         }
@@ -2374,7 +2381,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             revision,
         } => {
             let review = client
-                .delete_review_comment(review_id, comment_id, revision)
+                .invoke::<reviews::comments::delete::Op>(&reviews::comments::delete::Input {
+                    id: review_id,
+                    comment_id,
+                    expected_revision: revision,
+                })
                 .await?;
             println!(
                 "deleted comment {comment_id} · draft revision {}",
@@ -2387,7 +2398,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             comment_id,
         } => {
             let comment = client
-                .set_review_comment_resolution(review_id, comment_id, true)
+                .invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+                    id: review_id,
+                    comment_id,
+                    resolved: true,
+                })
                 .await?;
             println!("resolved comment {}", comment.id);
             Ok(())
@@ -2397,7 +2412,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             comment_id,
         } => {
             let comment = client
-                .set_review_comment_resolution(review_id, comment_id, false)
+                .invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+                    id: review_id,
+                    comment_id,
+                    resolved: false,
+                })
                 .await?;
             println!("reopened comment {}", comment.id);
             Ok(())
@@ -2415,7 +2434,10 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             revision,
         } => {
             let review = client
-                .retarget_review_to_current(review_id, revision)
+                .invoke::<reviews::retarget::Op>(&reviews::retarget::Input {
+                    id: review_id,
+                    expected_revision: revision,
+                })
                 .await?;
             println!(
                 "review {} targets artifact revision {} · draft revision {}",
@@ -2460,7 +2482,11 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             Ok(())
         }
         ReviewCmd::Retry { review_id } => {
-            let review = client.retry_review_delivery(review_id).await?;
+            let review = client
+                .invoke::<reviews::retry_delivery::Op>(&reviews::retry_delivery::Input {
+                    id: review_id,
+                })
+                .await?;
             println!("review {} · delivery {}", review.id, review.delivery_state);
             Ok(())
         }
@@ -2487,7 +2513,11 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Interrupt { session } => cmd_session_interrupt(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
         SessionCmd::Changes { session } => {
-            let changes = client::default()?.changes(&session).await?;
+            let changes = client::default()?
+                .invoke::<sessions::changes::Op>(&sessions::changes::Input {
+                    session: session.to_string(),
+                })
+                .await?;
             println!("{}", serde_json::to_string_pretty(&changes)?);
             Ok(())
         }
@@ -2497,7 +2527,11 @@ async fn run_session(cmd: SessionCmd) -> Result<()> {
         }
         SessionCmd::Events { session, limit } => {
             if let Some(session) = session {
-                let events = client::default()?.branch_log(&session).await?;
+                let events = client::default()?
+                    .invoke::<branches::events::list::Op>(&branches::events::list::Input {
+                        branch: session.to_string(),
+                    })
+                    .await?;
                 for event in events.into_iter().rev().take(limit.max(0) as usize).rev() {
                     println!(
                         "{}  {:<14} {}",
@@ -2575,7 +2609,10 @@ fn github_access_session(explicit: Option<String>) -> Result<String> {
 async fn layout_revision(client: &Client, requested: Option<i64>) -> Result<i64> {
     match requested {
         Some(revision) => Ok(revision),
-        None => Ok(client.get_session_layout().await?.revision),
+        None => Ok(client
+            .invoke::<session_layout::get::Op>(&session_layout::get::Input {})
+            .await?
+            .revision),
     }
 }
 
@@ -2614,34 +2651,44 @@ fn print_session_layout(layout: &SessionLayoutView) {
 async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
     let client = client::default()?;
     let layout = match cmd {
-        SessionLayoutCmd::Show => client.get_session_layout().await?,
+        SessionLayoutCmd::Show => {
+            client
+                .invoke::<session_layout::get::Op>(&session_layout::get::Input {})
+                .await?
+        }
         SessionLayoutCmd::SpaceAdd { name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::spaces::create::Op>(&layout::spaces::create::Input {
-                    name,
-                    expected_revision,
-                })
+                .invoke::<session_layout::spaces::create::Op>(
+                    &session_layout::spaces::create::Input {
+                        name,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::SpaceRename { id, name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::spaces::update::Op>(&layout::spaces::update::Input {
-                    id,
-                    name,
-                    expected_revision,
-                })
+                .invoke::<session_layout::spaces::update::Op>(
+                    &session_layout::spaces::update::Input {
+                        id,
+                        name,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::SpaceDelete { id, to, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::spaces::delete::Op>(&layout::spaces::delete::Input {
-                    id,
-                    destination_group_id: to,
-                    expected_revision,
-                })
+                .invoke::<session_layout::spaces::delete::Op>(
+                    &session_layout::spaces::delete::Input {
+                        id,
+                        destination_group_id: to,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::GroupAdd {
@@ -2651,31 +2698,37 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::groups::create::Op>(&layout::groups::create::Input {
-                    space_id: space,
-                    name,
-                    expected_revision,
-                })
+                .invoke::<session_layout::groups::create::Op>(
+                    &session_layout::groups::create::Input {
+                        space_id: space,
+                        name,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::GroupRename { id, name, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::groups::update::Op>(&layout::groups::update::Input {
-                    id,
-                    name,
-                    expected_revision,
-                })
+                .invoke::<session_layout::groups::update::Op>(
+                    &session_layout::groups::update::Input {
+                        id,
+                        name,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::GroupDelete { id, to, revision } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::groups::delete::Op>(&layout::groups::delete::Input {
-                    id,
-                    destination_group_id: to,
-                    expected_revision,
-                })
+                .invoke::<session_layout::groups::delete::Op>(
+                    &session_layout::groups::delete::Input {
+                        id,
+                        destination_group_id: to,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::Reorder {
@@ -2687,7 +2740,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::reorder::Op>(&layout::reorder::Input {
+                .invoke::<session_layout::reorder::Op>(&session_layout::reorder::Input {
                     kind,
                     id,
                     before_id: before,
@@ -2717,7 +2770,7 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
                 .context("restore snapshot must be a JSON array of group orders")?;
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::restore::Op>(&layout::restore::Input {
+                .invoke::<session_layout::restore::Op>(&session_layout::restore::Input {
                     groups,
                     expected_revision,
                 })
@@ -2725,8 +2778,8 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         }
         SessionLayoutCmd::Collapse { group } => {
             client
-                .invoke::<layout::groups::preference::set::Op>(
-                    &layout::groups::preference::set::Input {
+                .invoke::<session_layout::groups::preference::set::Op>(
+                    &session_layout::groups::preference::set::Input {
                         id: group,
                         collapsed: true,
                     },
@@ -2735,8 +2788,8 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         }
         SessionLayoutCmd::Expand { group } => {
             client
-                .invoke::<layout::groups::preference::set::Op>(
-                    &layout::groups::preference::set::Input {
+                .invoke::<session_layout::groups::preference::set::Op>(
+                    &session_layout::groups::preference::set::Input {
                         id: group,
                         collapsed: false,
                     },
@@ -2751,12 +2804,14 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .invoke::<layout::defaults::set::Op>(&layout::defaults::set::Input {
-                    selector_kind: kind,
-                    selector_value: value,
-                    group_id: to,
-                    expected_revision,
-                })
+                .invoke::<session_layout::defaults::set::Op>(
+                    &session_layout::defaults::set::Input {
+                        selector_kind: kind,
+                        selector_value: value,
+                        group_id: to,
+                        expected_revision,
+                    },
+                )
                 .await?
         }
         SessionLayoutCmd::DefaultDelete {
@@ -2766,7 +2821,13 @@ async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
         } => {
             let expected_revision = layout_revision(&client, revision).await?;
             client
-                .delete_session_placement_default(kind, &value, expected_revision)
+                .invoke::<session_layout::defaults::delete::Op>(
+                    &session_layout::defaults::delete::Input {
+                        selector_kind: kind,
+                        selector_value: value.to_string(),
+                        expected_revision,
+                    },
+                )
                 .await?
         }
     };
@@ -2779,7 +2840,9 @@ async fn run_mcp(cmd: McpCmd) -> Result<()> {
         McpCmd::Serve { adapter } => loom::mcp::serve(&adapter).await,
         McpCmd::ServeCustom { identity } => loom::custom_mcp::serve_from_env(&identity).await,
         McpCmd::Ls => {
-            let registry = client::default()?.mcp_registry().await?;
+            let registry = client::default()?
+                .invoke::<mcps::get::Op>(&mcps::get::Input {})
+                .await?;
             for set in &registry.capability_sets {
                 println!(
                     "{:<30} {:<4} {:<12} {}",
@@ -2795,7 +2858,9 @@ async fn run_mcp(cmd: McpCmd) -> Result<()> {
             Ok(())
         }
         McpCmd::Show { name } => {
-            let registry = client::default()?.mcp_registry().await?;
+            let registry = client::default()?
+                .invoke::<mcps::get::Op>(&mcps::get::Input {})
+                .await?;
             if let Some(server) = registry
                 .custom_servers
                 .iter()
@@ -2828,7 +2893,9 @@ async fn run_mcp(cmd: McpCmd) -> Result<()> {
                 test_source,
                 enabled: !opts.disabled,
             };
-            let registry = client::default()?.mcp_registry().await?;
+            let registry = client::default()?
+                .invoke::<mcps::get::Op>(&mcps::get::Input {})
+                .await?;
             let value = if registry
                 .custom_servers
                 .iter()
@@ -2930,7 +2997,7 @@ async fn cmd_login(name: String, url: Option<String>, token_stdin: bool) -> Resu
         bail!("Loom rejected the personal API token");
     }
     remote
-        .list_tokens()
+        .invoke::<auth::tokens::list::Op>(&auth::tokens::list::Input {})
         .await
         .context("credential is authenticated but is not a user API token")?;
     loom::client_context::save_login(&paths, &name, &url, token)?;
@@ -3085,7 +3152,10 @@ async fn run_federation(cmd: FederationCmd) -> Result<()> {
             println!("added federation mapping {}", mapping.id);
         }
         FederationCmd::Ls => {
-            for mapping in client.list_federations().await? {
+            for mapping in client
+                .invoke::<auth::federations::list::Op>(&auth::federations::list::Input {})
+                .await?
+            {
                 println!(
                     "{}  provider={}  service={}  profiles={}",
                     mapping.name,
@@ -3174,7 +3244,10 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             );
         }
         ProfileCmd::Ls => {
-            for profile in client.list_profiles().await? {
+            for profile in client
+                .invoke::<profiles::list::Op>(&profiles::list::Input {})
+                .await?
+            {
                 println!(
                     "{:<20} {:<11} {:<10} {:<8} {}",
                     profile.name,
@@ -3189,9 +3262,21 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             println!(
                 "{}",
                 if effective {
-                    serde_json::to_string_pretty(&client.effective_profile(&name).await?)?
+                    serde_json::to_string_pretty(
+                        &client
+                            .invoke::<profiles::effective::Op>(&profiles::effective::Input {
+                                name: name.to_string(),
+                            })
+                            .await?,
+                    )?
                 } else {
-                    serde_json::to_string_pretty(&client.get_profile(&name).await?)?
+                    serde_json::to_string_pretty(
+                        &client
+                            .invoke::<profiles::get::Op>(&profiles::get::Input {
+                                name: name.to_string(),
+                            })
+                            .await?,
+                    )?
                 }
             );
         }
@@ -3311,7 +3396,14 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 name,
                 value,
             } => {
-                client.set_profile_env(&profile, &name, &value).await?;
+                client
+                    .invoke::<profiles::env::set::Op>(&profiles::env::set::Input {
+                        profile: profile.to_string(),
+                        name: name.to_string(),
+                        value: Some(value.to_string()),
+                        secret_ref: None,
+                    })
+                    .await?;
                 println!("set {name} on profile {profile}");
             }
             ProfileEnvCmd::Secret {
@@ -3320,12 +3412,22 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 secret_ref,
             } => {
                 client
-                    .set_profile_env_secret(&profile, &name, &secret_ref)
+                    .invoke::<profiles::env::set::Op>(&profiles::env::set::Input {
+                        profile: profile.to_string(),
+                        name: name.to_string(),
+                        value: None,
+                        secret_ref: Some(secret_ref.to_string()),
+                    })
                     .await?;
                 println!("set Secret Manager reference for {name} on profile {profile}");
             }
             ProfileEnvCmd::Rm { profile, name } => {
-                client.remove_profile_env(&profile, &name).await?;
+                client
+                    .invoke::<profiles::env::delete::Op>(&profiles::env::delete::Input {
+                        profile: profile.to_string(),
+                        name: name.to_string(),
+                    })
+                    .await?;
                 println!("removed {name} from profile {profile}");
             }
         },
@@ -3379,7 +3481,9 @@ async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()>
 }
 
 async fn cmd_token_ls() -> Result<()> {
-    let tokens = client::default()?.list_tokens().await?;
+    let tokens = client::default()?
+        .invoke::<auth::tokens::list::Op>(&auth::tokens::list::Input {})
+        .await?;
     if tokens.is_empty() {
         println!("no tokens — create one with `loom token add <name>`");
         return Ok(());
@@ -4973,17 +5077,113 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
     }
     let list = serde_json::to_value(
         client
-            .search_sessions(&SearchSessionsOptions {
-                query: search.unwrap_or_default().to_string(),
-                history: archived,
-                archived_only: false,
-                status,
-                attention,
-                creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
-                automation: Some(managed),
-                managed,
+            .invoke::<sessions::list::Op>(&sessions::list::Input {
+                q: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .query
+                .clone(),
+                history: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .history,
+                archived_only: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .archived_only,
+                status: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .status,
+                attention: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .attention,
+                creator: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .creator,
+                automation: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .automation
+                .unwrap_or(true),
+                managed: (SearchSessionsOptions {
+                    query: search.unwrap_or_default().to_string(),
+                    history: archived,
+                    archived_only: false,
+                    status,
+                    attention,
+                    creator,
+                    // The plain fleet listing has always omitted automation
+                    // sessions; the managed inventory has always included them.
+                    automation: Some(managed),
+                    managed,
+                })
+                .managed,
             })
             .await?,
     )?;

@@ -19,6 +19,7 @@ use loom::backend;
 use loom::session::{self as session_mod, NewSession};
 
 use crate::fixtures::{branch_tag_value, TestServer};
+use weaver_api::operations::sessions;
 
 /// The relay command that launches the scripted fake ACP agent over stdio.
 fn agent_cmd() -> String {
@@ -1068,7 +1069,13 @@ async fn permission_answered_over_rest() {
     // The session's own bearer token cannot approve the ACP prompt it caused.
     // Only a human principal may cross this boundary, regardless of whether
     // the call arrives through a CLI, MCP adapter, or raw REST.
-    let session = ts.client.get_session("acp-rest").await.unwrap();
+    let session = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "acp-rest".to_string(),
+        })
+        .await
+        .unwrap();
     let token = loom::auth::create_session_token(
         &ts.state.db,
         Some("rjpower"),
@@ -2376,7 +2383,13 @@ async fn insert_protected_review(
     delivery_key: &str,
     payload: &str,
 ) {
-    let session = ts.client.get_session(session_id).await.unwrap();
+    let session = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: session_id.to_string(),
+        })
+        .await
+        .unwrap();
     let inserted = sqlx::query(
         "INSERT INTO reviews
             (repo_root, branch_id, session_id, subject_kind, subject_id,

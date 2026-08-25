@@ -1766,6 +1766,18 @@ pub enum ReviewSubjectKindDto {
     Changes,
 }
 
+impl std::str::FromStr for ReviewSubjectKindDto {
+    type Err = String;
+
+    fn from_str(kind: &str) -> Result<Self, Self::Err> {
+        match kind.trim() {
+            "artifact" => Ok(Self::Artifact),
+            "changes" => Ok(Self::Changes),
+            other => Err(format!("unknown review subject kind `{other}`")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewAnchorKindDto {

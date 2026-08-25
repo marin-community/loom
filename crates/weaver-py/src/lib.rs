@@ -32,6 +32,7 @@ use serde::Serialize;
 
 use weaver_api::capability::{require, CapabilityError};
 use weaver_api::{Client as ApiClient, SendReq};
+use weaver_api::operations::sessions;
 
 pyo3::create_exception!(
     weaver_py,
@@ -164,7 +165,9 @@ impl Client {
     /// (`GET /api/sessions/{key}`).
     fn session(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let view = py
-            .detach(|| self.rt.block_on(self.inner.get_session(key)))
+            .detach(|| self.rt.block_on(self.inner.invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: key.to_string(),
+        })))
             .map_err(api_err)?;
         to_py(py, &view)
     }
@@ -181,7 +184,9 @@ impl Client {
     /// (`GET /api/sessions/{key}/changes`).
     fn changes(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let value = py
-            .detach(|| self.rt.block_on(self.inner.changes(key)))
+            .detach(|| self.rt.block_on(self.inner.invoke::<sessions::changes::Op>(&sessions::changes::Input {
+            session: key.to_string(),
+        })))
             .map_err(api_err)?;
         to_py(py, &value)
     }
