@@ -145,7 +145,7 @@ sessions.changes                   POST /api/sessions/changes                   
 sessions.chat                      POST /api/sessions/chat                           session_self  read           json    cli=loom sessions chat           grants=[loom/sessions/read@v1]
 sessions.chat.stream               GET /api/sessions/chat/stream                    session_self  read           stream  cli=-                            grants=[loom/sessions/read@v1]
 sessions.config.set                POST /api/sessions/config/set                     session_self  write          json    cli=-                            grants=[loom/sessions/write@v1]
-sessions.context                   POST /api/sessions/context                        session_self  read           json    cli=loom context                 grants=[loom/sessions/read@v1]
+sessions.context                   POST /api/sessions/context                        session_self  read           json    cli=-                            grants=[loom/sessions/read@v1]
 sessions.conversation              POST /api/sessions/conversation                   session_self  read           json    cli=loom sessions conversation   grants=[loom/sessions/read@v1]
 sessions.conversation.block        POST /api/sessions/conversation/block             session_self  read           json    cli=-                            grants=[loom/sessions/read@v1]
 sessions.delete                    POST /api/sessions/delete                         session_self  destructive    json    cli=-                            grants=[loom/sessions/write@v1]

@@ -1752,6 +1752,20 @@ mod cli_tree_tests {
                     break;
                 }
             }
+            // Landing on a *group* means the advertised words reach something
+            // else entirely: `sessions.context` once advertised `loom context`,
+            // which is the credential-context manager and takes a subcommand of
+            // its own. Finding a command by that name is not enough — an
+            // operation is one invocation, so what it names has to be runnable.
+            if let Some(leaf) = node {
+                if leaf.get_subcommands().next().is_some() {
+                    drift.push(format!(
+                        "  {} advertises `{}`, which is a command group, not an invocation",
+                        operation.id,
+                        cli.invocation()
+                    ));
+                }
+            }
         }
         assert!(
             drift.is_empty(),

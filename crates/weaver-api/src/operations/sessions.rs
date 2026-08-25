@@ -130,11 +130,17 @@ pub mod context {
 
     /// Resolve this caller's session, branch, repository, channel, and links.
     // `self` cannot be a Rust module name — not even as a raw identifier — so an
-    // id of `self.get` could never live in the file its name promises. The CLI
-    // still spells it `loom context` and MCP still calls it `loom_context::get`:
-    // projections are named independently of identity, which is the point.
+    // id of `self.get` could never live in the file its name promises. MCP calls
+    // it `loom_context::get`: projections are named independently of identity,
+    // which is the point.
+    //
+    // No CLI projection. It advertised `loom context`, but that name belongs to
+    // the credential-context manager (`loom context ls|use|add|current|rm`) and
+    // always has — the operation was never reachable by the words it published.
+    // `loom self` prints this data today by asking `branches.get`; giving this
+    // operation a truthful projection means that command invoking it.
     #[operation(id = "sessions.context", actor = SessionSelf, scope = Session, risk = Read,
-                grants = ["loom/sessions/read@v1"], cli = "context")]
+                grants = ["loom/sessions/read@v1"])]
     pub struct Input {
         #[operand(context)]
         pub session: String,
