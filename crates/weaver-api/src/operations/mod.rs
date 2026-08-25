@@ -206,42 +206,6 @@ pub fn all_session_capabilities() -> Vec<String> {
     grants
 }
 
-/// Translate `mcp/*@v1` capability names to registry grants for backward
-/// compatibility with sessions carrying legacy transport-shaped names.
-pub fn session_capabilities_from_mcp<'a>(
-    restricted: bool,
-    capability_sets: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    if !restricted {
-        return all_session_capabilities();
-    }
-    let mut capabilities = std::collections::BTreeSet::from([
-        "loom/sessions/read@v1".to_string(),
-        "loom/permissions/read@v1".to_string(),
-        "loom/permissions/request@v1".to_string(),
-    ]);
-    for capability in capability_sets {
-        let canonical = match capability {
-            "mcp/context/read@v1" | "mcp/history/self@v1" | "mcp/session/read@v1" => {
-                Some("loom/sessions/read@v1")
-            }
-            "mcp/session/status@v1" | "mcp/messaging/status@v1" => Some("loom/sessions/write@v1"),
-            "mcp/channel/read@v1" => Some("loom/channels/read@v1"),
-            "mcp/channel/write@v1" => Some("loom/channels/write@v1"),
-            "mcp/artifact/read@v1" => Some("loom/artifacts/read@v1"),
-            "mcp/artifact/write@v1" => Some("loom/artifacts/write@v1"),
-            "mcp/issue/read@v1" => Some("loom/issues/read@v1"),
-            "mcp/issue/write@v1" => Some("loom/issues/write@v1"),
-            other if other.starts_with("loom/") => Some(other),
-            _ => None,
-        };
-        if let Some(canonical) = canonical {
-            capabilities.insert(canonical.to_string());
-        }
-    }
-    capabilities.into_iter().collect()
-}
-
 // -- Validation --------------------------------------------------------------
 
 /// Enforce the registry's structural invariants.

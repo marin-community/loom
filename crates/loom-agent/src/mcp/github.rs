@@ -37,11 +37,20 @@ const GITHUB_TOOL_NAMES: [&str; 6] = [
     "pr_edit",
 ];
 
+/// Every tool here is hand-written against one operation whose boundary is
+/// the session's own allow-list rather than a grant, so there is nothing to
+/// export.
+fn no_exports() -> &'static [super::dispatch::Export] {
+    &[]
+}
+
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "github",
     server_name: SERVER_NAME,
     description: "Repository-scoped GitHub issue and pull-request operations.",
     capability_sets,
+    exports: no_exports,
+    superseded: &[("mcp/github/comment@v1", "loom/github/comment@v1")],
     expand_tool_set,
     is_permission_rule,
     server_config,

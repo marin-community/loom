@@ -48,6 +48,14 @@ pub(crate) struct Adapter {
     server_name: &'static str,
     description: &'static str,
     capability_sets: fn() -> &'static [CapabilitySet],
+    /// The tools this adapter exports and the operation each one is.
+    exports: fn() -> &'static [dispatch::Export],
+    /// Old set names this adapter answers for, as `(old, current)`. The one
+    /// place a superseded name is written: it marks the old name deprecated in
+    /// the registry view and resolves it to the current set's grants. `old` may
+    /// be a name this adapter still publishes, one it renamed away from, or one
+    /// nothing publishes any more.
+    superseded: &'static [(&'static str, &'static str)],
     expand_tool_set: fn(&str) -> Option<Vec<String>>,
     is_permission_rule: fn(&str) -> bool,
     server_config: fn() -> Value,
@@ -271,18 +279,80 @@ pub fn registry() -> McpRegistryView {
     }
 }
 
+/// The set that supersedes `name`, if some adapter declares one.
 fn canonical_capability_successor(name: &str) -> Option<&'static str> {
-    match name {
-        "mcp/github/comment@v1" => Some("loom/github/comment@v1"),
-        "mcp/context/read@v1" => Some("loom/context/read@v1"),
-        "mcp/channel/read@v1" => Some("loom/channels/read@v1"),
-        "mcp/channel/write@v1" => Some("loom/channels/write@v1"),
-        "mcp/artifact/read@v1" => Some("loom/artifacts/read@v1"),
-        "mcp/artifact/write@v1" => Some("loom/artifacts/write@v1"),
-        "mcp/session/read@v1" | "mcp/history/self@v1" => Some("loom/sessions/read@v1"),
-        "mcp/session/status@v1" | "mcp/messaging/status@v1" => Some("loom/sessions/write@v1"),
-        _ => None,
+    adapters().find_map(|adapter| {
+        adapter
+            .superseded
+            .iter()
+            .find(|(before, _)| *before == name)
+            .map(|(_, after)| *after)
+    })
+}
+
+/// The registry grants a capability set confers.
+///
+/// A set is a name for some of an adapter's exports, so the grants it carries
+/// are the grants those operations declare. Superseded `mcp/*@v1` names need
+/// no translation table of their own: they name sets like any other, and a set
+/// resolves to grants the same way whatever it is called.
+fn capability_set_grants(name: &str) -> Vec<&'static str> {
+    // A superseded name resolves through its successor, whether or not anything
+    // still publishes the old name.
+    let name = canonical_capability_successor(name).unwrap_or(name);
+    let mut grants = Vec::new();
+    for adapter in adapters() {
+        let Some(set) = (adapter.capability_sets)()
+            .iter()
+            .find(|set| set.name == name)
+        else {
+            continue;
+        };
+        let exports = (adapter.exports)();
+        for tool in set.tools {
+            let Some(export) = exports.iter().find(|export| export.tool == *tool) else {
+                // A hand-written tool that is not a registered operation — the
+                // restricted GitHub tools, whose boundary is the session's own
+                // allow-list rather than a grant.
+                continue;
+            };
+            for grant in export.operation.grants {
+                if !grants.contains(grant) {
+                    grants.push(grant);
+                }
+            }
+        }
+        break;
     }
+    grants
+}
+
+/// Every registry grant a session holding `sets` may exercise.
+///
+/// An unrestricted session reaches everything an agent may call; a restricted
+/// one reaches the base three plus whatever its selected sets confer.
+pub fn session_capabilities<'a>(
+    restricted: bool,
+    sets: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    if !restricted {
+        return weaver_api::all_session_capabilities();
+    }
+    let mut capabilities = std::collections::BTreeSet::from([
+        "loom/sessions/read@v1".to_string(),
+        "loom/permissions/read@v1".to_string(),
+        "loom/permissions/request@v1".to_string(),
+    ]);
+    for set in sets {
+        let grants = capability_set_grants(set);
+        if grants.is_empty() && set.starts_with("loom/") {
+            // A policy naming a grant directly rather than a set that confers it.
+            capabilities.insert(set.to_string());
+            continue;
+        }
+        capabilities.extend(grants.into_iter().map(str::to_string));
+    }
+    capabilities.into_iter().collect()
 }
 
 fn selected_for_groups(set: &McpCapabilitySetView, groups: &[String]) -> bool {

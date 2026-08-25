@@ -87,6 +87,11 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Session lifecycle, status projection, and normalized history.",
     capability_sets: || CAPABILITY_SETS,
+    exports,
+    superseded: &[
+        ("mcp/session/read@v1", "loom/sessions/read@v1"),
+        ("mcp/session/status@v1", "loom/sessions/write@v1"),
+    ],
     expand_tool_set,
     is_permission_rule,
     server_config,

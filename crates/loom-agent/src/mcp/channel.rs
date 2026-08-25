@@ -40,7 +40,7 @@ fn exports() -> &'static [Export] {
 
 // The names these sets carried before the `loom/` rename. Sessions pinned to
 // one still resolve it.
-const RENAMED: &[(&str, &str)] = &[
+const SUPERSEDED: &[(&str, &str)] = &[
     ("mcp/channel/read@v1", "loom/channels/read@v1"),
     ("mcp/channel/write@v1", "loom/channels/write@v1"),
 ];
@@ -50,6 +50,11 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Durable conversation streams, subscriptions, and delivery receipts.",
     capability_sets,
+    exports,
+    superseded: &[
+        ("mcp/channel/read@v1", "loom/channels/read@v1"),
+        ("mcp/channel/write@v1", "loom/channels/write@v1"),
+    ],
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -59,13 +64,13 @@ pub(super) const ADAPTER: Adapter = Adapter {
 
 /// Capability sets are derived from the registry: every `channels.*` operation
 /// whose MCP projection targets this server contributes its tool to the set
-/// named by its grant, plus the same sets under the names they were renamed
+/// named by its grant, plus the same sets under the names they were superseded
 /// away from.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
         let mut sets = super::dispatch::capability_sets(exports(), "channel", describe_capability);
-        sets.extend(super::dispatch::alias_capability_sets(&sets, RENAMED));
+        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
         sets
     })
 }

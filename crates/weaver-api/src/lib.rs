@@ -24,8 +24,8 @@ pub use dto::*;
 pub use operations::{
     all_session_capabilities, operation, operation_bundles, operation_for_request,
     operation_input_schema, operation_views, operations, operations_for_bundle,
-    session_capabilities_from_mcp, validate_operation_registry, ActorPolicy, ApiMetaView,
-    CliProjection, ContextField, ContextSource, ContextValues, Io, NoView, Operands, Operation,
-    OperationBundle, OperationBundleFactory, OperationRisk, OperationScope, OperationSpec,
-    OperationView, Render, ScopeRef, Scoped, ViewFlags, OPERATION_BUNDLE_FACTORIES,
+    validate_operation_registry, ActorPolicy, ApiMetaView, CliProjection, ContextField,
+    ContextSource, ContextValues, Io, NoView, Operands, Operation, OperationBundle,
+    OperationBundleFactory, OperationRisk, OperationScope, OperationSpec, OperationView, Render,
+    ScopeRef, Scoped, ViewFlags, OPERATION_BUNDLE_FACTORIES,
 };

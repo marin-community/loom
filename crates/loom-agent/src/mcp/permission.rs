@@ -40,6 +40,8 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Effective operation grants and durable human approval requests.",
     capability_sets,
+    exports,
+    superseded: &[],
     expand_tool_set,
     is_permission_rule,
     server_config,

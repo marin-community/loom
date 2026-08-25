@@ -36,6 +36,8 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Session-scoped normalized history and literal search.",
     capability_sets,
+    exports,
+    superseded: &[("mcp/history/self@v1", "loom/sessions/read@v1")],
     expand_tool_set,
     is_permission_rule,
     server_config,

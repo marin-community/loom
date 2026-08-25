@@ -38,6 +38,11 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Repository work items, lifecycle, and free-form tags.",
     capability_sets,
+    exports,
+    superseded: &[
+        ("mcp/issue/read@v1", "loom/issues/read@v1"),
+        ("mcp/issue/write@v1", "loom/issues/write@v1"),
+    ],
     expand_tool_set,
     is_permission_rule,
     server_config,

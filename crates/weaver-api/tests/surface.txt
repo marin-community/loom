@@ -42,7 +42,7 @@ branches.events.list               POST /api/branches/events/list               
 branches.get                       POST /api/branches/get                            session_self  read           json    cli=loom branches get            grants=[loom/branches/read@v1]
 branches.issues.list               POST /api/branches/issues/list                    session_self  read           json    cli=loom branches issues list    grants=[loom/branches/read@v1]
 branches.list                      POST /api/branches/list                           session_self  read           json    cli=loom branches list           grants=[loom/branches/read@v1]
-branches.slack.reply               POST /api/branches/slack/reply                    session_self  external_write json    cli=loom branches slack reply    grants=[loom/branches/write@v1]
+branches.slack.reply               POST /api/branches/slack/reply                    session_self  external_write json    cli=loom branches slack reply    grants=[loom/branches/slack@v1]
 branches.status.set                POST /api/branches/status/set                     session_self  write          json    cli=loom branches status set     grants=[loom/branches/write@v1]
 branches.tags.delete               POST /api/branches/tags/delete                    session_self  write          json    cli=loom branches tags delete    grants=[loom/branches/write@v1]
 branches.tags.set                  POST /api/branches/tags/set                       session_self  write          json    cli=loom branches tags set       grants=[loom/branches/write@v1]

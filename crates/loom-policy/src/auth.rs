@@ -796,7 +796,7 @@ pub fn session_capabilities_for_policy(
 ) -> Result<Vec<String>> {
     let snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(policy_mcp_access).context("invalid session MCP policy snapshot")?;
-    Ok(weaver_api::session_capabilities_from_mcp(
+    Ok(loom_agent::mcp::session_capabilities(
         restricted,
         snapshot
             .capability_sets

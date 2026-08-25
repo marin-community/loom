@@ -50,6 +50,8 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Session status and fixed-thread messaging through Loom routing.",
     capability_sets,
+    exports,
+    superseded: &[("mcp/messaging/status@v1", "loom/sessions/write@v1")],
     expand_tool_set,
     is_permission_rule,
     server_config,

@@ -296,9 +296,9 @@ pub(crate) fn capability_sets(
 /// the alias was written.
 pub(crate) fn alias_capability_sets(
     sets: &[CapabilitySet],
-    renamed: &[(&'static str, &'static str)],
+    superseded: &[(&'static str, &'static str)],
 ) -> Vec<CapabilitySet> {
-    renamed
+    superseded
         .iter()
         .map(|(before, after)| {
             let set = sets

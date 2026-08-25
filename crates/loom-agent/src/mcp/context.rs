@@ -25,13 +25,15 @@ fn exports() -> &'static [Export] {
 // derived. `mcp/context/read@v1` is the name that set carried before the
 // `loom/` rename.
 const SET_NAME: &str = "loom/context/read@v1";
-const RENAMED: &[(&str, &str)] = &[("mcp/context/read@v1", SET_NAME)];
+const SUPERSEDED: &[(&str, &str)] = &[("mcp/context/read@v1", SET_NAME)];
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "context",
     server_name: SERVER_NAME,
     description: "Canonical identifiers and links for the calling session.",
     capability_sets,
+    exports,
+    superseded: &[("mcp/context/read@v1", SET_NAME)],
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -46,7 +48,7 @@ fn capability_sets() -> &'static [CapabilitySet] {
         for set in &mut sets {
             set.name = SET_NAME;
         }
-        sets.extend(super::dispatch::alias_capability_sets(&sets, RENAMED));
+        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
         sets
     })
 }
