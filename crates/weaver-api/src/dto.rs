@@ -10,8 +10,6 @@
 //! call these once they've gathered the parts — so the wire struct has exactly
 //! one definition while the DB access stays where the daemon owns it.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1179,23 +1177,6 @@ impl DeploymentSettingValue {
             Self::Bool(value) => value.to_string(),
         }
     }
-}
-
-/// Declarative runtime resources rendered by infrastructure tooling and
-/// reconciled by name.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DeploymentReq {
-    /// Organization defaults for registered runtime settings. Live DB values
-    /// remain a higher-precedence override.
-    #[serde(default)]
-    pub settings: BTreeMap<String, DeploymentSettingValue>,
-    #[serde(default)]
-    pub profiles: Vec<DeploymentProfileReq>,
-    #[serde(default)]
-    pub federations: Vec<FederationReq>,
-    /// Remove deployment-managed resources not in this request.
-    #[serde(default)]
-    pub prune: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]

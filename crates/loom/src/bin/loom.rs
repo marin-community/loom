@@ -3191,12 +3191,7 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
             };
             let request = parse_deployment_manifest(&contents)?;
             let result = client::default()?
-                .invoke::<deployment::reconcile::Op>(&deployment::reconcile::Input {
-                    settings: request.settings.clone(),
-                    profiles: request.profiles.clone(),
-                    federations: request.federations.clone(),
-                    prune: request.prune,
-                })
+                .invoke::<deployment::reconcile::Op>(&request)
                 .await?;
             println!(
                 "reconciled {} settings, {} profiles, and {} federation mappings",
@@ -3209,7 +3204,7 @@ async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
     Ok(())
 }
 
-fn parse_deployment_manifest(contents: &str) -> Result<weaver_api::DeploymentReq> {
+fn parse_deployment_manifest(contents: &str) -> Result<deployment::reconcile::Input> {
     serde_yaml_ng::from_str(contents).context("decoding deployment manifest as YAML or JSON")
 }
 
