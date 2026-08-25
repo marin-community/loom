@@ -13,8 +13,8 @@ use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
     ChannelMessageView, CommentDto, DecidePermissionRequestReq, MoveSessionsReq,
-    PermissionRequestView, ReadinessView, RunWatchReq, SearchSessionsOptions, SendReq,
-    SessionGithubAccessView, SessionLayoutView, SessionView, SetSessionGithubAccessReq,
+    PermissionRequestView, ReadinessView, SearchSessionsOptions, SendReq, SessionGithubAccessView,
+    SessionLayoutView, SessionView, SetSessionGithubAccessReq,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -482,17 +482,6 @@ impl Client {
 
     // -- Staged reviews ------------------------------------------------------
 
-    pub async fn discard_review(&self, review_id: i64, expected_revision: i64) -> Result<Value> {
-        use crate::operations::reviews::discard;
-        let result = self
-            .invoke::<discard::Op>(&discard::Input {
-                id: review_id,
-                expected_revision,
-            })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
-
     // -- Issues ---------------------------------------------------------------
 
     // -- Settings -------------------------------------------------------------
@@ -502,59 +491,9 @@ impl Client {
         self.get_typed("/api/ready").await
     }
 
-    pub async fn delete_custom_mcp(&self, identity: &str) -> Result<Value> {
-        use crate::operations::mcps::custom::delete;
-        let result = self
-            .invoke::<delete::Op>(&delete::Input {
-                identity: identity.to_string(),
-            })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
-
-    pub async fn delete_profile(&self, name: &str) -> Result<Value> {
-        use crate::operations::profiles::delete;
-        let result = self
-            .invoke::<delete::Op>(&delete::Input {
-                name: name.to_string(),
-            })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
-
     // -- Watches ------------------------------------------------------
 
-    /// Fire a round now and return the raw `{run_id, outcome, summary}`
-    /// (`watches.run`).
-    pub async fn run_watch(&self, key: &str, req: &RunWatchReq) -> Result<Value> {
-        use crate::operations::watches::run;
-        let result = self
-            .invoke::<run::Op>(&run::Input {
-                key: key.to_string(),
-                dry_run: req.dry_run,
-            })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
-
     // -- API tokens -------------------------------------------------------
-
-    pub async fn remove_federation(&self, id: &str) -> Result<Value> {
-        use crate::operations::auth::federations::remove;
-        let result = self
-            .invoke::<remove::Op>(&remove::Input { id: id.to_string() })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
-
-    /// Revoke an API token by id (`auth.tokens.revoke`).
-    pub async fn revoke_token(&self, id: &str) -> Result<Value> {
-        use crate::operations::auth::tokens::revoke;
-        let result = self
-            .invoke::<revoke::Op>(&revoke::Input { id: id.to_string() })
-            .await?;
-        Ok(serde_json::to_value(result)?)
-    }
 }
 
 /// Parse the wire spelling of a review subject kind, which

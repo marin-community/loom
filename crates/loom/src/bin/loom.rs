@@ -2429,7 +2429,12 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             review_id,
             revision,
         } => {
-            client.discard_review(review_id, revision).await?;
+            client
+                .invoke::<reviews::discard::Op>(&reviews::discard::Input {
+                    id: review_id,
+                    expected_revision: revision,
+                })
+                .await?;
             println!("discarded review {review_id}");
             Ok(())
         }
@@ -2936,7 +2941,11 @@ async fn run_mcp(cmd: McpCmd) -> Result<()> {
             Ok(())
         }
         McpCmd::Rm { identity } => {
-            client::default()?.delete_custom_mcp(&identity).await?;
+            client::default()?
+                .invoke::<mcps::custom::delete::Op>(&mcps::custom::delete::Input {
+                    identity: identity.clone(),
+                })
+                .await?;
             println!("removed {identity}");
             Ok(())
         }
@@ -3182,7 +3191,11 @@ async fn run_federation(cmd: FederationCmd) -> Result<()> {
             }
         }
         FederationCmd::Rm { id } => {
-            client.remove_federation(&id).await?;
+            client
+                .invoke::<auth::federations::remove::Op>(&auth::federations::remove::Input {
+                    id: id.clone(),
+                })
+                .await?;
             println!("removed federation mapping {id}");
         }
     }
@@ -3405,7 +3418,9 @@ async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             );
         }
         ProfileCmd::Rm { name } => {
-            client.delete_profile(&name).await?;
+            client
+                .invoke::<profiles::delete::Op>(&profiles::delete::Input { name: name.clone() })
+                .await?;
             println!("removed profile {name}");
         }
         ProfileCmd::Env { cmd } => match cmd {
@@ -3520,7 +3535,9 @@ async fn cmd_token_ls() -> Result<()> {
 }
 
 async fn cmd_token_rm(id: String) -> Result<()> {
-    client::default()?.revoke_token(&id).await?;
+    client::default()?
+        .invoke::<auth::tokens::revoke::Op>(&auth::tokens::revoke::Input { id: id.clone() })
+        .await?;
     println!("revoked token {id}");
     Ok(())
 }

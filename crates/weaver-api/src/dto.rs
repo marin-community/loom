@@ -2442,13 +2442,6 @@ pub struct AgentEnvVarView {
     pub updated_at: String,
 }
 
-/// Body for `POST /api/watches/{id}/run`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct RunWatchReq {
-    #[serde(default)]
-    pub dry_run: bool,
-}
-
 /// Result of `DELETE /api/watches/{id}`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WatchDeleteResult {
