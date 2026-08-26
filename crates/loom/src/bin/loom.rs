@@ -17,9 +17,9 @@ use weaver_api::operations::permissions as perm_ops;
 use weaver_api::operations::session_layout;
 use weaver_api::operations::{NoView, Render};
 use weaver_api::{
-    ArtifactTextAnchorDto, DecidePermissionRequestReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter, SessionSearchAttention,
-    SessionSearchStatus, SessionView, SetSessionGithubAccessReq,
+    ArtifactTextAnchorDto, ReviewAnchorDto, ReviewAnchorKindDto, ReviewSubjectKindDto,
+    SearchSessionsOptions, SessionCreatorFilter, SessionGithubAccessView, SessionSearchAttention,
+    SessionSearchStatus, SessionView,
 };
 
 use loom::client::{self, Client};
@@ -2091,63 +2091,59 @@ async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
         }
         PermissionsCmd::Approve { request, reason } => {
             let decided = client
-                .decide_permission_request(
-                    &request,
-                    &DecidePermissionRequestReq {
-                        decision: "approve".to_string(),
-                        reason: reason.join(" "),
-                    },
-                )
+                .invoke::<perm_ops::requests::approve::Op>(&perm_ops::requests::approve::Input {
+                    request,
+                    reason: reason.join(" "),
+                })
                 .await?;
             println!("approved {} — {}", decided.id, decided.repository);
             Ok(())
         }
         PermissionsCmd::Deny { request, reason } => {
             let decided = client
-                .decide_permission_request(
-                    &request,
-                    &DecidePermissionRequestReq {
-                        decision: "deny".to_string(),
-                        reason: reason.join(" "),
-                    },
-                )
+                .invoke::<perm_ops::requests::deny::Op>(&perm_ops::requests::deny::Input {
+                    request,
+                    reason: reason.join(" "),
+                })
                 .await?;
             println!("denied {} — {}", decided.id, decided.repository);
             Ok(())
         }
+        // Granting and revoking are two operations, so the command names one
+        // rather than passing a mode for something downstream to branch on.
         PermissionsCmd::Grant { resource } => {
-            update_permission_resource(&client, resource, "write").await
+            let PermissionGrantResource::GithubRepository {
+                repository,
+                session,
+            } = resource;
+            let view = client
+                .invoke::<perm_ops::github::grant::Op>(&perm_ops::github::grant::Input {
+                    repository,
+                    session: github_access_session(session)?,
+                })
+                .await?;
+            print_github_access(&view);
+            Ok(())
         }
         PermissionsCmd::Revoke { resource } => {
-            update_permission_resource(&client, resource, "none").await
+            let PermissionGrantResource::GithubRepository {
+                repository,
+                session,
+            } = resource;
+            let view = client
+                .invoke::<perm_ops::github::revoke::Op>(&perm_ops::github::revoke::Input {
+                    repository,
+                    session: github_access_session(session)?,
+                })
+                .await?;
+            print_github_access(&view);
+            Ok(())
         }
     }
 }
 
-async fn update_permission_resource(
-    client: &Client,
-    resource: PermissionGrantResource,
-    mode: &str,
-) -> Result<()> {
-    match resource {
-        PermissionGrantResource::GithubRepository {
-            repository,
-            session,
-        } => {
-            let session = github_access_session(session)?;
-            let view = client
-                .set_session_github_access(
-                    &session,
-                    &SetSessionGithubAccessReq {
-                        repository,
-                        mode: mode.to_string(),
-                    },
-                )
-                .await?;
-            println!("{} {} — {}", view.mode, view.repository, view.granted_by);
-            Ok(())
-        }
-    }
+fn print_github_access(view: &SessionGithubAccessView) {
+    println!("{} {} — {}", view.mode, view.repository, view.granted_by);
 }
 
 /// Why a server must not start here, if it must not.

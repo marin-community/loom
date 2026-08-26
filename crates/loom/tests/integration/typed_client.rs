@@ -10,7 +10,7 @@ use serial_test::serial;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
-use weaver_api::{DecidePermissionRequestReq, SettingKind, SettingSource};
+use weaver_api::{SettingKind, SettingSource};
 
 use weaver_api::operations::permissions as permission_ops;
 
@@ -282,13 +282,10 @@ async fn operation_discovery_and_permission_request_round_trip() {
 
     let denied = ts
         .client
-        .decide_permission_request(
-            &request.id,
-            &DecidePermissionRequestReq {
-                decision: "deny".to_string(),
-                reason: "not needed".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::deny::Op>(&permission_ops::requests::deny::Input {
+            request: request.id.clone(),
+            reason: "not needed".to_string(),
+        })
         .await
         .unwrap();
     assert_eq!(denied.state, "denied");

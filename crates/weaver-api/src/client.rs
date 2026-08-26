@@ -12,9 +12,7 @@ use serde_json::Value;
 use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
-    ChannelMessageView, CommentDto, DecidePermissionRequestReq, PermissionRequestView,
-    ReadinessView, SearchSessionsOptions, SendReq, SessionGithubAccessView, SessionView,
-    SetSessionGithubAccessReq,
+    ChannelMessageView, CommentDto, ReadinessView, SearchSessionsOptions, SendReq, SessionView,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -159,61 +157,6 @@ impl Client {
     /// List the transport-neutral operation catalogue advertised by the server.
     pub async fn operations(&self) -> Result<Vec<OperationView>> {
         self.get_typed("/api/operations").await
-    }
-
-    /// Grant or revoke one session's override access to a GitHub repository.
-    /// Dispatches to `permissions.github.grant` for `mode: "write"`, else
-    /// `permissions.github.revoke` — the two operations that replaced this
-    /// route's `PUT` half; `write`/`none` are the only modes the store
-    /// recognizes.
-    pub async fn set_session_github_access(
-        &self,
-        session_id: &str,
-        request: &SetSessionGithubAccessReq,
-    ) -> Result<SessionGithubAccessView> {
-        use crate::operations::permissions::github::{grant, revoke};
-        if request.mode == "write" {
-            self.invoke::<grant::Op>(&grant::Input {
-                repository: request.repository.clone(),
-                session: session_id.to_string(),
-            })
-            .await
-        } else {
-            self.invoke::<revoke::Op>(&revoke::Input {
-                repository: request.repository.clone(),
-                session: session_id.to_string(),
-            })
-            .await
-        }
-    }
-
-    /// Approve or deny a pending permission request.
-    ///
-    /// Approving carries `risk = ExternalWrite`; denying is an ordinary write.
-    /// The choice of operation determines the risk level.
-    pub async fn decide_permission_request(
-        &self,
-        request_id: &str,
-        request: &DecidePermissionRequestReq,
-    ) -> Result<PermissionRequestView> {
-        use crate::operations::permissions::requests::{approve, deny};
-        match request.decision.trim() {
-            "approve" => {
-                self.invoke::<approve::Op>(&approve::Input {
-                    request: request_id.to_string(),
-                    reason: request.reason.clone(),
-                })
-                .await
-            }
-            "deny" => {
-                self.invoke::<deny::Op>(&deny::Input {
-                    request: request_id.to_string(),
-                    reason: request.reason.clone(),
-                })
-                .await
-            }
-            other => Err(anyhow!("unknown permission decision `{other}`")),
-        }
     }
 
     /// List visible sessions with default filters (`sessions.list`).

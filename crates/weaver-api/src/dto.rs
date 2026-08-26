@@ -1037,12 +1037,6 @@ pub struct SessionGithubAccessView {
     pub granted_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SetSessionGithubAccessReq {
-    pub repository: String,
-    pub mode: String,
-}
-
 /// Durable request for a human to expand one live session's external access.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PermissionRequestView {
@@ -1058,14 +1052,6 @@ pub struct PermissionRequestView {
     pub decided_by: Option<String>,
     pub decided_at: Option<String>,
     pub decision_reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DecidePermissionRequestReq {
-    /// `approve` or `deny`.
-    pub decision: String,
-    #[serde(default)]
-    pub reason: String,
 }
 
 /// Current Loom operation grants and external repository scope for a session.
