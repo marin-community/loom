@@ -16,6 +16,8 @@
 //! completions, the server-free half of `config`) are not operations and have no
 //! entry here.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -254,6 +256,246 @@ pub fn validate_operation_registry() -> Result<(), String> {
 
 // -- OpenAPI projection ------------------------------------------------------
 
+/// Where a hoisted schema lives in the document.
+const COMPONENTS: &str = "#/components/schemas/";
+
+/// A schemars root carries `$schema`, `$defs`, and `title`, which its `$defs`
+/// twin does not. Drop them so a type reached both ways compares equal.
+fn schema_body(schema: &Value) -> Value {
+    match schema {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "$schema" | "$defs" | "title"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// A schemars title that names a type the document can share.
+///
+/// `Input` and `Output` are the per-operation structs the macro generates, so
+/// the name says nothing about the type; `Array_of_*` and `null` are structural.
+fn is_shared_name(title: &str) -> bool {
+    !matches!(title, "Input" | "Output" | "null" | "AnyValue")
+        && !title.starts_with("Array_of_")
+        && title
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
+        && title.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `sessions.summary.list` -> `SessionsSummaryList`.
+fn pascal(id: &str) -> String {
+    id.split(['.', '_'])
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+fn rewrite_refs(value: &mut Value, resolve: &dyn Fn(&str) -> String) {
+    match value {
+        Value::Object(map) => {
+            if let Some(name) = map
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix("#/$defs/"))
+                .map(str::to_string)
+            {
+                map.insert(
+                    "$ref".to_string(),
+                    json!(format!("{COMPONENTS}{}", resolve(&name))),
+                );
+            }
+            for child in map.values_mut() {
+                rewrite_refs(child, resolve);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                rewrite_refs(item, resolve);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every type the registry's schemas share, hoisted into one namespace.
+///
+/// schemars renders each schema standalone, so every operation that mentions a
+/// `TagView` carries its own copy of it under `$defs`. Left alone that is 660
+/// definitions of 119 distinct types in one document — and a code generator
+/// walking it would emit each type as many times as it is repeated. Hoisting
+/// gives every type one definition and every mention a `$ref` to it.
+///
+/// The name each operation's schema must use for a type whose Rust name is not
+/// unique across the registry, keyed by `(operation, Rust name)`.
+type SchemaNames = BTreeMap<(&'static str, String), String>;
+
+/// Returns the `components/schemas` map plus that renaming.
+fn shared_schemas() -> (serde_json::Map<String, Value>, SchemaNames) {
+    // Rust name -> every (operation, body) the registry emits it with.
+    let mut claims: BTreeMap<String, Vec<(&'static str, Value)>> = BTreeMap::new();
+    for operation in operations() {
+        for schema in [(operation.schema)(), (operation.output_schema)()] {
+            if let Some(defs) = schema.get("$defs").and_then(Value::as_object) {
+                for (name, body) in defs {
+                    claims
+                        .entry(name.clone())
+                        .or_default()
+                        .push((operation.id, body.clone()));
+                }
+            }
+            // A response is one named type more often than not; hoisting the
+            // root too is what stops `SessionView` appearing inline a dozen
+            // times beside the copy already under `$defs`.
+            if let Some(title) = schema.get("title").and_then(Value::as_str) {
+                if is_shared_name(title) {
+                    claims
+                        .entry(title.to_string())
+                        .or_default()
+                        .push((operation.id, schema_body(&schema)));
+                }
+            }
+        }
+    }
+
+    let mut names: SchemaNames = BTreeMap::new();
+    let mut claimed: Vec<(String, &'static str, Value)> = Vec::new();
+    for (name, sightings) in &claims {
+        let distinct: BTreeSet<String> =
+            sightings.iter().map(|(_, body)| body.to_string()).collect();
+        for (operation, body) in sightings {
+            // Every operation's input struct is named `Input`, so an operation
+            // input embedded in another operation's schema claims a name that
+            // is not unique. Qualifying by the operation that mentions it keeps
+            // hoisting from silently merging two different types.
+            let declared = if distinct.len() == 1 {
+                name.clone()
+            } else {
+                format!("{}Nested{name}", pascal(operation))
+            };
+            names.insert((operation, name.clone()), declared.clone());
+            claimed.push((declared, operation, body.clone()));
+        }
+    }
+
+    let mut schemas = serde_json::Map::new();
+    for (declared, operation, mut body) in claimed {
+        rewrite_refs(&mut body, &|name| {
+            names
+                .get(&(operation, name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        });
+        if let Some(previous) = schemas.get(&declared) {
+            assert_eq!(
+                previous, &body,
+                "two different types are hoisted as `{declared}`"
+            );
+        }
+        schemas.insert(declared, body);
+    }
+    (schemas, names)
+}
+
+/// Names reachable by `$ref` from `schema`, transitively.
+fn referenced(
+    schema: &Value,
+    schemas: &serde_json::Map<String, Value>,
+    seen: &mut BTreeSet<String>,
+) {
+    match schema {
+        Value::Object(map) => {
+            if let Some(name) = map
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|reference| reference.strip_prefix(COMPONENTS))
+            {
+                if seen.insert(name.to_string()) {
+                    if let Some(target) = schemas.get(name) {
+                        referenced(target, schemas, seen);
+                    }
+                }
+            }
+            for child in map.values() {
+                referenced(child, schemas, seen);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                referenced(item, schemas, seen);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Mark every property of an object schema required.
+///
+/// Only ever applied to a schema a *response* alone mentions. schemars derives
+/// `required` from what deserialization accepts: a field with a serde default,
+/// and every `Option`, may be omitted by a *sender*. Serialization is not
+/// symmetric — serde writes every field of a struct, an absent `Option` as an
+/// explicit `null` — so a response's `required` list under-reports by exactly
+/// the fields the server always emits, and a generated client would make its
+/// callers test for an absence that cannot happen.
+///
+/// The exception this cannot see is `#[serde(skip_serializing_if)]`, which does
+/// omit a field. Fifteen DTO fields use it and are described here as present.
+fn require_every_property(schema: &mut Value) {
+    match schema {
+        Value::Object(map) => {
+            if let Some(properties) = map.get("properties").and_then(Value::as_object) {
+                let names: Vec<Value> = properties.keys().map(|name| json!(name)).collect();
+                if !names.is_empty() {
+                    map.insert("required".to_string(), Value::Array(names));
+                }
+            }
+            for (key, child) in map.iter_mut() {
+                // A `$ref` is a component, marked in its own right; `required`
+                // and `enum` hold names and values, not schemas.
+                if !matches!(
+                    key.as_str(),
+                    "$ref" | "required" | "enum" | "const" | "default"
+                ) {
+                    require_every_property(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                require_every_property(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Operands that travel in the query string instead of a JSON body.
+///
+/// `style: form` with `explode: true` over an object schema is OpenAPI's
+/// spelling of `?name=value&other=value`, which is how the byte-encoded
+/// operations — streams, websockets, downloads, uploads — carry their operands.
+/// Their operand list used to be missing from the document entirely.
+fn query_parameters(schema: Value) -> Value {
+    json!([{
+        "name": "operands",
+        "in": "query",
+        "required": true,
+        "style": "form",
+        "explode": true,
+        "schema": schema,
+    }])
+}
+
 /// Render the registry as an OpenAPI 3.1 document.
 ///
 /// Routes are unique by construction, so this is a straight map over the
@@ -262,12 +504,60 @@ pub fn validate_operation_registry() -> Result<(), String> {
 /// declared their own routes — and it emitted no request schema at all, because
 /// `ArgumentSpec` could not describe one.
 pub fn openapi_document(version: &str) -> Value {
+    let (mut schemas, names) = shared_schemas();
+    // A schema only a response mentions describes what the server writes, where
+    // every field is present. One a request mentions keeps schemars' `required`,
+    // because there a caller really may omit what it lists.
+    let mut requestable = BTreeSet::new();
+    for operation in operations() {
+        let resolve = |name: &str| {
+            names
+                .get(&(operation.id, name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        };
+        let mut input = schema_body(&(operation.schema)());
+        rewrite_refs(&mut input, &resolve);
+        referenced(&input, &schemas, &mut requestable);
+    }
+    for (name, schema) in schemas.iter_mut() {
+        if !requestable.contains(name) {
+            require_every_property(schema);
+        }
+    }
+
     let mut paths = serde_json::Map::new();
     for operation in operations() {
-        let body = json!({
-            "required": true,
-            "content": { "application/json": { "schema": (operation.schema)() } },
-        });
+        let resolve = |name: &str| {
+            names
+                .get(&(operation.id, name.to_string()))
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        };
+        let mut input = schema_body(&(operation.schema)());
+        rewrite_refs(&mut input, &resolve);
+        let output = (operation.output_schema)();
+        let output = match output.get("title").and_then(Value::as_str) {
+            Some(title) if is_shared_name(title) => {
+                json!({ "$ref": format!("{COMPONENTS}{}", resolve(title)) })
+            }
+            _ => {
+                // An anonymous per-operation `Output` keeps its title: it is
+                // the only name a generated client has to call the type by.
+                let mut inline = match &output {
+                    Value::Object(map) => Value::Object(
+                        map.iter()
+                            .filter(|(key, _)| !matches!(key.as_str(), "$schema" | "$defs"))
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect(),
+                    ),
+                    other => other.clone(),
+                };
+                rewrite_refs(&mut inline, &resolve);
+                require_every_property(&mut inline);
+                inline
+            }
+        };
         let mut definition = json!({
             "operationId": operation.id,
             "summary": operation.summary,
@@ -280,17 +570,41 @@ pub fn openapi_document(version: &str) -> Value {
             "responses": {
                 "200": {
                     "description": "success",
-                    "content": {
-                        "application/json": { "schema": (operation.output_schema)() },
-                    },
+                    "content": { "application/json": { "schema": output } },
                 },
             },
         });
         if let Some(cli) = operation.cli {
             definition["x-loom-cli"] = json!(cli.invocation());
         }
-        if operation.method() == "POST" {
-            definition["requestBody"] = body;
+        if !operation.context.is_empty() {
+            // The request schema elides these: a session caller cannot supply
+            // them. Every other caller has to, so the document has to say so.
+            definition["x-loom-context"] = json!(operation
+                .context
+                .iter()
+                .map(|field| field.name)
+                .collect::<Vec<_>>());
+        }
+        match operation.io {
+            Io::Json | Io::Session => {
+                definition["requestBody"] = json!({
+                    "required": true,
+                    "content": { "application/json": { "schema": input } },
+                });
+            }
+            Io::Upload => {
+                definition["parameters"] = query_parameters(input);
+                definition["requestBody"] = json!({
+                    "required": true,
+                    "content": {
+                        "application/octet-stream": { "schema": { "type": "string", "format": "binary" } },
+                    },
+                });
+            }
+            Io::Stream | Io::Duplex | Io::Download => {
+                definition["parameters"] = query_parameters(input);
+            }
         }
         let method = operation.method().to_ascii_lowercase();
         paths
@@ -304,6 +618,7 @@ pub fn openapi_document(version: &str) -> Value {
         "openapi": "3.1.0",
         "info": { "title": "Loom API", "version": version },
         "paths": paths,
+        "components": { "schemas": schemas },
     })
 }
 
