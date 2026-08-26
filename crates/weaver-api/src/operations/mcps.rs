@@ -116,7 +116,8 @@ pub mod get {
 
     /// The trusted MCP registry: built-in adapters, versioned capability sets,
     /// and operator-authored custom servers.
-    #[operation(id = "mcps.get", actor = User, scope = Global, risk = Read, cli = "mcps get")]
+    #[operation(id = "mcps.get", actor = User, scope = Global, risk = Read, cli = "mcps get",
+                render = custom)]
     pub struct Input {}
 
     pub type Output = McpRegistryView;

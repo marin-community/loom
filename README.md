@@ -438,10 +438,10 @@ Settings or use the operator CLI:
 
 ```sh
 loom settings list
-loom profile ls
+loom profiles ls
 loom profile show default
 loom profile show ops --effective
-loom mcp ls
+loom mcps get
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
 loom mcp add /engineering/search/docs --label "Docs search" \

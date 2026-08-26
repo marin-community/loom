@@ -209,7 +209,8 @@ pub mod list {
     /// List named launch profiles. Secret environment values are never
     /// returned.
     #[operation(id = "profiles.list", actor = SessionSelf, scope = Global, risk = Read,
-                grants = ["loom/sessions/read@v1"], cli = "profiles list", cli_alias = "ls")]
+                grants = ["loom/sessions/read@v1"], cli = "profiles list", cli_alias = "ls",
+                render = custom)]
     pub struct Input {}
 
     pub type Output = Vec<ProfileView>;

@@ -1,4 +1,14 @@
-//! `loom profile` — named session launch profiles and their environment.
+//! `loom profile` — the launch-profile commands a declaration cannot serve.
+//!
+//! `loom profiles list` renders the table now (`weaver_api::render::profiles`),
+//! so the hand-written `ls` that printed a second version of it is gone. What
+//! is left each does something one declaration cannot: `add` reads an
+//! instructions file off disk; `show` picks between two operations
+//! (`profiles.get` and `profiles.effective`) from a flag; `resolve` exits
+//! non-zero when the snapshot is invalid; `clone` resolves first so it can send
+//! the revisions it reviewed; and `env set`/`secret` are two spellings of
+//! `profiles.env.set` that differ in whether the value is a literal or a Secret
+//! Manager reference.
 
 use crate::client;
 use anyhow::{bail, Context, Result};
@@ -9,8 +19,6 @@ use weaver_api::operations::{profiles, sessions};
 pub enum ProfileCmd {
     /// Add a named launch profile.
     Add(Box<ProfileAddOpts>),
-    /// List profiles (secret values are never returned).
-    Ls,
     /// Show one profile.
     Show {
         name: String,
@@ -180,21 +188,6 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 "added profile {} (revision {})",
                 profile.name, profile.revision
             );
-        }
-        ProfileCmd::Ls => {
-            for profile in client
-                .invoke::<profiles::list::Op>(&profiles::list::Input {})
-                .await?
-            {
-                println!(
-                    "{:<20} {:<11} {:<10} {:<8} {}",
-                    profile.name,
-                    profile.class,
-                    profile.agent_kind,
-                    if profile.strict { "strict" } else { "mutable" },
-                    profile.description
-                );
-            }
         }
         ProfileCmd::Show { name, effective } => {
             println!(

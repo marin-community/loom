@@ -15,7 +15,7 @@ pub mod create {
     ///
     /// Watches are fleet-wide configuration, not per-session.
     #[operation(id = "watches.create", actor = Admin, scope = Global, risk = Write,
-                cli = "watch add")]
+                cli = "watch add", render = custom)]
     pub struct Input {
         /// The watch's unique name.
         #[operand(positional)]
@@ -74,7 +74,8 @@ pub mod get {
     use super::prelude::*;
 
     /// Inspect one watch by id or name.
-    #[operation(id = "watches.get", actor = User, scope = Global, risk = Read, cli = "watch get")]
+    #[operation(id = "watches.get", actor = User, scope = Global, risk = Read, cli = "watch get",
+                render = custom)]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -88,7 +89,8 @@ pub mod list {
     use super::prelude::*;
 
     /// List every registered watch: name, enabled, trigger, program, last outcome.
-    #[operation(id = "watches.list", actor = User, scope = Global, risk = Read, cli = "watch ls")]
+    #[operation(id = "watches.list", actor = User, scope = Global, risk = Read, cli = "watch ls",
+                render = custom)]
     pub struct Input {}
 
     pub type Output = Vec<WatchView>;
@@ -99,7 +101,7 @@ pub mod programs {
 
     /// List the builtin watch programs that ship with loom.
     #[operation(id = "watches.programs", actor = User, scope = Global, risk = Read,
-                cli = "watch programs", view = View)]
+                cli = "watch programs", view = View, render = custom)]
     pub struct Input {}
 
     pub type Output = Vec<ProgramView>;
@@ -139,7 +141,7 @@ pub mod runs {
     /// Show a watch's round history: time, trigger reason, outcome, summary, and
     /// the captured stdout/stderr/exit status of each round.
     #[operation(id = "watches.runs", actor = User, scope = Global, risk = Read, cli = "watch runs",
-                cli_alias = "logs")]
+                cli_alias = "logs", view = View, render = custom)]
     pub struct Input {
         /// Watch id or name.
         #[operand(positional)]
@@ -149,6 +151,15 @@ pub mod runs {
     }
 
     pub type Output = Vec<WatchRunView>;
+
+    /// CLI-only flags that never cross the wire: the whole history is fetched
+    /// either way, this only chooses how much of each round gets printed.
+    #[derive(Debug, Clone, Default, Deserialize, View)]
+    pub struct View {
+        /// Print each round's summary and the actions it took, not one row per
+        /// round. This is what `loom watch logs` used to mean.
+        pub verbose: bool,
+    }
 }
 
 pub mod update {

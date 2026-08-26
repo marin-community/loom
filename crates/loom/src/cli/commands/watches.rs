@@ -1,14 +1,21 @@
-//! `loom watch` — the operator and authoring surface over watch programs.
+//! `loom watch` — the watch commands a declaration cannot serve.
+//!
+//! `ls`, `programs`, `runs` and `get` are declared operations now, printed by
+//! `weaver_api::render::watches`. What is left: `new` scaffolds a local file
+//! and never touches the server; `add` builds the `trigger` and `scope` JSON
+//! out of flag sugar (`--cron`, `--every`, `--on-event`, `--repo`); `run`
+//! names the watch and says whether the round was a dry run, neither of which
+//! `WatchRunResult` carries; and `enable`/`disable` are two spellings of
+//! `watches.update` that differ only in the `enabled` they send.
 
-use crate::cli::support::truncate;
 use crate::client;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 use weaver_api::operations::watches;
+use weaver_api::operations::{NoView, Render};
 
-/// Subcommands under `loom watch` — the operator + authoring surface. A
-/// thin client over the REST API ("the API is the CLI").
+/// The `loom watch` subcommands that are not one declared operation each.
 #[derive(Subcommand)]
 pub enum WatchCmd {
     /// Scaffold a starter program file at `~/.weaver/watches/<name>.py`.
@@ -20,13 +27,6 @@ pub enum WatchCmd {
     New {
         /// The watch name; also the file stem (`<name>.py`).
         name: String,
-    },
-    /// List the builtin programs that ship with loom (`watches.programs`).
-    Programs {
-        /// Print one program's script source instead of the table, e.g.
-        /// `--source builtin:archive-merged` — a working example to start from.
-        #[arg(long)]
-        source: Option<String>,
     },
     /// Register a watch from flags (`watches.create`).
     Add(Box<AddOpts>),
@@ -45,8 +45,6 @@ pub enum WatchCmd {
         /// Watch id or name.
         name: String,
     },
-    /// List every watch: name, enabled, trigger, program, last outcome.
-    Ls,
     /// Fire a round now and print its outcome + summary.
     Run {
         /// Watch id or name.
@@ -55,22 +53,6 @@ pub enum WatchCmd {
         /// X", nothing is performed. Safe to repeat — the iteration primitive.
         #[arg(long)]
         dry_run: bool,
-    },
-    /// Show a watch's round history (time, reason, outcome, summary).
-    Runs {
-        /// Watch id or name.
-        name: String,
-        /// How many recent rounds to show.
-        #[arg(long, default_value = "20")]
-        limit: i64,
-    },
-    /// Show the actions each recent round took (a verbose `runs`).
-    Logs {
-        /// Watch id or name.
-        name: String,
-        /// How many recent rounds to show.
-        #[arg(long, default_value = "10")]
-        limit: i64,
     },
 }
 
@@ -129,15 +111,11 @@ pub struct AddOpts {
 pub async fn run_watch(cmd: WatchCmd) -> Result<()> {
     match cmd {
         WatchCmd::New { name } => cmd_watch_new(name).await,
-        WatchCmd::Programs { source } => cmd_watch_programs(source).await,
         WatchCmd::Add(opts) => cmd_watch_add(*opts).await,
         WatchCmd::Rm { name } => cmd_watch_rm(name).await,
         WatchCmd::Enable { name } => cmd_watch_set_enabled(name, true).await,
         WatchCmd::Disable { name } => cmd_watch_set_enabled(name, false).await,
-        WatchCmd::Ls => cmd_watch_ls().await,
         WatchCmd::Run { name, dry_run } => cmd_watch_run(name, dry_run).await,
-        WatchCmd::Runs { name, limit } => cmd_watch_runs(name, limit, false).await,
-        WatchCmd::Logs { name, limit } => cmd_watch_runs(name, limit, true).await,
     }
 }
 
@@ -218,29 +196,6 @@ pub async fn cmd_watch_new(name: String) -> Result<()> {
     Ok(())
 }
 
-/// `loom watch programs` — list the builtin programs that ship with loom
-/// (the registry the panel offers), or print one program's script source with
-/// `--source` as a working example to start a custom program from.
-pub async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
-    let client = client::default()?;
-    let rows = client
-        .invoke::<watches::programs::Op>(&watches::programs::Input {})
-        .await?;
-    if let Some(want) = source {
-        let row = rows.iter().find(|p| p.program == want);
-        let Some(row) = row else {
-            bail!("no builtin program '{want}' — `loom watch programs` lists them");
-        };
-        print!("{}", row.source);
-        return Ok(());
-    }
-    println!("{:<26}  TITLE", "PROGRAM");
-    for p in rows {
-        println!("{:<26}  {}", p.program, p.title);
-    }
-    Ok(())
-}
-
 /// Build the trigger JSON from the `add` flags. clap's `group = "trigger"`
 /// already makes cron/every/on-event mutually exclusive; `repo` is folded in
 /// when present. An empty trigger (`{}`) is a valid, never-firing default.
@@ -306,15 +261,11 @@ pub async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
             enabled: None,
         })
         .await?;
-    println!("registered watch {}  ({})", o.name, o.id);
-    println!("  trigger: {}", trigger_summary(&o.trigger));
-    println!("  program: {}", o.program);
-    println!("  caps:    {}", capabilities_summary(&o.capabilities));
-    println!("  profile: {}", o.profile);
-    println!(
-        "  enabled: no — arm it with `loom watch enable {}`",
-        opts.name
-    );
+    // The watch itself is described by `watches.create`'s own renderer, so
+    // `add`, `loom watch get` and the MCP tool all read a watch the same way.
+    // The arming hint is the CLI's alone: it names a command.
+    println!("{}", <watches::create::Op as Render>::text(&o, &NoView));
+    println!("  arm it with `loom watch enable {}`", opts.name);
     Ok(())
 }
 
@@ -347,33 +298,6 @@ pub async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
     Ok(())
 }
 
-/// `loom watch ls` — a table of every watch.
-pub async fn cmd_watch_ls() -> Result<()> {
-    let client = client::default()?;
-    let rows = client
-        .invoke::<watches::list::Op>(&watches::list::Input {})
-        .await?;
-    if rows.is_empty() {
-        println!("no watches — scaffold one with `loom watch new <name>`");
-        return Ok(());
-    }
-    println!(
-        "{:<18}  {:<8}  {:<22}  {:<18}  LAST",
-        "NAME", "ENABLED", "TRIGGER", "PROGRAM"
-    );
-    for o in rows {
-        println!(
-            "{:<18}  {:<8}  {:<22}  {:<18}  {}",
-            truncate(&o.name, 18),
-            if o.enabled { "yes" } else { "no" },
-            truncate(&trigger_summary(&o.trigger), 22),
-            truncate(&o.program, 18),
-            o.last_outcome.as_deref().unwrap_or("—"),
-        );
-    }
-    Ok(())
-}
-
 /// `loom watch run` — fire a round now and print outcome + summary.
 pub async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
     let client = client::default()?;
@@ -389,119 +313,6 @@ pub async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
         println!("  {}", res.summary);
     }
     Ok(())
-}
-
-/// `loom watch runs` / `logs` — the round history. `verbose` (the `logs`
-/// alias) also prints each round's actions.
-pub async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
-    let client = client::default()?;
-    let rows = client
-        .invoke::<watches::runs::Op>(&watches::runs::Input {
-            key: name.clone(),
-            limit: Some(limit),
-        })
-        .await?;
-    if rows.is_empty() {
-        println!("no rounds yet for {name} — fire one with `loom watch run {name}`");
-        return Ok(());
-    }
-    if !verbose {
-        println!(
-            "{:<24}  {:<14}  {:<8}  SUMMARY",
-            "WHEN", "REASON", "OUTCOME"
-        );
-    }
-    for r in &rows {
-        if verbose {
-            println!("{}  [{}]  {}", r.started_at, r.trigger_reason, r.outcome);
-            if !r.summary.is_empty() {
-                println!("  {}", r.summary);
-            }
-            if let Some(actions) = r.actions.as_array() {
-                for a in actions {
-                    println!("    - {}", action_summary(a));
-                }
-            }
-        } else {
-            println!(
-                "{:<24}  {:<14}  {:<8}  {}",
-                r.started_at,
-                truncate(&r.trigger_reason, 14),
-                r.outcome,
-                truncate(&r.summary, 60),
-            );
-        }
-    }
-    Ok(())
-}
-
-/// A one-line summary of a round action (a mark / nudge / would-do entry).
-pub fn action_summary(a: &Value) -> String {
-    // A mutating action carries `action`; a dry-run stub carries `would`.
-    let verb = a
-        .get("action")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            a.get("would")
-                .and_then(Value::as_str)
-                .map(|w| format!("would {w}"))
-        })
-        .unwrap_or_else(|| "?".to_string());
-    let session = a.get("session").and_then(Value::as_str).unwrap_or("");
-    let detail = a
-        .get("level")
-        .and_then(Value::as_str)
-        .map(|l| {
-            let note = a.get("note").and_then(Value::as_str).unwrap_or("");
-            if note.is_empty() {
-                l.to_string()
-            } else {
-                format!("{l} — {note}")
-            }
-        })
-        .or_else(|| a.get("text").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_default();
-    if detail.is_empty() {
-        format!("{verb} {session}")
-    } else {
-        format!("{verb} {session}: {detail}")
-    }
-}
-
-/// A compact human summary of an `WatchView`'s parsed `trigger` object.
-pub fn trigger_summary(t: &Value) -> String {
-    if let Some(cron) = t.get("cron").and_then(Value::as_str) {
-        return format!("cron {cron}");
-    }
-    if let Some(every) = t.get("every").and_then(Value::as_str) {
-        return format!("every {every}");
-    }
-    // `on` is the shape every reactive watch is stored in — a list of event
-    // names, each optionally `name=level`. Reading only the legacy singular
-    // `event` key meant the TRIGGER column showed a dash for all of them.
-    if let Some(events) = t.get("on").and_then(Value::as_array) {
-        let names: Vec<&str> = events.iter().filter_map(Value::as_str).collect();
-        if !names.is_empty() {
-            return format!("on {}", names.join(","));
-        }
-    }
-    if let Some(event) = t.get("event").and_then(Value::as_str) {
-        return match t.get("level").and_then(Value::as_str) {
-            Some(level) => format!("on {event}={level}"),
-            None => format!("on {event}"),
-        };
-    }
-    "—".to_string()
-}
-
-/// The granted capability set, comma-joined, for an `WatchView`. `observe` is
-/// implicit, so an empty grant list still reads as that baseline.
-pub fn capabilities_summary(capabilities: &[String]) -> String {
-    if capabilities.is_empty() {
-        return "observe".to_string();
-    }
-    capabilities.join(",")
 }
 
 #[cfg(test)]
@@ -631,30 +442,5 @@ mod tests {
             ..empty_add("a")
         })
         .is_err());
-    }
-    #[test]
-    fn trigger_summary_reads_each_shape() {
-        let cron = json!({ "cron": "0 * * * *" });
-        assert_eq!(trigger_summary(&cron), "cron 0 * * * *");
-        let every = json!({ "every": "30m" });
-        assert_eq!(trigger_summary(&every), "every 30m");
-        let event = json!({ "event": "attention", "level": "blocked" });
-        assert_eq!(trigger_summary(&event), "on attention=blocked");
-        let on = json!({ "on": ["pr.merged", "pr.opened"] });
-        assert_eq!(trigger_summary(&on), "on pr.merged,pr.opened");
-        let on_empty = json!({ "on": [] });
-        assert_eq!(trigger_summary(&on_empty), "—");
-        let empty = json!({});
-        assert_eq!(trigger_summary(&empty), "—");
-    }
-    #[test]
-    fn action_summary_renders_marks_nudges_and_would_dos() {
-        let mark =
-            json!({ "action": "mark", "session": "s1", "level": "blocked", "note": "stuck" });
-        assert_eq!(action_summary(&mark), "mark s1: blocked — stuck");
-        let would = json!({ "would": "mark", "session": "s1", "level": "ok" });
-        assert_eq!(action_summary(&would), "would mark s1: ok");
-        let nudge = json!({ "action": "nudge", "session": "s1", "text": "try again" });
-        assert_eq!(action_summary(&nudge), "nudge s1: try again");
     }
 }

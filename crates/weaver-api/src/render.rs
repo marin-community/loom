@@ -10,5 +10,8 @@
 
 pub mod channels;
 pub mod issues;
+pub mod mcps;
+pub mod profiles;
 pub mod reviews;
 pub mod session_layout;
+pub mod watches;

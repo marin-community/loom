@@ -1,5 +1,11 @@
-//! `loom mcp` — the trusted capability sets and the custom-server registry,
-//! plus the two stdio adapters loom launches for an agent.
+//! `loom mcp` — the MCP registry commands a declaration cannot serve.
+//!
+//! The registry table lives in `weaver_api::render::mcps` and reaches the
+//! command line as `loom mcps get`. What is left: `show` searches one response
+//! for a custom server *or* a capability set, so the answer depends on which
+//! collection the name is in; `add` reads a script and its tests off disk, then
+//! chooses create or update from what the registry already holds; and `serve`
+//! / `serve-custom` are long-running stdio servers, not a marshal-and-print.
 
 use crate::client;
 use anyhow::{anyhow, bail, Context, Result};
@@ -8,8 +14,6 @@ use weaver_api::operations::mcps;
 
 #[derive(Subcommand)]
 pub enum McpCmd {
-    /// List trusted MCP adapters and capability sets.
-    Ls,
     /// Show one versioned capability set by name.
     Show { name: String },
     /// Add or replace an operator-authored uv MCP script.
@@ -46,24 +50,6 @@ pub async fn run_mcp(cmd: McpCmd) -> Result<()> {
     match cmd {
         McpCmd::Serve { adapter } => crate::mcp::serve(&adapter).await,
         McpCmd::ServeCustom { identity } => crate::custom_mcp::serve_from_env(&identity).await,
-        McpCmd::Ls => {
-            let registry = client::default()?
-                .invoke::<mcps::get::Op>(&mcps::get::Input {})
-                .await?;
-            for set in &registry.capability_sets {
-                println!(
-                    "{:<30} {:<4} {:<12} {}",
-                    set.name, set.version, set.adapter, set.description
-                );
-            }
-            for server in &registry.custom_servers {
-                println!(
-                    "{:<30} r{:<3} {:<12} {}",
-                    server.identity, server.revision, server.validation_state, server.description
-                );
-            }
-            Ok(())
-        }
         McpCmd::Show { name } => {
             let registry = client::default()?
                 .invoke::<mcps::get::Op>(&mcps::get::Input {})

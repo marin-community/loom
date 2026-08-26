@@ -115,7 +115,7 @@ idempotency, and deployment boundaries.
 ## Operator surface
 
 ```sh
-loom mcp ls
+loom mcps get
 loom mcp show mcp/github/comment@v1
 loom mcp add /engineering/search/docs --file server.py --tests test_mcp.py
 loom profile add ops --agent codex --mcp github,messaging

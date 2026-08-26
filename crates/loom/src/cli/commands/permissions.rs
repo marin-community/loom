@@ -1,4 +1,13 @@
-//! `loom permissions` — effective access, requests, and human decisions.
+//! `loom permissions` — the access commands a declaration cannot serve.
+//!
+//! `explain` is declared now; it was `invoke` and pretty-print. The rest each
+//! keep a flag the declaration has no room for. `show`, `requests` and
+//! `request` take `--session`, and the declared `session` is a context operand
+//! with no command-line spelling, so converting them would delete the only way
+//! an operator inspects a session other than the one they are standing in.
+//! `grant`/`revoke` default that same target from the environment, where the
+//! declaration requires it. `approve`/`deny` join their trailing argv words
+//! into one `reason`, and a declared operand is a single value.
 
 use crate::client;
 use anyhow::{Context, Result};
@@ -17,8 +26,6 @@ pub enum PermissionsCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Explain a registered operation's actor, risk, and projections.
-    Explain { operation: String },
     /// Request a human-approved expansion of this session's external access.
     Request {
         #[command(subcommand)]
@@ -116,16 +123,6 @@ pub async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                     );
                 }
             }
-            Ok(())
-        }
-        PermissionsCmd::Explain { operation } => {
-            let operation = client
-                .invoke::<perm_ops::explain::Op>(&perm_ops::explain::Input { operation })
-                .await
-                .with_context(|| {
-                    "unknown operation — run `loom help --json` to list operation ids"
-                })?;
-            println!("{}", serde_json::to_string_pretty(&operation)?);
             Ok(())
         }
         PermissionsCmd::Request { resource } => match resource {
