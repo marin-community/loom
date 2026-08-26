@@ -4943,11 +4943,11 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
         "ID", "STATUS", "ATTENTION", "NAME", "LOCATION"
     );
     for ws in &rows {
-        // An unplaced session renders as the bare separator this column has
-        // always shown for one: the JSON reader could not tell `null` from an
-        // object with two empty names.
+        // An unplaced session used to print a bare `/`: the untyped reader
+        // could not tell `null` from an object with two empty names, so the
+        // separator was joining nothing to nothing.
         let location = ws.placement.as_ref().map_or_else(
-            || "/".to_string(),
+            || "—".to_string(),
             |placement| format!("{}/{}", placement.space_name, placement.group_name),
         );
         println!(

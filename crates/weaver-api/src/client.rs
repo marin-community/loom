@@ -117,18 +117,6 @@ impl Client {
         self.send(Method::POST, path, Some(body)).await
     }
 
-    pub async fn patch(&self, path: &str, body: Value) -> Result<Value> {
-        self.send(Method::PATCH, path, Some(body)).await
-    }
-
-    pub async fn put(&self, path: &str, body: Value) -> Result<Value> {
-        self.send(Method::PUT, path, Some(body)).await
-    }
-
-    pub async fn delete(&self, path: &str) -> Result<Value> {
-        self.send(Method::DELETE, path, None).await
-    }
-
     // -- Typed helpers ----------------------------------------------------
 
     async fn get_typed<R: DeserializeOwned>(&self, path: &str) -> Result<R> {
