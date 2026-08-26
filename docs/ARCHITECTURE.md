@@ -287,6 +287,10 @@ same surface. The rule is one line:
 
 ### The operation registry
 
+[operations.md](operations.md) walks the whole flow with diagrams: what the
+macro emits, how each of the three surfaces is assembled from it, and the
+invariants that keep them in step. This section is the summary.
+
 An operation is declared exactly once, in
 [`crates/weaver-api/src/operations/`](../crates/weaver-api/src/operations/) —
 one file per top-level group, and **its id is its module path**:
