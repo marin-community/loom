@@ -1023,3 +1023,98 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
         "branch ancestry is repository-scoped"
     );
 }
+
+/// A branch key is not a branch. Whatever a session credential spells, the
+/// branch it reaches is the one the key *resolves* to, and that row has to be
+/// in its own tree.
+///
+/// This is the property `require_branch_access` and `require_branch` used to
+/// disagree about. The check matched `id = ? OR branch = ?` while the handler
+/// resolved with `branch::resolve_key`, and branch names are unique per
+/// repository rather than globally — so a session on `<repo>:main` could send
+/// `{"branch": "main"}`, satisfy the check against its own row, and have the
+/// handler act on a *different* repository's `main`. Nothing pinned it, which is
+/// why it survived to be found by hand.
+#[tokio::test]
+#[serial]
+async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "branch scope", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let session_id = created["id"].as_str().unwrap();
+    let branch_id = created["branch"]["id"].as_str().unwrap().to_string();
+    let branch_name = created["branch"]["branch"].as_str().unwrap().to_string();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), session_id, &branch_id)
+            .await
+            .unwrap();
+
+    // Same branch name, different repository, inserted afterwards so it wins
+    // `resolve_key`'s newest-first tiebreak. The id is fixed so the test can
+    // name a prefix of it.
+    let foreign_repo = format!("{}-foreign", ts.cwd());
+    let foreign = weaver_core::branch::insert(
+        &ts.state.db,
+        "zzzzfore",
+        &foreign_repo,
+        &branch_name,
+        "main",
+    )
+    .await
+    .unwrap();
+
+    let http = reqwest::Client::new();
+    let get_branch = |key: String| {
+        let http = http.clone();
+        let url = url(&ts, "/api/branches/get");
+        let token = token.clone();
+        async move {
+            http.post(url)
+                .bearer_auth(&token)
+                .json(&json!({ "branch": key }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    for key in [
+        foreign.id.clone(),
+        "zzzz".to_string(),
+        format!("{foreign_repo}:{branch_name}"),
+        // The bare name is ambiguous and resolves to the newest match, which is
+        // the foreign row. Denying is the fail-closed answer; returning the
+        // foreign branch's contents was the bug.
+        branch_name.clone(),
+        // `LIKE` metacharacters, which resolve literally now.
+        "%".to_string(),
+        "_".to_string(),
+    ] {
+        let response = get_branch(key.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "branch key {key:?} should not reach outside the session's tree"
+        );
+    }
+
+    // The forms that name the caller's own branch still work — including
+    // `repo_root:name`, which the check used to reject outright, and the empty
+    // key, which is how an agent says "my branch" by saying nothing.
+    for key in [
+        branch_id.clone(),
+        format!("{}:{branch_name}", ts.cwd()),
+        String::new(),
+    ] {
+        let response = get_branch(key.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK, "own branch as {key:?}");
+        let view: Value = response.json().await.unwrap();
+        assert_eq!(view["id"].as_str(), Some(branch_id.as_str()));
+    }
+}

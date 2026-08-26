@@ -220,8 +220,18 @@ pub async fn list(db: &Db) -> Result<Vec<Branch>> {
     Ok(rows)
 }
 
-/// Look up a branch by id, exact `repo:branch` spec, or unambiguous id prefix.
+/// Look up a branch by id, exact `repo:branch` spec, exact name, or id prefix.
+///
+/// A name or prefix can match several branches — branch names are unique per
+/// repository, not globally — and the newest wins. Authorization compares the
+/// resolved row rather than the key, so a key that resolves widely still only
+/// reaches what the caller may reach.
 pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
+    // An empty key names nothing. Left to the prefix arm below it would become
+    // `id LIKE '%'` and resolve to the newest branch in the database.
+    if key.is_empty() {
+        return Ok(None);
+    }
     if let Some(b) = get(db, key).await? {
         return Ok(Some(b));
     }
@@ -230,13 +240,29 @@ pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
             return Ok(Some(b));
         }
     }
-    let query = select_branches("WHERE branch = ? OR id LIKE ? ORDER BY created_at DESC");
+    let query =
+        select_branches(r"WHERE branch = ? OR id LIKE ? ESCAPE '\' ORDER BY created_at DESC");
     let matches = sqlx::query_as::<_, Branch>(&query)
         .bind(key)
-        .bind(format!("{key}%"))
+        .bind(format!("{}%", like_prefix(key)))
         .fetch_all(db)
         .await?;
     Ok(matches.into_iter().next())
+}
+
+/// Quote a caller's string so `LIKE` reads it literally.
+///
+/// `_` matches any one character and `%` any run of them, so an unquoted key
+/// resolved by shape as well as by prefix: `a_c` matched the id `abc`.
+fn like_prefix(key: &str) -> String {
+    let mut quoted = String::with_capacity(key.len());
+    for ch in key.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted
 }
 
 /// Create a new branch row.
