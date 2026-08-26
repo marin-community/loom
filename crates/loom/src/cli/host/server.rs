@@ -42,7 +42,10 @@ pub enum ServerCmd {
 /// file. A private `WEAVER_HOME` has none, so the documented way to exercise
 /// loom by hand (`WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0`)
 /// still works.
-pub fn nested_server_refusal(session_id: Option<&str>, home: &std::path::Path) -> Option<String> {
+pub(crate) fn nested_server_refusal(
+    session_id: Option<&str>,
+    home: &std::path::Path,
+) -> Option<String> {
     let session_id = session_id.filter(|id| !id.is_empty())?;
     let state = home.join("loom.json");
     if !state.exists() {
@@ -77,7 +80,7 @@ pub async fn run_server(cmd: ServerCmd) -> Result<()> {
     }
 }
 
-pub fn init_tracing() {
+pub(crate) fn init_tracing() {
     use tracing_subscriber::prelude::*;
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env()
@@ -92,11 +95,11 @@ pub fn init_tracing() {
         .init();
 }
 
-pub fn server_base() -> String {
+pub(crate) fn server_base() -> String {
     crate::endpoint::base_url()
 }
 
-pub async fn server_is_up(base: &str) -> bool {
+pub(crate) async fn server_is_up(base: &str) -> bool {
     let url = format!("{base}/api/health");
     match reqwest::get(&url).await {
         Ok(resp) => resp.status().is_success(),
@@ -104,7 +107,7 @@ pub async fn server_is_up(base: &str) -> bool {
     }
 }
 
-pub fn format_uptime(secs: i64) -> String {
+pub(crate) fn format_uptime(secs: i64) -> String {
     let secs = secs.max(0);
     let days = secs / 86_400;
     let hours = (secs % 86_400) / 3_600;
@@ -121,12 +124,12 @@ pub fn format_uptime(secs: i64) -> String {
     }
 }
 
-pub fn uptime_secs(started_at: &str) -> Option<i64> {
+pub(crate) fn uptime_secs(started_at: &str) -> Option<i64> {
     let started = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
     Some((chrono::Utc::now() - started.with_timezone(&chrono::Utc)).num_seconds())
 }
 
-pub async fn wait_for_health(base: &str, want: bool, timeout: std::time::Duration) -> bool {
+pub(crate) async fn wait_for_health(base: &str, want: bool, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         if server_is_up(base).await == want {
@@ -139,7 +142,7 @@ pub async fn wait_for_health(base: &str, want: bool, timeout: std::time::Duratio
     }
 }
 
-pub async fn cmd_status() -> Result<()> {
+pub(crate) async fn cmd_status() -> Result<()> {
     let base = server_base();
     if !server_is_up(&base).await {
         println!("loom: not running");
@@ -161,7 +164,7 @@ pub async fn cmd_status() -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_start() -> Result<()> {
+pub(crate) async fn cmd_start() -> Result<()> {
     let base = server_base();
     if server_is_up(&base).await {
         println!("loom already running at {base}");
@@ -170,7 +173,7 @@ pub async fn cmd_start() -> Result<()> {
     spawn_server().await
 }
 
-pub async fn spawn_server() -> Result<()> {
+pub(crate) async fn spawn_server() -> Result<()> {
     use std::os::unix::process::CommandExt;
 
     let exe = std::env::current_exe().context("locating the loom binary")?;
@@ -209,7 +212,7 @@ pub async fn spawn_server() -> Result<()> {
     }
 }
 
-pub async fn cmd_stop() -> Result<()> {
+pub(crate) async fn cmd_stop() -> Result<()> {
     let base = server_base();
     if !server_is_up(&base).await {
         println!("loom is not running");
@@ -239,7 +242,7 @@ pub async fn cmd_stop() -> Result<()> {
     }
 }
 
-pub async fn cmd_restart() -> Result<()> {
+pub(crate) async fn cmd_restart() -> Result<()> {
     let base = server_base();
     if server_is_up(&base).await {
         cmd_stop().await?;

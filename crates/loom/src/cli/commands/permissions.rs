@@ -227,11 +227,11 @@ pub async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
     }
 }
 
-pub fn print_github_access(view: &SessionGithubAccessView) {
+pub(crate) fn print_github_access(view: &SessionGithubAccessView) {
     println!("{} {} — {}", view.mode, view.repository, view.granted_by);
 }
 
-pub fn github_access_session(explicit: Option<String>) -> Result<String> {
+pub(crate) fn github_access_session(explicit: Option<String>) -> Result<String> {
     explicit
         .or_else(|| std::env::var("LOOM_SESSION_ID").ok())
         .or_else(|| std::env::var("WEAVER_BRANCH").ok())

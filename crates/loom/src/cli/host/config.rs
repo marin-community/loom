@@ -75,7 +75,7 @@ pub enum SecretBackend {
 
 /// The default `loom.toml` path, mirroring [`ConfigPathOpts`]'s clap resolution
 /// (`$LOOM_CONFIG`, else `./loom.toml`) for the walkthrough, which takes no flag.
-pub fn default_config_path() -> std::path::PathBuf {
+pub(crate) fn default_config_path() -> std::path::PathBuf {
     std::env::var(crate::loom_config::CONFIG_ENV_VAR)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from(crate::loom_config::DEFAULT_PATH))
@@ -95,7 +95,7 @@ pub async fn run_config(cmd: ConfigCmd) -> Result<()> {
 /// the settings pane's `settings.patch` against a running daemon — the
 /// form a deploy's boot sequence needs, since it must seed the auth settings
 /// *before* loom starts listening.
-pub async fn cmd_config_set(key: String, value: String) -> Result<()> {
+pub(crate) async fn cmd_config_set(key: String, value: String) -> Result<()> {
     if let Err(why) = weaver_core::config::validate(&key, &value) {
         bail!("{key}: {why}");
     }
@@ -113,7 +113,7 @@ pub async fn cmd_config_set(key: String, value: String) -> Result<()> {
 /// outranked `loom.toml` for this run — the footgun a deploy workstation hits
 /// when an `ANTHROPIC_API_KEY` or similar setting happens to be exported
 /// (see `loom_config::resolve_reporting_shadows`).
-pub fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path) {
+pub(crate) fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path) {
     for name in shadowed {
         eprintln!(
             "warning: ambient env var {name} overrides the value for {name} already set in {} \
@@ -127,7 +127,7 @@ pub fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path) {
 /// `loom config render-env` — resolve `loom.toml` (plus any ambient env
 /// override) and write it out as a dotenv file, the only place the
 /// field→`ENV_NAME` mapping is applied.
-pub fn cmd_config_render_env(opts: RenderEnvOpts) -> Result<()> {
+pub(crate) fn cmd_config_render_env(opts: RenderEnvOpts) -> Result<()> {
     let (config, shadowed) = crate::loom_config::resolve_reporting_shadows(&opts.config.config)
         .with_context(|| format!("loading {}", opts.config.config.display()))?;
     warn_shadowed_env(&shadowed, &opts.config.config);
@@ -150,7 +150,7 @@ pub fn cmd_config_render_env(opts: RenderEnvOpts) -> Result<()> {
 /// `loom config secret-names` — the secret fields' `ENV_NAME`s, one per line.
 /// Static (drawn from the schema, not from which fields happen to be set) —
 /// what a Secret Manager provisioning step names its secrets after.
-pub fn cmd_config_secret_names(opts: ConfigPathOpts) -> Result<()> {
+pub(crate) fn cmd_config_secret_names(opts: ConfigPathOpts) -> Result<()> {
     // Resolved (not just iterated statically) so a malformed loom.toml surfaces
     // here rather than only later, in render-env or push-secrets.
     crate::loom_config::resolve(&opts.config)
@@ -164,7 +164,7 @@ pub fn cmd_config_secret_names(opts: ConfigPathOpts) -> Result<()> {
 /// `loom config push-secrets` — push every set secret field to a Secret
 /// Manager backend, secret id == `ENV_NAME`. Values travel over the
 /// subprocess's stdin, never a command-line argument or a log line.
-pub async fn cmd_config_push_secrets(opts: PushSecretsOpts) -> Result<()> {
+pub(crate) async fn cmd_config_push_secrets(opts: PushSecretsOpts) -> Result<()> {
     let (config, shadowed) = crate::loom_config::resolve_reporting_shadows(&opts.config.config)
         .with_context(|| format!("loading {}", opts.config.config.display()))?;
     warn_shadowed_env(&shadowed, &opts.config.config);
@@ -193,7 +193,7 @@ pub async fn cmd_config_push_secrets(opts: PushSecretsOpts) -> Result<()> {
 /// Create-or-update one GCP Secret Manager secret via the `gcloud` CLI,
 /// feeding `value` over stdin so it never appears in an argument list or a
 /// process listing.
-pub async fn gcp_push_secret(project: &str, name: &str, value: &str) -> Result<()> {
+pub(crate) async fn gcp_push_secret(project: &str, name: &str, value: &str) -> Result<()> {
     let exists = tokio::process::Command::new("gcloud")
         .args(["secrets", "describe", name, "--project", project])
         .stdout(std::process::Stdio::null())
@@ -229,7 +229,7 @@ pub async fn gcp_push_secret(project: &str, name: &str, value: &str) -> Result<(
 /// Run `gcloud <args>`, writing `stdin_data` to its stdin and closing it —
 /// the way to pass a secret value without it ever appearing in the argument
 /// list (visible in `ps`) or an error message.
-pub async fn run_gcloud_with_stdin(args: &[&str], stdin_data: &str) -> Result<()> {
+pub(crate) async fn run_gcloud_with_stdin(args: &[&str], stdin_data: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("gcloud")
         .args(args)

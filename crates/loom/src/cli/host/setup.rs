@@ -79,7 +79,7 @@ pub async fn run_setup(cmd: Option<SetupCmd>) -> Result<()> {
 /// and delegate to the same [`cmd_setup_github_app`]/[`cmd_setup_secrets`] the
 /// subcommands use. A failure in an optional step is reported and the walkthrough
 /// continues, so a browser timeout can't cost you the operator you just set up.
-pub async fn cmd_setup_init() -> Result<()> {
+pub(crate) async fn cmd_setup_init() -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         bail!(
@@ -218,7 +218,7 @@ pub async fn cmd_setup_init() -> Result<()> {
 /// Prompt (plain text) for one line, showing `default` in brackets and returning
 /// it on a blank answer. A `None` default makes the answer required — it
 /// re-prompts until non-empty.
-pub fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
+pub(crate) fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
     use std::io::Write;
     loop {
         match default {
@@ -242,7 +242,7 @@ pub fn prompt_line(label: &str, default: Option<&str>) -> Result<String> {
 }
 
 /// Prompt yes/no, returning `true` for yes; a blank answer takes `default_yes`.
-pub fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
+pub(crate) fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
     use std::io::Write;
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
     print!("  {label} {hint}: ");
@@ -261,7 +261,7 @@ pub fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
 /// Prompt for one of `options` by number, returning the chosen 0-based index.
 /// A blank answer takes `default` (also 0-based); an out-of-range answer
 /// re-prompts.
-pub fn prompt_choice(prompt: &str, options: &[&str], default: usize) -> Result<usize> {
+pub(crate) fn prompt_choice(prompt: &str, options: &[&str], default: usize) -> Result<usize> {
     use std::io::Write;
     println!("  {prompt}");
     for (i, opt) in options.iter().enumerate() {
@@ -288,7 +288,7 @@ pub fn prompt_choice(prompt: &str, options: &[&str], default: usize) -> Result<u
 
 /// Open `url` in the operator's browser (best-effort via `xdg-open`), always
 /// printing it first so a headless or SSH-tunnelled run can open it by hand.
-pub fn open_browser(url: &str, intro: &str) {
+pub(crate) fn open_browser(url: &str, intro: &str) {
     println!("{intro}");
     println!("  {url}");
     let _ = std::process::Command::new("xdg-open").arg(url).status();
@@ -305,7 +305,7 @@ pub struct ExistingApp {
 
 /// Read the configured App from the settings table. `None` when no App id is
 /// stored on a fresh or incompletely configured instance.
-pub async fn existing_app(db: &Db) -> Option<ExistingApp> {
+pub(crate) async fn existing_app(db: &Db) -> Option<ExistingApp> {
     let nonempty = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let id = nonempty(weaver_core::config::get(db, crate::github_app::APP_ID_KEY).await)?;
     Some(ExistingApp {
@@ -318,7 +318,7 @@ pub async fn existing_app(db: &Db) -> Option<ExistingApp> {
 /// Present the update / re-install menu for an already-configured App. Returns
 /// `true` when the operator chose to create a brand-new App; `false` when the
 /// existing App was handled here (a page opened, or left untouched).
-pub async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
+pub(crate) async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
     println!(
         "  A GitHub App is already configured (id {}{}).",
         app.id,
@@ -379,7 +379,7 @@ pub async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
 /// Reconstruct a base URL from a stored `LOOM_DOMAIN` for pre-filling the
 /// wizard: `localhost` (with no port on record) maps back to the local default,
 /// any real domain to `https://<domain>`. `None` for an empty domain.
-pub fn base_url_from_domain(domain: &str) -> Option<String> {
+pub(crate) fn base_url_from_domain(domain: &str) -> Option<String> {
     let d = domain.trim();
     if d.is_empty() {
         None
@@ -393,7 +393,7 @@ pub fn base_url_from_domain(domain: &str) -> Option<String> {
 /// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to
 /// Loom's sqlite database directly through its daemon-less setup path;
 /// it does not need the loom daemon to be running.
-pub async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
+pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     let base_url = opts.base_url.trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         bail!("--base-url must be a full URL, e.g. https://loom.team.dev (got '{base_url}')");
@@ -643,7 +643,7 @@ pub async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
 /// The bare host from a `--base-url` like `https://loom.team.dev` or
 /// `http://localhost:7878` — no scheme, no port. What `LOOM_DOMAIN` expects
 /// (the Caddyfile in `deploy/standalone` templates it in directly).
-pub fn host_from_base_url(base_url: &str) -> &str {
+pub(crate) fn host_from_base_url(base_url: &str) -> &str {
     base_url
         .trim_start_matches("https://")
         .trim_start_matches("http://")
@@ -655,7 +655,7 @@ pub fn host_from_base_url(base_url: &str) -> &str {
 /// A default App name derived from the host in `--base-url` (`loom-<host>`,
 /// non-alphanumerics folded to `-`) — GitHub App names must be unique across
 /// all of GitHub, so this is a starting point, not a guarantee.
-pub fn default_app_name(base_url: &str) -> String {
+pub(crate) fn default_app_name(base_url: &str) -> String {
     let host = host_from_base_url(base_url);
     let slug: String = host
         .chars()
@@ -667,7 +667,7 @@ pub fn default_app_name(base_url: &str) -> String {
 /// `loom setup secrets` — prompt for the paste-once agent secrets and store
 /// them as operator environment variables (`crate::agent_env`), exported into
 /// every session loom launches from then on.
-pub async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
+pub(crate) async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
         bail!(
@@ -736,7 +736,7 @@ pub async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
 /// personal App). An org-owned App is created under the org's own developer
 /// settings; the individual `LOOM_OWNER_GITHUB` is still resolved separately
 /// (see [`prompt_owner`]).
-pub fn prompt_org() -> Result<Option<String>> {
+pub(crate) fn prompt_org() -> Result<Option<String>> {
     let choice = prompt_choice(
         "Who should own the GitHub App?",
         &[
@@ -761,7 +761,7 @@ pub fn prompt_org() -> Result<Option<String>> {
 /// Prompt (plain, not hidden — a GitHub login isn't a secret) for the
 /// individual owner login an `--org` install needs, since the org itself
 /// can't be `LOOM_OWNER_GITHUB`.
-pub fn prompt_owner(org: &str) -> Result<String> {
+pub(crate) fn prompt_owner(org: &str) -> Result<String> {
     use std::io::Write;
     print!(
         "The App will be owned by the {org} organization, but the first approved sign-in needs \
@@ -782,7 +782,7 @@ pub fn prompt_owner(org: &str) -> Result<String> {
 /// Prompt for a secret without echoing it to the terminal. An empty answer
 /// means "skip" (leave the current value, if any, alone). `already_set` annotates
 /// the prompt so the operator knows a blank answer keeps the stored value.
-pub fn prompt_secret(name: &str, already_set: bool) -> Result<Option<String>> {
+pub(crate) fn prompt_secret(name: &str, already_set: bool) -> Result<Option<String>> {
     let hint = if already_set {
         " (already set — blank keeps it)"
     } else {

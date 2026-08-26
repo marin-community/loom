@@ -7,7 +7,7 @@ pub fn configure_agent_client() -> Result<()> {
     crate::cli::agent::set_client_override(client::default()?)
 }
 
-pub fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

@@ -23,7 +23,7 @@ pub enum SessionLayoutCmd {
 ///
 /// Both print through the operation's own renderer, so the twelve declared
 /// layout commands and these two describe a layout the same way.
-pub async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
+pub(crate) async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
     let client = client::default()?;
     let (group, collapsed) = match cmd {
         SessionLayoutCmd::Collapse { group } => (group, true),

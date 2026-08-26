@@ -44,7 +44,7 @@ pub async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
     Ok(())
 }
 
-pub fn parse_deployment_manifest(contents: &str) -> Result<deployment::reconcile::Input> {
+pub(crate) fn parse_deployment_manifest(contents: &str) -> Result<deployment::reconcile::Input> {
     serde_yaml_ng::from_str(contents).context("decoding deployment manifest as YAML or JSON")
 }
 

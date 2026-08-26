@@ -12,19 +12,19 @@ use weaver_api::operations::settings;
 use super::client;
 
 #[derive(Subcommand)]
-pub enum ConfigCmd {
+pub enum SettingsCmd {
     /// Print one setting's value.
     Get { key: String },
 }
 
-pub async fn run(cmd: ConfigCmd) -> Result<()> {
+pub async fn run(cmd: SettingsCmd) -> Result<()> {
     cmd_config(cmd).await
 }
 
-async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
+async fn cmd_config(cmd: SettingsCmd) -> Result<()> {
     let client = client();
     match cmd {
-        ConfigCmd::Get { key } => {
+        SettingsCmd::Get { key } => {
             let settings = client
                 .invoke::<settings::get::Op>(&settings::get::Input {})
                 .await?;

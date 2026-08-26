@@ -421,7 +421,7 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
 
 /// The agent's resolved attention level from a `SessionView`'s `branch.tags` —
 /// the value of the `attention` tag, or `ok` when it is absent (the calm state).
-pub fn branch_attention(ws: &SessionView) -> &str {
+pub(crate) fn branch_attention(ws: &SessionView) -> &str {
     ws.branch
         .tags
         .iter()
@@ -475,7 +475,7 @@ impl From<LaunchOpts> for LaunchArgs {
 /// and nothing to pick up (`--claim`/`--issue`/`--branch`). Launching anyway
 /// would spawn an agent with an empty goal that "starts unprompted", so we
 /// stop and point the user at the useful forms instead.
-pub fn launch_underspecified(a: &LaunchArgs) -> bool {
+pub(crate) fn launch_underspecified(a: &LaunchArgs) -> bool {
     a.goal.trim().is_empty()
         && a.name.is_none()
         && a.title.is_none()
@@ -484,7 +484,8 @@ pub fn launch_underspecified(a: &LaunchArgs) -> bool {
         && a.branch.is_none()
 }
 
-pub const LAUNCH_HINT: &str = "nothing to do — give the agent a task or something to pick up:
+pub(crate) const LAUNCH_HINT: &str =
+    "nothing to do — give the agent a task or something to pick up:
   loom sessions launch \"<what the agent should do>\"  # the common case
   loom sessions launch --claim <id>                    # pick up a Loom issue
   loom sessions launch --issue <n>                     # seed from a GitHub issue
@@ -513,7 +514,7 @@ pub enum RepoTarget {
 /// A path that exists wins over a slug of the same spelling: a real directory in
 /// front of you is never a guess, so `--repo ./acme/widgets` can't be hijacked
 /// into a clone of `github.com/acme/widgets`.
-pub fn resolve_repo_target(repo: Option<&str>) -> Result<RepoTarget> {
+pub(crate) fn resolve_repo_target(repo: Option<&str>) -> Result<RepoTarget> {
     let Some(input) = repo.map(str::trim).filter(|s| !s.is_empty()) else {
         let cwd = std::env::current_dir().context("could not read the current directory")?;
         return Ok(RepoTarget::Local(cwd));
@@ -642,7 +643,7 @@ pub async fn cmd_launch(a: LaunchArgs) -> Result<()> {
 
 /// Resolve a session view by key, surfacing a clearer error than a bare 404 when
 /// the key matches no live session.
-pub async fn fetch_session(client: &Client, key: &str) -> Result<SessionView> {
+pub(crate) async fn fetch_session(client: &Client, key: &str) -> Result<SessionView> {
     client
         .invoke::<sessions::get::Op>(&sessions::get::Input {
             session: key.to_string(),
@@ -653,7 +654,7 @@ pub async fn fetch_session(client: &Client, key: &str) -> Result<SessionView> {
 
 /// One-line attention summary: the resolved level (the agent's `attention` tag,
 /// `ok` when absent), plus its current-state message when set.
-pub fn attention_summary(ws: &SessionView) -> String {
+pub(crate) fn attention_summary(ws: &SessionView) -> String {
     let attention = branch_attention(ws);
     let message = &ws.branch.description;
     if message.is_empty() {
@@ -667,7 +668,7 @@ pub fn attention_summary(ws: &SessionView) -> String {
 /// session we are running inside. The server resolves the URL (only it knows
 /// loom's public origin); this just prints it bare, so it composes into a
 /// `gh pr create --body "$(…)"` without any trimming.
-pub async fn cmd_session_url(key: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_session_url(key: Option<String>) -> Result<()> {
     let key = match key {
         Some(k) => k,
         // `$WEAVER_BRANCH` is the branch id loom exports into every session it
@@ -693,7 +694,7 @@ pub async fn cmd_session_url(key: Option<String>) -> Result<()> {
 }
 
 /// `loom sessions poll` — a one-shot status read: lifecycle + attention.
-pub async fn cmd_session_poll(key: String) -> Result<()> {
+pub(crate) async fn cmd_session_poll(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = fetch_session(&client, &key).await?;
     println!("session {}  ({})", ws.id, ws.branch.name);
@@ -709,7 +710,7 @@ pub async fn cmd_session_poll(key: String) -> Result<()> {
 
 /// `loom sessions wait` — block until the session finishes, is lost, or (unless
 /// `lifecycle_only`) its agent raises attention.
-pub async fn cmd_session_wait(
+pub(crate) async fn cmd_session_wait(
     key: String,
     timeout: u64,
     interval: u64,
@@ -753,7 +754,7 @@ pub async fn cmd_session_wait(
 
 /// Why a `wait` should stop watching `ws`, or `None` to keep waiting: a terminal
 /// or orphaned lifecycle, or — unless `lifecycle_only` — a raised attention.
-pub fn wake_reason(ws: &SessionView, key: &str, lifecycle_only: bool) -> Option<String> {
+pub(crate) fn wake_reason(ws: &SessionView, key: &str, lifecycle_only: bool) -> Option<String> {
     let status = ws.status.as_str();
     if status == "archived" {
         return Some(format!(
@@ -778,13 +779,13 @@ pub fn wake_reason(ws: &SessionView, key: &str, lifecycle_only: bool) -> Option<
 }
 
 /// The terminal session lifecycle states (mirrors `session::is_terminal`).
-pub fn is_terminal_status(status: &str) -> bool {
+pub(crate) fn is_terminal_status(status: &str) -> bool {
     matches!(status, "done" | "error" | "archived")
 }
 
 /// `loom sessions send` — type a message into the agent's pane, submitting it
 /// (Enter) unless `submit` is false.
-pub async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<()> {
+pub(crate) async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<()> {
     if message.trim().is_empty() {
         bail!("nothing to send — provide a message");
     }
@@ -805,7 +806,7 @@ pub async fn cmd_session_send(key: String, message: String, submit: bool) -> Res
 }
 
 /// `loom sessions interrupt` — interrupt the agent's current turn.
-pub async fn cmd_session_interrupt(key: String) -> Result<()> {
+pub(crate) async fn cmd_session_interrupt(key: String) -> Result<()> {
     let client = client::default()?;
     client
         .invoke::<sessions::interrupt::Op>(&sessions::interrupt::Input {
@@ -817,7 +818,7 @@ pub async fn cmd_session_interrupt(key: String) -> Result<()> {
 }
 
 /// `loom sessions preview` — print the session's recent terminal screen.
-pub async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
+pub(crate) async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     let client = client::default()?;
     let res = client
         .invoke::<sessions::preview::Op>(&sessions::preview::Input {
@@ -1002,7 +1003,7 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_show(key: String) -> Result<()> {
+pub(crate) async fn cmd_show(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
         .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
@@ -1015,7 +1016,7 @@ pub async fn cmd_show(key: String) -> Result<()> {
 /// (`sessions.update`). This keeps the CLI at parity with the dashboard's inline
 /// title editor: the observed label and provenance travel with the edit so a
 /// concurrent rename is rejected rather than silently overwritten.
-pub async fn cmd_session_rename(key: String, title: String) -> Result<()> {
+pub(crate) async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     let title = title.trim();
     if title.is_empty() {
         bail!("nothing to rename to — provide a new title");
@@ -1039,7 +1040,7 @@ pub async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_session_regenerate_title(key: String) -> Result<()> {
+pub(crate) async fn cmd_session_regenerate_title(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
         .invoke::<sessions::title::regenerate::Op>(&sessions::title::regenerate::Input {
@@ -1050,7 +1051,7 @@ pub async fn cmd_session_regenerate_title(key: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> {
+pub(crate) async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let ws = client
         .invoke::<sessions::title::generation::set::Op>(&sessions::title::generation::set::Input {
@@ -1068,11 +1069,11 @@ pub async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<
 
 /// How long `session cue --ensure` follows a generation it started. Covers the
 /// server's own 45s prompt timeout with room for the runtime to spawn first.
-pub const CUE_POLL_ATTEMPTS: usize = 40;
+pub(crate) const CUE_POLL_ATTEMPTS: usize = 40;
 
-pub const CUE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const CUE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-pub async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
+pub(crate) async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
     let client = client::default()?;
     let mut cue = if ensure {
         client
@@ -1118,7 +1119,7 @@ pub async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<(
     Ok(())
 }
 
-pub fn print_session(ws: &SessionView) {
+pub(crate) fn print_session(ws: &SessionView) {
     println!("session {}  ({})", ws.id, ws.branch.name);
     println!(
         "  title:    {} ({})",
@@ -1219,7 +1220,7 @@ pub async fn cmd_attach(key: String) -> Result<()> {
     Err(anyhow!("failed to exec terminal attach: {err}"))
 }
 
-pub async fn cmd_archive(key: String) -> Result<()> {
+pub(crate) async fn cmd_archive(key: String) -> Result<()> {
     let client = client::default()?;
     let res = client
         .invoke::<sessions::archive::Op>(&sessions::archive::Input {
@@ -1240,7 +1241,7 @@ pub async fn cmd_archive(key: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_adopt(key: String) -> Result<()> {
+pub(crate) async fn cmd_adopt(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
         .invoke::<sessions::adopt::Op>(&sessions::adopt::Input { session: key })
@@ -1252,7 +1253,7 @@ pub async fn cmd_adopt(key: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_recover(key: String) -> Result<()> {
+pub(crate) async fn cmd_recover(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
         .invoke::<sessions::recover::Op>(&sessions::recover::Input { session: key })
@@ -1264,7 +1265,7 @@ pub async fn cmd_recover(key: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_handoff(
+pub(crate) async fn cmd_handoff(
     key: String,
     profile: Option<String>,
     agent: Option<String>,
@@ -1337,7 +1338,7 @@ pub async fn cmd_handoff(
     Ok(())
 }
 
-pub async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
+pub(crate) async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
     let client = client::default()?;
     let res = client
         .invoke::<sessions::delete::Op>(&sessions::delete::Input {

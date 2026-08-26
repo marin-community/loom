@@ -15,17 +15,17 @@
 
 pub mod artifacts;
 pub mod channels;
-pub mod config;
 pub mod issues;
 pub mod session;
+pub mod settings;
 pub mod status;
 pub mod tags;
 
 pub use artifacts::{run as run_artifact, ArtifactCmd};
 pub use channels::{run as run_channel, ChannelCmd};
-pub use config::{run as run_settings, ConfigCmd};
 pub use issues::{run as run_issue, IssueCmd, IssueTagCmd};
 pub use session::{run_chatlog, run_events, run_github_token, run_hook, run_self};
+pub use settings::{run as run_settings, SettingsCmd};
 pub use status::{run as run_status, run_summary, StatusCmd};
 pub use tags::{run as run_tag, TagCmd};
 
@@ -35,6 +35,9 @@ use std::sync::OnceLock;
 use weaver_api::operations::{branches, Operation, Render};
 use weaver_api::render::sessions::status_line;
 use weaver_api::Client;
+
+// The column-fitting helper the group commands share with `loom`'s own.
+pub(super) use crate::cli::support::truncate;
 
 // ---------------------------------------------------------------------------
 // The loom client and "current branch" resolution
@@ -47,7 +50,7 @@ static CLIENT_OVERRIDE: OnceLock<Client> = OnceLock::new();
 /// Point compatibility handlers at Loom's fully resolved client context.
 /// The standalone binary never calls this and retains environment/local
 /// endpoint resolution.
-pub fn set_client_override(client: Client) -> Result<()> {
+pub(crate) fn set_client_override(client: Client) -> Result<()> {
     CLIENT_OVERRIDE
         .set(client)
         .map_err(|_| anyhow!("Loom client override is already set"))
@@ -115,25 +118,4 @@ where
     O::View: Default,
 {
     O::text(output, &O::View::default())
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut t: String = s.chars().take(max.saturating_sub(1)).collect();
-        t.push('…');
-        t
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_respects_the_max_length() {
-        assert_eq!(truncate("short", 10), "short");
-        assert_eq!(truncate("a very long string", 6), "a ver…");
-    }
 }

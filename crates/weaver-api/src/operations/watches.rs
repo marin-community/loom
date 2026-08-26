@@ -100,20 +100,17 @@ pub mod programs {
     use super::prelude::*;
 
     /// List the builtin watch programs that ship with loom.
+    ///
+    /// No `cli`: `loom watch programs` takes `--source <name>`, which is a
+    /// lookup in the returned list that can miss, and a `Render` returns a
+    /// `String` with no way to say "that name does not exist". The command
+    /// stays hand-written so a typo still exits non-zero; it prints the table
+    /// through this operation's renderer.
     #[operation(id = "watches.programs", actor = User, scope = Global, risk = Read,
-                cli = "watch programs", view = View, render = custom)]
+                render = custom)]
     pub struct Input {}
 
     pub type Output = Vec<ProgramView>;
-
-    /// CLI-only flags that never cross the wire: the full registry is always
-    /// fetched, this only chooses what gets printed.
-    #[derive(Debug, Clone, Default, Deserialize, View)]
-    pub struct View {
-        /// Print one program's embedded script source instead of the table, e.g.
-        /// `--source builtin:archive-merged`.
-        pub source: Option<String>,
-    }
 }
 
 pub mod run {

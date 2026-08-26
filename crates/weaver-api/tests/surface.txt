@@ -211,7 +211,7 @@ watches.create                     POST /api/watches/create                     
 watches.delete                     POST /api/watches/delete                          admin         destructive    json    cli=loom watch rm                grants=[]
 watches.get                        POST /api/watches/get                             user          read           json    cli=loom watch get               grants=[]
 watches.list                       POST /api/watches/list                            user          read           json    cli=loom watch ls                grants=[]
-watches.programs                   POST /api/watches/programs                        user          read           json    cli=loom watch programs          grants=[]
+watches.programs                   POST /api/watches/programs                        user          read           json    cli=-                            grants=[]
 watches.run                        POST /api/watches/run                             admin         write          json    cli=loom watch run               grants=[]
 watches.runs                       POST /api/watches/runs                            user          read           json    cli=loom watch runs              grants=[]
 watches.update                     POST /api/watches/update                          admin         write          json    cli=loom watch update            grants=[]

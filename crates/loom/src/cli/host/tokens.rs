@@ -58,7 +58,7 @@ pub async fn run_token(cmd: TokenCmd) -> Result<()> {
     }
 }
 
-pub async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
+pub(crate) async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result<()> {
     let created = client::default()?
         .invoke::<auth::tokens::create::Op>(&auth::tokens::create::Input {
             name: name.clone(),
@@ -80,7 +80,7 @@ pub async fn cmd_token_create(name: String, expires_days: Option<i64>) -> Result
     Ok(())
 }
 
-pub async fn cmd_token_ls() -> Result<()> {
+pub(crate) async fn cmd_token_ls() -> Result<()> {
     let tokens = client::default()?
         .invoke::<auth::tokens::list::Op>(&auth::tokens::list::Input {})
         .await?;
@@ -101,7 +101,7 @@ pub async fn cmd_token_ls() -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_token_rm(id: String) -> Result<()> {
+pub(crate) async fn cmd_token_rm(id: String) -> Result<()> {
     client::default()?
         .invoke::<auth::tokens::revoke::Op>(&auth::tokens::revoke::Input { id: id.clone() })
         .await?;
@@ -111,7 +111,7 @@ pub async fn cmd_token_rm(id: String) -> Result<()> {
 
 /// Parse a `--ttl` duration: a bare number of seconds, or one suffixed with
 /// `s`, `m` or `h`.
-pub fn parse_ttl(value: &str) -> Result<i64> {
+pub(crate) fn parse_ttl(value: &str) -> Result<i64> {
     let value = value.trim();
     let (number, multiplier) = match value.chars().last() {
         Some('s') => (&value[..value.len() - 1], 1),

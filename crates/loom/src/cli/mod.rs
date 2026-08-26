@@ -178,7 +178,6 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<watches::delete::Op>(),
         bind::<watches::get::Op>(),
         bind::<watches::list::Op>(),
-        bind::<watches::programs::Op>(),
         bind::<watches::run::Op>(),
         bind::<watches::runs::Op>(),
         bind::<watches::update::Op>(),

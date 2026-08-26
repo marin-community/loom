@@ -5,15 +5,7 @@ use serde_json::Value;
 use crate::dto::{ProgramView, WatchRunView, WatchView};
 use crate::operations::watches;
 use crate::operations::{NoView, Render};
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut short: String = text.chars().take(max.saturating_sub(1)).collect();
-    short.push('…');
-    short
-}
+use crate::render::truncate;
 
 /// A compact human summary of a `WatchView`'s parsed `trigger` object.
 fn trigger_summary(trigger: &Value) -> String {
@@ -154,13 +146,7 @@ impl Render for watches::create::Op {
 }
 
 impl Render for watches::programs::Op {
-    fn text(output: &Vec<ProgramView>, view: &watches::programs::View) -> String {
-        if let Some(want) = &view.source {
-            return match output.iter().find(|program| &program.program == want) {
-                Some(program) => program.source.clone(),
-                None => format!("no builtin program '{want}' — `loom watch programs` lists them"),
-            };
-        }
+    fn text(output: &Vec<ProgramView>, _: &NoView) -> String {
         let header = format!("{:<26}  TITLE", "PROGRAM");
         std::iter::once(header)
             .chain(

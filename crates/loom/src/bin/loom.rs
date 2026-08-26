@@ -9,8 +9,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use loom::cli::agent::{
-    ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, ConfigCmd as AgentConfigCmd,
-    IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd,
+    ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, IssueCmd as AgentIssueCmd,
+    SettingsCmd, StatusCmd as AgentStatusCmd,
 };
 
 use loom::cli::commands::mcps::{run_mcp, McpCmd};
@@ -62,7 +62,7 @@ enum HostCmd {
     /// Inspect live settings through the REST API.
     Settings {
         #[command(subcommand)]
-        cmd: AgentConfigCmd,
+        cmd: SettingsCmd,
     },
     /// Inspect trusted MCP capability sets, or run an internal stdio adapter.
     ///
@@ -827,8 +827,16 @@ async fn run() -> Result<()> {
         Cmd::Operation(binding, matches) => {
             configure_agent_client()?;
             let rendered = (binding.run)(&matches).await?;
+            // Printed as the renderer built it. `artifacts get` renders an
+            // artifact's own bytes, so trimming here truncated what
+            // `loom artifacts get plan > plan.md` wrote; the only thing added
+            // is the final newline a terminal expects.
             if !rendered.is_empty() {
-                println!("{}", rendered.trim_end());
+                if rendered.ends_with('\n') {
+                    print!("{rendered}");
+                } else {
+                    println!("{rendered}");
+                }
             }
             Ok(())
         }

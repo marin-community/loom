@@ -1,12 +1,14 @@
 //! `loom watch` — the watch commands a declaration cannot serve.
 //!
-//! `ls`, `programs`, `runs` and `get` are declared operations now, printed by
+//! `ls`, `runs` and `get` are declared operations now, printed by
 //! `weaver_api::render::watches`. What is left: `new` scaffolds a local file
 //! and never touches the server; `add` builds the `trigger` and `scope` JSON
 //! out of flag sugar (`--cron`, `--every`, `--on-event`, `--repo`); `run`
 //! names the watch and says whether the round was a dry run, neither of which
-//! `WatchRunResult` carries; and `enable`/`disable` are two spellings of
-//! `watches.update` that differ only in the `enabled` they send.
+//! `WatchRunResult` carries; `enable`/`disable` are two spellings of
+//! `watches.update` that differ only in the `enabled` they send; and
+//! `programs` takes `--source <name>`, a lookup that can miss, which a
+//! renderer has no way to report as a failure.
 
 use crate::client;
 use anyhow::{bail, Context, Result};
@@ -27,6 +29,13 @@ pub enum WatchCmd {
     New {
         /// The watch name; also the file stem (`<name>.py`).
         name: String,
+    },
+    /// List the builtin programs that ship with loom (`watches.programs`).
+    Programs {
+        /// Print one program's script source instead of the table, e.g.
+        /// `--source builtin:archive-merged` — a working example to start from.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// Register a watch from flags (`watches.create`).
     Add(Box<AddOpts>),
@@ -111,6 +120,7 @@ pub struct AddOpts {
 pub async fn run_watch(cmd: WatchCmd) -> Result<()> {
     match cmd {
         WatchCmd::New { name } => cmd_watch_new(name).await,
+        WatchCmd::Programs { source } => cmd_watch_programs(source).await,
         WatchCmd::Add(opts) => cmd_watch_add(*opts).await,
         WatchCmd::Rm { name } => cmd_watch_rm(name).await,
         WatchCmd::Enable { name } => cmd_watch_set_enabled(name, true).await,
@@ -125,7 +135,7 @@ pub async fn run_watch(cmd: WatchCmd) -> Result<()> {
 /// (`loom watch programs --source <name>` prints one as a fuller
 /// example). Plain `replace` rather than `format!`, so the template's literal
 /// braces (JSON, f-strings) stay readable.
-pub fn scaffold_template(name: &str) -> String {
+pub(crate) fn scaffold_template(name: &str) -> String {
     const TEMPLATE: &str = r##"# /// script
 # requires-python = ">=3.9"
 # dependencies = []
@@ -162,7 +172,7 @@ if __name__ == "__main__":
 
 /// The conventional path for a watch's program file:
 /// `~/.weaver/watches/<name>.py`.
-pub fn watch_path(name: &str) -> std::path::PathBuf {
+pub(crate) fn watch_path(name: &str) -> std::path::PathBuf {
     crate::db::weaver_home()
         .join("watches")
         .join(format!("{name}.py"))
@@ -171,7 +181,7 @@ pub fn watch_path(name: &str) -> std::path::PathBuf {
 /// `loom watch new` — scaffold a starter program file and print its path.
 /// A local file-convention command: it touches no server (T8 file convention),
 /// so it works before the Python binding exists.
-pub async fn cmd_watch_new(name: String) -> Result<()> {
+pub(crate) async fn cmd_watch_new(name: String) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
         bail!("name must not be empty");
@@ -199,7 +209,7 @@ pub async fn cmd_watch_new(name: String) -> Result<()> {
 /// Build the trigger JSON from the `add` flags. clap's `group = "trigger"`
 /// already makes cron/every/on-event mutually exclusive; `repo` is folded in
 /// when present. An empty trigger (`{}`) is a valid, never-firing default.
-pub fn build_trigger(opts: &AddOpts) -> Value {
+pub(crate) fn build_trigger(opts: &AddOpts) -> Value {
     let mut t = serde_json::Map::new();
     if let Some(cron) = &opts.cron {
         t.insert("cron".into(), json!(cron));
@@ -221,7 +231,7 @@ pub fn build_trigger(opts: &AddOpts) -> Value {
 
 /// Build the scope JSON: the explicit `--scope` JSON if given (parsed), with the
 /// `--repo` filter folded in so a repo-pinned watch only surveys its repo.
-pub fn build_scope(opts: &AddOpts) -> Result<Value> {
+pub(crate) fn build_scope(opts: &AddOpts) -> Result<Value> {
     let mut scope = match &opts.scope {
         Some(raw) => serde_json::from_str::<Value>(raw)
             .with_context(|| format!("--scope is not valid JSON: {raw}"))?,
@@ -236,7 +246,7 @@ pub fn build_scope(opts: &AddOpts) -> Result<Value> {
 }
 
 /// `loom watch add` — register a watch (`watches.create`).
-pub async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
+pub(crate) async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     let client = client::default()?;
     let params = opts
         .prompt
@@ -270,7 +280,28 @@ pub async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 }
 
 /// `loom watch rm` — delete a watch.
-pub async fn cmd_watch_rm(name: String) -> Result<()> {
+/// `loom watch programs` — the builtin program table, or one program's source.
+///
+/// The table is `watches.programs`' own renderer. `--source` is the reason this
+/// is not simply a declared command: naming a program that does not exist has
+/// to exit non-zero, and a `Render` has no way to say so.
+pub(crate) async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
+    let client = client::default()?;
+    let programs = client
+        .invoke::<watches::programs::Op>(&watches::programs::Input {})
+        .await?;
+    let Some(want) = source else {
+        println!("{}", watches::programs::Op::text(&programs, &NoView));
+        return Ok(());
+    };
+    let Some(program) = programs.iter().find(|program| program.program == want) else {
+        bail!("no builtin program '{want}' — `loom watch programs` lists them");
+    };
+    print!("{}", program.source);
+    Ok(())
+}
+
+pub(crate) async fn cmd_watch_rm(name: String) -> Result<()> {
     let client = client::default()?;
     client
         .invoke::<watches::delete::Op>(&watches::delete::Input { key: name.clone() })
@@ -281,7 +312,7 @@ pub async fn cmd_watch_rm(name: String) -> Result<()> {
 
 /// `loom watch enable|disable` — flip the `enabled` toggle
 /// (`watches.update`).
-pub async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
+pub(crate) async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let o = client
         .invoke::<watches::update::Op>(&watches::update::Input {
@@ -299,7 +330,7 @@ pub async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
 }
 
 /// `loom watch run` — fire a round now and print outcome + summary.
-pub async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
+pub(crate) async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
     let client = client::default()?;
     let res = client
         .invoke::<watches::run::Op>(&watches::run::Input {
