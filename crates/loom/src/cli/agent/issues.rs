@@ -5,11 +5,26 @@ use clap::Subcommand;
 
 use weaver_api::operations::branches;
 use weaver_api::operations::issues as issue_ops;
+use weaver_api::render::sessions::{attention, status_line};
 use weaver_api::{Client, IssueAction, IssueView};
 use weaver_core::tags;
 
-use super::{attention_of, branch_key, client, working_branch_status};
+use super::{branch_key, client, working_branch_status};
 
+// `close`, `reopen` and `delete` are served by `issues.close`/`.reopen`/
+// `.delete` and printed by `weaver_api::render::issues`. The rest stay because
+// a declaration plus a pure renderer cannot express them:
+//
+// - `add` joins its trailing words into a title and picks between two
+//   operations — `issues.create` or `issues.backlog.create` — on `--repo`.
+// - `ls`, `get` and `wait` each poll the branch working an issue for its live
+//   status, which is a round trip per delegated sub-tree. That is what makes
+//   them a poll rather than a record lookup, and a renderer has no client.
+// - `tag set`/`delete` take a run of ids followed by a key (and a value), which
+//   one declared positional cannot be; `issues.tags.*` act on a single id.
+// - `tag ls` has no operation: nothing declared lists one item's tags.
+//
+// A doc comment here would replace the group's `about` in `--help`.
 #[derive(Subcommand)]
 pub enum IssueCmd {
     /// Add an issue. By default it is claimed by the current branch; `--repo`
@@ -59,22 +74,6 @@ pub enum IssueCmd {
         /// Wake only when the issue closes; ignore the sub-agent's attention.
         #[arg(long)]
         closed_only: bool,
-    },
-    /// Atomically close one or more issues.
-    Close {
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Atomically reopen one or more closed issues.
-    Reopen {
-        #[arg(required = true)]
-        ids: Vec<i64>,
-    },
-    /// Atomically delete one or more issues.
-    #[command(name = "delete", visible_alias = "rm")]
-    Rm {
-        #[arg(required = true)]
-        ids: Vec<i64>,
     },
     /// Label an issue with free-form `(key, value)` tags: set, rm, or ls.
     ///
@@ -262,36 +261,6 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 closed_only,
             )
             .await?;
-        }
-        IssueCmd::Close { ids } => {
-            let result = client
-                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
-                    ids,
-                    action: IssueAction::Close,
-                    repo_root: b.repo_root.clone(),
-                })
-                .await?;
-            println!("closed {} issue(s)", result.issues.len());
-        }
-        IssueCmd::Reopen { ids } => {
-            let result = client
-                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
-                    ids,
-                    action: IssueAction::Reopen,
-                    repo_root: b.repo_root.clone(),
-                })
-                .await?;
-            println!("reopened {} issue(s)", result.issues.len());
-        }
-        IssueCmd::Rm { ids } => {
-            let result = client
-                .invoke::<issue_ops::actions::Op>(&issue_ops::actions::Input {
-                    ids,
-                    action: IssueAction::Delete,
-                    repo_root: b.repo_root.clone(),
-                })
-                .await?;
-            println!("deleted {} issue(s)", result.deleted_ids.len());
         }
         IssueCmd::Tag { cmd } => cmd_issue_tag(&client, &b.repo_root, cmd).await?,
     }
@@ -596,14 +565,8 @@ async fn cmd_issue_wait(
                     // The sub-agent wants the user when its `attention` tag is
                     // present with a loud value (`attention`/`blocked`); absence
                     // is the calm `ok` state.
-                    let attention = attention_of(&row);
-                    if tags::ATTENTION_VALUES.contains(&attention.as_str()) {
-                        let msg = if row.description.is_empty() {
-                            attention
-                        } else {
-                            format!("{attention} — {}", row.description)
-                        };
-                        println!("issue #{id} needs you — {name} is {msg}");
+                    if tags::ATTENTION_VALUES.contains(&attention(&row).as_str()) {
+                        println!("issue #{id} needs you — {name} is {}", status_line(&row));
                         return Ok(());
                     }
                 }

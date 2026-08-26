@@ -1121,7 +1121,7 @@ pub mod status {
 
         /// Read the session's durable attention level and status message.
         #[operation(id = "sessions.status.get", actor = SessionSelf, scope = Session, risk = Read,
-                    grants = ["loom/sessions/read@v1"], cli = "status get")]
+                    grants = ["loom/sessions/read@v1"], cli = "status get", render = custom)]
         pub struct Input {
             #[operand(context)]
             pub session: String,
@@ -1135,7 +1135,7 @@ pub mod status {
 
         /// Update the durable attention level and status message.
         #[operation(id = "sessions.status.set", actor = SessionSelf, scope = Session, risk = Write,
-                    grants = ["loom/sessions/write@v1"], cli = "status set")]
+                    grants = ["loom/sessions/write@v1"], cli = "status set", render = custom)]
         pub struct Input {
             /// The attention level.
             #[operand(long = "tag")]

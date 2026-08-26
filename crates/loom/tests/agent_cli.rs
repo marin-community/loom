@@ -1,10 +1,10 @@
 //! Agent-facing CLI flows against a real (locally isolated) loom server — the
 //! CLI's only mode now that it is an HTTP-only client of loom (see
 //! `weaver_api::endpoint`). Each test boots its own server on a random port
-//! with an isolated `WEAVER_HOME`, seeds one branch row, and drives the
-//! `weaver` binary as a subprocess pointed at it via `$WEAVER_API`/
-//! `$WEAVER_BRANCH` — the same env loom injects into every session it
-//! launches.
+//! with an isolated `WEAVER_HOME`, seeds one branch and the session running on
+//! it, and drives the `weaver` binary as a subprocess pointed at it via
+//! `$WEAVER_API`/`$WEAVER_BRANCH`/`$LOOM_TOKEN` — the same env loom injects
+//! into every session it launches.
 //!
 //! `Env::start` mutates process-global env (`WEAVER_HOME`), so every test is
 //! `#[serial]` — they share one binary and would otherwise race on that env.
@@ -13,25 +13,100 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::process::{Command, Stdio};
 
+use loom::session as session_mod;
 use loom::AppState;
-use loom::{db, server};
+use loom::{auth, db, server};
 use serial_test::serial;
 use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
+
+/// The title and goal every fixture branch carries. The session channel is
+/// named after the one and opens with the other, which is what
+/// `channel_cli_reads_and_appends_typed_history` asserts.
+const BRANCH_TITLE: &str = "CLI channel";
+const BRANCH_GOAL: &str = "coordinate durably";
 
 /// Path to the freshly-built `weaver` binary the test will drive.
 fn loom_bin() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_BIN_EXE_loom"))
 }
 
+/// Seed the session running on `branch_id`, as loom's launcher would.
+///
+/// The `NewSession` fields are ordinary launch defaults; what matters to this
+/// suite is that a session row exists at all, because a session credential is
+/// how the server resolves the caller's own repository, branch, and session for
+/// every declaration-served command.
+async fn seed_session(db: &weaver_core::db::Db, branch_id: &str) -> loom::session::Session {
+    session_mod::insert_with_policy(
+        db,
+        &session_mod::NewSession {
+            id: "sess-agent-cli".to_string(),
+            branch_id: branch_id.to_string(),
+            work_dir: "/repo".to_string(),
+            term_session: "weaver-sess-agent-cli".to_string(),
+            agent_kind: "claude".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: None,
+            created_by: None,
+            protocol: "acp".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+        &launch_policy(),
+    )
+    .await
+    .unwrap()
+}
+
+/// An ordinary unrestricted launch policy — the shape loom stamps on a session
+/// it starts. `restricted: false` is what makes the minted credential carry the
+/// full session capability set, as a real agent's does.
+fn launch_policy() -> session_mod::SessionLaunchPolicy {
+    session_mod::SessionLaunchPolicy {
+        profile: loom::profile::DEFAULT_PROFILE.to_string(),
+        launch_mode: "auto".to_string(),
+        profile_revision: 1,
+        profile_lifetime: 1,
+        strict: false,
+        env_clear: false,
+        ambient_allowlist: "[]".to_string(),
+        idle_archive_secs: None,
+        turn_budget: 0,
+        prelude: "weaver".to_string(),
+        restricted: false,
+        github_repositories: "[]".to_string(),
+        allowed_tools: "[]".to_string(),
+        mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[]}"#.to_string(),
+        launch_snapshot: String::new(),
+        creator_kind: "system".to_string(),
+        creator_subject: "test".to_string(),
+        parent_session_id: None,
+        automation_run_id: None,
+    }
+}
+
 /// A running loom server, isolated in its own temp `WEAVER_HOME`/sqlite db,
 /// with one branch row seeded — the target `$WEAVER_BRANCH` names, exactly as
-/// loom would set it for a real session.
+/// loom would set it for a real session — plus the session running on it and
+/// its scoped credential.
 struct Env {
     addr: SocketAddr,
     branch_id: String,
     repo_root: String,
     branch_name: String,
+    session_id: String,
+    /// The session credential loom hands an agent as `$LOOM_TOKEN`.
+    ///
+    /// Not decoration: a declaration-served command resolves `repo_root`,
+    /// `branch` and `session` from the caller's own credential, so without a
+    /// session token every operand the dispatcher supplies would be empty.
+    token: String,
     db: weaver_core::db::Db,
     _home: tempfile::TempDir,
 }
@@ -54,6 +129,19 @@ impl Env {
         let branch = weaver_core::branch::upsert(&pool, &repo_root, &branch_name, "main")
             .await
             .unwrap();
+        // Both before the session: a session channel is named after the branch
+        // title and opens with its goal, and neither reaches back afterwards.
+        weaver_core::branch::set_title(
+            &pool,
+            &branch.id,
+            BRANCH_TITLE,
+            weaver_core::branch::TitleProvenance::User,
+        )
+        .await
+        .unwrap();
+        weaver_core::branch::set_goal(&pool, &branch.id, BRANCH_GOAL, "user")
+            .await
+            .unwrap();
 
         let trigger = loom::github_trigger::GithubTrigger::production(pool.clone());
         let state = AppState {
@@ -69,11 +157,18 @@ impl Env {
         };
         tokio::spawn(server::serve(state, listener));
 
+        let session = seed_session(&pool, &branch.id).await;
+        let token = auth::create_session_token(&pool, None, &session.id, &branch.id)
+            .await
+            .unwrap();
+
         let env = Env {
             addr,
             branch_id: branch.id,
             repo_root,
             branch_name,
+            session_id: session.id,
+            token,
             db: pool,
             _home: home,
         };
@@ -97,7 +192,7 @@ impl Env {
         cmd.args(args)
             .env("WEAVER_API", format!("http://{}", self.addr))
             .env("WEAVER_BRANCH", &self.branch_id)
-            .env_remove("LOOM_TOKEN");
+            .env("LOOM_TOKEN", &self.token);
         cmd
     }
 
@@ -227,8 +322,11 @@ async fn issue_lifecycle() {
     assert!(out.contains("another task"), "ls output: {out}");
     assert_eq!(out.matches("[ ]").count(), 2, "two open issues");
 
-    // Close #1, then list defaults to open only (should drop it).
-    env.run(&["issues", "close", "1"]);
+    // Close #1, then list defaults to open only (should drop it). `close`,
+    // `reopen` and `rm` are served by their declarations, so each answers with
+    // the items it changed rather than a count.
+    let closed = env.run(&["issues", "close", "1"]);
+    assert!(closed.contains("closed #1"), "close: {closed}");
     let out = env.run(&["issues", "ls"]);
     assert!(
         !out.contains("fix the thing"),
@@ -242,11 +340,13 @@ async fn issue_lifecycle() {
     );
 
     // Reopen, then rm.
-    env.run(&["issues", "reopen", "1"]);
+    let reopened = env.run(&["issues", "reopen", "1"]);
+    assert!(reopened.contains("reopened #1"), "reopen: {reopened}");
     let out = env.run(&["issues", "ls"]);
     assert_eq!(out.matches("[ ]").count(), 2);
 
-    env.run(&["issues", "rm", "1"]);
+    let removed = env.run(&["issues", "rm", "1"]);
+    assert!(removed.contains("deleted #1"), "rm: {removed}");
     let out = env.run(&["issues", "ls", "--all"]);
     assert!(!out.contains("fix the thing"));
 }
@@ -255,57 +355,22 @@ async fn issue_lifecycle() {
 #[serial]
 async fn channel_cli_reads_and_appends_typed_history() {
     let env = Env::start().await;
-    weaver_core::branch::set_title(
-        &env.db,
-        &env.branch_id,
-        "CLI channel",
-        weaver_core::branch::TitleProvenance::User,
-    )
-    .await
-    .unwrap();
-    weaver_core::branch::set_goal(&env.db, &env.branch_id, "coordinate durably", "user")
-        .await
-        .unwrap();
-    loom::session::insert(
-        &env.db,
-        &loom::session::NewSession {
-            id: "cli-session".to_string(),
-            branch_id: env.branch_id.clone(),
-            work_dir: "/repo/.worktrees/cli-session".to_string(),
-            term_session: "weaver-cli-session".to_string(),
-            agent_kind: "shell".to_string(),
-            model: String::new(),
-            effort: String::new(),
-            status: "running".to_string(),
-            github_repo: None,
-            parent_branch_id: None,
-            managed_by: None,
-            created_by: Some("rjpower".to_string()),
-            protocol: "terminal".to_string(),
-            origin: "user".to_string(),
-            class: "interactive".to_string(),
-            tracking_issue_id: None,
-        },
-    )
-    .await
-    .unwrap();
+    // The session channel is the one `Env` seeded; a branch holds only one.
+    let channel = env.session_id.clone();
 
     let listed = env.run(&["channels", "ls"]);
-    assert!(listed.contains("cli-session"), "channel list: {listed}");
-    assert!(listed.contains("CLI channel"), "channel list: {listed}");
+    assert!(listed.contains(&channel), "channel list: {listed}");
+    assert!(listed.contains(BRANCH_TITLE), "channel list: {listed}");
 
-    let opening = env.run(&["channels", "read", "--channel", "cli-session"]);
+    let opening = env.run(&["channels", "read", "--channel", &channel]);
     assert!(opening.contains("goal"), "channel history: {opening}");
-    assert!(
-        opening.contains("coordinate durably"),
-        "channel history: {opening}"
-    );
+    assert!(opening.contains(BRANCH_GOAL), "channel history: {opening}");
 
     let sent = env.run(&[
         "channels",
         "send",
         "--channel",
-        "cli-session",
+        &channel,
         "--kind",
         "result",
         "ready",
@@ -315,7 +380,7 @@ async fn channel_cli_reads_and_appends_typed_history() {
     assert!(sent.contains("result"), "channel send: {sent}");
     assert!(sent.contains("ready for review"), "channel send: {sent}");
 
-    let history = env.run(&["channels", "read", "--channel", "cli-session"]);
+    let history = env.run(&["channels", "read", "--channel", &channel]);
     assert!(
         history.contains("ready for review"),
         "channel history: {history}"
@@ -323,16 +388,16 @@ async fn channel_cli_reads_and_appends_typed_history() {
 
     // `get` reads its delivery bindings out of the channel it already fetched,
     // and `ack` reports the marker the server moved.
-    let detail = env.run(&["channels", "get", "cli-session"]);
+    let detail = env.run(&["channels", "get", &channel]);
     assert!(
-        detail.contains("id:      cli-session"),
+        detail.contains(&format!("id:      {channel}")),
         "channel get: {detail}"
     );
     assert!(detail.contains("bindings:"), "channel get: {detail}");
 
-    let acked = env.run(&["channels", "ack", "--channel", "cli-session"]);
+    let acked = env.run(&["channels", "ack", "--channel", &channel]);
     assert!(
-        acked.contains("cli-session read through"),
+        acked.contains(&format!("{channel} read through")),
         "channel ack: {acked}"
     );
 
@@ -340,12 +405,12 @@ async fn channel_cli_reads_and_appends_typed_history() {
         "channels",
         "subscribe",
         "--channel",
-        "cli-session",
+        &channel,
         "--mode",
         "observe",
     ]);
     assert!(
-        subscribed.contains("cli-session") && subscribed.contains("observe through"),
+        subscribed.contains(&channel) && subscribed.contains("observe through"),
         "channel subscribe: {subscribed}"
     );
 }
@@ -483,11 +548,43 @@ async fn issue_ls_shows_delegated_sub_trees() {
 /// `child`) and give `child` a branch row with the supplied attention/
 /// description — reproducing the state a `loom session launch` from inside
 /// the parent would create.
+///
+/// Including the child's own session, parented to the launching branch: a
+/// session credential reaches the branches of its own session tree, and it is
+/// that parent link — not the issue's `source_branch` — that puts the child in
+/// it. Without one, the parent's poll of its sub-tree is correctly refused.
 async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, description: &str) {
     let child_id = weaver_core::branch::new_id();
     weaver_core::branch::insert(&env.db, &child_id, &env.repo_root, child, "main")
         .await
         .unwrap();
+    session_mod::insert_with_policy(
+        &env.db,
+        &session_mod::NewSession {
+            id: format!("sess-{child_id}"),
+            branch_id: child_id.clone(),
+            work_dir: env.repo_root.clone(),
+            term_session: format!("weaver-{child_id}"),
+            agent_kind: "claude".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: Some(env.branch_id.clone()),
+            managed_by: None,
+            created_by: None,
+            protocol: "acp".to_string(),
+            origin: "agent".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+        &session_mod::SessionLaunchPolicy {
+            parent_session_id: Some(env.session_id.clone()),
+            ..launch_policy()
+        },
+    )
+    .await
+    .unwrap();
     // The attention level lives on the `attention` tag now; `ok` is absence.
     if attention == "ok" {
         weaver_core::tags::clear(&env.db, &child_id, weaver_core::tags::ATTENTION_KEY)
@@ -642,6 +739,54 @@ async fn artifact_write_show_ls_and_revisions() {
     assert!(rm.contains("was rev 2"), "rm: {rm}");
     let ls = env.run(&["artifacts", "ls"]);
     assert!(!ls.contains("plan"), "rm should remove it: {ls}");
+}
+
+/// `history` and `resolve` are served by their declarations now, so their text
+/// comes from `weaver_api::render::artifacts` rather than a hand-written
+/// printer. Both are here because neither had CLI coverage before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_history_lists_every_revision() {
+    let env = Env::start().await;
+    env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n");
+    env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan v2\n");
+
+    let history = env.run(&["artifacts", "history", "plan"]);
+    assert!(history.contains("rev 1"), "history: {history}");
+    assert!(history.contains("rev 2"), "history: {history}");
+    assert!(
+        history.contains("agent"),
+        "history names the author: {history}"
+    );
+}
+
+/// `resolve` answers with the thread as it now stands — `[resolved]` — instead
+/// of echoing back the id the caller passed in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_resolve_reports_the_resolved_thread() {
+    let env = Env::start().await;
+    env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n\nDesign here.\n");
+    let opened = env.run(&[
+        "artifacts",
+        "comment",
+        "plan",
+        "--quote",
+        "Design here.",
+        "needs detail",
+    ]);
+    let tid: i64 = opened
+        .split_whitespace()
+        .nth(2)
+        .expect("opened thread <id>")
+        .parse()
+        .expect("thread id is numeric");
+
+    let resolved = env.run(&["artifacts", "resolve", "plan", &tid.to_string()]);
+    assert!(
+        resolved.contains(&format!("#{tid} [resolved]")),
+        "resolve reports the thread's new state: {resolved}"
+    );
 }
 
 /// The URL printed after a write is resolved server-side, so it carries the

@@ -34,7 +34,8 @@ pub mod get {
 
     /// Read one artifact or immutable revision.
     #[operation(id = "artifacts.get", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts get")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts get", cli_alias = "show",
+                view = View, render = custom)]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -52,6 +53,14 @@ pub mod get {
     }
 
     pub type Output = ArtifactView;
+
+    /// Presentation flags. The response always carries both the envelope and
+    /// the content; this only chooses which of them gets printed.
+    #[derive(Debug, Clone, Default, Deserialize, View)]
+    pub struct View {
+        /// Print the envelope metadata instead of the content.
+        pub meta: bool,
+    }
 }
 
 pub mod history {
@@ -59,7 +68,7 @@ pub mod history {
 
     /// List immutable artifact revisions.
     #[operation(id = "artifacts.history", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts history")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts history", render = custom)]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]
@@ -81,7 +90,8 @@ pub mod list {
 
     /// List branch and repository-scoped artifacts.
     #[operation(id = "artifacts.list", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/artifacts/read@v1"], cli = "artifacts list")]
+                grants = ["loom/artifacts/read@v1"], cli = "artifacts list", cli_alias = "ls",
+                render = custom)]
     pub struct Input {
         /// When true, list every artifact in the repository. By default, list
         /// only this branch's own artifacts and the repository-shared ones.
@@ -189,7 +199,8 @@ pub mod threads {
 
         /// List anchored artifact review threads.
         #[operation(id = "artifacts.threads.list", actor = SessionSelf, scope = Branch, risk = Read,
-                    grants = ["loom/artifacts/read@v1"], cli = "artifacts threads")]
+                    grants = ["loom/artifacts/read@v1"], cli = "artifacts threads", view = View,
+                    render = custom)]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]
@@ -197,13 +208,26 @@ pub mod threads {
             pub name: String,
             /// When true, list only unresolved threads. By default, include all threads.
             /// Resolved threads appear collapsed in the dashboard, not hidden.
-            #[operand(default = false)]
+            // `skip_cli`: the command line spells this choice the other way
+            // round — open threads by default, `--all` to widen — so offering
+            // this one too would be two flags for one question. A `//` comment,
+            // because a doc comment would carry CLI trivia into the MCP
+            // argument schema and the generated frontend types.
+            #[operand(default = false, skip_cli)]
             pub open_only: bool,
             #[operand(context)]
             pub branch: String,
         }
 
         pub type Output = Vec<ThreadDto>;
+
+        /// Presentation flags. Every thread is fetched; this chooses which of
+        /// them gets printed.
+        #[derive(Debug, Clone, Default, Deserialize, View)]
+        pub struct View {
+            /// Show resolved and orphaned threads too, not just the open ones.
+            pub all: bool,
+        }
     }
 
     pub mod resolve {
@@ -211,7 +235,8 @@ pub mod threads {
 
         /// Resolve an artifact review thread.
         #[operation(id = "artifacts.threads.resolve", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts resolve")]
+                    risk = Write, grants = ["loom/artifacts/write@v1"], cli = "artifacts resolve",
+                    render = custom)]
         pub struct Input {
             /// The artifact's name.
             #[operand(positional)]

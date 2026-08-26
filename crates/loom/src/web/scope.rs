@@ -69,18 +69,14 @@ pub(crate) async fn require_branch_access(
     if branch_id == branch {
         return Ok(());
     }
-    // Branches are addressable by id or by name within the session's repo; both
-    // resolve to the same row, so compare after resolution rather than rejecting
-    // a legitimate alias.
-    let resolved: Option<String> =
-        sqlx::query_scalar("SELECT id FROM branches WHERE id = ? OR branch = ?")
-            .bind(branch)
-            .bind(branch)
-            .fetch_optional(&st.db)
-            .await?;
-    let Some(resolved) = resolved else {
+    // Branches are addressable several ways — id, name, `repo_root:name`, an id
+    // prefix — so resolve with the same function the handler will, and compare
+    // rows. Matching on `id` or `branch` alone rejected `repo_root:name`, which
+    // is the form the CLI builds when it polls the branch working an issue.
+    let Some(resolved) = weaver_core::branch::resolve_key(&st.db, branch).await? else {
         return Err(denied("session credentials are limited to their branch"));
     };
+    let resolved = resolved.id;
     if resolved == branch_id {
         return Ok(());
     }

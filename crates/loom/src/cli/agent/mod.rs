@@ -33,7 +33,8 @@ use anyhow::{anyhow, bail, Result};
 use std::sync::OnceLock;
 
 use weaver_api::operations::{branches, Operation, Render};
-use weaver_api::{BranchView, Client};
+use weaver_api::render::sessions::status_line;
+use weaver_api::Client;
 
 // ---------------------------------------------------------------------------
 // The loom client and "current branch" resolution
@@ -91,16 +92,6 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
     Ok(key.to_string())
 }
 
-/// The resolved attention level for a branch: the `attention` tag's value, or
-/// `ok` when the branch carries no such tag (absence is calm).
-fn attention_of(b: &BranchView) -> String {
-    b.tags
-        .iter()
-        .find(|t| t.key == weaver_core::tags::ATTENTION_KEY)
-        .map(|t| t.value.clone())
-        .unwrap_or_else(|| "ok".to_string())
-}
-
 /// The live status of the branch working an issue, as `"<branch> · <attention>
 /// — <message>"`, or `None` when the branch row can't be resolved (a stale
 /// `claimed_branch` name, or a network hiccup — best-effort). This is what
@@ -113,13 +104,7 @@ async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) 
         })
         .await
         .ok()?;
-    let attention = attention_of(&b);
-    let status = if b.description.is_empty() {
-        attention
-    } else {
-        format!("{attention} — {}", b.description)
-    };
-    Some(format!("{claimed} · {status}"))
+    Some(format!("{claimed} · {}", status_line(&b)))
 }
 
 /// One operation's own rendering of a result a hand-written command fetched

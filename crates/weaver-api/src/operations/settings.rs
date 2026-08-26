@@ -73,8 +73,14 @@ pub mod get {
     ///
     /// An agent may read the configuration it runs under; writing is
     /// `settings.patch`.
+    ///
+    /// Spelled `list` on the command line, not `get`: it takes no key and
+    /// answers with the whole table. `loom settings get <key>` is a separate
+    /// hand-written command that picks one row out of this same response and
+    /// fails when the key is unknown.
     #[operation(id = "settings.get", actor = SessionSelf, scope = Global, risk = Read,
-                grants = ["loom/sessions/read@v1"], cli = "settings get")]
+                grants = ["loom/sessions/read@v1"], cli = "settings list", cli_alias = "ls",
+                render = custom)]
     pub struct Input {}
 
     pub type Output = SettingsEnvelope;

@@ -201,7 +201,7 @@ sessions.url                       POST /api/sessions/url                       
 settings.env.delete                POST /api/settings/env/delete                     admin         write          json    cli=loom settings env delete     grants=[]
 settings.env.list                  POST /api/settings/env/list                       admin         read           json    cli=loom settings env list       grants=[]
 settings.env.set                   POST /api/settings/env/set                        admin         write          json    cli=loom settings env set        grants=[]
-settings.get                       POST /api/settings/get                            session_self  read           json    cli=loom settings get            grants=[loom/sessions/read@v1]
+settings.get                       POST /api/settings/get                            session_self  read           json    cli=loom settings list           grants=[loom/sessions/read@v1]
 settings.patch                     POST /api/settings/patch                          admin         write          json    cli=loom settings patch          grants=[]
 shell.restart                      POST /api/shell/restart                           admin         external_write json    cli=loom shell restart           grants=[]
 shell.terminal                     GET /api/shell/terminal                          admin         external_write duplex  cli=-                            grants=[]

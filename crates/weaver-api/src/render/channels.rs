@@ -1,5 +1,6 @@
 //! Text rendering for durable channel operations.
 
+use super::truncate;
 use crate::dto::{ChannelMessageView, ChannelSubscriptionView, ChannelView};
 use crate::operations::channels;
 use crate::operations::{NoView, Render};
@@ -7,15 +8,6 @@ use crate::operations::{NoView, Render};
 /// A channel row is one line, so its topic is trimmed to what fits beside it;
 /// `channels get` prints the whole thing.
 const TOPIC_WIDTH: usize = 100;
-
-fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
-        return text.to_string();
-    }
-    let mut short: String = text.chars().take(max.saturating_sub(1)).collect();
-    short.push('…');
-    short
-}
 
 fn row(channel: &ChannelView) -> String {
     let urgent = if channel.unread_urgent_count > 0 {

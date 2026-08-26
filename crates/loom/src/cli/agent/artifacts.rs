@@ -5,8 +5,24 @@ use clap::Subcommand;
 
 use weaver_api::operations::artifacts;
 
-use super::{branch_key, client, truncate};
+use super::{branch_key, client};
 
+// The three artifact commands no declaration can serve. `list`, `get`,
+// `history`, `threads` and `resolve` are their `#[operation]`s now, printed by
+// `weaver_api::render::artifacts`; what is left does something a declaration
+// plus a pure renderer cannot:
+//
+// - `write` reads a local file (or stdin), sniffs an image and encodes it as a
+//   data URI, and then asks the server for the artifact's externally-visible
+//   dashboard link — a second round trip, after the write.
+// - `delete` resolves the artifact first so it can name the scope and revision
+//   it removed and say "no artifact 'x'" when there is none;
+//   `ArtifactDeleteResult` carries only `{deleted, name}`.
+// - `comment` joins its trailing words into one body, and opening a thread
+//   needs the artifact's current revision to anchor against — fetched first,
+//   then sent.
+//
+// A doc comment here would replace the group's `about` in `--help`.
 #[derive(Subcommand)]
 pub enum ArtifactCmd {
     /// Write an artifact: append a new revision (creating it if absent). Reads
@@ -39,26 +55,6 @@ pub enum ArtifactCmd {
         #[arg(long)]
         base_rev: Option<i64>,
     },
-    /// List artifacts: this branch's plus the repo-shared ones. `--repo` lists
-    /// every artifact in the repo, all scopes.
-    #[command(name = "list", visible_alias = "ls")]
-    Ls {
-        /// List every artifact in the repo, regardless of scope.
-        #[arg(long)]
-        repo: bool,
-    },
-    /// Show an artifact's content (latest revision by default). `--meta` prints
-    /// the envelope (id, name, kind, title, scope, latest rev, timestamps).
-    #[command(name = "get", visible_alias = "show")]
-    Show {
-        name: String,
-        /// Show a specific revision instead of the latest.
-        #[arg(long)]
-        rev: Option<i64>,
-        /// Print the envelope metadata instead of the content.
-        #[arg(long)]
-        meta: bool,
-    },
     /// Remove an artifact and its entire revision history. Resolves the name
     /// branch-scoped first, then repo-shared (what `show` would display); pass
     /// `--repo` to target the repo-shared one when a branch copy shadows it.
@@ -68,13 +64,6 @@ pub enum ArtifactCmd {
         name: String,
         /// Remove the repo-shared artifact of this name, not the branch-scoped
         /// one.
-        #[arg(long)]
-        repo: bool,
-    },
-    /// List immutable revision metadata, newest first.
-    History {
-        name: String,
-        /// Read the repo-shared artifact rather than a branch copy.
         #[arg(long)]
         repo: bool,
     },
@@ -103,22 +92,6 @@ pub enum ArtifactCmd {
         suffix: String,
         /// The comment text. Joined with spaces.
         body: Vec<String>,
-    },
-    /// Resolve a discussion thread on an artifact.
-    Resolve {
-        /// The artifact name.
-        name: String,
-        /// The thread id (see `loom artifacts threads`).
-        thread_id: i64,
-    },
-    /// List an artifact's discussion threads, each with its comments. Open
-    /// threads only by default; `--all` also shows resolved/orphaned ones.
-    Threads {
-        /// The artifact name.
-        name: String,
-        /// Include resolved and orphaned threads too.
-        #[arg(long)]
-        all: bool,
     },
 }
 
@@ -280,62 +253,6 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             let scope = if repo { "repo-shared" } else { "this branch" };
             println!("{url}  (rev {}, {scope})", view.meta.rev);
         }
-        ArtifactCmd::Ls { repo } => {
-            let artifacts = client
-                .invoke::<artifacts::list::Op>(&artifacts::list::Input {
-                    repo,
-                    branch: key.to_string(),
-                })
-                .await?;
-            if artifacts.is_empty() {
-                println!("(no artifacts)");
-                return Ok(());
-            }
-            for a in &artifacts {
-                // A branch-scoped artifact is prefixed by its owning branch id;
-                // a repo-shared one is marked so the scope is legible at a glance.
-                let scope = match &a.branch_id {
-                    Some(bid) => format!("{bid}/"),
-                    None => "repo:".to_string(),
-                };
-                let title = if a.title.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {}", a.title)
-                };
-                println!("{scope}{:<24} [rev {}] {}{title}", a.name, a.rev, a.kind);
-            }
-        }
-        ArtifactCmd::Show { name, rev, meta } => {
-            let view = client
-                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
-                    name: name.trim().to_string(),
-                    rev,
-                    repo: false,
-                    branch: key.to_string(),
-                })
-                .await?;
-            if meta {
-                println!("id:      {}", view.meta.id);
-                println!("name:    {}", view.meta.name);
-                println!("kind:    {}", view.meta.kind);
-                if !view.meta.title.is_empty() {
-                    println!("title:   {}", view.meta.title);
-                }
-                println!(
-                    "scope:   {}",
-                    match &view.meta.branch_id {
-                        Some(bid) => format!("branch {bid}"),
-                        None => "repo-shared".to_string(),
-                    }
-                );
-                println!("rev:     {}", view.meta.rev);
-                println!("created: {}", view.meta.created_at);
-                println!("updated: {}", view.meta.updated_at);
-                return Ok(());
-            }
-            print!("{}", view.content);
-        }
         ArtifactCmd::Rm { name, repo } => {
             // Fetch first (branch-scoped resolution, matching `show`) so we can
             // report the scope/revision that got removed.
@@ -358,22 +275,6 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                 None => "repo-shared".to_string(),
             };
             println!("deleted {} ({scope}, was rev {})", a.meta.name, a.meta.rev);
-        }
-        ArtifactCmd::History { name, repo } => {
-            let artifact = client
-                .invoke::<artifacts::get::Op>(&artifacts::get::Input {
-                    name: name.trim().to_string(),
-                    rev: None,
-                    repo,
-                    branch: key.to_string(),
-                })
-                .await?;
-            for version in artifact.versions {
-                println!(
-                    "rev {}  {}  {}",
-                    version.rev, version.created_at, version.author
-                );
-            }
         }
         ArtifactCmd::Comment {
             name,
@@ -428,43 +329,6 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                         )
                         .await?;
                     println!("opened thread {} on {name} (rev {})", t.id, a.meta.rev);
-                }
-            }
-        }
-        ArtifactCmd::Resolve { name, thread_id } => {
-            client
-                .resolve_branch_thread(&key, name.trim(), thread_id)
-                .await?;
-            println!("resolved thread {thread_id} on {}", name.trim());
-        }
-        ArtifactCmd::Threads { name, all } => {
-            let name = name.trim();
-            let threads = client
-                .invoke::<artifacts::threads::list::Op>(&artifacts::threads::list::Input {
-                    name: name.to_string(),
-                    open_only: false,
-                    branch: key.to_string(),
-                })
-                .await?;
-            let threads: Vec<_> = if all {
-                threads
-            } else {
-                threads.into_iter().filter(|t| t.status == "open").collect()
-            };
-            if threads.is_empty() {
-                let scope = if all { "" } else { "open " };
-                println!("(no {scope}threads on {name})");
-                return Ok(());
-            }
-            for t in &threads {
-                println!(
-                    "#{} [{}] \"{}\"",
-                    t.id,
-                    t.status,
-                    truncate(&t.anchor.quote, 70)
-                );
-                for c in &t.comments {
-                    println!("    {}: {}", c.author, c.body);
                 }
             }
         }

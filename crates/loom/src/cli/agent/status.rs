@@ -4,12 +4,23 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 
 use weaver_api::operations::issues as issue_ops;
-use weaver_api::operations::{artifacts, branches, channels};
+use weaver_api::operations::{artifacts, branches, channels, sessions};
+use weaver_api::render::sessions::{github_wiring, status_line};
 use weaver_api::{BranchView, Client, IssueView, ThreadDto};
 use weaver_core::tags;
 
-use super::{attention_of, branch_key, channel_key, client, truncate, working_branch_status};
+use super::{branch_key, channel_key, client, render, truncate, working_branch_status};
 
+// `sessions.status.get` and `.set` declare these two invocations and now print
+// them — `weaver_api::render::sessions` holds the only copy of the text. What
+// keeps the clap enum is the *group*: `status` is these two verbs and nothing
+// else, so letting the declarations place them would leave `loom status` a
+// registry-assembled group with no description in `loom --help` and clap's
+// "the subcommand 'status' wasn't recognized" where it now says "a subcommand
+// is required". Removing it also means editing `bin/loom.rs`, which is being
+// split elsewhere.
+//
+// A doc comment here would replace the group's `about` in `--help`.
 #[derive(Subcommand)]
 pub enum StatusCmd {
     /// Print the current attention level and message.
@@ -49,6 +60,18 @@ const SUMMARY_TASK_CAP: usize = 10;
 /// Render the `loom summary` catch-up as a string. Kept
 /// separate from the printing so the post-compaction hook can replay the same
 /// text into the agent's context as `additionalContext` (see [`cmd_hook`]).
+///
+/// Not a `Render` on `sessions.summary.get`, though it is the obvious
+/// candidate. `SessionCatchupView` carries the goal, the level and message, the
+/// channel row, the artifacts and the issues — but not the `github` tag this
+/// prints, not the last three channel messages, and not the open threads across
+/// every artifact. Those are three more reads, one of them per artifact, and
+/// each delegated sub-tree costs a fourth to fetch the working branch's live
+/// status. It also *writes*: reading the catch-up advances this agent's own
+/// read marker on its channel. A renderer is a pure function of one `Output`
+/// and can do none of that. Widening the view to carry it all would make
+/// `sessions.summary.get` fan out server-side for every caller, including the
+/// dashboard, which needs none of it.
 pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -64,14 +87,8 @@ pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<St
     };
     let _ = writeln!(out, "Goal:    {goal}  (loom artifacts get goal)");
 
-    let attention = attention_of(b);
-    let status = if b.description.is_empty() {
-        attention
-    } else {
-        format!("{attention} — {}", b.description)
-    };
-    let _ = writeln!(out, "Status:  {status}  (loom status get)");
-    if let Some(wiring) = github_wiring_of(b) {
+    let _ = writeln!(out, "Status:  {}  (loom status get)", status_line(b));
+    if let Some(wiring) = github_wiring(b) {
         let _ = writeln!(
             out,
             "GitHub:  status messages mirror publicly to {wiring}  (loom sessions tags delete github stops it)"
@@ -303,38 +320,8 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
             branch: key.to_string(),
         })
         .await?;
-    println!("repo:        {}", b.repo_root);
-    println!("branch:      {}", b.branch);
-    println!("base:        {}", b.base_branch);
-    if !b.title.is_empty() {
-        println!("title:       {}", b.title);
-    }
-    println!(
-        "goal:        {}",
-        if b.goal.is_empty() { "(none)" } else { &b.goal }
-    );
-    let attention = attention_of(&b);
-    let status = if b.description.is_empty() {
-        attention
-    } else {
-        format!("{attention} — {}", b.description)
-    };
-    println!("status:      {status}");
-    if let Some(wiring) = github_wiring_of(&b) {
-        println!("github:      status messages mirror publicly to {wiring}");
-    }
-    println!("open issues: {}", b.open_issue_count);
+    println!("{}", render::<sessions::status::get::Op>(&b));
     Ok(())
-}
-
-/// The branch's GitHub wiring — the `github` tag's `owner/name#number` — when
-/// the session mirrors its status trail onto a GitHub thread.
-fn github_wiring_of(b: &BranchView) -> Option<&str> {
-    b.tags
-        .iter()
-        .find(|t| t.key == tags::GITHUB_KEY)
-        .map(|t| t.value.as_str())
-        .filter(|v| !v.is_empty())
 }
 
 /// Report the agent's status: set the attention level and, when a message is
@@ -344,7 +331,8 @@ fn github_wiring_of(b: &BranchView) -> Option<&str> {
 /// writes the description, sets or clears the tag, and records a single `tag`
 /// event atomically server-side. An empty message leaves the previous message
 /// in place — `loom status set --tag ok` just lowers the level without wiping
-/// what the agent last said.
+/// what the agent last said, and the reply says so, because what is printed is
+/// the session's status as it now stands rather than the arguments sent.
 async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
     // `ok` is a valid *input* (return to calm) but is never stored — it clears
@@ -353,18 +341,13 @@ async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str
     if level != "ok" && !tags::is_valid_value(tags::ATTENTION_KEY, &level) {
         bail!("unknown status '{level}' — expected one of ok, attention, blocked");
     }
-    client
+    let updated = client
         .invoke::<branches::status::set::Op>(&branches::status::set::Input {
             level: level.to_string(),
             message: (!message.is_empty()).then(|| message.to_string()),
             branch: key.to_string(),
         })
         .await?;
-    let message = message.trim();
-    if message.is_empty() {
-        println!("status: {level}");
-    } else {
-        println!("status: {level} — {message}");
-    }
+    println!("{}", render::<sessions::status::set::Op>(&updated));
     Ok(())
 }

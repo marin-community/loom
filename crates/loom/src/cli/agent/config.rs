@@ -1,4 +1,8 @@
-//! `loom settings` — read the server's live settings.
+//! `loom settings get <key>` — one row out of the settings table.
+//!
+//! The whole table is `loom settings list`, which is `settings.get` rendered by
+//! its own declaration. Picking one key stays here: the operation takes no key,
+//! and an unknown one has to fail — a renderer returns text, never an error.
 
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -11,9 +15,6 @@ use super::client;
 pub enum ConfigCmd {
     /// Print one setting's value.
     Get { key: String },
-    /// List every setting and its value.
-    #[command(name = "list", visible_alias = "ls")]
-    Ls,
 }
 
 pub async fn run(cmd: ConfigCmd) -> Result<()> {
@@ -23,14 +24,6 @@ pub async fn run(cmd: ConfigCmd) -> Result<()> {
 async fn cmd_config(cmd: ConfigCmd) -> Result<()> {
     let client = client();
     match cmd {
-        ConfigCmd::Ls => {
-            let settings = client
-                .invoke::<settings::get::Op>(&settings::get::Input {})
-                .await?;
-            for s in &settings.settings {
-                println!("{} = {}  ({})", s.key, s.value, s.source);
-            }
-        }
         ConfigCmd::Get { key } => {
             let settings = client
                 .invoke::<settings::get::Op>(&settings::get::Input {})
