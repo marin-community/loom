@@ -15,19 +15,10 @@
 //! POSIX shell identifier, since the value is exported by the launch script.
 
 use anyhow::Result;
-use serde::Serialize;
 use sqlx::Row;
+use weaver_api::AgentEnvVarView;
 
 use crate::db::{now_iso, Db};
-
-/// One stored variable with its bookkeeping timestamp — what the settings pane
-/// renders and what the API returns.
-#[derive(Debug, Clone, Serialize)]
-pub struct EnvVar {
-    pub name: String,
-    pub value: String,
-    pub updated_at: String,
-}
 
 /// Names loom owns and exports itself ([`crate::agent::launch`]). Operator vars
 /// are exported *after* these, so allowing one of these names through would let a
@@ -80,7 +71,7 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
 }
 
 /// Every stored variable, ordered by name.
-pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
+pub async fn list(db: &Db) -> Result<Vec<AgentEnvVarView>> {
     let rows = sqlx::query(
         "SELECT name, value, updated_at FROM profile_env
          WHERE profile_name = 'default' ORDER BY name",
@@ -89,7 +80,7 @@ pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|r| EnvVar {
+        .map(|r| AgentEnvVarView {
             name: r.get::<String, _>("name"),
             value: r.get::<String, _>("value"),
             updated_at: r.get::<String, _>("updated_at"),

@@ -1,5 +1,5 @@
 use weaver_api::operations::repos::env as ops;
-use weaver_api::{RepoEnvVarView, RepoEnvView};
+use weaver_api::RepoEnvView;
 
 use crate::agent_env;
 use crate::db::Db;
@@ -23,14 +23,7 @@ use super::{ApiResult, AppError};
 async fn repo_env_view(db: &Db, repo_root: &str) -> ApiResult<RepoEnvView> {
     Ok(RepoEnvView {
         repo_root: repo_root.to_string(),
-        env: repo_env::list(db, repo_root)
-            .await?
-            .into_iter()
-            .map(|v| RepoEnvVarView {
-                name: v.name,
-                updated_at: v.updated_at,
-            })
-            .collect(),
+        env: repo_env::list(db, repo_root).await?,
     })
 }
 

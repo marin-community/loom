@@ -11,19 +11,10 @@ use super::{ApiResult, AppError};
 // Operator-managed agent environment variables
 // ---------------------------------------------------------------------------
 
-/// The default profile's environment, as the wire [`AgentEnvVarView`] list —
-/// values included in full, matching [`agent_env::list`] (see that module's
-/// doc comment: this facade predates the write-only convention profiles use).
+/// The default profile's environment, values included in full — this facade
+/// predates the write-only convention profiles use.
 async fn env_vars(db: &Db) -> ApiResult<Vec<AgentEnvVarView>> {
-    Ok(agent_env::list(db)
-        .await?
-        .into_iter()
-        .map(|entry| AgentEnvVarView {
-            name: entry.name,
-            value: entry.value,
-            updated_at: entry.updated_at,
-        })
-        .collect())
+    Ok(agent_env::list(db).await?)
 }
 
 // ---------------------------------------------------------------------------

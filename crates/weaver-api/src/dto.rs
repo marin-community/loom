@@ -2432,9 +2432,10 @@ pub struct UserPreferencesEnvelope {
 }
 
 /// One variable in the default profile's environment, as the
-/// `settings.env.*` compatibility facade returns it. Unlike a profile's own
-/// environment metadata ([`ProfileEnvView`]), the value is not redacted —
-/// this facade predates the write-only convention profiles use.
+/// `settings.env.*` compatibility facade returns it and as
+/// `loom_store::agent_env` stores it. Unlike a profile's own environment
+/// metadata ([`ProfileEnvView`]), the value is not redacted — this facade
+/// predates the write-only convention profiles use.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentEnvVarView {
     pub name: String,
@@ -2512,9 +2513,10 @@ pub struct RepoRevisionValidationView {
     pub message: Option<String>,
 }
 
-/// One per-repo environment variable's metadata. Mirrors
-/// `loom_store::repo_env::RepoEnvVar`. Values are write-only and never
-/// returned.
+/// One per-repo environment variable's metadata, and the row type
+/// `loom_store::repo_env` reads. The value is deliberately omitted: per-repo
+/// variables are write-only, so a stored secret can be replaced but never read
+/// back.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoEnvVarView {
     pub name: String,
@@ -2796,7 +2798,8 @@ pub struct SessionIdeInfoView {
     pub idle_timeout_secs: i64,
 }
 
-/// One journaled ACP chat block, as `sessions.chat` exposes it. `payload` is
+/// One journaled ACP chat block, as `sessions.chat` exposes it and as
+/// `loom_store::chat` journals it. Addressed by `(turn, seq)`. `payload` is
 /// passed through as JSON; the client renders it by `kind`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChatBlockView {

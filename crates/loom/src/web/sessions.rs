@@ -23,11 +23,11 @@ use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, db, events, git, github, repo};
 use weaver_api::operations::sessions as ops;
 use weaver_api::{
-    AcpMetadataView, BranchView, ChatBlockView, ChatCursorView, HistoryPageView,
-    ResolvedLaunchView, ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView,
-    SessionCreatorFilter, SessionFilesView, SessionIdeInfoView, SessionInterruptResult,
-    SessionModeResult, SessionPreviewResult, SessionSearchAttention, SessionSearchStatus,
-    SessionSendResult, SessionSummaryView, SessionUrlView, SessionView,
+    AcpMetadataView, BranchView, ChatCursorView, HistoryPageView, ResolvedLaunchView,
+    ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
+    SessionFilesView, SessionIdeInfoView, SessionInterruptResult, SessionModeResult,
+    SessionPreviewResult, SessionSearchAttention, SessionSearchStatus, SessionSendResult,
+    SessionSummaryView, SessionUrlView, SessionView,
 };
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance, TitleUpdate};
@@ -1743,16 +1743,7 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
         .filter(|pending| !pending.trim().is_empty())
         .map(str::to_string);
     Ok(SessionChatView {
-        blocks: blocks
-            .into_iter()
-            .map(|block| ChatBlockView {
-                turn: block.turn,
-                seq: block.seq,
-                kind: block.kind,
-                payload: block.payload,
-                created_at: block.created_at,
-            })
-            .collect(),
+        blocks,
         older_cursor,
         live_turn: session_mod::acp_inflight_turn(&session),
         effective_mode: effective_turn_mode(&session),

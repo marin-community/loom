@@ -20,22 +20,13 @@
 //! launch script.
 
 use anyhow::Result;
-use serde::Serialize;
 use sqlx::Row;
+use weaver_api::RepoEnvVarView;
 
 use crate::db::{now_iso, Db};
 
-/// One stored variable's *metadata* — what the API returns and the settings pane
-/// renders. The value is deliberately omitted (write-only); only that a value is
-/// set, under what name, and when it last changed.
-#[derive(Debug, Clone, Serialize)]
-pub struct RepoEnvVar {
-    pub name: String,
-    pub updated_at: String,
-}
-
 /// The variables' metadata for a repo, ordered by name. Never includes values.
-pub async fn list(db: &Db, repo_root: &str) -> Result<Vec<RepoEnvVar>> {
+pub async fn list(db: &Db, repo_root: &str) -> Result<Vec<RepoEnvVarView>> {
     let rows =
         sqlx::query("SELECT name, updated_at FROM repo_env WHERE repo_root = ? ORDER BY name")
             .bind(repo_root)
@@ -43,7 +34,7 @@ pub async fn list(db: &Db, repo_root: &str) -> Result<Vec<RepoEnvVar>> {
             .await?;
     Ok(rows
         .into_iter()
-        .map(|r| RepoEnvVar {
+        .map(|r| RepoEnvVarView {
             name: r.get::<String, _>("name"),
             updated_at: r.get::<String, _>("updated_at"),
         })

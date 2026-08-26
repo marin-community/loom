@@ -14,11 +14,14 @@
 //! kinds documented on [`crate::acp`]). This module only stores and reads it.
 
 use anyhow::Result;
-use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::db::{now_iso, Db};
+
+/// A block is journaled in the shape `sessions.chat` serves it; re-exported so
+/// the journal's writers and readers name the row type through this module.
+pub use weaver_api::ChatBlockView;
 
 pub const HANDOFF_PROMPT_VERSION: i64 = 2;
 
@@ -312,17 +315,6 @@ fn prefix_chars(text: &str, max_chars: usize) -> String {
     } else {
         prefix
     }
-}
-
-/// One journaled block as the `/chat` routes expose it. `payload` is passed
-/// through as JSON — the client renders it by `kind`.
-#[derive(Debug, Clone, Serialize)]
-pub struct ChatBlockView {
-    pub turn: i64,
-    pub seq: i64,
-    pub kind: String,
-    pub payload: Value,
-    pub created_at: String,
 }
 
 /// The upstream id a block of `kind` is addressed by, mirrored into the indexed
