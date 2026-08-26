@@ -6032,6 +6032,15 @@ fn trigger_summary(t: &Value) -> String {
     if let Some(every) = t.get("every").and_then(Value::as_str) {
         return format!("every {every}");
     }
+    // `on` is the shape every reactive watch is stored in — a list of event
+    // names, each optionally `name=level`. Reading only the legacy singular
+    // `event` key meant the TRIGGER column showed a dash for all of them.
+    if let Some(events) = t.get("on").and_then(Value::as_array) {
+        let names: Vec<&str> = events.iter().filter_map(Value::as_str).collect();
+        if !names.is_empty() {
+            return format!("on {}", names.join(","));
+        }
+    }
     if let Some(event) = t.get("event").and_then(Value::as_str) {
         return match t.get("level").and_then(Value::as_str) {
             Some(level) => format!("on {event}={level}"),
@@ -6809,6 +6818,10 @@ settings:
         assert_eq!(trigger_summary(&every), "every 30m");
         let event = json!({ "event": "attention", "level": "blocked" });
         assert_eq!(trigger_summary(&event), "on attention=blocked");
+        let on = json!({ "on": ["pr.merged", "pr.opened"] });
+        assert_eq!(trigger_summary(&on), "on pr.merged,pr.opened");
+        let on_empty = json!({ "on": [] });
+        assert_eq!(trigger_summary(&on_empty), "—");
         let empty = json!({});
         assert_eq!(trigger_summary(&empty), "—");
     }
