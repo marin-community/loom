@@ -24,7 +24,7 @@ pub mod tags;
 pub use artifacts::{run as run_artifact, ArtifactCmd};
 pub use channels::{run as run_channel, ChannelCmd};
 pub use issues::{run as run_issue, IssueCmd, IssueTagCmd};
-pub use session::{run_chatlog, run_events, run_github_token, run_hook, run_self};
+pub use session::{run_chatlog, run_events, run_hook, run_self};
 pub use settings::{run as run_settings, SettingsCmd};
 pub use status::{run as run_status, run_summary, StatusCmd};
 pub use tags::{run as run_tag, TagCmd};

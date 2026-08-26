@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use weaver_api::operations::{branches, permissions};
+use weaver_api::operations::branches;
 use weaver_api::BranchView;
 use weaver_core::tags;
 
@@ -23,10 +23,6 @@ pub async fn run_hook(event: String) -> Result<()> {
     cmd_hook(event).await
 }
 
-pub async fn run_github_token(repository: Option<String>) -> Result<()> {
-    cmd_github_token(repository).await
-}
-
 pub fn run_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
     cmd_chatlog(file, as_json)
 }
@@ -34,19 +30,6 @@ pub fn run_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
 // ---------------------------------------------------------------------------
 // The loom client and "current branch" resolution
 // ---------------------------------------------------------------------------
-
-async fn cmd_github_token(repository: Option<String>) -> Result<()> {
-    let session_id =
-        std::env::var("LOOM_SESSION_ID").map_err(|_| anyhow!("$LOOM_SESSION_ID is not set"))?;
-    let credential = client()
-        .invoke::<permissions::github::token::Op>(&permissions::github::token::Input {
-            session: session_id.to_string(),
-            repository,
-        })
-        .await?;
-    println!("{}", credential.token);
-    Ok(())
-}
 
 async fn cmd_where() -> Result<()> {
     let client = client();

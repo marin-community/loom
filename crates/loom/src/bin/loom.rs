@@ -7,7 +7,7 @@
 //! terminal (the browser terminal is the other interaction surface).
 
 use anyhow::{bail, Context, Result};
-use clap::{Arg, ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
 use loom::cli::agent::{
     ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, IssueCmd as AgentIssueCmd,
     SettingsCmd, StatusCmd as AgentStatusCmd,
@@ -228,7 +228,6 @@ enum RegisteredCliCommand {
     Review(ReviewCmd),
     Issues(AgentIssueCmd),
     Permissions(PermissionsCmd),
-    GithubToken(Option<String>),
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -427,30 +426,19 @@ fn parse_attach_command(matches: &ArgMatches) -> clap::error::Result<RegisteredC
     AttachArgs::from_arg_matches(matches).map(|args| RegisteredCliCommand::Attach(args.session))
 }
 
+/// `loom hook --event <name>` — the Claude Code lifecycle hook entry point.
+///
+/// Hand-written because it is not an operation: it stamps a branch event from
+/// the environment a hook runs in, and does nothing at all when that
+/// environment says the caller is a nested agent.
 fn hook_command() -> Command {
-    HookArgs::augment_args(Command::new("hook").hide(true))
+    HookArgs::augment_args(
+        Command::new("hook").about("Record a Claude Code lifecycle hook for this session"),
+    )
 }
 
 fn parse_hook_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
     HookArgs::from_arg_matches(matches).map(|args| RegisteredCliCommand::Hook(args.event))
-}
-
-/// Hand-written because it is hidden. `permissions.github.token` declares the
-/// same operands, but a leaf the registry builds is always visible, and this is
-/// the command a git credential helper calls, not one a person browses to.
-fn github_token_command() -> Command {
-    Command::new("github-token").hide(true).arg(
-        Arg::new("repository")
-            .long("repository")
-            .value_name("OWNER/NAME")
-            .help("Scope the credential to one repository this session may write"),
-    )
-}
-
-fn parse_github_token_command(matches: &ArgMatches) -> clap::error::Result<RegisteredCliCommand> {
-    Ok(RegisteredCliCommand::GithubToken(
-        matches.get_one::<String>("repository").cloned(),
-    ))
 }
 
 const SESSION_CLI_COMMANDS: &[CliCommandFactory] = &[
@@ -533,20 +521,12 @@ const ISSUE_CLI_COMMANDS: &[CliCommandFactory] = &[CliCommandFactory {
     parse: parse_issues_command,
 }];
 
-const PERMISSION_CLI_COMMANDS: &[CliCommandFactory] = &[
-    CliCommandFactory {
-        name: "permissions",
-        aliases: &[],
-        build: permissions_command,
-        parse: parse_permissions_command,
-    },
-    CliCommandFactory {
-        name: "github-token",
-        aliases: &[],
-        build: github_token_command,
-        parse: parse_github_token_command,
-    },
-];
+const PERMISSION_CLI_COMMANDS: &[CliCommandFactory] = &[CliCommandFactory {
+    name: "permissions",
+    aliases: &[],
+    build: permissions_command,
+    parse: parse_permissions_command,
+}];
 
 const CLI_COMMAND_GROUPS: &[&[CliCommandFactory]] = &[
     SESSION_CLI_COMMANDS,
@@ -890,10 +870,6 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
             loom::cli::agent::run_issue(cmd).await
         }
         RegisteredCliCommand::Permissions(cmd) => run_permissions(cmd).await,
-        RegisteredCliCommand::GithubToken(repository) => {
-            configure_agent_client()?;
-            loom::cli::agent::run_github_token(repository).await
-        }
     }
 }
 

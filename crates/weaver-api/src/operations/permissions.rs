@@ -208,7 +208,8 @@ pub mod github {
         /// Mint a refreshable repository-scoped GitHub App credential for this
         /// session.
         #[operation(id = "permissions.github.token", actor = SessionOnly, scope = Session,
-                    risk = ExternalWrite, grants = ["loom/github/use@v1"], cli = "github-token")]
+                    risk = ExternalWrite, grants = ["loom/github/use@v1"], cli = "github-token",
+                    render = custom)]
         pub struct Input {
             #[operand(context)]
             pub session: String,
