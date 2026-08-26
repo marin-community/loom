@@ -65,6 +65,11 @@ enum HostCmd {
         cmd: AgentConfigCmd,
     },
     /// Inspect trusted MCP capability sets, or run an internal stdio adapter.
+    ///
+    /// Named for its bundle so the hand-written commands and the declared ones
+    /// land in one group. Two groups a letter apart — `loom mcp` beside `loom
+    /// mcps` — is how the same registry ended up answering to two words.
+    #[command(name = "mcps", visible_alias = "mcp")]
     Mcp {
         #[command(subcommand)]
         cmd: McpCmd,
@@ -136,6 +141,7 @@ enum HostCmd {
         cmd: ClientContextCmd,
     },
     /// Manage named session launch profiles and their secret environment.
+    #[command(name = "profiles", visible_alias = "profile")]
     Profile {
         #[command(subcommand)]
         cmd: ProfileCmd,
