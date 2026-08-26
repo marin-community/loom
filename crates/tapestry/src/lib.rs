@@ -31,7 +31,7 @@ pub use supervisor::{run as supervise, SupervisorConfig};
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// Which backend a supervisor runs. `Pty` is the historical terminal supervisor
@@ -167,6 +167,42 @@ fn encode_launch_spec_with_ambient(
     .context("encoding tapestry launch spec")
 }
 
+/// This process's own binary, to re-exec as a supervisor when the caller did not
+/// name one — plus the `argv[0]` to present it under, when that has to differ
+/// from the exec path.
+///
+/// The subtlety is an upgrade under a running process. `current_exe()` reads
+/// `/proc/self/exe`, which keeps naming the binary's *original* path with a
+/// ` (deleted)` suffix once that file is replaced — which installing a new loom
+/// does. Exec'ing that name fails with `ENOENT`, so a supervisor that predated
+/// the install could never spawn a sibling again: its own agent kept running,
+/// but every derived worktree shell died at launch with `spawning detached
+/// supervisor`, which the browser could only show as an endless "reconnecting".
+///
+/// `/proc/self/exe` itself stays a valid handle on the running image for the
+/// life of the process (a forked child inherits it right up to `execve`), so
+/// fall back to that. It also pins the sibling to the *owner's* build, which is
+/// what a derived supervisor wants — the replacement on disk may speak a
+/// different protocol. Only this fallback path pays its one cost, a `comm` of
+/// `exe` rather than `tapestry`, so carry the original name in `argv[0]` to keep
+/// the supervisor greppable in `ps`.
+fn self_exe() -> Result<(PathBuf, Option<PathBuf>)> {
+    let named = std::env::current_exe().context("resolving tapestry binary")?;
+    if !cfg!(target_os = "linux") || named.exists() {
+        return Ok((named, None));
+    }
+    let running = PathBuf::from("/proc/self/exe");
+    if !running.exists() {
+        return Ok((named, None)); // no /proc: let the spawn fail with the real cause
+    }
+    let argv0 = named
+        .to_str()
+        .and_then(|p| p.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .unwrap_or(named);
+    Ok((running, Some(argv0)))
+}
+
 /// Launch a session's supervisor as a **detached** process: it `setsid`s into
 /// its own session, dropping its controlling terminal and stdio. With no
 /// controlling terminal it ignores the SIGHUP its launcher's exit would
@@ -181,13 +217,16 @@ fn encode_launch_spec_with_ambient(
 /// whole life of the long-running supervisor. It also means a script with spaces
 /// or quotes needs no shell-escaping.
 pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
-    let exe = match opts.supervisor_bin {
-        Some(p) => p.to_path_buf(),
-        None => std::env::current_exe().context("resolving tapestry binary")?,
+    let (exe, argv0) = match opts.supervisor_bin {
+        Some(p) => (p.to_path_buf(), None),
+        None => self_exe()?,
     };
     let spec = encode_launch_spec(opts, &[])?;
 
     let mut cmd = std::process::Command::new(&exe);
+    if let Some(argv0) = argv0 {
+        cmd.arg0(argv0);
+    }
     if opts.env_clear {
         // Pin the detached supervisor to the socket root the launcher already
         // resolved. Merely forwarding explicit overrides is insufficient: the

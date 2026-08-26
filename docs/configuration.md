@@ -109,13 +109,23 @@ environment or runtime used by existing triggers.
 
 Profiles may declare `github_repositories` to define the GitHub App broker's
 scope. Ordinary interactive sessions select the launching user's Account PAT
-first and use this broker when the App path is selected. Interactive profiles
-stamp only the session's current allowlisted repository. Strict,
-environment-cleared automation profiles retain the complete list for reviewed
-cross-repository workflows, so their entries must use one owner. Tokens grant
-write access to repository contents, issues, pull requests, Actions, and
-workflow files. The configured GitHub App must have those permissions and be
-installed on every listed repository.
+first and use this broker when the App path is selected. An interactive session
+stamps only its own current repository, which it gets whether or not the
+profile lists it — the allowlist governs expansion beyond that repository.
+Strict, environment-cleared automation profiles retain the complete list for
+reviewed cross-repository workflows, so their entries must use one owner.
+Tokens grant write access to repository contents, issues, pull requests,
+Actions, and workflow files. The configured GitHub App must have those
+permissions and be installed on every listed repository.
+
+An entry may also be an `owner/*` pattern. A pattern scopes no token by itself;
+it declares that this session may expand into that owner without a human
+decision, so `loom permissions request github-repository owner/repo` is applied
+on the spot rather than raising attention and waiting. Each expansion is still
+validated against the App installation, recorded as an audited grant, and
+revocable with `loom permissions revoke github-repository`. Use it for an
+organization whose repositories the profile's sessions are already trusted
+with; leave it off when every expansion deserves a person's eyes.
 
 ```yaml
 profiles:

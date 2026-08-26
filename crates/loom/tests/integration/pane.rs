@@ -13,16 +13,36 @@ use loom::backend;
 
 use crate::fixtures::TestServer;
 
-/// Submit `text` and poll `sessions.preview` until the captured screen contains
-/// `marker`, **re-submitting** between polls. The launch script `exec`s the shell
+/// How a poller re-sends `text` between polls: as a submitted line, or as input
+/// staged on the prompt without an Enter.
+#[derive(Clone, Copy)]
+enum SendMode {
+    Submit,
+    Stage,
+}
+
+impl SendMode {
+    fn submits(self) -> bool {
+        matches!(self, SendMode::Submit)
+    }
+}
+
+/// Send `text` and poll `sessions.preview` until the captured screen contains
+/// `marker`, **re-sending** between polls. The launch script `exec`s the shell
 /// only after the supervisor socket is already up, and shell startup flushes any
 /// input typed during that window — so a command sent right after create can be
-/// echoed but never run. Re-submitting steps past that startup window; once the
-/// shell is reading, the command executes and the marker appears.
-async fn submit_until(ts: &TestServer, id: &str, text: &str, marker: &str) -> String {
+/// echoed but never run, and staged input can vanish before it is ever drawn.
+/// Re-sending steps past that startup window.
+///
+/// With [`SendMode::Submit`] the marker is the command's *output*, which appears only
+/// once the shell has executed it. With [`SendMode::Stage`] nothing executes, so the
+/// marker is the staged text itself — its appearance on the prompt line is the
+/// proof the input reached the PTY, and the point at which a caller can
+/// meaningfully assert the command has *not* run.
+async fn send_until(ts: &TestServer, id: &str, send: SendMode, text: &str, marker: &str) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        // Poll the current screen for a short window before re-submitting.
+        // Poll the current screen for a short window before re-sending.
         let inner = tokio::time::Instant::now() + Duration::from_secs(2);
         loop {
             let res = ts
@@ -40,12 +60,15 @@ async fn submit_until(ts: &TestServer, id: &str, text: &str, marker: &str) -> St
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if tokio::time::Instant::now() >= deadline {
-            panic!("marker {marker:?} never appeared in the pane after re-submitting");
+            panic!("marker {marker:?} never appeared in the pane after re-sending");
         }
-        // Not yet — (re)submit. Harmless if the earlier submit already ran.
+        // Not yet — (re)send. Harmless if the earlier send already landed.
         let _ = ts
             .client
-            .post("/api/sessions/send", json!({ "session": id, "text": text }))
+            .post(
+                "/api/sessions/send",
+                json!({ "session": id, "text": text, "submit": send.submits() }),
+            )
             .await;
     }
 }
@@ -78,7 +101,14 @@ async fn send_runs_a_command_and_preview_reads_it() {
         .unwrap();
     assert_eq!(sent["submitted"], true, "submit defaults to true");
 
-    let screen = submit_until(&ts, &id, "echo PANE_$((6 * 7))", "PANE_42").await;
+    let screen = send_until(
+        &ts,
+        &id,
+        SendMode::Submit,
+        "echo PANE_$((6 * 7))",
+        "PANE_42",
+    )
+    .await;
     assert!(screen.contains("PANE_42"), "command output missing");
 
     client
@@ -112,14 +142,11 @@ async fn send_without_submit_does_not_execute() {
         .unwrap();
     assert_eq!(sent["submitted"], false);
 
-    // Give the pane a beat, then confirm the arithmetic never ran: the literal
-    // text is on the prompt line, but the evaluated `STAGED_2` is not.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let res = client
-        .post("/api/sessions/preview", json!({ "session": id }))
-        .await
-        .unwrap();
-    let screen = res["screen"].as_str().unwrap_or("");
+    // Wait for the staged text to be echoed on the prompt line — that is the
+    // proof the input actually reached the PTY, and it anchors the negative:
+    // the literal is on screen, the evaluated `STAGED_2` never is.
+    let staged = "echo STAGED_$((1 + 1))";
+    let screen = send_until(&ts, &id, SendMode::Stage, staged, staged).await;
     assert!(
         !screen.contains("STAGED_2"),
         "unsubmitted input should not have executed; screen:\n{screen}"

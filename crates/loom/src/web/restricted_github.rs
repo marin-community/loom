@@ -48,9 +48,32 @@ pub(super) async fn github_token_operation(
             "session profile has no GitHub repository credential",
         ));
     }
+    // Named repository: the narrowest useful scope, and the only form that
+    // works once a session's access spans more than one owner. Unnamed keeps
+    // the whole set, which the App can mint only while it stays single-owner.
+    let scope = match input
+        .repository
+        .as_deref()
+        .map(str::trim)
+        .filter(|repository| !repository.is_empty())
+    {
+        Some(requested) => {
+            let slug = crate::repo::parse_slug(requested)
+                .map_err(AppError::bad_request)?
+                .slug();
+            if !repositories.iter().any(|candidate| candidate == &slug) {
+                return Err(AppError::new(
+                    StatusCode::FORBIDDEN,
+                    format!("session has no GitHub access to {slug}"),
+                ));
+            }
+            vec![slug]
+        }
+        None => repositories,
+    };
     let app = super::configured_github_app(&st).await?;
     let token = app
-        .token_for_repositories(&repositories)
+        .token_for_repositories(&scope)
         .await
         .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(GithubTokenView { token })

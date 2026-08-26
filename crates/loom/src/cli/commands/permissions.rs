@@ -13,7 +13,7 @@ use crate::client;
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use weaver_api::operations::permissions as perm_ops;
-use weaver_api::SessionGithubAccessView;
+use weaver_api::{PermissionRequestView, SessionGithubAccessView};
 
 #[derive(Subcommand)]
 pub enum PermissionsCmd {
@@ -115,6 +115,15 @@ pub async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                 for repository in view.github_repositories {
                     println!("  {repository}");
                 }
+                if !view.github_repository_patterns.is_empty() {
+                    println!(
+                        "GitHub owners grantable without review ({}):",
+                        view.github_repository_patterns.len()
+                    );
+                    for pattern in view.github_repository_patterns {
+                        println!("  {pattern}");
+                    }
+                }
                 println!("pending requests ({}):", view.pending_requests.len());
                 for request in view.pending_requests {
                     println!(
@@ -141,10 +150,7 @@ pub async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
                         session,
                     })
                     .await?;
-                println!(
-                    "request {} pending — {} {}",
-                    request.id, request.mode, request.repository
-                );
+                println!("{}", permission_request_confirmation(&request));
                 Ok(())
             }
         },
@@ -231,6 +237,19 @@ pub(crate) fn print_github_access(view: &SessionGithubAccessView) {
     println!("{} {} — {}", view.mode, view.repository, view.granted_by);
 }
 
+/// What `loom permissions request` prints back.
+///
+/// It reports the state the server returned rather than assuming `pending`: a
+/// request for a repository already covered by a grant pattern is approved on
+/// arrival, and saying "pending" then sent the caller off to wait for a
+/// decision that had already been made.
+fn permission_request_confirmation(request: &PermissionRequestView) -> String {
+    format!(
+        "request {} {} — {} {}",
+        request.id, request.state, request.mode, request.repository
+    )
+}
+
 pub(crate) fn github_access_session(explicit: Option<String>) -> Result<String> {
     explicit
         .or_else(|| std::env::var("LOOM_SESSION_ID").ok())
@@ -238,4 +257,38 @@ pub(crate) fn github_access_session(explicit: Option<String>) -> Result<String> 
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .context("not inside a loom session — pass the target explicitly with --session <session>")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_request_confirmation_reports_the_returned_state() {
+        let mut request = PermissionRequestView {
+            id: "req-1".to_string(),
+            session_id: "session-1".to_string(),
+            kind: "github_repository".to_string(),
+            repository: "acme/widgets".to_string(),
+            mode: "write".to_string(),
+            reason: "open the pull request".to_string(),
+            state: "pending".to_string(),
+            requested_by: "session:session-1".to_string(),
+            requested_at: "2026-08-24T00:00:00Z".to_string(),
+            decided_by: None,
+            decided_at: None,
+            decision_reason: None,
+        };
+        assert_eq!(
+            permission_request_confirmation(&request),
+            "request req-1 pending — write acme/widgets"
+        );
+
+        request.state = "approved".to_string();
+        request.decided_by = Some("policy:acme/*".to_string());
+        assert_eq!(
+            permission_request_confirmation(&request),
+            "request req-1 approved — write acme/widgets"
+        );
+    }
 }

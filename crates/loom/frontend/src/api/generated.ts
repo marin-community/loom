@@ -784,6 +784,12 @@ export interface DiagnosticsView {
 export interface EffectivePermissionsView {
   actor: string;
   github_repositories: string[];
+  /**
+   * `owner/*` launch-policy entries: owners this session may expand into
+   * without a human decision. They scope no token until a request applies
+   * one concrete repository.
+   */
+  github_repository_patterns: string[];
   operations: string[];
   pending_requests: PermissionRequestView[];
   session_id: string;
@@ -3421,6 +3427,12 @@ export interface PermissionsGithubRevokeInput {
 
 /** Mint a refreshable repository-scoped GitHub App credential for this session. */
 export interface PermissionsGithubTokenInput {
+  /**
+   * Narrow the credential to one `owner/repo`. An App installation
+   * token covers exactly one owner, so a session whose access spans
+   * owners has no single token and must ask per repository.
+   */
+  repository?: string | null;
   /** Supplied by the dispatcher from the caller's session context when omitted. */
   session?: string;
 }
@@ -4435,7 +4447,7 @@ export interface SessionsPreviewInput {
   session?: string;
 }
 
-/** Send a user message to an ACP session. Dispatched immediately when idle, or appended to the durable queue while a turn is live; `send_now` instead cancels any live turn and starts the message as a normal prompt. Every send records a `nudge` event on the branch (the audit rule). */
+/** Send a user message to an ACP session. Dispatched immediately when idle, or appended to the durable queue while a turn is live; `send_now` instead cancels an ordinary live turn and starts the message as a normal prompt. A live compaction always finishes before queued feedback starts. Every send records a `nudge` event on the branch (the audit rule). */
 export interface SessionsPromptCreateInput {
   /** Worktree-relative files to attach as ACP resource links. */
   files?: string[];
@@ -4445,7 +4457,11 @@ export interface SessionsPromptCreateInput {
    * copy.
    */
   force_queued?: boolean;
-  /** Cancel any live turn and start this message as a normal prompt. */
+  /**
+   * Cancel an ordinary live turn and start this message as a normal
+   * prompt. A live compaction queues it until its provider-owned
+   * boundary instead.
+   */
   send_now?: boolean;
   /** The message text. */
   text: string;
@@ -5207,7 +5223,7 @@ export interface Operations {
   'sessions.permissions.answer': { input: SessionsPermissionsAnswerInput; output: AnswerPermissionResult };
   /** Read a bounded terminal preview. */
   'sessions.preview': { input: SessionsPreviewInput; output: SessionPreviewResult };
-  /** Send a user message to an ACP session. Dispatched immediately when idle, or appended to the durable queue while a turn is live; `send_now` instead cancels any live turn and starts the message as a normal prompt. Every send records a `nudge` event on the branch (the audit rule). */
+  /** Send a user message to an ACP session. Dispatched immediately when idle, or appended to the durable queue while a turn is live; `send_now` instead cancels an ordinary live turn and starts the message as a normal prompt. A live compaction always finishes before queued feedback starts. Every send records a `nudge` event on the branch (the audit rule). */
   'sessions.prompt.create': { input: SessionsPromptCreateInput; output: PromptResult };
   /** Pull unseen next-turn feedback back out of the durable queue for editing. The ACP task owns the consume so this action is serialized with automatic dispatch at a turn boundary. */
   'sessions.prompt.retract': { input: SessionsPromptRetractInput; output: RetractResult };

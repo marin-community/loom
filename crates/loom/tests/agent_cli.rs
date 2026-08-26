@@ -20,6 +20,10 @@ use serial_test::serial;
 use tokio::net::TcpListener;
 use weaver_core::events::EventBus;
 
+#[path = "support/schema.rs"]
+mod support_schema;
+use support_schema::seed_migrated_db;
+
 /// The title and goal every fixture branch carries. The session channel is
 /// named after the one and opens with the other, which is what
 /// `channel_cli_reads_and_appends_typed_history` asserts.
@@ -115,6 +119,7 @@ impl Env {
     async fn start() -> Self {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
+        seed_migrated_db();
         // `seed_owner` no longer defaults to a real login — this suite's
         // requests (the `weaver` CLI, over loopback) need a seeded owner to
         // resolve to.

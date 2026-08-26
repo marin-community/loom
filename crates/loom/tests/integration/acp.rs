@@ -18,7 +18,7 @@ use loom::acp::{self, AcpLaunch, AcpPromptEffort, AcpPromptModel, NewOrLoad, Sse
 use loom::backend;
 use loom::session::{self as session_mod, NewSession};
 
-use crate::fixtures::{branch_tag_value, TestServer};
+use crate::fixtures::{age_past_runtime_start_grace, branch_tag_value, TestServer};
 use weaver_api::operations::sessions;
 
 /// The relay command that launches the scripted fake ACP agent over stdio.
@@ -191,6 +191,58 @@ async fn transient_prompt_uses_acp_and_cleans_its_relay() {
     .expect("fake-fast is advertised");
     assert_eq!(output.text, "summary");
     assert_eq!(output.model.as_deref(), Some("fake-fast"));
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposable_launch_validation_rejects_unavailable_modes_and_cleans_its_relay() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+    let mut launch = transient_launch(
+        &ts,
+        vec![("FAKE_ACP_MODES".to_string(), "default,plan".to_string())],
+    );
+    launch.mode = Some("auto".to_string());
+    launch.initial_model = Some("fake-deep".to_string());
+    launch.initial_effort = Some("high".to_string());
+
+    let error = acp::validate_launch(
+        &ts.state.db,
+        ts.state.acp.transient_sessions(),
+        launch,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("the adapter does not advertise auto mode");
+    assert!(
+        error
+            .to_string()
+            .contains("launch mode 'auto' is not available"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("default, plan"), "{error}");
+
+    let mut launch = transient_launch(&ts, vec![]);
+    launch.initial_model = Some("claude-unavailable".to_string());
+    let error = acp::validate_launch(
+        &ts.state.db,
+        ts.state.acp.transient_sessions(),
+        launch,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("the adapter does not advertise the requested model");
+    assert!(
+        error
+            .to_string()
+            .contains("launch model 'claude-unavailable' is not available"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("fake-fast, fake-deep"),
+        "{error}"
+    );
     assert_eq!(backend::list_sessions().await.unwrap(), before);
 }
 
@@ -1630,6 +1682,95 @@ async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
     }));
 }
 
+/// Compaction mutates provider-owned conversation state and must finish at its
+/// normal prompt-response boundary. Immediate user input becomes durable
+/// next-turn feedback, including after Loom re-attaches to the live adapter.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_send_now_waits_for_live_compaction() {
+    let ts = TestServer::start().await;
+    let id = "acp-compact-queue";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![("FAKE_ACP_COMPACT_DELAY".to_string(), "1500".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "/compact preserve task context" }),
+        )
+        .await
+        .unwrap();
+    let inflight = session_mod::get(&ts.state.db, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .acp_inflight
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&inflight).unwrap()["compaction"],
+        true
+    );
+
+    // Model a Loom-side restart while the provider keeps compacting. The
+    // durable in-flight marker must preserve the no-interrupt rule.
+    assert!(ts.state.acp.stop(id), "the compaction task was running");
+    acp::attach(&ts.state.acp_ctx(), id)
+        .await
+        .expect("re-attach succeeds");
+
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:after compaction", "send_now": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], true, "response: {sent}");
+    assert_eq!(sent["turn"], 0);
+    // Promoting the visible queue is still follow-up delivery, not an explicit
+    // request to abort the provider's compaction.
+    let forced = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "", "force_queued": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(forced["queued"], true, "response: {forced}");
+    assert_eq!(forced["turn"], 0);
+
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(10), |chat| {
+        let blocks = chat["blocks"].as_array().unwrap();
+        chat["live_turn"].is_null()
+            && blocks.iter().any(|block| {
+                block["turn"] == 1
+                    && block["kind"] == "agent_message"
+                    && block["payload"]["text"] == "after compaction"
+            })
+    })
+    .await;
+    assert!(chat["pending_prompt"].is_null());
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "end_turn"
+    }));
+    assert!(!blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+}
+
 /// Cross-session `sessions.send` is control-plane input, not ordinary composer
 /// feedback. It cancels a live turn and starts the message immediately instead
 /// of leaving it in the durable next-turn queue.
@@ -2059,6 +2200,110 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
             block["kind"] == "agent_message"
                 && block["payload"]["text"] == "before-disconnectafter-disconnect"
         }) && blocks.iter().any(|block| block["kind"] == "turn_end")
+    })
+    .await;
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evicted_driver_does_not_detach_its_successors_session() {
+    let ts = TestServer::start().await;
+    let id = "acp-driver-handover";
+    start_new(&ts, id, None, None).await;
+
+    // A second loom generation: same database and relays, its own registry.
+    let successor = acp::AcpCtx {
+        ctx: ts.state.ctx.clone(),
+        acp: acp::AcpRegistry::new(),
+    };
+    acp::attach(&successor, id)
+        .await
+        .expect("the successor generation attaches its own driver");
+    assert!(
+        successor.acp.is_live(id),
+        "the successor drives the session"
+    );
+
+    // The evicted driver unwinds: it drops its registry slot (so the process it
+    // belongs to can repair the session again) and leaves the row alone.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while ts.state.acp.is_live(id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the evicted driver never released its registry slot"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+    assert_eq!(
+        session.status, "running",
+        "the evicted driver detached a session its successor was driving"
+    );
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert!(
+        branch_tag_value(&view, "runtime").is_empty(),
+        "no runtime failure is reported for a session that never lost its driver"
+    );
+
+    // The successor really is driving it: a prompt through its handle runs a turn.
+    successor
+        .acp
+        .get(id)
+        .expect("the successor handle is registered")
+        .prompt("say:handed-over".to_string(), None, vec![])
+        .await
+        .expect("the successor drives the conversation");
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "handed-over"
+        })
+    })
+    .await;
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn adopt_reconciles_an_orphaned_row_that_still_has_a_live_driver() {
+    let ts = TestServer::start().await;
+    let id = "acp-orphaned-but-live";
+    start_new(&ts, id, None, None).await;
+    assert!(
+        session_mod::mark_orphaned(&ts.state.db, id).await.unwrap(),
+        "stage the contradiction: an orphaned row under a live driver"
+    );
+
+    ts.client
+        .post("/api/sessions/adopt", json!({ "session": id }))
+        .await
+        .expect("adopt reconciles the row instead of refusing it");
+    let view = poll_view(&ts, id, Duration::from_secs(10), |view| {
+        view["status"] == "running"
+    })
+    .await;
+    assert_eq!(view["status"], "running");
+    assert!(
+        ts.state.acp.is_live(id),
+        "the original driver was kept — nothing was respawned"
+    );
+
+    // Still the same live conversation, not a restarted one.
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:still-here" }),
+        )
+        .await
+        .expect("the reconciled session takes prompts");
+    poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "still-here"
+        })
     })
     .await;
 }
@@ -2767,6 +3012,58 @@ async fn rest_create_uses_the_configured_permission_default() {
         .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
+}
+
+/// Provider-owned selectors are vetted before a durable session or worktree is
+/// created, so an account/model combination that lacks the profile's mode is a
+/// normal validation error instead of a recoverable broken runtime.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_create_vets_builtin_profile_before_provisioning() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
+    )
+    .await
+    .unwrap();
+    loom::profile::env_set(
+        &ts.state.db,
+        loom::profile::DEFAULT_PROFILE,
+        "FAKE_ACP_MODES",
+        "default,plan",
+    )
+    .await
+    .unwrap();
+
+    let worktree = ts.repo_path().join(".worktrees").join("invalid-profile");
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/launch", ts.addr))
+        .json(&json!({
+            "goal": "must not start",
+            "cwd": ts.cwd(),
+            "agent": "claude",
+            "protocol": "acp",
+            "name": "invalid-profile"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("launch mode 'auto' is not available"),
+        "{body}"
+    );
+    assert!(
+        !worktree.exists(),
+        "validation happens before worktree creation"
+    );
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
 }
 
 /// Poll `sessions.get` until `pred` accepts the view, returning it.
@@ -3644,6 +3941,7 @@ async fn adopt_can_answer_a_permission_replayed_during_load() {
 
     assert!(ts.state.acp.stop(&id), "the original task was live");
     backend::kill_session_and_wait(&relay).await.unwrap();
+    age_past_runtime_start_grace(&ts.state.db, &id).await;
     poll_view(&ts, &id, Duration::from_secs(15), |view| {
         view["status"] == "orphaned"
     })
@@ -3745,6 +4043,7 @@ async fn adopt_reopens_via_load_without_duplicates() {
     backend::kill_session(&term_session).await.ok();
 
     // The monitor notices the dead terminal and marks the row orphaned.
+    age_past_runtime_start_grace(&ts.state.db, &id).await;
     poll_view(&ts, &id, Duration::from_secs(15), |v| {
         v["status"] == "orphaned"
     })
@@ -4021,7 +4320,7 @@ async fn builtin_codex_launches_over_codex_acp() {
         "the opening prompt contains the goal exactly once: {prompt}"
     );
     assert!(
-        prompt.contains("Use `loom summary` to recover context"),
+        prompt.contains("Use `loom summary` after compaction"),
         "summary is offered as recovery: {prompt}"
     );
     assert!(

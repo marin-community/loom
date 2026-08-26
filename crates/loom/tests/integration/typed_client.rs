@@ -292,6 +292,189 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(denied.decided_by.as_deref(), Some("rjpower"));
 }
 
+/// A GitHub App installation token covers one owner, so a session holding
+/// access under two owners has no single token. Each repository is brokered on
+/// its own, and granting the second owner no longer has to mint the union.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_credentials_are_brokered_per_repository_across_owners() {
+    let ts = TestServer::start_with_app().await;
+    let created = ts
+        .client
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            cwd: ts.cwd(),
+            goal: Some("work across two owners".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET policy_github_repositories = ? WHERE id = ?")
+        .bind(r#"["marin-community/marin"]"#)
+        .bind(&created.id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    // A human grants the second owner. Before per-repository brokering this
+    // failed here, because validation minted the whole prospective set.
+    ts.client
+        .invoke::<permission_ops::github::grant::Op>(&permission_ops::github::grant::Input {
+            session: created.id.clone(),
+            repository: "Open-Athena/mumwelt".to_string(),
+        })
+        .await
+        .unwrap();
+
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &created.id,
+        &created.branch.id,
+    )
+    .await
+    .unwrap();
+    let session = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
+
+    assert_eq!(
+        session
+            .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
+                session: created.id.clone(),
+            })
+            .await
+            .unwrap()
+            .github_repositories,
+        ["Open-Athena/mumwelt", "marin-community/marin"]
+    );
+
+    for repository in ["marin-community/marin", "Open-Athena/mumwelt"] {
+        let credential = session
+            .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+                session: created.id.clone(),
+                repository: Some(repository.to_string()),
+            })
+            .await
+            .unwrap();
+        assert!(!credential.token.is_empty(), "no token for {repository}");
+    }
+
+    // The unscoped form cannot represent a set spanning owners, which is
+    // exactly why the adapters name a repository.
+    let error = session
+        .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+            session: created.id.clone(),
+            repository: None,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("one owner"), "unexpected error: {error}");
+
+    // A repository the session has no grant for is refused before any minting.
+    let denied = session
+        .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+            session: created.id.clone(),
+            repository: Some("marin-community/vllm".to_string()),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        denied.contains("no GitHub access to marin-community/vllm"),
+        "unexpected error: {denied}"
+    );
+}
+
+/// An `owner/*` launch-policy entry is a standing decision: a request for that
+/// owner is applied immediately, with the same durable record a human decision
+/// leaves, and without parking the session on someone who may not be reachable.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_pattern_applies_repository_access_without_a_human() {
+    let ts = TestServer::start_with_app().await;
+    let created = ts
+        .client
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            cwd: ts.cwd(),
+            goal: Some("push to a sibling repository".to_string()),
+            agent: Some("shell".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // Stamp the pattern the way a profile allowlist would at launch.
+    sqlx::query("UPDATE sessions SET policy_github_repositories = ? WHERE id = ?")
+        .bind(r#"["marin-community/*"]"#)
+        .bind(&created.id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &created.id,
+        &created.branch.id,
+    )
+    .await
+    .unwrap();
+    let session = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
+
+    let granted = session
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            session: created.id.clone(),
+            repository: "marin-community/vllm".to_string(),
+            mode: "write".to_string(),
+            reason: "open the PR".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(granted.state, "approved");
+    assert_eq!(
+        granted.decided_by.as_deref(),
+        Some("policy:marin-community/*")
+    );
+
+    let effective = session
+        .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(effective.github_repositories, ["marin-community/vllm"]);
+    assert_eq!(effective.github_repository_patterns, ["marin-community/*"]);
+    assert!(effective.pending_requests.is_empty());
+    // A policy grant is not an interruption.
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap()
+        .branch;
+    assert_ne!(tag_value(&branch, "attention"), Some("attention"));
+
+    // An owner the policy says nothing about still needs a person.
+    let pending = session
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            session: created.id.clone(),
+            repository: "acme/widgets".to_string(),
+            mode: "write".to_string(),
+            reason: "unrelated".to_string(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(pending.state, "pending");
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap()
+        .branch;
+    assert_eq!(tag_value(&branch, "attention"), Some("attention"));
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_result_delivers_once_to_the_bound_slack_origin() {

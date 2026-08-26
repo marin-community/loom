@@ -7,6 +7,7 @@ import type {
   ProfileEnv,
   ProfileInput,
 } from '../types';
+import ModelCombobox from './ModelCombobox.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -201,32 +202,22 @@ watch(
 
     <div class="grid min-w-0 gap-1">
       <label class="text-xs" :for="`${uid}-model`">Model</label>
-      <input
+      <ModelCombobox
         v-if="selectedAgent?.accepts_raw_model"
         :id="`${uid}-model`"
         v-model="draft.model"
-        data-testid="profile-model"
-        :list="`${uid}-model-options`"
+        :choices="selectedAgent.models"
         :disabled="disabled"
-        autocomplete="off"
-        placeholder="Agent default"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
+        field-class="bg-input"
+        testid="profile-model"
       />
-      <datalist v-if="selectedAgent?.accepts_raw_model" :id="`${uid}-model-options`">
-        <option
-          v-for="model in selectedAgent.models"
-          :key="model.id"
-          :value="model.id"
-          :label="model.label"
-        />
-      </datalist>
       <select
         v-else
         :id="`${uid}-model`"
         v-model="draft.model"
         data-testid="profile-model"
         :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
+        class="min-w-0 w-full rounded bg-input px-2 py-1.5"
       >
         <option value="">Agent default</option>
         <option v-for="model in selectedAgent?.models ?? []" :key="model.id" :value="model.id">

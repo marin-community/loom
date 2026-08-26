@@ -34,8 +34,9 @@ History are views over the same placement rather than separate ownership models.
 
 Successful automation is an ordinary session placed in the Ops space. A failed
 or incomplete run without a session appears as a typed **Intervention** in
-Attention and Ops, where the operator can inspect or clean it up. There is no
-separate Automations destination.
+Attention and Ops. The row shows the last launch error and exposes **Clear**,
+which archives the attempt while retaining it in History. There is no separate
+Automations destination.
 GitHub and Slack triggers land in their respective Inbox spaces. Delegated
 sessions inherit their parent's placement.
 

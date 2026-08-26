@@ -150,6 +150,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "permission-requests",
         include_str!("../migrations/0028_permission_requests.sql"),
     ),
+    (
+        29,
+        "acp-driver-epoch",
+        include_str!("../migrations/0029_acp_driver_epoch.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

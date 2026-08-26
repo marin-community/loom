@@ -25,6 +25,7 @@ use weaver_core::config as core_config;
 use weaver_core::events::EventBus;
 
 use crate::support::tapestry_bin;
+use crate::support_schema::seed_migrated_db;
 
 /// Run `program args` in `dir`, asserting it succeeds.
 pub fn sh(dir: &Path, program: &str, args: &[&str]) {
@@ -220,6 +221,7 @@ impl TestServer {
         // at the sibling supervisor binary.
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
+        seed_migrated_db();
         std::env::set_var("WEAVER_TAPESTRY_BIN", tapestry_bin());
         // Never let the outer loom session's scoped bearer leak into this
         // isolated server or CLI subprocesses spawned by a test.
@@ -332,6 +334,27 @@ impl TestServer {
     pub fn cwd(&self) -> String {
         self.repo.path().to_string_lossy().into_owned()
     }
+}
+
+/// Age a session past the monitor's runtime-start grace window.
+///
+/// The orphan sweep leaves a session alone for the first several seconds after
+/// it was created, so a runtime that is still coming up is never mistaken for a
+/// dead one. A test proving the *dead terminal → orphaned* transition is not
+/// testing that window — `monitor`'s own unit tests cover it — so it backdates
+/// `created_at` instead of sitting out ten seconds of wall-clock per case.
+pub async fn age_past_runtime_start_grace(db: &loom::db::Db, id: &str) {
+    let backdated = (chrono::Utc::now() - chrono::Duration::minutes(1))
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    let updated = sqlx::query("UPDATE sessions SET created_at = ? WHERE id = ?")
+        .bind(&backdated)
+        .bind(id)
+        .execute(db)
+        .await
+        .expect("backdating the session's creation time")
+        .rows_affected();
+    assert_eq!(updated, 1, "no session {id} to age past the start grace");
 }
 
 /// Restores `$HOME` on drop, so a test that points it at a temp dir (to exercise

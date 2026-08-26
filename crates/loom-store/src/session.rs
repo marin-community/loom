@@ -73,6 +73,9 @@ pub struct Session {
     /// a block boundary for. [`crate::acp`] subscribes from here on (re)attach.
     #[serde(default)]
     pub acp_ack_seq: i64,
+    /// Monotonic epoch of the ACP driver that owns this session.
+    #[serde(default)]
+    pub acp_driver_epoch: i64,
     /// Outstanding client->agent request state as JSON (`{"prompt_id":N,"turn":N}`),
     /// re-adopted on attach so a replayed turn-end response is recognized. `None`
     /// when no turn is in flight.
@@ -153,7 +156,8 @@ const SESSION_COLUMNS: &str = "\
     lifecycle_transition, lifecycle_step, lifecycle_transition_started_at, \
     lifecycle_transition_owner_pid, github_repo, \
     last_activity_at, created_at, parent_branch_id, managed_by, created_by, park, sort_order, \
-    protocol, acp_session_id, acp_ack_seq, acp_inflight, current_mode, pending_prompt, origin, \
+    protocol, acp_session_id, acp_ack_seq, acp_driver_epoch, acp_inflight, current_mode, \
+    pending_prompt, origin, \
     class, turn_count, tracking_issue_id, profile, launch_mode, profile_revision, \
     profile_lifetime, policy_strict, policy_env_clear, policy_ambient_allowlist, \
     policy_idle_archive_secs, policy_turn_budget, policy_prelude, policy_restricted, \
@@ -961,20 +965,64 @@ pub async fn increment_turn_count(db: &Db, id: &str) -> Result<i64> {
 /// provider, so the monitor must not invalidate its mutation generation either.
 /// Returns whether this call performed the transition.
 pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE sessions
+    orphan_update(db, id, None).await
+}
+
+/// Mark a session orphaned if `driver_epoch` still owns its ACP driver slot.
+pub async fn mark_orphaned_by_driver(db: &Db, id: &str, driver_epoch: i64) -> Result<bool> {
+    orphan_update(db, id, Some(driver_epoch)).await
+}
+
+async fn orphan_update(db: &Db, id: &str, driver_epoch: Option<i64>) -> Result<bool> {
+    const BASE: &str = "UPDATE sessions
          SET status = 'orphaned', mutation_revision = mutation_revision + 1
          WHERE id = ?
-           AND status NOT IN ('orphaned', 'done', 'error', 'archived', 'handoff')",
+           AND status NOT IN ('orphaned', 'done', 'error', 'archived', 'handoff')";
+    let sql = match driver_epoch {
+        Some(_) => format!("{BASE} AND acp_driver_epoch = ?"),
+        None => BASE.to_string(),
+    };
+    let mut query = sqlx::query(&sql).bind(id);
+    if let Some(epoch) = driver_epoch {
+        query = query.bind(epoch);
+    }
+    let result = query.execute(db).await?;
+    let changed = result.rows_affected() == 1;
+    if changed {
+        tracing::info!(%id, "session marked orphaned atomically");
+    }
+    Ok(changed)
+}
+
+/// Restore an orphaned session after its ACP driver reattaches.
+pub async fn clear_orphaned_after_reattach(db: &Db, id: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET status = 'running', mutation_revision = mutation_revision + 1
+         WHERE id = ? AND status = 'orphaned' AND lifecycle_transition IS NULL",
     )
     .bind(id)
     .execute(db)
     .await?;
     let changed = result.rows_affected() == 1;
     if changed {
-        tracing::info!(%id, "session marked orphaned atomically");
+        tracing::info!(%id, "orphaned session restored to running by its live ACP driver");
     }
     Ok(changed)
+}
+
+/// Claim the ACP driver slot and return its new epoch.
+pub async fn claim_acp_driver(db: &Db, id: &str) -> Result<i64> {
+    let epoch: Option<i64> = sqlx::query_scalar(
+        "UPDATE sessions SET acp_driver_epoch = acp_driver_epoch + 1
+         WHERE id = ? RETURNING acp_driver_epoch",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    let epoch = epoch.ok_or_else(|| anyhow!("session {id} not found"))?;
+    tracing::debug!(%id, epoch, "acp driver epoch claimed");
+    Ok(epoch)
 }
 
 pub async fn touch(db: &Db, id: &str) -> Result<()> {
@@ -1874,6 +1922,86 @@ mod tests {
         assert_eq!(
             get(&db, &session.id).await.unwrap().unwrap().status,
             "handoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_superseded_acp_driver_cannot_detach_the_session() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/driver-epoch").await;
+        insert(&db, &new_session("driver-epoch", &branch, None))
+            .await
+            .unwrap();
+
+        // The driver that is attached right now may detach the session.
+        let first = claim_acp_driver(&db, "driver-epoch").await.unwrap();
+        // Its replacement claims the slot before subscribing, which is what
+        // evicts the first driver from the relay.
+        let second = claim_acp_driver(&db, "driver-epoch").await.unwrap();
+        assert!(second > first, "each claim takes a fresh epoch");
+
+        assert!(
+            !mark_orphaned_by_driver(&db, "driver-epoch", first)
+                .await
+                .unwrap(),
+            "an evicted driver cannot detach the session its successor is driving"
+        );
+        assert_eq!(
+            get(&db, "driver-epoch").await.unwrap().unwrap().status,
+            "running"
+        );
+        assert!(
+            mark_orphaned_by_driver(&db, "driver-epoch", second)
+                .await
+                .unwrap(),
+            "the session's current driver still reports its own failure"
+        );
+        assert_eq!(
+            get(&db, "driver-epoch").await.unwrap().unwrap().status,
+            "orphaned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reattached_driver_clears_a_stale_orphaned_status() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/reattach-clear").await;
+        insert(&db, &new_session("reattach-clear", &branch, None))
+            .await
+            .unwrap();
+
+        assert!(
+            !clear_orphaned_after_reattach(&db, "reattach-clear")
+                .await
+                .unwrap(),
+            "a running row needs no repair"
+        );
+        assert!(mark_orphaned(&db, "reattach-clear").await.unwrap());
+        assert!(clear_orphaned_after_reattach(&db, "reattach-clear")
+            .await
+            .unwrap());
+        assert_eq!(
+            get(&db, "reattach-clear").await.unwrap().unwrap().status,
+            "running"
+        );
+
+        // A lifecycle operation owns the row exclusively: an archive that began
+        // from an orphaned session is not undone by a late reattach.
+        assert!(mark_orphaned(&db, "reattach-clear").await.unwrap());
+        assert!(
+            begin_transition(&db, "reattach-clear", "archiving", "Stopping agent")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !clear_orphaned_after_reattach(&db, "reattach-clear")
+                .await
+                .unwrap(),
+            "a transition owner is not overwritten"
+        );
+        assert_eq!(
+            get(&db, "reattach-clear").await.unwrap().unwrap().status,
+            "orphaned"
         );
     }
 

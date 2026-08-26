@@ -280,7 +280,8 @@ async fn interactive_session_uses_the_launching_users_account_token() {
 }
 
 /// An interactive profile can use the configured GitHub App as its default
-/// credential while stamping only the current allowlisted repository.
+/// credential while stamping only the current repository — never the profile's
+/// other entries.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_profile_brokers_its_current_github_repository() {
@@ -331,6 +332,78 @@ async fn interactive_profile_brokers_its_current_github_repository() {
             "/api/sessions/launch",
             json!({
                 "goal": "use brokered credentials",
+                "cwd": ts.cwd(),
+                "agent": "codex",
+            }),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    let repositories: String =
+        sqlx::query_scalar("SELECT policy_github_repositories FROM sessions WHERE id = ?")
+            .bind(id)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
+    assert_eq!(repositories, r#"["marin-community/marin"]"#);
+    ts.client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+}
+
+/// A session's own repository is its baseline App scope. The profile allowlist
+/// governs expansion *beyond* the current repository, so an empty one no longer
+/// leaves the session unable to push the branch it was created on.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_session_brokers_its_own_repository_without_an_allowlist() {
+    let _adapter = EnvVarGuard::set(
+        "WEAVER_CODEX_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let ts = TestServer::start().await;
+    let repo_root = ts.repo_path().canonicalize().unwrap();
+    loom::repo::register(
+        &ts.state.db,
+        "marin-community/marin",
+        "https://github.com/marin-community/marin.git",
+        &repo_root.to_string_lossy(),
+    )
+    .await
+    .unwrap();
+    // The stock profile allowlists nothing at all.
+    assert!(
+        loom::profile::get(&ts.state.db, loom::profile::DEFAULT_PROFILE)
+            .await
+            .unwrap()
+            .unwrap()
+            .github_repositories()
+            .unwrap()
+            .is_empty()
+    );
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[
+            (
+                loom::github_app::APP_ID_KEY.to_string(),
+                Some("123456".to_string()),
+            ),
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some("configured-for-preflight".to_string()),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let session = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "push my own branch",
                 "cwd": ts.cwd(),
                 "agent": "codex",
             }),

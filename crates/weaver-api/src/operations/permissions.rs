@@ -212,6 +212,10 @@ pub mod github {
         pub struct Input {
             #[operand(context)]
             pub session: String,
+            /// Narrow the credential to one `owner/repo`. An App installation
+            /// token covers exactly one owner, so a session whose access spans
+            /// owners has no single token and must ask per repository.
+            pub repository: Option<String>,
         }
 
         pub type Output = GithubTokenView;

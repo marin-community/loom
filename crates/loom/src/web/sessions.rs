@@ -929,9 +929,10 @@ pub(super) async fn send_session(
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
     let (session, branch) = require_session(&st.db, &key).await?;
-    // A cross-session send must not sit behind an ACP turn indefinitely or be
-    // discarded with an adapter's in-memory steer. Cancel a live turn and
-    // immediately start this message as a fresh turn, keeping the same audit.
+    // A cross-session send must not sit behind an ordinary ACP turn indefinitely
+    // or be discarded with an adapter's in-memory steer. Cancel and replace that
+    // turn, while allowing a provider-owned compaction to finish before the
+    // message starts, keeping the same audit either way.
     if session.protocol == "acp" {
         let handle = require_acp_task(&st, &session)?;
         let by = author_or_manual(req.by.as_deref());

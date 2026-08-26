@@ -9,6 +9,8 @@
 
 #[path = "../support/tapestry.rs"]
 mod support;
+#[path = "../support/schema.rs"]
+mod support_schema;
 
 mod fixtures;
 

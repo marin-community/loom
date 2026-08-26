@@ -5,6 +5,17 @@ use std::process::{Command, Output, Stdio};
 
 const DOCKERFILE: &str = include_str!("../../../Dockerfile");
 
+/// The broker CLI stands in for `loom github-token` and echoes the repository
+/// it was asked for, so a test can assert which scope the adapter requested.
+const BROKER_STUB: &str = "loom_github_token() {
+  if [ \"$1\" = --repository ]; then
+    printf 'broker-token:%s\\n' \"$2\"
+  else
+    printf 'broker-token\\n'
+  fi
+}
+";
+
 fn embedded_script(path: &str) -> String {
     let start = format!("cat > {path} <<'SH'\n");
     let (_, tail) = DOCKERFILE
@@ -13,13 +24,30 @@ fn embedded_script(path: &str) -> String {
     let (script, _) = tail
         .split_once("\nSH\n")
         .unwrap_or_else(|| panic!("unterminated {path} heredoc"));
-    script.replace("/usr/local/bin/loom github-token", "printf broker-token")
+    let body = script.replace("/usr/local/bin/loom github-token", "loom_github_token");
+    format!("{BROKER_STUB}{body}")
 }
 
 fn run_script(script: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
+    run_credential_script(script, env, args, "")
+}
+
+/// Run one adapter from a file so its stdin carries the credential request git
+/// would write, and from a directory that is not a git checkout so the `gh`
+/// wrapper cannot pick up this repository's own origin.
+fn run_credential_script(
+    script: &str,
+    env: &[(&str, &str)],
+    args: &[&str],
+    request: &str,
+) -> Output {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("adapter.sh");
+    std::fs::write(&path, script).unwrap();
     let mut child = Command::new("sh")
-        .arg("-s")
+        .arg(&path)
         .args(args)
+        .current_dir(dir.path())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .envs(env.iter().copied())
@@ -32,7 +60,7 @@ fn run_script(script: &str, env: &[(&str, &str)], args: &[&str]) -> Output {
         .stdin
         .take()
         .unwrap()
-        .write_all(script.as_bytes())
+        .write_all(request.as_bytes())
         .unwrap();
     child.wait_with_output().unwrap()
 }
@@ -108,6 +136,67 @@ fn git_helper_obeys_loom_owned_auth_mode() {
         .contains("missing GH_TOKEN"));
 }
 
+/// An installation token covers one owner, so the helper must ask for the
+/// repository git named rather than the session's whole set. Without this a
+/// session holding access under two owners can push to neither.
+#[test]
+fn git_helper_scopes_the_brokered_token_to_the_repository_git_asked_for() {
+    let script = embedded_script("/usr/local/bin/git-credential-ghtoken");
+    let broker = &[
+        ("LOOM_GITHUB_AUTH_MODE", "broker"),
+        ("LOOM_SESSION_ID", "session"),
+        ("LOOM_TOKEN", "session-token"),
+    ];
+
+    let scoped = run_credential_script(
+        &script,
+        broker,
+        &["get"],
+        "protocol=https\nhost=github.com\npath=marin-community/vllm.git\n\n",
+    );
+    assert!(scoped.status.success());
+    assert_eq!(
+        String::from_utf8(scoped.stdout).unwrap(),
+        "username=x-access-token\npassword=broker-token:marin-community/vllm\n"
+    );
+
+    // A different owner in the same session resolves independently.
+    let other_owner = run_credential_script(
+        &script,
+        broker,
+        &["get"],
+        "protocol=https\nhost=github.com\npath=Open-Athena/mumwelt\n\n",
+    );
+    assert!(other_owner.status.success());
+    assert_eq!(
+        String::from_utf8(other_owner.stdout).unwrap(),
+        "username=x-access-token\npassword=broker-token:Open-Athena/mumwelt\n"
+    );
+
+    // Git omits `path` unless credential.useHttpPath is set; fall back to the
+    // session's whole set rather than failing.
+    let unscoped = run_credential_script(
+        &script,
+        broker,
+        &["get"],
+        "protocol=https\nhost=github.com\n\n",
+    );
+    assert!(unscoped.status.success());
+    assert_eq!(
+        String::from_utf8(unscoped.stdout).unwrap(),
+        "username=x-access-token\npassword=broker-token\n"
+    );
+}
+
+/// The Dockerfile must enable `credential.useHttpPath` for github.com, or git
+/// never sends the `path` the helper above scopes on.
+#[test]
+fn git_is_configured_to_send_the_repository_path_to_the_helper() {
+    assert!(
+        DOCKERFILE.contains("git config --system credential.https://github.com.useHttpPath true")
+    );
+}
+
 #[test]
 fn gh_wrapper_obeys_loom_owned_auth_mode() {
     let script = embedded_script("/usr/local/bin/gh").replace(
@@ -129,6 +218,57 @@ fn gh_wrapper_obeys_loom_owned_auth_mode() {
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
         "GH_TOKEN=broker-token\nGITHUB_TOKEN=unset\n"
+    );
+
+    let scoped = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "broker"),
+            ("LOOM_SESSION_ID", "session"),
+            ("LOOM_TOKEN", "session-token"),
+            ("GH_REPO", "marin-community/vllm"),
+        ],
+        &["pr", "create"],
+    );
+    assert!(scoped.status.success());
+    assert_eq!(
+        String::from_utf8(scoped.stdout).unwrap(),
+        "GH_TOKEN=broker-token:marin-community/vllm\nGITHUB_TOKEN=unset\n"
+    );
+
+    // An explicit repository flag must beat both an ambient token and GH_REPO.
+    // Otherwise a cross-repository `gh pr create --repo ...` can be silently
+    // re-authenticated for the checkout's unrelated repository.
+    let explicit = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "broker"),
+            ("LOOM_SESSION_ID", "session"),
+            ("LOOM_TOKEN", "session-token"),
+            ("GH_TOKEN", "broker-token:wrong/repository"),
+            ("GH_REPO", "wrong/repository"),
+        ],
+        &["pr", "create", "--repo", "marin-community/harbor"],
+    );
+    assert!(explicit.status.success());
+    assert_eq!(
+        String::from_utf8(explicit.stdout).unwrap(),
+        "GH_TOKEN=broker-token:marin-community/harbor\nGITHUB_TOKEN=unset\n"
+    );
+
+    let short_flag = run_script(
+        &script,
+        &[
+            ("LOOM_GITHUB_AUTH_MODE", "broker"),
+            ("LOOM_SESSION_ID", "session"),
+            ("LOOM_TOKEN", "session-token"),
+        ],
+        &["pr", "create", "-Rgithub.com/Open-Athena/mumwelt"],
+    );
+    assert!(short_flag.status.success());
+    assert_eq!(
+        String::from_utf8(short_flag.stdout).unwrap(),
+        "GH_TOKEN=broker-token:Open-Athena/mumwelt\nGITHUB_TOKEN=unset\n"
     );
 
     let direct = run_script(

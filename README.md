@@ -189,8 +189,12 @@ loom channels send "ready for review"
 ```
 
 `loom permissions show` reports the session's effective operations and external
-repository scope. `loom permissions request --help` exposes the durable human
-approval flow when another repository is needed.
+repository scope. A session always has App scope for its own repository;
+`loom permissions request --help` exposes the durable approval flow for any
+other one. That request raises the session's attention and posts to its
+channel, so you decide from Session Details in the browser — no shell needed.
+A profile that allowlists `owner/*` turns those decisions into a standing
+approval for that owner, applied without waiting on you.
 
 ## Status & attention
 

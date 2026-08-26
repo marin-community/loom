@@ -164,6 +164,62 @@ pub enum AcpPromptEffort<'a> {
     Prefer(&'a str),
 }
 
+/// Open and configure a disposable ACP session without sending a prompt.
+///
+/// This exercises the runtime-owned model, effort, and mode controls before a
+/// durable Loom session is provisioned. Provider entitlements are not reliably
+/// discoverable from static metadata, so the adapter handshake is the source of
+/// truth. The detached relay is always removed before returning.
+pub async fn validate_launch(
+    db: &Db,
+    transient_sessions: &crate::backend::TransientSessionRegistry,
+    launch: AcpLaunch,
+    timeout: Duration,
+) -> Result<()> {
+    if !matches!(launch.new_or_load, NewOrLoad::New { .. }) {
+        bail!("ACP launch validation requires a fresh session");
+    }
+
+    let relay_name = format!(
+        "{}{:016x}",
+        crate::backend::TRANSIENT_SESSION_PREFIX,
+        rand::random::<u64>()
+    );
+    let _relay_lease = transient_sessions.lease(&relay_name);
+    let env: Vec<(&str, &str)> = launch
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect();
+    crate::backend::new_relay_session(
+        &relay_name,
+        &launch.adapter_cmd,
+        &env,
+        launch.env_clear,
+        &launch.cwd,
+        crate::backend::memory_max_gb(db).await,
+    )
+    .await?;
+
+    let operation = async {
+        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
+        AcpPromptClient::new(stream).validate(&launch).await
+    };
+    let result = match tokio::time::timeout(timeout, operation).await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("timed out validating ACP launch after {timeout:?}")),
+    };
+    let cleanup = crate::backend::kill_session_and_wait(&relay_name).await;
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(cleanup)) => Err(cleanup.context("cleaning up ACP validation relay")),
+        (Err(error), Err(cleanup)) => Err(anyhow!(
+            "{error}; failed to clean up ACP validation relay: {cleanup}"
+        )),
+    }
+}
+
 /// Run one isolated prompt through an ordinary ACP adapter launch. Model and
 /// effort are selected through the adapter's live `configOptions`; this path
 /// never knows or invokes a provider CLI. The relay and provider session are
@@ -252,18 +308,12 @@ impl AcpPromptClient {
         }
     }
 
-    async fn run(
-        mut self,
-        launch: &AcpLaunch,
-        prompt: &str,
-        model: AcpPromptModel<'_>,
-        effort: AcpPromptEffort<'_>,
-    ) -> Result<Option<AcpPromptOutput>> {
+    async fn open_new_session(&mut self, launch: &AcpLaunch) -> Result<wire::NewSessionResult> {
         self.request(method::INITIALIZE, wire::initialize_params())
             .await?;
         let (cwd, meta) = match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
-            NewOrLoad::Load { .. } => unreachable!("checked by prompt_once"),
+            NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
         };
         let opened = self
             .request(
@@ -273,7 +323,77 @@ impl AcpPromptClient {
             .await?;
         let opened: wire::NewSessionResult =
             serde_json::from_value(opened).context("invalid ACP session/new response")?;
-        self.session_id = opened.session_id;
+        self.session_id.clone_from(&opened.session_id);
+        Ok(opened)
+    }
+
+    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
+        let opened = self.open_new_session(launch).await?;
+        let mut options = opened.config_options.unwrap_or_default();
+
+        for (kind, desired) in [
+            ("model", launch.initial_model.as_deref()),
+            ("effort", launch.initial_effort.as_deref()),
+        ] {
+            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let Some(details) = config_option_details(&options, kind) else {
+                // Some adapters apply launch selectors out of band and do not
+                // advertise a matching ACP control. session/new is authoritative
+                // for those runtimes, just as it is during the durable handshake.
+                continue;
+            };
+            if details.current.as_deref() == Some(desired) {
+                continue;
+            }
+            let unavailable = if details.available.is_empty() {
+                format!("launch {kind} '{desired}' is not available")
+            } else {
+                format!(
+                    "launch {kind} '{desired}' is not available (advertised {kind}s: {})",
+                    details.available.join(", ")
+                )
+            };
+            options = self
+                .set_config_option(&details.id, Value::String(desired.to_string()))
+                .await
+                .with_context(|| unavailable)?;
+        }
+
+        if let Some(mode) = launch
+            .mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty())
+        {
+            if let Some(modes) = &opened.modes {
+                let available = mode_ids(&modes.available_modes);
+                if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
+                    bail!(
+                        "launch mode '{mode}' is not available (available modes: {})",
+                        available.join(", ")
+                    );
+                }
+            }
+            self.request(
+                method::SESSION_SET_MODE,
+                wire::set_mode_params(&self.session_id, mode),
+            )
+            .await
+            .with_context(|| format!("launch mode '{mode}' is not available"))?;
+        }
+        Ok(())
+    }
+
+    async fn run(
+        mut self,
+        launch: &AcpLaunch,
+        prompt: &str,
+        model: AcpPromptModel<'_>,
+        effort: AcpPromptEffort<'_>,
+    ) -> Result<Option<AcpPromptOutput>> {
+        let opened = self.open_new_session(launch).await?;
         let mut options = opened.config_options.unwrap_or_default();
 
         let model = match model {
@@ -439,15 +559,61 @@ impl AcpPromptClient {
     }
 }
 
-fn current_model(config_options: &[Value]) -> Option<String> {
+struct ConfigOptionDetails {
+    id: String,
+    current: Option<String>,
+    available: Vec<String>,
+}
+
+fn is_config_option_kind(option: &Value, kind: &str) -> bool {
+    let id = option.get("id").and_then(Value::as_str).unwrap_or("");
+    let category = option.get("category").and_then(Value::as_str).unwrap_or("");
+    match kind {
+        "model" => category == "model" || id == "model",
+        "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
+        "mode" => category == "mode" || id == "mode",
+        _ => false,
+    }
+}
+
+fn config_option_details(config_options: &[Value], kind: &str) -> Option<ConfigOptionDetails> {
     config_options.iter().find_map(|option| {
-        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
-        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
-        (category == "model" || id == "model")
-            .then(|| option.get("currentValue").and_then(Value::as_str))
-            .flatten()
-            .map(str::to_string)
+        let id = option.get("id").and_then(Value::as_str)?;
+        is_config_option_kind(option, kind).then(|| {
+            let current = option
+                .get("currentValue")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let available = option
+                .get("options")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| {
+                    choice
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            ConfigOptionDetails {
+                id: id.to_string(),
+                current,
+                available,
+            }
+        })
     })
+}
+
+fn mode_ids(modes: &[Value]) -> Vec<String> {
+    modes
+        .iter()
+        .filter_map(|mode| mode.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect()
+}
+
+fn current_model(config_options: &[Value]) -> Option<String> {
+    config_option_details(config_options, "model").and_then(|details| details.current)
 }
 
 fn preferred_config_value(
@@ -456,16 +622,9 @@ fn preferred_config_value(
     preferences: &[&str],
     allow_contains: bool,
 ) -> Option<(String, String)> {
-    let option = config_options.iter().find(|option| {
-        let id = option.get("id").and_then(Value::as_str).unwrap_or("");
-        let category = option.get("category").and_then(Value::as_str).unwrap_or("");
-        match kind {
-            "model" => category == "model" || id == "model",
-            "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
-            "mode" => category == "mode" || id == "mode",
-            _ => false,
-        }
-    })?;
+    let option = config_options
+        .iter()
+        .find(|option| is_config_option_kind(option, kind))?;
     let id = option.get("id")?.as_str()?.to_string();
     let values = option
         .get("options")
@@ -580,7 +739,8 @@ impl AcpHandle {
     }
 
     /// Deliver immediate input by cancelling a live turn and starting the
-    /// message normally.
+    /// message normally. A live `/compact` is allowed to finish; the message is
+    /// queued for its next turn instead.
     pub async fn stop_and_send(
         &self,
         text: String,
@@ -824,9 +984,14 @@ impl AcpRegistry {
             .map(|entry| entry.handle.clone())
     }
 
-    /// Whether a task is running for `session_id`.
+    /// Whether `session_id` has a live, driveable task.
     pub fn is_live(&self, session_id: &str) -> bool {
-        self.inner.lock().unwrap().map.contains_key(session_id)
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(session_id)
+            .is_some_and(|entry| !entry.handle.cmd_tx.is_closed())
     }
 
     /// Stop a live session: drop its handle so the task's command channel closes
@@ -924,13 +1089,14 @@ impl AcpRegistry {
         }));
     }
 
-    /// Remove the session's slot only if it still holds `generation` — a task
-    /// that has been superseded leaves the newer registration untouched.
-    fn remove_own(&self, session_id: &str, generation: u64) {
+    /// Remove this generation's slot, returning whether it owned the slot.
+    fn remove_own(&self, session_id: &str, generation: u64) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if inner.map.get(session_id).map(|entry| entry.generation) == Some(generation) {
             inner.map.remove(session_id);
+            return true;
         }
+        false
     }
 
     /// Whether `generation` is still the registered task for `session_id`.
@@ -1062,6 +1228,8 @@ async fn start_inner(
     // down and clear partially-persisted provider state before returning, or the
     // caller gets a stuck row plus a relay name handoff cannot safely reuse.
     let prepared: Result<(Task, mpsc::Receiver<Command>)> = async {
+        // Claim the driver slot before subscribing — see [`attach`].
+        let driver_epoch = session::claim_acp_driver(&state.db, session_id).await?;
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
         let mut task = Task::fresh(
             state,
@@ -1071,6 +1239,7 @@ async fn start_inner(
             events_tx.clone(),
         )
         .await?;
+        task.driver_epoch = driver_epoch;
         // `session/load` may replay an unanswered permission request and wait
         // for the client response before returning. Register the task before
         // setup so the REST permission route can drive that request instead of
@@ -1085,7 +1254,7 @@ async fn start_inner(
             },
         );
         if let Err(error) = task.handshake(&launch, handoff, &mut cmd_rx).await {
-            task.registry.remove_own(&task.session_id, task.generation);
+            let _ = task.registry.remove_own(&task.session_id, task.generation);
             return Err(error);
         }
         Ok((task, cmd_rx))
@@ -1129,6 +1298,10 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("session {session_id} has no acp_session_id"))?;
     let relay_name = session.term_session.clone();
     let cursor = session.acp_ack_seq.max(0) as u64;
+    // Claim the driver slot *before* subscribing: the subscribe evicts whatever
+    // driver the relay had, and the evicted task must already be fenced out of
+    // the row by the time its stream ends.
+    let driver_epoch = session::claim_acp_driver(&state.db, session_id).await?;
     let stream = crate::backend::subscribe_relay(&relay_name, cursor).await?;
 
     let (events_tx, _) = broadcast::channel(256);
@@ -1141,6 +1314,7 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
         events_tx.clone(),
     )
     .await?;
+    task.driver_epoch = driver_epoch;
 
     let (cmd_tx, cmd_rx) = mpsc::channel(64);
     task.generation = state.acp.register(
@@ -1163,7 +1337,8 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
 enum PromptDelivery {
     /// Preserve the conversation composer's queue-first behavior.
     Queue,
-    /// Immediate input: cancel and restart immediately.
+    /// Immediate input: cancel and restart immediately, except while the
+    /// provider is compacting its conversation.
     StopAndSend,
 }
 
@@ -1425,6 +1600,8 @@ struct Task {
     registry: AcpRegistry,
     /// This task's registry generation — used to remove only its own slot on exit.
     generation: u64,
+    /// Durable ownership of the session's ACP driver slot.
+    driver_epoch: i64,
     session_id: String,
     branch_id: String,
     relay_name: String,
@@ -1444,6 +1621,10 @@ struct Task {
     next_seq: i64,
     turns_dispatched: i64,
     turn_live: bool,
+    /// A provider-owned `/compact` mutates the conversation state behind the
+    /// ACP session. Ordinary incoming messages wait for that turn boundary so
+    /// `session/cancel` cannot leave the provider's context half-compacted.
+    compaction_turn: bool,
 
     buf: Option<ChunkBuf>,
     tools: HashMap<String, LiveTool>,
@@ -1517,6 +1698,7 @@ impl Task {
             bus: state.bus.clone(),
             registry: state.acp.clone(),
             generation: 0,
+            driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
             relay_name,
@@ -1530,6 +1712,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: false,
+            compaction_turn: false,
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
@@ -1574,6 +1757,11 @@ impl Task {
             .and_then(|v| v.get("external"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let compaction_turn = inflight_value
+            .as_ref()
+            .and_then(|v| v.get("compaction"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
@@ -1606,6 +1794,7 @@ impl Task {
             bus: state.bus.clone(),
             registry: state.acp.clone(),
             generation: 0,
+            driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
             relay_name,
@@ -1619,6 +1808,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: live_turn.is_some(),
+            compaction_turn,
             buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
@@ -2072,21 +2262,37 @@ impl Task {
                 },
             }
         };
+        // Release the registry slot *before* touching the row: a session must
+        // never be both `orphaned` and live, or adoption refuses it ("session
+        // already has a live ACP task") and the repair sweep skips it, which
+        // leaves no way back. `remove_own` also reports whether this task was
+        // still this process's driver for the session.
+        let owns_registry_slot = self.registry.remove_own(&self.session_id, self.generation);
         let failure_message = stop_reason.failure_message();
-        if let TaskStopReason::AgentExit { .. } = stop_reason {
-            self.on_failure(
-                failure_message
-                    .as_deref()
-                    .expect("agent exit always carries a failure message"),
-            )
-            .await;
-        } else if let Some(message) = &failure_message {
-            tracing::warn!(session = %self.session_id, reason = message, "acp task failed");
-        }
         if let Some(message) = &failure_message {
-            crate::status::record_acp_failure(&self.db, &self.bus, &self.session_id, message).await;
+            if owns_registry_slot && self.still_the_durable_driver().await {
+                if let TaskStopReason::AgentExit { .. } = stop_reason {
+                    self.on_failure(message).await;
+                } else {
+                    tracing::warn!(session = %self.session_id, reason = message, "acp task failed");
+                }
+                crate::status::record_acp_failure(
+                    &self.db,
+                    &self.bus,
+                    &self.session_id,
+                    self.driver_epoch,
+                    message,
+                )
+                .await;
+            } else {
+                tracing::info!(
+                    session = %self.session_id,
+                    epoch = self.driver_epoch,
+                    reason = ?stop_reason,
+                    "superseded acp task exited without detaching its former session"
+                );
+            }
         }
-        self.registry.remove_own(&self.session_id, self.generation);
         if let Some((reply, snapshot)) = handoff_reply {
             let _ = reply.send(Ok(snapshot));
         }
@@ -2096,6 +2302,19 @@ impl Task {
             reason = ?stop_reason,
             "acp task stopped"
         );
+    }
+
+    /// Whether this task still owns the durable ACP driver claim.
+    async fn still_the_durable_driver(&self) -> bool {
+        match session::get(&self.db, &self.session_id).await {
+            Ok(Some(session)) => session.acp_driver_epoch == self.driver_epoch,
+            Ok(None) => false,
+            Err(error) => {
+                tracing::warn!(session = %self.session_id, %error,
+                    "could not confirm the ACP driver claim on exit");
+                true
+            }
+        }
     }
 
     fn journal_replay_needed(&self) -> bool {
@@ -2541,6 +2760,7 @@ impl Task {
         // Settle the durable turn state *before* signalling the end over SSE, so a
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
+        self.compaction_turn = false;
         self.inflight_prompt = None;
         self.external_turn = false;
         self.effective_mode = None;
@@ -2718,6 +2938,9 @@ impl Task {
         resources: Vec<Value>,
     ) -> Result<PromptAck> {
         if self.turn_live {
+            if self.compaction_turn {
+                return self.queue_prompt(&text, &resources).await;
+            }
             self.cancel_live_turn().await?;
         }
         self.start_prompt(text, by, resources).await
@@ -2832,6 +3055,7 @@ impl Task {
         self.next_seq = seq + 1;
         self.turns_dispatched += 1;
         self.turn_live = true;
+        self.compaction_turn = false;
         self.effective_mode = effective_mode;
         if self
             .pending_interrupt_notice_through
@@ -2956,6 +3180,7 @@ impl Task {
         }
         self.turns_dispatched += 1;
         self.turn_live = true;
+        self.compaction_turn = opening_kind == kind::USER_MESSAGE && is_compaction_prompt(&text);
         self.effective_mode = self.current_mode.clone();
 
         self.emit(
@@ -2974,6 +3199,7 @@ impl Task {
             "prompt_id": id,
             "turn": self.current_turn,
             "mode": self.effective_mode,
+            "compaction": self.compaction_turn,
         })
         .to_string();
         session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await?;
@@ -3227,6 +3453,11 @@ impl Task {
                 };
                 if queued.trim().is_empty() {
                     let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
+                } else if self.turn_live && self.compaction_turn {
+                    let _ = reply.send(Ok(PromptAck {
+                        queued: true,
+                        turn: Some(self.current_turn),
+                    }));
                 } else if !self.turn_live {
                     let result = self.start_pending_prompt(by).await;
                     self.resume_automatic_dispatch_on(&result);
@@ -3247,7 +3478,10 @@ impl Task {
                 // instead of hiding it behind an arbitrarily long boundary.
                 // A wake for the review already in flight is only a retry of
                 // the notifier and must never interrupt that same review.
-                if self.inflight_review.is_some() || self.automatic_dispatch_paused {
+                if self.inflight_review.is_some()
+                    || self.compaction_turn
+                    || self.automatic_dispatch_paused
+                {
                     let _ = reply.send(Ok(PromptAck {
                         queued: true,
                         turn: Some(self.current_turn),
@@ -3400,6 +3634,7 @@ impl Task {
                 json!({ "turn": turn, "state": "ended", "stop_reason": "error" }),
             );
             self.turn_live = false;
+            self.compaction_turn = false;
             self.external_turn = false;
             self.effective_mode = None;
             let _ = session::set_inflight(&self.db, &self.session_id, None).await;
@@ -3556,14 +3791,28 @@ fn queued_prompt_text(text: &str, resources: &[Value]) -> String {
     queued
 }
 
+/// A compaction command must own its provider turn through the normal response
+/// boundary. Arguments are allowed, but similarly prefixed commands are not.
+fn is_compaction_prompt(text: &str) -> bool {
+    text.split_ascii_whitespace().next() == Some("/compact")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        auto_choice, deny_choice, preferred_config_value, preferred_mode, queued_prompt_text,
-        LiveTool, PermissionOption,
+        auto_choice, deny_choice, is_compaction_prompt, preferred_config_value, preferred_mode,
+        queued_prompt_text, LiveTool, PermissionOption,
     };
     use crate::acp::wire::{ContentBlock, ToolCallContent};
     use serde_json::json;
+
+    #[test]
+    fn compaction_prompt_detection_requires_the_exact_command() {
+        assert!(is_compaction_prompt("/compact"));
+        assert!(is_compaction_prompt("  /compact preserve the test context"));
+        assert!(!is_compaction_prompt("/compaction"));
+        assert!(!is_compaction_prompt("explain /compact"));
+    }
 
     #[tokio::test]
     async fn review_claim_fence_tracks_activation_rotation_and_task_death() {

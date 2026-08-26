@@ -616,17 +616,207 @@ fn sh_single_quote_path(path: &Path) -> String {
     sh_single_quote(&path.display().to_string())
 }
 
+const GITHUB_CLI_ADAPTER_MARKER: &str = "# Loom GitHub CLI credential adapter";
+
+fn is_loom_github_cli_adapter(path: &Path) -> bool {
+    use std::io::Read;
+
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut prefix = String::new();
+    file.take(512)
+        .read_to_string(&mut prefix)
+        .is_ok_and(|_| prefix.contains(GITHUB_CLI_ADAPTER_MARKER))
+}
+
+/// Resolve the stock GitHub CLI without selecting a per-session adapter from a
+/// parent Loom session. A nested development server inherits its caller's
+/// `PATH`, so blindly taking the first `gh` can make the child adapter recurse
+/// through the parent's adapter.
+fn stock_github_cli() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join("gh"))
+        .find(|candidate| {
+            if !candidate.is_file() {
+                return false;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if candidate
+                    .metadata()
+                    .map(|metadata| metadata.permissions().mode() & 0o111 == 0)
+                    .unwrap_or(true)
+                {
+                    return false;
+                }
+            }
+            !is_loom_github_cli_adapter(candidate)
+        })
+}
+
+/// Build the `gh` transport adapter installed ahead of the stock CLI in a
+/// managed session's `PATH`. Brokered credentials are resolved for every
+/// invocation, so a long-lived caller such as Marin's `wait_for.py` can poll
+/// beyond GitHub's one-hour installation-token lifetime.
+fn github_cli_adapter_script(loom_bin: &Path, github_cli: Option<&Path>) -> String {
+    let loom_bin = sh_single_quote_path(loom_bin);
+    let launch = github_cli.map_or_else(
+        || "echo \"stock GitHub CLI executable not found\" >&2\nexit 127".to_string(),
+        |path| format!("exec {} \"$@\"", sh_single_quote_path(path)),
+    );
+    format!(
+        r#"#!/bin/sh
+{GITHUB_CLI_ADAPTER_MARKER}
+case "${{LOOM_GITHUB_AUTH_MODE:-}}" in
+  broker)
+    if [ -z "$LOOM_SESSION_ID" ] || [ -z "$LOOM_TOKEN" ]; then
+      echo "Loom-managed GitHub auth is missing its session credential" >&2
+      exit 1
+    fi
+    repository=
+    repository_argument=
+    for argument in "$@"; do
+      if [ "$repository_argument" = next ]; then
+        repository="$argument"
+        break
+      fi
+      case "$argument" in
+        --repo|-R) repository_argument=next ;;
+        --repo=*) repository="${{argument#--repo=}}"; break ;;
+        -R?*) repository="${{argument#-R}}"; break ;;
+        --) break ;;
+      esac
+    done
+    if [ -z "$repository" ]; then
+      repository="${{GH_REPO:-}}"
+    fi
+    if [ -z "$repository" ]; then
+      origin="$(git config --get remote.origin.url 2>/dev/null || true)"
+      origin="${{origin%.git}}"
+      case "$origin" in
+        *github.com[:/]*) repository="${{origin##*github.com[:/]}}" ;;
+      esac
+    fi
+    repository="${{repository#github.com/}}"
+    if [ -n "$repository" ]; then
+      GH_TOKEN="$({loom_bin} github-token --repository "$repository")" || exit $?
+    else
+      GH_TOKEN="$({loom_bin} github-token)" || exit $?
+    fi
+    export GH_TOKEN
+    unset GITHUB_TOKEN
+    ;;
+  direct)
+    if [ -z "$GH_TOKEN" ]; then
+      echo "Loom-managed direct GitHub auth is missing GH_TOKEN" >&2
+      exit 1
+    fi
+    unset GITHUB_TOKEN
+    ;;
+  disabled)
+    echo "GitHub CLI access is disabled for this Loom session" >&2
+    exit 1
+    ;;
+  "")
+    echo "missing LOOM_GITHUB_AUTH_MODE; this environment was not prepared by Loom" >&2
+    exit 1
+    ;;
+  *)
+    echo "invalid LOOM_GITHUB_AUTH_MODE: $LOOM_GITHUB_AUTH_MODE" >&2
+    exit 1
+    ;;
+esac
+{launch}
+"#
+    )
+}
+
+/// Install the adapter only for sessions whose GitHub posture Loom stamped.
+/// The run directory is session-private and persists across runtime recovery,
+/// so rebuilding the small script on each launch is idempotent.
+async fn install_github_cli_adapter(
+    session_id: &str,
+    extra_env: &[(String, String)],
+) -> Result<Option<PathBuf>> {
+    if !extra_env
+        .iter()
+        .any(|(name, _)| name == "LOOM_GITHUB_AUTH_MODE")
+    {
+        return Ok(None);
+    }
+    let github_cli = stock_github_cli();
+    if github_cli.is_none() {
+        tracing::warn!(
+            session = session_id,
+            "stock gh executable not found; installing fail-closed GitHub CLI adapter"
+        );
+    }
+    let loom_bin = std::env::current_exe().context("resolving the loom executable")?;
+    let directory = crate::db::run_dir(session_id).join("bin");
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .with_context(|| format!("creating {}", directory.display()))?;
+    let adapter = directory.join("gh");
+    tokio::fs::write(
+        &adapter,
+        github_cli_adapter_script(&loom_bin, github_cli.as_deref()),
+    )
+    .await
+    .with_context(|| format!("writing {}", adapter.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700))
+            .await
+            .with_context(|| format!("setting permissions on {}", adapter.display()))?;
+    }
+    Ok(Some(directory))
+}
+
+fn prepend_path(env: &mut Vec<(String, String)>, directory: &Path) {
+    let inherited = env
+        .iter()
+        .find(|(name, _)| name == "PATH")
+        .map(|(_, value)| value.clone())
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let path = if inherited.is_empty() {
+        directory.display().to_string()
+    } else {
+        format!("{}:{inherited}", directory.display())
+    };
+    if let Some((_, value)) = env.iter_mut().find(|(name, _)| name == "PATH") {
+        *value = path;
+    } else {
+        env.push(("PATH".to_string(), path));
+    }
+}
+
 /// Build the launch script the supervisor runs as `sh -c <script>`: prepend the
-/// weaver bin dir to `$PATH`, run the (optional) inner agent command, then `exec`
-/// the login shell. The session's environment is delivered **out of band** (via
-/// the process environment — see [`start_terminal`] / [`backend::new_session`]),
-/// not `export`-ed here, so secret values never land on the child shell's argv.
-/// The `$PATH` prepend stays in the script because it needs the shell to expand
-/// the inherited `$PATH` at runtime; it carries no secret.
-fn wrap_launch_script(inner: &str, weaver_dir: Option<&Path>) -> String {
+/// session's GitHub CLI adapter and the weaver bin dir to `$PATH`, run the
+/// optional inner agent command, then `exec` the login shell. The session's
+/// environment is delivered **out of band** (via the process environment — see
+/// [`start_terminal`] / [`backend::new_session`]), not `export`-ed here, so
+/// secret values never land on the child shell's argv. The `$PATH` prepend stays
+/// in the script because it needs the shell to expand the inherited `$PATH` at
+/// runtime; it carries no secret.
+fn wrap_launch_script(
+    inner: &str,
+    weaver_dir: Option<&Path>,
+    github_adapter_dir: Option<&Path>,
+) -> String {
     let mut script = String::new();
-    if let Some(dir) = weaver_dir {
-        script.push_str(&format!("export PATH=\"{}:$PATH\"; ", dir.display()));
+    let path_prefix = github_adapter_dir
+        .into_iter()
+        .chain(weaver_dir)
+        .map(sh_single_quote_path)
+        .collect::<Vec<_>>()
+        .join(":");
+    if !path_prefix.is_empty() {
+        script.push_str(&format!("export PATH={path_prefix}:\"$PATH\"; "));
     }
     if !inner.is_empty() {
         script.push_str(inner);
@@ -642,7 +832,7 @@ fn wrap_launch_script(inner: &str, weaver_dir: Option<&Path>) -> String {
 /// not agents, so they don't go through [`launch`] or an [`AgentType`]. Their
 /// environment is delivered out of band alongside this script, same as an agent's.
 pub fn bare_shell_script(weaver_dir: Option<&Path>) -> String {
-    wrap_launch_script("", weaver_dir)
+    wrap_launch_script("", weaver_dir, None)
 }
 
 /// Everything [`launch`] needs to bring up a session's terminal.
@@ -743,7 +933,21 @@ async fn start_terminal(
     // The session environment loom injects (WEAVER_API/WEAVER_BRANCH, session
     // credentials, and operator vars) — the same set the ACP relay launch
     // delivers (see [`session_env`] / [`build_acp_launch`]).
-    let env_owned = session_env(ctx.server_addr, ctx.branch_id, ctx.extra_env);
+    let mut env_owned = session_env(ctx.server_addr, ctx.branch_id, ctx.extra_env);
+    let github_adapter_dir = if let Some(session_id) = ctx
+        .extra_env
+        .iter()
+        .find(|(name, _)| name == "LOOM_SESSION_ID")
+        .map(|(_, value)| value.as_str())
+    {
+        let directory = install_github_cli_adapter(session_id, ctx.extra_env).await?;
+        if let Some(directory) = &directory {
+            prepend_path(&mut env_owned, directory);
+        }
+        directory
+    } else {
+        None
+    };
     let env: Vec<(&str, &str)> = env_owned
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -751,7 +955,7 @@ async fn start_terminal(
     // The env is delivered to the child through the process environment (see
     // `backend::new_session` → `tapestry::spawn_detached`), not `export`-ed into
     // the script — so tokens/keys never appear on any process's argv.
-    let script = wrap_launch_script(inner, weaver_dir);
+    let script = wrap_launch_script(inner, weaver_dir, github_adapter_dir.as_deref());
     tracing::debug!(
         branch = ctx.branch_id,
         runtime,
@@ -985,6 +1189,9 @@ pub async fn build_acp_launch(
 
     let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env);
     push_env_default(&mut env, "LOOM_SESSION_ID", spec.session_id);
+    if let Some(directory) = install_github_cli_adapter(spec.session_id, spec.extra_env).await? {
+        prepend_path(&mut env, &directory);
+    }
     if spec.restricted {
         // GitHub mutations are performed by Loom's server-side restricted tool
         // endpoint. The adapter and model never receive the credential.
@@ -1929,6 +2136,14 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    #[cfg(unix)]
+    fn write_executable(path: &Path, source: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(path, source).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
     fn test_ctx<'a>(
         goal_file: Option<&'a Path>,
         primer_file: Option<&'a Path>,
@@ -1970,7 +2185,7 @@ mod tests {
             "shell" => String::new(),
             other => panic!("unexpected runtime in test helper: {other}"),
         };
-        wrap_launch_script(&inner, None)
+        wrap_launch_script(&inner, None, None)
     }
 
     #[test]
@@ -1979,6 +2194,114 @@ mod tests {
         // The `"shell"` runtime in the test helper builds the same bare shell.
         let script = launch_script("shell", None, None, LaunchMode::Fresh, "", "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn github_cli_adapter_refreshes_a_repository_token_for_every_call() {
+        let directory = tempfile::tempdir().unwrap();
+        let loom = directory.path().join("loom stub");
+        let github_cli = directory.path().join("gh stock");
+        let adapter = directory.path().join("gh");
+        let calls = directory.path().join("token-calls");
+        write_executable(
+            &loom,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'fresh-token\\n'\n",
+                sh_single_quote_path(&calls)
+            ),
+        );
+        write_executable(
+            &github_cli,
+            "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$GH_TOKEN\" \"${GITHUB_TOKEN-unset}\" \"$*\"\n",
+        );
+        write_executable(
+            &adapter,
+            &github_cli_adapter_script(&loom, Some(&github_cli)),
+        );
+
+        let invoke = |repository_flag: &[&str]| {
+            std::process::Command::new(&adapter)
+                .args(["pr", "view", "123"])
+                .args(repository_flag)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("LOOM_GITHUB_AUTH_MODE", "broker")
+                .env("LOOM_SESSION_ID", "session")
+                .env("LOOM_TOKEN", "session-token")
+                .env("GITHUB_TOKEN", "stale-token")
+                .output()
+                .unwrap()
+        };
+        let first = invoke(&["--repo", "marin-community/marin"]);
+        let second = invoke(&["-Rgithub.com/Open-Athena/mumwelt"]);
+
+        assert!(first.status.success());
+        assert_eq!(
+            String::from_utf8(first.stdout).unwrap(),
+            "fresh-token|unset|pr view 123 --repo marin-community/marin\n"
+        );
+        assert!(second.status.success());
+        assert_eq!(
+            String::from_utf8(second.stdout).unwrap(),
+            "fresh-token|unset|pr view 123 -Rgithub.com/Open-Athena/mumwelt\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(calls).unwrap(),
+            "github-token --repository marin-community/marin\n\
+             github-token --repository Open-Athena/mumwelt\n"
+        );
+    }
+
+    #[test]
+    fn github_cli_adapter_path_precedes_an_explicit_session_path() {
+        let mut env = vec![("PATH".to_string(), "/custom/bin:/usr/bin".to_string())];
+
+        prepend_path(&mut env, Path::new("/session/bin"));
+
+        assert_eq!(
+            env,
+            vec![(
+                "PATH".to_string(),
+                "/session/bin:/custom/bin:/usr/bin".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn terminal_launch_keeps_the_github_adapter_ahead_of_the_loom_bin() {
+        assert_eq!(
+            wrap_launch_script(
+                "",
+                Some(Path::new("/loom/bin")),
+                Some(Path::new("/session/bin"))
+            ),
+            "export PATH='/session/bin':'/loom/bin':\"$PATH\"; exec \"${SHELL:-/bin/sh}\""
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn github_cli_adapter_fails_closed_without_a_stock_cli() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = directory.path().join("gh");
+        write_executable(
+            &adapter,
+            &github_cli_adapter_script(Path::new("/missing/loom"), None),
+        );
+
+        let output = std::process::Command::new(&adapter)
+            .env_clear()
+            .env("LOOM_GITHUB_AUTH_MODE", "direct")
+            .env("GH_TOKEN", "personal-token")
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(127));
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "stock GitHub CLI executable not found\n"
+        );
     }
 
     #[test]
@@ -2069,7 +2392,7 @@ mod tests {
         let a = custom_agent("bare", "", "", "");
         assert_eq!(custom_command(&a, &ctx, LaunchMode::Fresh), "");
         assert_eq!(
-            wrap_launch_script(&custom_command(&a, &ctx, LaunchMode::Fresh), None),
+            wrap_launch_script(&custom_command(&a, &ctx, LaunchMode::Fresh), None, None,),
             "exec \"${SHELL:-/bin/sh}\""
         );
     }

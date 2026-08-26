@@ -809,7 +809,8 @@ pub mod prompt {
 
         /// Send a user message to an ACP session. Dispatched immediately when idle,
         /// or appended to the durable queue while a turn is live; `send_now` instead
-        /// cancels any live turn and starts the message as a normal prompt. Every
+        /// cancels an ordinary live turn and starts the message as a normal prompt.
+        /// A live compaction always finishes before queued feedback starts. Every
         /// send records a `nudge` event on the branch (the audit rule).
         ///
         /// Provenance is derived from the credential: `manual` for a human operator,
@@ -820,7 +821,9 @@ pub mod prompt {
             /// The message text.
             #[operand(positional)]
             pub text: String,
-            /// Cancel any live turn and start this message as a normal prompt.
+            /// Cancel an ordinary live turn and start this message as a normal
+            /// prompt. A live compaction queues it until its provider-owned
+            /// boundary instead.
             #[operand(default = false)]
             pub send_now: bool,
             /// Promote the server's durable next-turn queue instead of sending

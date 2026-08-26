@@ -1,6 +1,7 @@
 //! Ordinary session provisioning with one-way dependencies on runtime and
 //! domain owners, never Axum or the REST adapter.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -699,7 +700,7 @@ async fn create_inner(
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
-    let github_app = if (!session_github_repositories.is_empty())
+    let github_app = if crate::runtime::scopes_an_app_token(&session_github_repositories)
         || (launch_profile.restricted && managed_slug.is_some())
     {
         st.trigger.app()
@@ -720,6 +721,80 @@ async fn create_inner(
         ));
     }
     tracing::debug!(runtime = %runtime, "github app availability check passed");
+
+    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
+        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
+    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
+        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
+
+    // Builtin ACP metadata intentionally accepts provider-specific model ids,
+    // while the available model/mode set depends on the account represented by
+    // this profile's environment. Exercise the real adapter contract before
+    // creating a worktree or durable session so an unavailable selector fails
+    // as launch validation instead of leaving a broken session behind. Custom
+    // adapters remain operator-owned and retain their recoverable failed-session
+    // behavior.
+    if protocol == "acp" && crate::agent::builtin_agent_type(&runtime).is_some() {
+        let mut validation_launch = agent::build_acp_launch(
+            &st.db,
+            &agent::AcpLaunchSpec {
+                session_id: "profile-validation",
+                branch_id: "profile-validation",
+                runtime: &runtime,
+                work_dir: &repo_root,
+                server_addr: &st.addr,
+                model: &model,
+                effort: &effort,
+                goal_file: None,
+                primer_file: None,
+                extra_env: &extra_env,
+                env_clear: launch_profile.env_clear,
+                mode: &mode,
+                // A disposable handshake needs no repository hook mutation.
+                prelude: "none",
+                restricted: launch_profile.restricted,
+                allowed_tools: &stamped_allowed_tools,
+                mcp_access: &stamped_mcp_access,
+                custom: None,
+            },
+            agent::AcpOpen::Fresh,
+        )
+        .await
+        .map_err(|error| {
+            ProvisionError::invalid(format!(
+                "profile '{profile_name}' cannot build its ACP validation launch: {error}"
+            ))
+        })?;
+        // Model and mode availability do not require starting the profile's MCP
+        // servers or passing Loom/GitHub session authority to the disposable
+        // adapter. Materialize the ambient environment so provider credentials
+        // still match a non-cleared real launch, then remove reserved authority.
+        validation_launch.mcp_servers.clear();
+        let mut validation_env = BTreeMap::new();
+        if !validation_launch.env_clear {
+            validation_env.extend(std::env::vars());
+        }
+        validation_env.extend(validation_launch.env);
+        validation_env.retain(|name, _| {
+            !name.starts_with("WEAVER_")
+                && !name.starts_with("LOOM_")
+                && !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN")
+        });
+        validation_launch.env = validation_env.into_iter().collect();
+        validation_launch.env_clear = true;
+        crate::acp::validate_launch(
+            &st.db,
+            st.acp.transient_sessions(),
+            validation_launch,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .map_err(|error| {
+            ProvisionError::invalid(format!(
+                "profile '{profile_name}' is not available for this launch: {error}"
+            ))
+        })?;
+    }
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
     let mut goal = req.goal.unwrap_or_default().trim().to_string();
@@ -979,10 +1054,6 @@ async fn create_inner(
             None => None,
         }
     };
-    let stamped_allowed_tools = serde_json::to_string(&resolved.runtime_permissions)
-        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
-    let stamped_mcp_access = serde_json::to_string(&resolved.mcp_policy)
-        .map_err(|error| ProvisionError::invalid(error.to_string()))?;
     let (creator_kind, creator_subject) = actor.creator_identity();
     let launch_policy = session_mod::SessionLaunchPolicy {
         profile: profile_name.clone(),
@@ -1409,7 +1480,7 @@ async fn create_inner(
 /// context but is not a mandatory first turn.
 fn entrance_note(tracking_issue: Option<i64>) -> String {
     let mut note = "You are working in a Loom session. Use `loom summary` \
-                    to recover context, `loom help` to explore the registered \
+                    after compaction, `loom help` to explore the registered \
                     command surface, and `loom permissions show` to inspect \
                     effective access. This session has a durable channel for \
                     user/agent messages and status history; append a typed \
@@ -1656,7 +1727,7 @@ mod tests {
     fn entrance_note_keeps_catch_up_out_of_the_first_turn() {
         let note = entrance_note(Some(42));
         assert!(note.contains("loom summary"));
-        assert!(note.contains("recover context"));
+        assert!(note.contains("after compaction"));
         assert!(!note.contains("summary` first"));
         assert!(!note.contains("prints the full goal"));
         // It tells the agent exactly how to signal "done".
@@ -1701,7 +1772,8 @@ mod tests {
                 "Weaver context.",
                 None,
             ),
-            format!("do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow.")
+            "do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow."
+                .to_string()
         );
     }
 }

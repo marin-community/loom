@@ -54,15 +54,21 @@ async fn terminal_websocket_roundtrip() {
     }
     assert!(ready, "shell never came up");
 
-    // Drive a real size, give the supervisor a moment to apply the SIGWINCH, then
-    // run a command that prints the terminal width. The 0x01 → master.resize →
-    // SIGWINCH path must reach the shell.
+    // Drive a real size, then ask the shell what width it thinks it has until it
+    // answers with the new one. The 0x01 → master.resize → SIGWINCH path must
+    // reach the shell, but it gets there asynchronously — so poll the signal
+    // itself rather than guessing a delay that is usually far too long.
     term.send(Message::Binary(resize_frame(120, 40).into()))
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    send_input(&mut term, "echo DIMS COLS=$(tput cols)\n").await;
-    let dims = drain_until(&mut term, "COLS=120", Duration::from_secs(10)).await;
+    let mut dims = String::new();
+    for _ in 0..20 {
+        send_input(&mut term, "echo DIMS COLS=$(tput cols)\n").await;
+        dims = drain_until(&mut term, "COLS=120", Duration::from_millis(500)).await;
+        if dims.contains("COLS=120") {
+            break;
+        }
+    }
     assert!(
         dims.contains("COLS=120"),
         "resize did not propagate to the pty width; got:\n{dims}"

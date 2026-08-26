@@ -614,9 +614,8 @@ test.describe('durable session workbench', () => {
 
     await page.getByTestId('attention-view').click();
     const intervention = page.getByTestId('automation-run-only');
-    await intervention.hover();
-    await intervention.getByTestId('run-actions').click();
-    await intervention.getByTestId('run-action-archive').click();
+    await expect(intervention).toContainText('is not inside a git repository');
+    await intervention.getByTestId('run-action-clear').click();
     await page.getByTestId('confirm-dialog').getByTestId('confirm-dialog-confirm').click();
     await page.getByTestId('history-view').click();
     const cancelled = page.getByTestId('automation-run-history').getByTestId('automation-run-only');

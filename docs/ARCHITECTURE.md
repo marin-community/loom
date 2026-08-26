@@ -535,6 +535,16 @@ the concrete non-secret snapshot stamped for that runtime launch. Subsequent
 template/default/registry edits cannot silently mutate it; an explicit handoff
 can replace it with a newly resolved snapshot.
 
+Builtin ACP launches have one additional admission check because provider
+account entitlements cannot be inferred from Loom's static agent metadata.
+After resolving the repository/profile environment but before creating a
+worktree or session row, Loom opens a disposable, prompt-free ACP session and
+applies the selected model, effort, and mode through the adapter's live config
+surface. An unavailable selector is returned as launch validation; the
+transient relay is always removed and receives no MCP servers or session token.
+Operator-defined adapters retain the recoverable failed-session path because
+their launch commands and validation semantics are operator-owned.
+
 **Launch base.** A new session's worktree forks from `base`. When the create
 request omits it, `git::default_base` resolves the repo's default branch on
 `origin` and fetches it, so the branch starts from a fresh `origin/<default>`
@@ -593,7 +603,15 @@ Details → Advanced, not as the primary file or work surface.
   in the UI). On startup and periodically afterward, the active loom generation
   re-attaches every live-relay ACP session missing its in-process driver so its
   journal keeps flowing; a `loom.json` ownership fence prevents an older draining
-  server from competing for Tapestry's single relay subscription. ACP cursors
+  server from competing for Tapestry's single relay subscription. That fence is
+  advisory across a restart overlap, so the *durable* one is
+  `sessions.acp_driver_epoch`: a driver claims it before subscribing, and only
+  the holder may transition the row's runtime status. A driver evicted from the
+  relay by its successor therefore exits quietly instead of marking a session
+  `orphaned` that someone else is driving — a contradiction that would leave the
+  row unadoptable (adoption refuses a live task) and unrepairable (the sweep
+  skips one). Whoever attaches a driver settles the row afterwards, clearing a
+  stale `orphaned` an outgoing driver raced in. ACP cursors
   flush periodically rather than once per streaming frame, and a failed durable
   journal write yields the task so the repair pass replays from the last ACK
   instead of accumulating an unbounded backlog. Tapestry drains durable replay
@@ -837,11 +855,25 @@ a Slack conversation.
 
 ## GitHub integration
 
-An agent can request access to an additional repository when a live task
-expands beyond its launch policy. A human grants or revokes that session-only
-access from `loom github access` or Session Details, without restarting it.
-Loom validates write access against the GitHub App installation before storing
-the audited override.
+A session's own repository is its baseline App scope — it is stamped at launch
+whether or not the profile allowlists it, because an interactive session
+already selects the launching user's far broader Account PAT first.
+
+Expanding *beyond* that repository goes through
+`loom permissions request github-repository <owner/repo> --reason "…"`. That
+raises the session's attention tag, posts to its channel, and mirrors the
+status to Slack; a human approves or denies from Session Details in the SPA or
+with `loom permissions approve|deny`, and can grant or revoke directly with
+`loom permissions grant|revoke github-repository`. An agent must never ask a
+person to run a CLI command — the request operation is the whole mechanism, and
+a human operator can act on it from a browser.
+
+When the launch profile carries an `owner/*` allowlist entry, a matching
+request is applied immediately instead of waiting on a person: the pattern is a
+standing decision for that owner. The grant is still validated against the App
+installation, still recorded, and still revocable, and the token is still
+scoped only to the repositories actually asked for. Loom validates write access
+against the GitHub App installation before storing any audited override.
 
 When the GitHub App is configured, loom keeps a per-branch pull-request
 snapshot alongside the session. A second background loop
@@ -1037,16 +1069,32 @@ handoff and permission-mode changes are forbidden. The stock `github_comment`
 profile contains the policy only; its reviewed JSON manifest is seeded when
 absent and then remains operator-editable.
 
-**Git and GitHub CLI credentials.** The Docker image installs a Git credential
-helper and a `gh` wrapper because those clients do not speak Loom's session API.
-They are transport adapters, not policy owners: every fresh, resumed, warm, or
-handed-off session receives a reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
+**Git and GitHub CLI credentials.** Loom installs Git credential and `gh`
+adapters because those clients do not speak Loom's session API. The Docker image
+provides the Git adapter and a system `gh` adapter; native and ACP launches put a
+session-private `gh` adapter at the front of `PATH`. They are transport adapters,
+not policy owners: every fresh, resumed, warm, or handed-off session receives a
+reserved `LOOM_GITHUB_AUTH_MODE` selected by Loom.
 `direct` uses the launching user's write-only PAT stored in Loom Account
-settings, `broker` requests the session's short-lived App installation token,
-and `disabled` rejects direct GitHub CLI access. The adapters fail closed when
-the reserved mode is absent. The `gh` wrapper translates the selected mode into
-the stock CLI's native authentication contract for each invocation.
-Adapter registration stays in the image's system Git config: linked worktrees
+settings, `broker` requests a short-lived App installation token, and
+`disabled` rejects direct GitHub CLI access. The adapters fail closed when
+the reserved mode is absent.
+
+A `broker` token is minted **per repository**. An App installation covers one
+owner, so a session holding access under two owners has no single token that
+spans them. `credential.useHttpPath` is enabled for github.com, so git names the
+repository in every helper request and the helper forwards it as
+`loom github-token --repository owner/name`; the `gh` wrapper resolves the same
+from an explicit `--repo`/`-R` flag, `GH_REPO`, or the checkout's origin, in
+that order. The server refuses a repository the session has no access to, so
+naming one narrows the token and never widens it. Omitting the repository falls
+back to the session's whole set, which the App can mint only while it stays
+single-owner. The `gh` wrapper translates the selected mode into the stock
+CLI's native authentication contract for each invocation. In broker mode every
+invocation asks Loom for a current token, so long-running programs can make
+calls beyond GitHub's one-hour installation-token lifetime without managing the
+credential themselves.
+Git adapter registration stays in the image's system config: linked worktrees
 share repository-local config, agents may clone additional repositories, and
 the helper must be available before a target repository exists. Session
 selection and credentials remain Loom-owned policy; the image registration
