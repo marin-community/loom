@@ -19,12 +19,12 @@ use weaver_api::{
     ArtifactTextAnchorDto, DecidePermissionRequestReq, MoveSessionsReq, ReviewAnchorDto,
     ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter,
     SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
-    SessionSearchStatus, SetSessionGithubAccessReq,
+    SessionSearchStatus, SessionView, SetSessionGithubAccessReq,
 };
 
 use loom::client::{self, Client};
 use weaver_api::operations::deployment;
-use weaver_api::operations::{auth, branches, mcps, profiles, reviews, sessions};
+use weaver_api::operations::{auth, branches, mcps, profiles, reviews, sessions, watches};
 use weaver_core::db::Db;
 
 #[derive(Parser)]
@@ -3116,10 +3116,8 @@ async fn cmd_login(name: String, url: Option<String>, token_stdin: bool) -> Resu
     }
 
     let remote = Client::new(url.clone()).with_token(Some(token.to_string()));
-    let me = remote.post("/api/auth/me", json!({})).await?;
-    if me.get("authenticated").and_then(Value::as_bool) != Some(true)
-        || me.get("via").and_then(Value::as_str) != Some("token")
-    {
+    let me = remote.invoke::<auth::me::Op>(&auth::me::Input {}).await?;
+    if !me.authenticated || me.via.as_deref() != Some("token") {
         bail!("Loom rejected the personal API token");
     }
     remote
@@ -3127,10 +3125,7 @@ async fn cmd_login(name: String, url: Option<String>, token_stdin: bool) -> Resu
         .await
         .context("credential is authenticated but is not a user API token")?;
     loom::client_context::save_login(&paths, &name, &url, token)?;
-    let username = me
-        .get("username")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown user");
+    let username = me.username.as_deref().unwrap_or("unknown user");
     println!("logged in to {url} as {username}");
     println!("current context: {name}");
     Ok(())
@@ -4578,29 +4573,14 @@ fn init_tracing() {
         .init();
 }
 
-fn str_field<'a>(v: &'a Value, key: &str) -> &'a str {
-    v.get(key).and_then(Value::as_str).unwrap_or("")
-}
-
-/// Read a string field from a `SessionView`'s nested `branch` object.
-fn branch_str<'a>(v: &'a Value, key: &str) -> &'a str {
-    v.get("branch")
-        .and_then(|b| b.get(key))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-}
-
 /// The agent's resolved attention level from a `SessionView`'s `branch.tags` —
 /// the value of the `attention` tag, or `ok` when it is absent (the calm state).
-fn branch_attention(v: &Value) -> &str {
-    v.get("branch")
-        .and_then(|b| b.get("tags"))
-        .and_then(Value::as_array)
-        .and_then(|tags| {
-            tags.iter()
-                .find(|t| t.get("key").and_then(Value::as_str) == Some("attention"))
-        })
-        .and_then(|t| t.get("value").and_then(Value::as_str))
+fn branch_attention(ws: &SessionView) -> &str {
+    ws.branch
+        .tags
+        .iter()
+        .find(|t| t.key == "attention")
+        .map(|t| t.value.as_str())
         .filter(|v| !v.is_empty())
         .unwrap_or("ok")
 }
@@ -4989,18 +4969,20 @@ async fn cmd_launch(a: LaunchArgs) -> Result<()> {
 
 /// Resolve a session view by key, surfacing a clearer error than a bare 404 when
 /// the key matches no live session.
-async fn fetch_session(client: &Client, key: &str) -> Result<Value> {
+async fn fetch_session(client: &Client, key: &str) -> Result<SessionView> {
     client
-        .post("/api/sessions/get", json!({ "session": key }))
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: key.to_string(),
+        })
         .await
         .with_context(|| format!("no live session for '{key}'"))
 }
 
 /// One-line attention summary: the resolved level (the agent's `attention` tag,
 /// `ok` when absent), plus its current-state message when set.
-fn attention_summary(ws: &Value) -> String {
+fn attention_summary(ws: &SessionView) -> String {
     let attention = branch_attention(ws);
-    let message = branch_str(ws, "description");
+    let message = &ws.branch.description;
     if message.is_empty() {
         attention.to_string()
     } else {
@@ -5027,15 +5009,13 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
             )?,
     };
     let client = client::default()?;
-    let res: Value = client
-        .post("/api/sessions/url", json!({ "session": key }))
+    let res = client
+        .invoke::<sessions::url::Op>(&sessions::url::Input {
+            session: key.clone(),
+        })
         .await
         .with_context(|| format!("no live session for '{key}'"))?;
-    let url = res
-        .get("url")
-        .and_then(Value::as_str)
-        .context("server returned no url")?;
-    println!("{url}");
+    println!("{}", res.url);
     Ok(())
 }
 
@@ -5043,18 +5023,14 @@ async fn cmd_session_url(key: Option<String>) -> Result<()> {
 async fn cmd_session_poll(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = fetch_session(&client, &key).await?;
-    println!(
-        "session {}  ({})",
-        str_field(&ws, "id"),
-        branch_str(&ws, "name")
-    );
-    println!("  status:    {}", str_field(&ws, "status"));
+    println!("session {}  ({})", ws.id, ws.branch.name);
+    println!("  status:    {}", ws.status);
     println!("  attention: {}", attention_summary(&ws));
-    println!("  channel:   {}", str_field(&ws, "id"));
-    if let Some(n) = ws.get("tracking_issue").and_then(Value::as_i64) {
+    println!("  channel:   {}", ws.id);
+    if let Some(n) = ws.tracking_issue {
         println!("  track:     Loom issue #{n}");
     }
-    println!("  activity:  {}", str_field(&ws, "last_activity_at"));
+    println!("  activity:  {}", ws.last_activity_at);
     Ok(())
 }
 
@@ -5073,12 +5049,7 @@ async fn cmd_session_wait(
         println!("{reason}");
         return Ok(());
     }
-    println!(
-        "waiting on {} ({}) — {}",
-        key,
-        branch_str(&ws, "name"),
-        str_field(&ws, "status")
-    );
+    println!("waiting on {} ({}) — {}", key, ws.branch.name, ws.status);
 
     let interval = std::time::Duration::from_secs(interval);
     let deadline =
@@ -5101,7 +5072,7 @@ async fn cmd_session_wait(
         if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
             bail!(
                 "timed out after {timeout}s — session {key} still {}",
-                str_field(&ws, "status")
+                ws.status
             );
         }
     }
@@ -5109,8 +5080,8 @@ async fn cmd_session_wait(
 
 /// Why a `wait` should stop watching `ws`, or `None` to keep waiting: a terminal
 /// or orphaned lifecycle, or — unless `lifecycle_only` — a raised attention.
-fn wake_reason(ws: &Value, key: &str, lifecycle_only: bool) -> Option<String> {
-    let status = str_field(ws, "status");
+fn wake_reason(ws: &SessionView, key: &str, lifecycle_only: bool) -> Option<String> {
+    let status = ws.status.as_str();
     if status == "archived" {
         return Some(format!(
             "session {key} is archived — its worktree was torn down (try `loom sessions recover {key}`)"
@@ -5146,10 +5117,12 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
     }
     let client = client::default()?;
     client
-        .post(
-            "/api/sessions/send",
-            json!({ "session": key, "text": message, "submit": submit }),
-        )
+        .invoke::<sessions::send::Op>(&sessions::send::Input {
+            text: message,
+            submit: Some(submit),
+            by: None,
+            session: key.clone(),
+        })
         .await?;
     println!(
         "sent to {key}{}",
@@ -5162,7 +5135,9 @@ async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<
 async fn cmd_session_interrupt(key: String) -> Result<()> {
     let client = client::default()?;
     client
-        .post("/api/sessions/interrupt", json!({ "session": key }))
+        .invoke::<sessions::interrupt::Op>(&sessions::interrupt::Input {
+            session: key.clone(),
+        })
         .await?;
     println!("interrupted {key}");
     Ok(())
@@ -5172,12 +5147,12 @@ async fn cmd_session_interrupt(key: String) -> Result<()> {
 async fn cmd_session_preview(key: String, lines: usize) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .post(
-            "/api/sessions/preview",
-            json!({ "session": key, "lines": lines }),
-        )
+        .invoke::<sessions::preview::Op>(&sessions::preview::Input {
+            lines: lines as i64,
+            session: key,
+        })
         .await?;
-    print!("{}", str_field(&res, "screen"));
+    print!("{}", res.screen);
     // The capture is right-trimmed server-side; ensure a clean final newline.
     println!();
     Ok(())
@@ -5211,119 +5186,116 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
     if managed && (status.is_some() || attention.is_some()) {
         bail!("--status and --attention cannot be combined with --managed");
     }
-    let list = serde_json::to_value(
-        client
-            .invoke::<sessions::list::Op>(&sessions::list::Input {
-                q: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .query
-                .clone(),
-                history: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .history,
-                archived_only: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .archived_only,
-                status: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .status,
-                attention: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .attention,
-                creator: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .creator,
-                automation: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .automation
-                .unwrap_or(true),
-                managed: (SearchSessionsOptions {
-                    query: search.unwrap_or_default().to_string(),
-                    history: archived,
-                    archived_only: false,
-                    status,
-                    attention,
-                    creator,
-                    // The plain fleet listing has always omitted automation
-                    // sessions; the managed inventory has always included them.
-                    automation: Some(managed),
-                    managed,
-                })
-                .managed,
+    let rows = client
+        .invoke::<sessions::list::Op>(&sessions::list::Input {
+            q: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
             })
-            .await?,
-    )?;
-    let rows = list.as_array().cloned().unwrap_or_default();
+            .query
+            .clone(),
+            history: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .history,
+            archived_only: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .archived_only,
+            status: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .status,
+            attention: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .attention,
+            creator: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .creator,
+            automation: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .automation
+            .unwrap_or(true),
+            managed: (SearchSessionsOptions {
+                query: search.unwrap_or_default().to_string(),
+                history: archived,
+                archived_only: false,
+                status,
+                attention,
+                creator,
+                // The plain fleet listing has always omitted automation
+                // sessions; the managed inventory has always included them.
+                automation: Some(managed),
+                managed,
+            })
+            .managed,
+        })
+        .await?;
     if rows.is_empty() {
         let hint = match search {
             Some(s) => format!("no sessions match '{s}'"),
@@ -5336,22 +5308,22 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
         "{:<10}  {:<9}  {:<10}  {:<22}  {:<24}  TITLE",
         "ID", "STATUS", "ATTENTION", "NAME", "LOCATION"
     );
-    for ws in rows {
-        let location = ws.get("placement").map_or_else(String::new, |placement| {
-            format!(
-                "{}/{}",
-                str_field(placement, "space_name"),
-                str_field(placement, "group_name")
-            )
-        });
+    for ws in &rows {
+        // An unplaced session renders as the bare separator this column has
+        // always shown for one: the JSON reader could not tell `null` from an
+        // object with two empty names.
+        let location = ws.placement.as_ref().map_or_else(
+            || "/".to_string(),
+            |placement| format!("{}/{}", placement.space_name, placement.group_name),
+        );
         println!(
             "{:<10}  {:<9}  {:<10}  {:<22}  {:<24}  {}",
-            str_field(&ws, "id"),
-            str_field(&ws, "status"),
-            branch_attention(&ws),
-            truncate(branch_str(&ws, "name"), 22),
+            ws.id,
+            ws.status,
+            branch_attention(ws),
+            truncate(&ws.branch.name, 22),
             truncate(&location, 24),
-            truncate(branch_str(&ws, "title"), 46),
+            truncate(&ws.branch.title, 46),
         );
     }
     Ok(())
@@ -5360,7 +5332,7 @@ async fn cmd_ps(options: PsOptions) -> Result<()> {
 async fn cmd_show(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post("/api/sessions/get", json!({ "session": key }))
+        .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
         .await?;
     print_session(&ws);
     Ok(())
@@ -5377,52 +5349,46 @@ async fn cmd_session_rename(key: String, title: String) -> Result<()> {
     }
     let client = client::default()?;
     let current = client
-        .post("/api/sessions/get", json!({ "session": key }))
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: key.clone(),
+        })
         .await?;
     let ws = client
-        .post(
-            "/api/sessions/update",
-            json!({
-                "session": key,
-                "title": title,
-                "expected_title": branch_str(&current, "title"),
-                "expected_title_provenance": branch_str(&current, "title_provenance"),
-            }),
-        )
+        .invoke::<sessions::update::Op>(&sessions::update::Input {
+            title: Some(title.to_string()),
+            expected_title: Some(current.branch.title),
+            expected_title_provenance: Some(current.branch.title_provenance),
+            session: key,
+            ..Default::default()
+        })
         .await?;
-    println!(
-        "renamed {} → {}",
-        str_field(&ws, "id"),
-        branch_str(&ws, "title")
-    );
+    println!("renamed {} → {}", ws.id, ws.branch.title);
     Ok(())
 }
 
 async fn cmd_session_regenerate_title(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post("/api/sessions/title/regenerate", json!({ "session": key }))
+        .invoke::<sessions::title::regenerate::Op>(&sessions::title::regenerate::Input {
+            session: key,
+        })
         .await?;
-    println!(
-        "{} — {}",
-        branch_str(&ws, "title"),
-        str_field(ws.get("title_generation").unwrap_or(&Value::Null), "status")
-    );
+    println!("{} — {}", ws.branch.title, ws.title_generation.status);
     Ok(())
 }
 
 async fn cmd_session_title_generation(key: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post(
-            "/api/sessions/title/generation/set",
-            json!({ "session": key, "enabled": enabled }),
-        )
+        .invoke::<sessions::title::generation::set::Op>(&sessions::title::generation::set::Input {
+            enabled,
+            session: key,
+        })
         .await?;
     println!(
         "title generation {} ({})",
         if enabled { "enabled" } else { "disabled" },
-        str_field(ws.get("title_generation").unwrap_or(&Value::Null), "status")
+        ws.title_generation.status
     );
     Ok(())
 }
@@ -5436,17 +5402,18 @@ async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
     let client = client::default()?;
     let mut cue = if ensure {
         client
-            .post(
-                "/api/sessions/resumption_cue/ensure",
-                json!({ "session": key, "force": force }),
+            .invoke::<sessions::resumption_cue::ensure::Op>(
+                &sessions::resumption_cue::ensure::Input {
+                    force,
+                    session: key.clone(),
+                },
             )
             .await?
     } else {
         client
-            .post(
-                "/api/sessions/resumption_cue/get",
-                json!({ "session": key }),
-            )
+            .invoke::<sessions::resumption_cue::get::Op>(&sessions::resumption_cue::get::Input {
+                session: key.clone(),
+            })
             .await?
     };
     // An ensure only *starts* generation — the model call runs detached so it
@@ -5454,141 +5421,114 @@ async fn cmd_session_cue(key: String, ensure: bool, force: bool) -> Result<()> {
     // prints a cue rather than the status of a request that just left.
     if ensure {
         for _ in 0..CUE_POLL_ATTEMPTS {
-            if str_field(&cue, "status") != "generating" {
+            if cue.status != "generating" {
                 break;
             }
             tokio::time::sleep(CUE_POLL_INTERVAL).await;
             cue = client
-                .post(
-                    "/api/sessions/resumption_cue/get",
-                    json!({ "session": key }),
+                .invoke::<sessions::resumption_cue::get::Op>(
+                    &sessions::resumption_cue::get::Input {
+                        session: key.clone(),
+                    },
                 )
                 .await?;
         }
     }
-    println!("status: {}", str_field(&cue, "status"));
-    if let Some(text) = cue.get("text").and_then(Value::as_str) {
+    println!("status: {}", cue.status);
+    if let Some(text) = &cue.text {
         println!("{text}");
     }
-    if let Some(at) = cue.get("generated_at").and_then(Value::as_str) {
+    if let Some(at) = &cue.generated_at {
         println!("generated: {at}");
     }
     Ok(())
 }
 
-fn print_session(ws: &Value) {
-    println!(
-        "session {}  ({})",
-        str_field(ws, "id"),
-        branch_str(ws, "name")
-    );
+fn print_session(ws: &SessionView) {
+    println!("session {}  ({})", ws.id, ws.branch.name);
     println!(
         "  title:    {} ({})",
-        branch_str(ws, "title"),
-        branch_str(ws, "title_provenance")
+        ws.branch.title, ws.branch.title_provenance
     );
-    if let Some(generation) = ws.get("title_generation") {
-        println!(
-            "  title AI: {} ({})",
-            if generation
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "enabled"
-            } else {
-                "disabled"
-            },
-            str_field(generation, "status")
-        );
-    }
-    println!("  status:   {}", str_field(ws, "status"));
-    if let Some(placement) = ws.get("placement").filter(|value| !value.is_null()) {
+    println!(
+        "  title AI: {} ({})",
+        if ws.title_generation.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        ws.title_generation.status
+    );
+    println!("  status:   {}", ws.status);
+    if let Some(placement) = &ws.placement {
         println!(
             "  location: {} / {}",
-            str_field(placement, "space_name"),
-            str_field(placement, "group_name")
+            placement.space_name, placement.group_name
         );
     }
     // Agent-declared attention level (the resolved `attention` tag) plus its
     // current-state message (the branch `description`), shown together — one
     // signal.
-    let attention = branch_attention(ws);
-    let message = branch_str(ws, "description");
-    let attention = if message.is_empty() {
-        attention.to_string()
-    } else {
-        format!("{attention} — {message}")
-    };
-    println!("  attention: {attention}");
-    let goal = branch_str(ws, "goal");
+    println!("  attention: {}", attention_summary(ws));
+    let goal = &ws.branch.goal;
     println!(
         "  goal:     {}",
         if goal.is_empty() { "(none)" } else { goal }
     );
-    println!("  agent:    {}", str_field(ws, "agent_kind"));
-    let model = str_field(ws, "model");
-    if !model.is_empty() {
-        println!("  model:    {model}");
+    println!("  agent:    {}", ws.agent_kind);
+    if !ws.model.is_empty() {
+        println!("  model:    {}", ws.model);
     }
-    let effort = str_field(ws, "effort");
-    if !effort.is_empty() {
-        println!("  effort:   {effort}");
+    if !ws.effort.is_empty() {
+        println!("  effort:   {}", ws.effort);
     }
     println!(
         "  branch:   {} (base {})",
-        branch_str(ws, "branch"),
-        branch_str(ws, "base_branch")
+        ws.branch.branch, ws.branch.base_branch
     );
-    let exact_parent = str_field(ws, "parent_session_id");
+    let exact_parent = ws.parent_session_id.as_deref().unwrap_or_default();
     if !exact_parent.is_empty() {
         println!("  parent:   session {exact_parent}");
     } else {
-        let legacy_parent = str_field(ws, "parent_id");
+        let legacy_parent = ws.parent_id.as_deref().unwrap_or_default();
         if !legacy_parent.is_empty() {
             println!("  parent:   branch {legacy_parent} (legacy)");
         }
     }
-    println!("  work_dir: {}", str_field(ws, "work_dir"));
-    println!("  session:  {}", str_field(ws, "term_session"));
-    if let Some(repo) = ws.get("github_repo").and_then(Value::as_str) {
+    println!("  work_dir: {}", ws.work_dir);
+    println!("  session:  {}", ws.term_session);
+    if let Some(repo) = &ws.github_repo {
         if !repo.is_empty() {
             println!("  github:   {repo}");
         }
     }
     // The branch's PR snapshot, when loom has polled one (see `loom::github`).
-    if let Some(gh) = ws.get("branch").and_then(|b| b.get("github")) {
-        if let Some(url) = gh.get("pr_url").and_then(Value::as_str) {
-            let number = gh.get("pr_number").and_then(Value::as_i64).unwrap_or(0);
-            let state = gh
-                .get("pr_state")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            let mut bits = vec![state];
-            if let Some(review) = gh.get("review_decision").and_then(Value::as_str) {
-                bits.push(review.to_lowercase().replace('_', " "));
-            }
-            if let Some(checks) = gh.get("checks").and_then(Value::as_str) {
-                bits.push(format!("checks {checks}"));
-            }
-            let bits: Vec<String> = bits.into_iter().filter(|b| !b.is_empty()).collect();
-            println!("  pr:       #{number} {url} ({})", bits.join(", "));
+    if let Some(gh) = &ws.branch.github {
+        let mut bits = vec![gh.pr_state.to_lowercase()];
+        if let Some(review) = &gh.review_decision {
+            bits.push(review.to_lowercase().replace('_', " "));
         }
+        if let Some(checks) = &gh.checks {
+            bits.push(format!("checks {checks}"));
+        }
+        let bits: Vec<String> = bits.into_iter().filter(|b| !b.is_empty()).collect();
+        println!(
+            "  pr:       #{} {} ({})",
+            gh.pr_number,
+            gh.pr_url,
+            bits.join(", ")
+        );
     }
-    println!("  activity: {}", str_field(ws, "last_activity_at"));
+    println!("  activity: {}", ws.last_activity_at);
 }
 
 async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let client = client::default()?;
     let ws = client
-        .post("/api/sessions/get", json!({ "session": key }))
+        .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
         .await?;
-    let session = ws
-        .get("term_session")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("session has no terminal"))?;
+    let session = ws.term_session.as_str();
     // The `tapestry` binary ships beside `loom`; resolve it as a sibling so an
     // attach works regardless of PATH, then hand off to its native attach.
     let tapestry = std::env::current_exe()
@@ -5608,22 +5548,20 @@ async fn cmd_attach(key: String) -> Result<()> {
 async fn cmd_archive(key: String) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .post("/api/sessions/archive", json!({ "session": key }))
+        .invoke::<sessions::archive::Op>(&sessions::archive::Input {
+            session: key.clone(),
+        })
         .await?;
-    if str_field(&res, "kind") == "launch_attempt" {
+    if res.kind == "launch_attempt" {
         println!("archived launch attempt {key} (reserved runtime removed; history kept)");
     } else {
         println!(
             "archived {} (terminal + worktree removed; branch and history kept)",
-            str_field(&res, "branch")
+            res.branch
         );
     }
-    if let Some(warnings) = res.get("warnings").and_then(Value::as_array) {
-        for w in warnings {
-            if let Some(w) = w.as_str() {
-                eprintln!("  warning: {w}");
-            }
-        }
+    for w in &res.warnings {
+        eprintln!("  warning: {w}");
     }
     Ok(())
 }
@@ -5631,32 +5569,24 @@ async fn cmd_archive(key: String) -> Result<()> {
 async fn cmd_adopt(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post("/api/sessions/adopt", json!({ "session": key }))
+        .invoke::<sessions::adopt::Op>(&sessions::adopt::Input { session: key })
         .await?;
-    println!(
-        "adopted session {}  ({})",
-        str_field(&ws, "id"),
-        branch_str(&ws, "name")
-    );
-    println!("  status:  {}", str_field(&ws, "status"));
-    println!("  session: {}", str_field(&ws, "term_session"));
-    println!("  attach:  loom attach {}", str_field(&ws, "id"));
+    println!("adopted session {}  ({})", ws.id, ws.branch.name);
+    println!("  status:  {}", ws.status);
+    println!("  session: {}", ws.term_session);
+    println!("  attach:  loom attach {}", ws.id);
     Ok(())
 }
 
 async fn cmd_recover(key: String) -> Result<()> {
     let client = client::default()?;
     let ws = client
-        .post("/api/sessions/recover", json!({ "session": key }))
+        .invoke::<sessions::recover::Op>(&sessions::recover::Input { session: key })
         .await?;
-    println!(
-        "recovered session {}  ({})",
-        str_field(&ws, "id"),
-        branch_str(&ws, "name")
-    );
-    println!("  status:  {}", str_field(&ws, "status"));
-    println!("  session: {}", str_field(&ws, "term_session"));
-    println!("  attach:  loom attach {}", str_field(&ws, "id"));
+    println!("recovered session {}  ({})", ws.id, ws.branch.name);
+    println!("  status:  {}", ws.status);
+    println!("  session: {}", ws.term_session);
+    println!("  attach:  loom attach {}", ws.id);
     Ok(())
 }
 
@@ -5736,18 +5666,14 @@ async fn cmd_handoff(
 async fn cmd_rm(key: String, keep_branch: bool) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .post(
-            "/api/sessions/delete",
-            json!({ "session": key, "keep_branch": keep_branch }),
-        )
+        .invoke::<sessions::delete::Op>(&sessions::delete::Input {
+            keep_branch,
+            session: key.clone(),
+        })
         .await?;
     println!("removed session {key}");
-    if let Some(warnings) = res.get("warnings").and_then(Value::as_array) {
-        for w in warnings {
-            if let Some(w) = w.as_str() {
-                eprintln!("  warning: {w}");
-            }
-        }
+    for w in &res.warnings {
+        eprintln!("  warning: {w}");
     }
     Ok(())
 }
@@ -5853,26 +5779,19 @@ async fn cmd_watch_new(name: String) -> Result<()> {
 async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .post("/api/watches/programs", json!({}))
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+        .invoke::<watches::programs::Op>(&watches::programs::Input {})
+        .await?;
     if let Some(want) = source {
-        let row = rows.iter().find(|p| str_field(p, "program") == want);
+        let row = rows.iter().find(|p| p.program == want);
         let Some(row) = row else {
             bail!("no builtin program '{want}' — `loom watch programs` lists them");
         };
-        print!("{}", str_field(row, "source"));
+        print!("{}", row.source);
         return Ok(());
     }
     println!("{:<26}  TITLE", "PROGRAM");
     for p in rows {
-        println!(
-            "{:<26}  {}",
-            str_field(&p, "program"),
-            str_field(&p, "title"),
-        );
+        println!("{:<26}  {}", p.program, p.title);
     }
     Ok(())
 }
@@ -5919,50 +5838,34 @@ fn build_scope(opts: &AddOpts) -> Result<Value> {
 /// `loom watch add` — register a watch (`watches.create`).
 async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     let client = client::default()?;
-    let trigger = build_trigger(&opts);
-    let scope = build_scope(&opts)?;
     let params = opts
         .prompt
         .as_ref()
         .map(|p| json!({ "prompt": p }))
         .unwrap_or_else(|| json!({}));
 
-    let mut body = serde_json::Map::new();
-    body.insert("name".into(), json!(opts.name));
-    body.insert("trigger".into(), trigger);
-    body.insert("scope".into(), scope);
-    body.insert("params".into(), params);
-    if let Some(program) = &opts.program {
-        body.insert("program".into(), json!(program));
-    }
-    if let Some(caps) = &opts.capabilities {
-        body.insert("capabilities".into(), json!(caps));
-    }
-    if let Some(profile) = &opts.profile {
-        body.insert("profile".into(), json!(profile));
-    }
-    if let Some(model) = &opts.model {
-        body.insert("model".into(), json!(model));
-    }
-    if let Some(effort) = &opts.effort {
-        body.insert("effort".into(), json!(effort));
-    }
-    if let Some(cooldown) = opts.cooldown {
-        body.insert("cooldown_secs".into(), json!(cooldown));
-    }
-
     let o = client
-        .post("/api/watches/create", Value::Object(body))
+        .invoke::<watches::create::Op>(&watches::create::Input {
+            name: opts.name.clone(),
+            trigger: Some(build_trigger(&opts)),
+            scope: Some(build_scope(&opts)?),
+            params: Some(params),
+            program: opts.program.clone(),
+            capabilities: opts.capabilities.clone(),
+            profile: opts.profile.clone(),
+            model: opts.model.clone(),
+            effort: opts.effort.clone(),
+            cooldown_secs: opts.cooldown,
+            // `add` leaves the watch disarmed and prints how to arm it, so it
+            // takes the server's default rather than stating one.
+            enabled: None,
+        })
         .await?;
-    println!(
-        "registered watch {}  ({})",
-        str_field(&o, "name"),
-        str_field(&o, "id")
-    );
-    println!("  trigger: {}", trigger_summary(&o));
-    println!("  program: {}", str_field(&o, "program"));
-    println!("  caps:    {}", capabilities_summary(&o));
-    println!("  profile: {}", str_field(&o, "profile"));
+    println!("registered watch {}  ({})", o.name, o.id);
+    println!("  trigger: {}", trigger_summary(&o.trigger));
+    println!("  program: {}", o.program);
+    println!("  caps:    {}", capabilities_summary(&o.capabilities));
+    println!("  profile: {}", o.profile);
     println!(
         "  enabled: no — arm it with `loom watch enable {}`",
         opts.name
@@ -5974,7 +5877,7 @@ async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 async fn cmd_watch_rm(name: String) -> Result<()> {
     let client = client::default()?;
     client
-        .post("/api/watches/delete", json!({ "key": name }))
+        .invoke::<watches::delete::Op>(&watches::delete::Input { key: name.clone() })
         .await?;
     println!("removed watch {name}");
     Ok(())
@@ -5985,15 +5888,16 @@ async fn cmd_watch_rm(name: String) -> Result<()> {
 async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
     let client = client::default()?;
     let o = client
-        .post(
-            "/api/watches/update",
-            json!({ "key": name, "enabled": enabled }),
-        )
+        .invoke::<watches::update::Op>(&watches::update::Input {
+            key: name,
+            enabled: Some(enabled),
+            ..Default::default()
+        })
         .await?;
     println!(
         "{} watch {}",
         if enabled { "enabled" } else { "disabled" },
-        str_field(&o, "name")
+        o.name
     );
     Ok(())
 }
@@ -6002,11 +5906,8 @@ async fn cmd_watch_set_enabled(name: String, enabled: bool) -> Result<()> {
 async fn cmd_watch_ls() -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .post("/api/watches/list", json!({}))
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+        .invoke::<watches::list::Op>(&watches::list::Input {})
+        .await?;
     if rows.is_empty() {
         println!("no watches — scaffold one with `loom watch new <name>`");
         return Ok(());
@@ -6016,19 +5917,13 @@ async fn cmd_watch_ls() -> Result<()> {
         "NAME", "ENABLED", "TRIGGER", "PROGRAM"
     );
     for o in rows {
-        let enabled = if o.get("enabled").and_then(Value::as_bool).unwrap_or(false) {
-            "yes"
-        } else {
-            "no"
-        };
-        let last = o.get("last_outcome").and_then(Value::as_str).unwrap_or("—");
         println!(
             "{:<18}  {:<8}  {:<22}  {:<18}  {}",
-            truncate(str_field(&o, "name"), 18),
-            enabled,
-            truncate(&trigger_summary(&o), 22),
-            truncate(str_field(&o, "program"), 18),
-            last,
+            truncate(&o.name, 18),
+            if o.enabled { "yes" } else { "no" },
+            truncate(&trigger_summary(&o.trigger), 22),
+            truncate(&o.program, 18),
+            o.last_outcome.as_deref().unwrap_or("—"),
         );
     }
     Ok(())
@@ -6038,17 +5933,15 @@ async fn cmd_watch_ls() -> Result<()> {
 async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
     let client = client::default()?;
     let res = client
-        .post(
-            "/api/watches/run",
-            json!({ "key": name, "dry_run": dry_run }),
-        )
+        .invoke::<watches::run::Op>(&watches::run::Input {
+            key: name.clone(),
+            dry_run,
+        })
         .await?;
-    let outcome = str_field(&res, "outcome");
-    let summary = str_field(&res, "summary");
     let kind = if dry_run { "dry run" } else { "run" };
-    println!("{name} {kind}: {outcome}");
-    if !summary.is_empty() {
-        println!("  {summary}");
+    println!("{name} {kind}: {}", res.outcome);
+    if !res.summary.is_empty() {
+        println!("  {}", res.summary);
     }
     Ok(())
 }
@@ -6058,11 +5951,11 @@ async fn cmd_watch_run(name: String, dry_run: bool) -> Result<()> {
 async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
     let client = client::default()?;
     let rows = client
-        .post("/api/watches/runs", json!({ "key": name, "limit": limit }))
-        .await?
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+        .invoke::<watches::runs::Op>(&watches::runs::Input {
+            key: name.clone(),
+            limit: Some(limit),
+        })
+        .await?;
     if rows.is_empty() {
         println!("no rounds yet for {name} — fire one with `loom watch run {name}`");
         return Ok(());
@@ -6074,16 +5967,12 @@ async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
         );
     }
     for r in &rows {
-        let when = str_field(r, "started_at");
-        let reason = str_field(r, "trigger_reason");
-        let outcome = str_field(r, "outcome");
-        let summary = str_field(r, "summary");
         if verbose {
-            println!("{when}  [{reason}]  {outcome}");
-            if !summary.is_empty() {
-                println!("  {summary}");
+            println!("{}  [{}]  {}", r.started_at, r.trigger_reason, r.outcome);
+            if !r.summary.is_empty() {
+                println!("  {}", r.summary);
             }
-            if let Some(actions) = r.get("actions").and_then(Value::as_array) {
+            if let Some(actions) = r.actions.as_array() {
                 for a in actions {
                     println!("    - {}", action_summary(a));
                 }
@@ -6091,10 +5980,10 @@ async fn cmd_watch_runs(name: String, limit: i64, verbose: bool) -> Result<()> {
         } else {
             println!(
                 "{:<24}  {:<14}  {:<8}  {}",
-                when,
-                truncate(reason, 14),
-                outcome,
-                truncate(summary, 60),
+                r.started_at,
+                truncate(&r.trigger_reason, 14),
+                r.outcome,
+                truncate(&r.summary, 60),
             );
         }
     }
@@ -6136,10 +6025,7 @@ fn action_summary(a: &Value) -> String {
 }
 
 /// A compact human summary of an `WatchView`'s parsed `trigger` object.
-fn trigger_summary(o: &Value) -> String {
-    let Some(t) = o.get("trigger") else {
-        return "—".to_string();
-    };
+fn trigger_summary(t: &Value) -> String {
     if let Some(cron) = t.get("cron").and_then(Value::as_str) {
         return format!("cron {cron}");
     }
@@ -6155,18 +6041,13 @@ fn trigger_summary(o: &Value) -> String {
     "—".to_string()
 }
 
-/// The granted capability set, comma-joined, for an `WatchView`.
-fn capabilities_summary(o: &Value) -> String {
-    o.get("capabilities")
-        .and_then(Value::as_array)
-        .map(|caps| {
-            caps.iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "observe".to_string())
+/// The granted capability set, comma-joined, for an `WatchView`. `observe` is
+/// implicit, so an empty grant list still reads as that baseline.
+fn capabilities_summary(capabilities: &[String]) -> String {
+    if capabilities.is_empty() {
+        return "observe".to_string();
+    }
+    capabilities.join(",")
 }
 
 #[cfg(test)]
@@ -6514,18 +6395,58 @@ mod tests {
         }
     }
 
-    fn view(status: &str, attention: &str, description: &str) -> Value {
+    /// Decoding the fixture through `SessionView` keeps it answerable to the
+    /// wire contract: a renamed field fails here instead of silently reading as
+    /// absent.
+    fn view(status: &str, attention: &str, description: &str) -> SessionView {
         // `ok` is the calm, tag-less state; any other level is the `attention`
         // tag's value, mirroring the wire `branch.tags` shape.
         let tags = if attention == "ok" {
             json!([])
         } else {
-            json!([{ "key": "attention", "value": attention }])
+            json!([{
+                "key": "attention",
+                "value": attention,
+                "note": "",
+                "set_by": "agent",
+                "set_at": "",
+            }])
         };
-        json!({
+        serde_json::from_value(json!({
+            "id": "s",
             "status": status,
-            "branch": { "tags": tags, "description": description },
-        })
+            "work_dir": "",
+            "term_session": "",
+            "agent_kind": "",
+            "model": "",
+            "effort": "",
+            "github_repo": null,
+            "last_activity_at": "",
+            "created_at": "",
+            "updated_at": "",
+            "parent_id": null,
+            "created_by": null,
+            "tracking_issue": null,
+            "park": null,
+            "sort_order": null,
+            "branch": {
+                "id": "",
+                "name": "",
+                "title": "",
+                "goal": "",
+                "description": description,
+                "tags": tags,
+                "repo_root": "",
+                "branch": "",
+                "base_branch": "",
+                "created_at": "",
+                "updated_at": "",
+                "open_issue_count": 0,
+                "github": null,
+                "github_pr": null,
+            },
+        }))
+        .expect("fixture must decode as a SessionView")
     }
 
     #[test]
@@ -6882,13 +6803,13 @@ settings:
 
     #[test]
     fn trigger_summary_reads_each_shape() {
-        let cron = json!({ "trigger": { "cron": "0 * * * *" } });
+        let cron = json!({ "cron": "0 * * * *" });
         assert_eq!(trigger_summary(&cron), "cron 0 * * * *");
-        let every = json!({ "trigger": { "every": "30m" } });
+        let every = json!({ "every": "30m" });
         assert_eq!(trigger_summary(&every), "every 30m");
-        let event = json!({ "trigger": { "event": "attention", "level": "blocked" } });
+        let event = json!({ "event": "attention", "level": "blocked" });
         assert_eq!(trigger_summary(&event), "on attention=blocked");
-        let empty = json!({ "trigger": {} });
+        let empty = json!({});
         assert_eq!(trigger_summary(&empty), "—");
     }
 
