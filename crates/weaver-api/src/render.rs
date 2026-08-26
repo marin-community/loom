@@ -8,4 +8,5 @@
 //! operation whose text needs data the output does not carry should widen its
 //! `Output` — not reach for a client mid-render, as the old CLI printers did.
 
+pub mod channels;
 pub mod issues;

@@ -320,6 +320,34 @@ async fn channel_cli_reads_and_appends_typed_history() {
         history.contains("ready for review"),
         "channel history: {history}"
     );
+
+    // `get` reads its delivery bindings out of the channel it already fetched,
+    // and `ack` reports the marker the server moved.
+    let detail = env.run(&["channels", "get", "cli-session"]);
+    assert!(
+        detail.contains("id:      cli-session"),
+        "channel get: {detail}"
+    );
+    assert!(detail.contains("bindings:"), "channel get: {detail}");
+
+    let acked = env.run(&["channels", "ack", "--channel", "cli-session"]);
+    assert!(
+        acked.contains("cli-session read through"),
+        "channel ack: {acked}"
+    );
+
+    let subscribed = env.run(&[
+        "channels",
+        "subscribe",
+        "--channel",
+        "cli-session",
+        "--mode",
+        "observe",
+    ]);
+    assert!(
+        subscribed.contains("cli-session") && subscribed.contains("observe through"),
+        "channel subscribe: {subscribed}"
+    );
 }
 
 /// `issue tag set` sets a free-form label, `issue show` surfaces it, and

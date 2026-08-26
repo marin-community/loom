@@ -61,7 +61,7 @@ pub mod create {
     /// Scoped to a repository (humans launching from the dashboard specify no branch).
     /// A session's opening branch is recorded for provenance, not scope.
     #[operation(id = "channels.create", actor = SessionSelf, scope = Repository, risk = Write,
-                grants = ["loom/channels/write@v1"], cli = "channels open")]
+                grants = ["loom/channels/write@v1"], cli = "channels open", render = custom)]
     pub struct Input {
         /// The new channel's name.
         #[operand(positional)]
@@ -89,7 +89,7 @@ pub mod get {
 
     /// Inspect one channel and its delivery bindings.
     #[operation(id = "channels.get", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/channels/read@v1"], cli = "channels get")]
+                grants = ["loom/channels/read@v1"], cli = "channels get", render = custom)]
     pub struct Input {
         /// A visible channel id. Empty means this session's own channel,
         /// resolved server-side.
@@ -107,10 +107,13 @@ pub mod list {
 
     /// List visible durable channels and their unread state.
     #[operation(id = "channels.list", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/channels/read@v1"], cli = "channels list", cli_alias = "ls")]
+                grants = ["loom/channels/read@v1"], cli = "channels list", cli_alias = "ls",
+                render = custom)]
     pub struct Input {
         /// Include archived channels.
-        #[operand(default = false)]
+        // Spelled `--all` because that is the word the command line has always
+        // taken; the operand the other transports send is `archived`.
+        #[operand(default = false, long = "all")]
         pub archived: bool,
         #[operand(context)]
         pub branch: String,
@@ -129,7 +132,8 @@ pub mod messages {
         ///
         /// Idempotent on `idempotency_key`.
         #[operation(id = "channels.messages.create", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels send")]
+                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels send",
+                    render = custom)]
         pub struct Input {
             /// A visible channel id. Empty means this session's own channel,
             /// resolved server-side.
@@ -169,7 +173,7 @@ pub mod messages {
         /// Read a channel's message history, advancing the read marker unless
         /// peeking.
         #[operation(id = "channels.messages.list", actor = SessionSelf, scope = Branch, risk = Read,
-                    grants = ["loom/channels/read@v1"], cli = "channels read")]
+                    grants = ["loom/channels/read@v1"], cli = "channels read", render = custom)]
         pub struct Input {
             /// A visible channel id. Empty means this session's own channel,
             /// resolved server-side.
@@ -210,7 +214,8 @@ pub mod read_marker {
 
         /// Acknowledge a channel through a sequence number.
         #[operation(id = "channels.read_marker.set", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels ack")]
+                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels ack",
+                    render = custom)]
         pub struct Input {
             /// A visible channel id. Empty means this session's own channel,
             /// resolved server-side.
@@ -236,7 +241,8 @@ pub mod subscription {
 
         /// Set how a session follows a channel.
         #[operation(id = "channels.subscription.set", actor = SessionSelf, scope = Branch,
-                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels subscribe")]
+                    risk = Write, grants = ["loom/channels/write@v1"], cli = "channels subscribe",
+                    render = custom)]
         pub struct Input {
             /// A visible channel id. Empty means this session's own channel,
             /// resolved server-side.
@@ -262,7 +268,8 @@ pub mod wait {
 
     /// Wait for the next matching channel message.
     #[operation(id = "channels.wait", actor = SessionSelf, scope = Branch, risk = Read,
-                grants = ["loom/channels/read@v1"], cli = "channels wait", view = View)]
+                grants = ["loom/channels/read@v1"], cli = "channels wait", view = View,
+                render = custom)]
     pub struct Input {
         /// A visible channel id. Empty means this session's own channel,
         /// resolved server-side.

@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 use std::sync::OnceLock;
 
 use weaver_api::operations::issues as issue_ops;
-use weaver_api::operations::{artifacts, branches, channels, permissions, settings};
+use weaver_api::operations::{
+    artifacts, branches, channels, permissions, settings, Operation, Render,
+};
 use weaver_api::{BranchView, Client, IssueAction, IssueView, ThreadDto};
 use weaver_core::tags;
 
@@ -33,37 +35,22 @@ pub enum StatusCmd {
         message: String,
     },
 }
+// The channel commands whose arguments no declaration can express. Everything
+// else under `loom channels` is served by its `#[operation]` declaration and
+// printed by `weaver_api::render::channels`; what is left here takes an
+// argument shape an operand cannot. `open` and `send` join the trailing words
+// of the command line into one value, so `loom channels send ready for review`
+// still works unquoted, and `wait` polls from the client so it can acknowledge
+// what it scans and print every matching message rather than only the first.
+//
+// A doc comment here would replace the group's `about` in `--help`.
 #[derive(Subcommand)]
 pub enum ChannelCmd {
-    /// List visible open channels and their unread state.
-    #[command(name = "list", visible_alias = "ls")]
-    Ls {
-        /// Include archived channels.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Get channel metadata and its server-owned delivery bindings.
-    Get {
-        /// Channel id, or `self`; defaults to this session's channel.
-        channel: Option<String>,
-    },
     /// Open a custom channel alongside the current session channel.
     Open {
         name: Vec<String>,
         #[arg(long, default_value = "")]
         topic: String,
-    },
-    /// Read channel history and advance its read marker.
-    Read {
-        /// Channel id; defaults to this session's channel.
-        #[arg(long)]
-        channel: Option<String>,
-        /// Only print messages after this sequence number.
-        #[arg(long, default_value = "0")]
-        after: i64,
-        /// Do not advance the read marker.
-        #[arg(long)]
-        peek: bool,
     },
     /// Send a message; on a session channel this also delivers it to the agent.
     Send {
@@ -78,27 +65,6 @@ pub enum ChannelCmd {
         /// Retry-safe key scoped to the channel.
         #[arg(long)]
         idempotency_key: Option<String>,
-    },
-    /// Set how this session follows a channel.
-    Subscribe {
-        /// Channel id; defaults to this session's channel.
-        #[arg(long)]
-        channel: Option<String>,
-        /// observe or deliver.
-        #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_SUBSCRIPTION_MODE)]
-        mode: String,
-        /// Subscribe this descendant session instead of the caller.
-        #[arg(long)]
-        session: Option<String>,
-    },
-    /// Mark a channel read through its latest message.
-    Ack {
-        /// Channel id; defaults to this session's channel.
-        #[arg(long)]
-        channel: Option<String>,
-        /// Mark read through this sequence instead of the latest.
-        #[arg(long)]
-        seq: Option<i64>,
     },
     /// Wait for the next channel message.
     Wait {
@@ -1185,65 +1151,6 @@ const BACKLOG_CAP: usize = 10;
 async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
     let client = client();
     match cmd {
-        ChannelCmd::Ls { all } => {
-            let channels = client
-                .invoke::<channels::list::Op>(&channels::list::Input {
-                    archived: all,
-                    branch: String::new(),
-                })
-                .await?;
-            if channels.is_empty() {
-                println!("(no channels)");
-            }
-            for channel in channels {
-                let urgent = if channel.unread_urgent_count > 0 {
-                    format!(" !{}", channel.unread_urgent_count)
-                } else {
-                    String::new()
-                };
-                let unread = if channel.unread_count > 0 {
-                    format!(" +{}", channel.unread_count)
-                } else {
-                    String::new()
-                };
-                println!(
-                    "{}  {:<8} {}{}{}",
-                    channel.id, channel.kind, channel.name, unread, urgent
-                );
-                if !channel.topic.is_empty() {
-                    println!("  {}", truncate(&channel.topic, 100));
-                }
-            }
-        }
-        ChannelCmd::Get { channel } => {
-            let id = channel_key(channel)?;
-            let channel = client
-                .invoke::<channels::get::Op>(&channels::get::Input {
-                    channel: id.to_string(),
-                    branch: String::new(),
-                })
-                .await?;
-            println!("id:      {}", channel.id);
-            println!("kind:    {}", channel.kind);
-            println!("name:    {}", channel.name);
-            println!("state:   {}", channel.state);
-            if !channel.topic.is_empty() {
-                println!("topic:   {}", channel.topic);
-            }
-            let bindings = client
-                .invoke::<channels::bindings::list::Op>(&channels::bindings::list::Input {
-                    channel: id.to_string(),
-                    branch: String::new(),
-                })
-                .await?;
-            println!("bindings:");
-            if bindings.is_empty() {
-                println!("  (none)");
-            }
-            for binding in bindings {
-                println!("  {}  {}  {}", binding.id, binding.kind, binding.label);
-            }
-        }
         ChannelCmd::Open { name, topic } => {
             let name = name.join(" ");
             if name.trim().is_empty() {
@@ -1268,29 +1175,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                     branch: None,
                 })
                 .await?;
-            println!("{}  {}", channel.id, channel.name);
-        }
-        ChannelCmd::Read {
-            channel,
-            after,
-            peek,
-        } => {
-            let id = channel_key(channel)?;
-            let messages = client.channel_messages(&id, after).await?;
-            print_channel_messages(&messages);
-            if !peek {
-                if let Some(last) = messages.last() {
-                    client
-                        .invoke::<channels::read_marker::set::Op>(
-                            &channels::read_marker::set::Input {
-                                channel: id.to_string(),
-                                seq: Some(last.seq),
-                                branch: String::new(),
-                            },
-                        )
-                        .await?;
-                }
-            }
+            println!("{}", render::<channels::create::Op>(&channel));
         }
         ChannelCmd::Send {
             text,
@@ -1316,41 +1201,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                     branch: String::new(),
                 })
                 .await?;
-            print_channel_messages(&[message]);
-        }
-        ChannelCmd::Subscribe {
-            channel,
-            mode,
-            session,
-        } => {
-            let id = channel_key(channel)?;
-            let subscription = client
-                .invoke::<channels::subscription::set::Op>(&channels::subscription::set::Input {
-                    channel: id.to_string(),
-                    mode: mode.to_string(),
-                    session: session.as_deref().map(str::to_string),
-                    branch: String::new(),
-                })
-                .await?;
-            println!(
-                "{}  {}:{}  {} through {}",
-                subscription.channel_id,
-                subscription.subject_kind,
-                subscription.subject_id,
-                subscription.mode,
-                subscription.read_seq
-            );
-        }
-        ChannelCmd::Ack { channel, seq } => {
-            let id = channel_key(channel)?;
-            let subscription = client
-                .invoke::<channels::read_marker::set::Op>(&channels::read_marker::set::Input {
-                    channel: id.to_string(),
-                    seq,
-                    branch: String::new(),
-                })
-                .await?;
-            println!("{} read through {}", id, subscription.read_seq);
+            println!("{}", render::<channels::messages::create::Op>(&message));
         }
         ChannelCmd::Wait {
             channel,
@@ -1398,7 +1249,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
                         .cloned()
                         .collect::<Vec<_>>();
                     if !matching.is_empty() {
-                        print_channel_messages(&matching);
+                        println!("{}", render::<channels::messages::list::Op>(&matching));
                         return Ok(());
                     }
                 }
@@ -1417,32 +1268,14 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
     Ok(())
 }
 
-fn print_channel_messages(messages: &[weaver_api::ChannelMessageView]) {
-    if messages.is_empty() {
-        println!("(no messages)");
-    }
-    for message in messages {
-        let marker = match message.urgency.as_str() {
-            "blocked" => "!!",
-            "attention" => " !",
-            _ => "  ",
-        };
-        println!(
-            "{:>4}{} {:<7} {}:{}  {}",
-            message.seq, marker, message.kind, message.author_kind, message.author_id, message.body
-        );
-        for delivery in &message.deliveries {
-            let error = delivery
-                .last_error
-                .as_deref()
-                .map(|error| format!(" — {error}"))
-                .unwrap_or_default();
-            println!(
-                "       delivery {} → {}{}",
-                delivery.binding_id, delivery.state, error
-            );
-        }
-    }
+/// One operation's own rendering of a result a hand-written command fetched
+/// itself. What the declaration prints and what the bespoke command prints are
+/// then the same function, so they cannot drift.
+fn render<O: Operation + Render>(output: &O::Output) -> String
+where
+    O::View: Default,
+{
+    O::text(output, &O::View::default())
 }
 
 async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
