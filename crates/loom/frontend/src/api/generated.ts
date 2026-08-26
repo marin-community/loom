@@ -3719,7 +3719,10 @@ export interface ReviewsCommentsCreateInput {
 export interface ReviewsCommentsDeleteInput {
   /** The comment to delete. */
   comment_id: number;
-  /** Optimistic-concurrency guard on the review's draft revision. */
+  /**
+   * Optimistic-concurrency guard on the review's draft revision, as
+   * `loom review ls` or the previous mutation reported it.
+   */
   expected_revision: number;
   /** The review the comment belongs to. */
   id: number;
@@ -3772,7 +3775,10 @@ export interface ReviewsCreateInput {
 
 /** Permanently discard a draft review. */
 export interface ReviewsDiscardInput {
-  /** Optimistic-concurrency guard on the review's draft revision. */
+  /**
+   * Optimistic-concurrency guard on the review's draft revision, as
+   * `loom review ls` or the previous mutation reported it.
+   */
   expected_revision: number;
   /** The draft review to discard. */
   id: number;
@@ -3802,7 +3808,10 @@ export interface ReviewsListInput {
 
 /** Retarget a draft review's subject onto its current version — an artifact's latest revision, or the branch's current change-set — in one step, without touching anything else. */
 export interface ReviewsRetargetInput {
-  /** Optimistic-concurrency guard on the review's draft revision. */
+  /**
+   * Optimistic-concurrency guard on the review's draft revision, as
+   * `loom review show` or the previous mutation reported it.
+   */
   expected_revision: number;
   /** The draft review to retarget. */
   id: number;
@@ -3884,11 +3893,14 @@ export interface RunsListInput {
 export interface SessionLayoutDefaultsDeleteInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
-  /** Which kind of selector the default to clear matches on. */
+  expected_revision?: number | null;
+  /**
+   * Which kind of selector the default to clear matches on: `origin`,
+   * `profile`, or `watch`.
+   */
   selector_kind: SessionPlacementSelectorKind;
   selector_value: string;
 }
@@ -3897,12 +3909,16 @@ export interface SessionLayoutDefaultsDeleteInput {
 export interface SessionLayoutDefaultsSetInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
+  /** The group matching sessions land in. */
   group_id: string;
-  /** Which kind of selector this default matches on. */
+  /**
+   * Which kind of selector this default matches on: `origin`,
+   * `profile`, or `watch`.
+   */
   selector_kind: SessionPlacementSelectorKind;
   selector_value: string;
 }
@@ -3919,11 +3935,12 @@ export interface SessionLayoutGetInput {
 export interface SessionLayoutGroupsCreateInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   name: string;
+  /** The space the group is created in. */
   space_id: string;
 }
 
@@ -3936,10 +3953,10 @@ export interface SessionLayoutGroupsDeleteInput {
   destination_group_id?: string | null;
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   /** The group being deleted. */
   id: string;
 }
@@ -3955,10 +3972,10 @@ export interface SessionLayoutGroupsPreferenceSetInput {
 export interface SessionLayoutGroupsUpdateInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   /** The group being renamed. */
   id: string;
   name: string;
@@ -3971,13 +3988,15 @@ export interface SessionLayoutMoveInput {
    * to the end.
    */
   before_session_id?: string | null;
+  /** The group they move into. */
   destination_group_id: string;
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
+  /** The sessions to move, in the order they should land. */
   session_ids?: string[];
 }
 
@@ -3989,13 +4008,13 @@ export interface SessionLayoutReorderInput {
   destination_space_id?: string | null;
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   /** The space or group being repositioned. */
   id: string;
-  /** Whether `id` names a space or a group. */
+  /** Whether `id` names a `space` or a `group`. */
   kind: SessionLayoutItemKind;
 }
 
@@ -4003,10 +4022,11 @@ export interface SessionLayoutReorderInput {
 export interface SessionLayoutRestoreInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
+  /** A JSON array of `{"group_id":"…","session_ids":["…"]}` objects. */
   groups?: SessionGroupOrderReq[];
 }
 
@@ -4014,10 +4034,10 @@ export interface SessionLayoutRestoreInput {
 export interface SessionLayoutSpacesCreateInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   name: string;
 }
 
@@ -4030,10 +4050,10 @@ export interface SessionLayoutSpacesDeleteInput {
   destination_group_id?: string | null;
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Stale calls are rejected to prevent concurrent
-   * edit conflicts.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   /** The space being deleted. */
   id: string;
 }
@@ -4042,10 +4062,10 @@ export interface SessionLayoutSpacesDeleteInput {
 export interface SessionLayoutSpacesUpdateInput {
   /**
    * Optimistic-concurrency guard: the layout revision this call was
-   * composed against. Rejects stale callers to prevent clobbering concurrent
-   * edits from other dashboard tabs.
+   * composed against. A stale revision is rejected; omitting it applies
+   * the change to whatever is current.
    */
-  expected_revision: number;
+  expected_revision?: number | null;
   /** The space being renamed. */
   id: string;
   name: string;
