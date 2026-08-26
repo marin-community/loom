@@ -6,7 +6,10 @@
 //! they never reach the API, so there is nothing for the registry to own.
 
 pub mod clap_bind;
+pub mod commands;
 pub mod dispatch;
+pub mod host;
+pub mod support;
 
 pub use dispatch::{augment, bind, resolve, CliBinding};
 

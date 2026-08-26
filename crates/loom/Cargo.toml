@@ -7,6 +7,12 @@ build = "build.rs"
 [lib]
 name = "loom"
 path = "src/lib.rs"
+# The CLI command groups' doc comments are clap help text — shell transcripts
+# that `--help` prints verbatim, indented the way a terminal shows them.
+# rustdoc reads an indented block as Rust and tries to compile it, so a
+# `loom sessions launch "..."` example fails as a doctest. The crate has no real
+# doctests to lose.
+doctest = false
 
 [[bin]]
 name = "loom"
