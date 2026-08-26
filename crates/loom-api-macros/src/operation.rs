@@ -266,6 +266,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     grants: &[#(#grant_literals),*],
                     cli: #cli_tokens,
                     schema: <#input_ty as ::weaver_api::operations::Operands>::schema,
+                    output_schema: || {
+                        ::serde_json::to_value(::schemars::schema_for!(Output))
+                            .unwrap_or_else(|_| ::serde_json::json!({}))
+                    },
                     context: <#input_ty as ::weaver_api::operations::Operands>::CONTEXT,
                 };
         }

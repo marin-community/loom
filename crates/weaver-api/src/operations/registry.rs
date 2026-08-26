@@ -10,6 +10,7 @@
 //! through function pointers, eliminating any hand-maintained alignment between
 //! the declaration and the implementation.
 
+use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
@@ -17,7 +18,7 @@ use serde_json::Value;
 ///
 /// This is the axis that replaces excluding administrative or human-only
 /// endpoints from the registry: an operator-only action is `Admin`, not absent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorPolicy {
     SessionSelf,
@@ -64,7 +65,7 @@ impl ActorPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationRisk {
     Read,
@@ -85,7 +86,7 @@ impl OperationRisk {
 }
 
 /// The durable resource an operation is authorized against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationScope {
     Session,
@@ -111,7 +112,7 @@ impl OperationScope {
 /// This is the *only* axis on which a registered operation may be special.
 /// Streaming and upload endpoints keep their descriptor, typed input, and
 /// authorization instead of becoming unchecked special cases.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Io {
     /// JSON request, JSON response. The overwhelming majority.
@@ -290,7 +291,15 @@ pub struct OperationSpec {
     pub io: Io,
     pub grants: &'static [&'static str],
     pub cli: Option<CliProjection>,
+    /// JSON Schema for what a caller may pass, context fields elided.
     pub schema: fn() -> Value,
+    /// JSON Schema for what this operation returns.
+    ///
+    /// Derived from `Output`, the same way `schema` is derived from `Input`.
+    /// Without it a caller could be told exactly what to send and nothing at
+    /// all about what comes back, which is why `frontend/src/types.ts` was
+    /// hand-written.
+    pub output_schema: fn() -> Value,
     pub context: &'static [ContextField],
 }
 
@@ -314,7 +323,7 @@ impl OperationSpec {
 /// A compile-time binding between one identity and its concrete types.
 pub trait Operation: Send + Sync + 'static {
     type Input: Operands + Send + Sync + 'static;
-    type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Output: Serialize + DeserializeOwned + JsonSchema + Send + Sync + 'static;
     type View: ViewFlags + Send + Sync + 'static;
 
     const SPEC: &'static OperationSpec;
@@ -417,6 +426,7 @@ mod tests {
             grants: &[],
             cli: None,
             schema,
+            output_schema: schema,
             context: &[],
         };
         assert_eq!(spec.path(), "/api/issues/tags/set");

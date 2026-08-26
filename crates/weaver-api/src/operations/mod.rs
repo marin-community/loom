@@ -131,7 +131,7 @@ pub fn operation_input_schema(operation: &OperationSpec) -> Value {
 
 // -- Discovery views ---------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct OperationView {
     pub id: String,
     pub bundle: String,
@@ -146,6 +146,7 @@ pub struct OperationView {
     pub cli_aliases: Vec<String>,
     pub grants: Vec<String>,
     pub schema: Value,
+    pub output_schema: Value,
 }
 
 impl From<&OperationSpec> for OperationView {
@@ -176,6 +177,7 @@ impl From<&OperationSpec> for OperationView {
                 .map(|grant| (*grant).to_string())
                 .collect(),
             schema: (spec.schema)(),
+            output_schema: (spec.output_schema)(),
         }
     }
 }
@@ -275,7 +277,14 @@ pub fn openapi_document(version: &str) -> Value {
             "x-loom-risk": operation.risk.as_str(),
             "x-loom-io": operation.io.as_str(),
             "x-loom-grants": operation.grants,
-            "responses": { "200": { "description": "success" } },
+            "responses": {
+                "200": {
+                    "description": "success",
+                    "content": {
+                        "application/json": { "schema": (operation.output_schema)() },
+                    },
+                },
+            },
         });
         if let Some(cli) = operation.cli {
             definition["x-loom-cli"] = json!(cli.invocation());
