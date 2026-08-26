@@ -323,7 +323,7 @@ pub mod update {
         /// Replace the detail body.
         pub body: Option<String>,
         /// `open` or `closed`.
-        #[schemars(extend("enum" = ["open", "closed"]))]
+        #[schemars(extend("enum" = ::serde_json::json!(["open", "closed", null])))]
         pub status: Option<String>,
         /// GitHub issue mapping as `owner/name#number`. An empty string clears the
         /// mapping; omitting the field leaves it unchanged.

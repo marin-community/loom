@@ -893,6 +893,17 @@ mod tests {
     /// pattern and reason length — each declared on the operand rather than in
     /// the adapter. Membership is identical in all 23 sets and no tool
     /// description changed.
+    /// Re-pinned again when three optional operands stopped advertising a
+    /// closed enum that excluded `null`. `channels.wait`'s `kind`,
+    /// `permissions.requests.list`'s `state` and `issues.update`'s `status` are
+    /// each `Option<String>` — serde accepts an explicit `null` and reads it as
+    /// "no filter" — while the schema listed only the string values, so an
+    /// agent sending `null` was sending something the tool said was invalid.
+    /// The SPA was doing exactly that. `null` is a member of each enum now.
+    /// Only the two `channel/read` sets and `permissions/read` move;
+    /// `issues.update` is not exported as a tool. Membership is identical in
+    /// all 23 sets and no description changed.
+    ///
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -913,7 +924,7 @@ mod tests {
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:5b0d55410134f443d8c0bc0b53b247e1ee6de63386ee089496a25f8e2364708c",
+                "sha256:d90f7358facdecea9a10fd2cff6f75ccec35a76b5d0dcb08e62ca0a71b35fa2b",
             ),
             (
                 "loom/channels/write@v1",
@@ -921,7 +932,7 @@ mod tests {
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:db2a76d69832ccd618b0fc7b24c3cf7ad10a1a0b0f801fbeaf9155a839558d5c",
+                "sha256:4895ffaa5ba9f2f7d45b4ee66501d8c20f1770f861cf81fc4463c9686050725c",
             ),
             (
                 "mcp/channel/write@v1",
@@ -981,7 +992,7 @@ mod tests {
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:4939df1955fd91c32ff026ca4aef015e532be9551409bcb62dab2548e0250f3b",
+                "sha256:a87137f2c28852fdb0ee54d257f518ef384f2eaa4cb8960cef54e7301b30f22a",
             ),
             (
                 "loom/permissions/request@v1",

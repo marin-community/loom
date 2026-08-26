@@ -280,7 +280,7 @@ pub mod wait {
         #[schemars(range(min = 0))]
         pub after: Option<i64>,
         /// Wake only for this message kind, e.g. `result`.
-        #[schemars(extend("enum" = ["goal", "message", "status", "result", "system"]))]
+        #[schemars(extend("enum" = ::serde_json::json!(["goal", "message", "status", "result", "system", null])))]
         pub kind: Option<String>,
         /// Wake only for `attention` or `blocked` urgency.
         #[operand(default = false)]

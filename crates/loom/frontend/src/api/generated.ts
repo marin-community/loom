@@ -3086,7 +3086,7 @@ export interface ChannelsWaitInput {
    */
   channel?: string;
   /** Wake only for this message kind, e.g. `result`. */
-  kind?: 'goal' | 'message' | 'status' | 'result' | 'system';
+  kind?: 'goal' | 'message' | 'status' | 'result' | 'system' | null;
   /** Seconds to wait before giving up. */
   timeout?: number;
   /** Wake only for `attention` or `blocked` urgency. */
@@ -3299,7 +3299,7 @@ export interface IssuesUpdateInput {
   /** A Loom work-item id. */
   id: number;
   /** `open` or `closed`. */
-  status?: 'open' | 'closed';
+  status?: 'open' | 'closed' | null;
   /** Replace the one-line summary. */
   title?: string | null;
   /** Return the item to the unclaimed backlog. */
@@ -3450,7 +3450,7 @@ export interface PermissionsRequestsDenyInput {
 /** List durable external-access requests for this session. */
 export interface PermissionsRequestsListInput {
   /** Restrict to `pending`, `approved`, or `denied`. Omit to list all. */
-  state?: 'pending' | 'approved' | 'denied';
+  state?: 'pending' | 'approved' | 'denied' | null;
   /** Supplied by the dispatcher from the caller's session context when omitted. */
   session?: string;
 }

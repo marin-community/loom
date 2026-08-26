@@ -295,7 +295,7 @@ pub mod requests {
                     cli = "permissions requests")]
         pub struct Input {
             /// Restrict to `pending`, `approved`, or `denied`. Omit to list all.
-            #[schemars(extend("enum" = ["pending", "approved", "denied"]))]
+            #[schemars(extend("enum" = ::serde_json::json!(["pending", "approved", "denied", null])))]
             pub state: Option<String>,
             #[operand(context)]
             pub session: String,
