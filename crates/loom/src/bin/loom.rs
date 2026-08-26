@@ -543,14 +543,25 @@ fn registered_cli_factory(name: &str) -> Option<&'static CliCommandFactory> {
 
 impl FromArgMatches for Cmd {
     fn from_arg_matches(matches: &ArgMatches) -> clap::error::Result<Self> {
+        // Generic bindings go first. `generic_bindings` has already dropped
+        // every path the hand-written tree answers, so whatever resolves here
+        // is an operation no bespoke command implements.
+        //
+        // The factory table used to be asked first, and it matches on the
+        // *group* name, so a group with any hand-written command swallowed
+        // every declared one beside it. That was 18 invocations across
+        // `channels`, `issues` and `sessions` — `loom issues list` among them.
+        // The tree offered them, `--help` documented them, `/api/operations`
+        // advertised them, and running one said the subcommand was not
+        // recognized.
+        let bindings = generic_bindings();
+        if let Some((binding, operation_matches)) = loom::cli::resolve(&bindings, matches) {
+            return Ok(Self::Operation(*binding, operation_matches));
+        }
         if let Some((name, command_matches)) = matches.subcommand() {
             if let Some(factory) = registered_cli_factory(name) {
                 return (factory.parse)(command_matches).map(Self::Registered);
             }
-        }
-        let bindings = generic_bindings();
-        if let Some((binding, operation_matches)) = loom::cli::resolve(&bindings, matches) {
-            return Ok(Self::Operation(*binding, operation_matches));
         }
         HostCmd::from_arg_matches(matches).map(Self::Host)
     }
@@ -1722,10 +1733,12 @@ mod cli_tree_tests {
     }
 
     /// Every advertised invocation exists in the tree the binary really uses.
-    /// it violated: a descriptor said `cli: Some("loom issues list")` beside a
-    /// clap enum whose variant was `Ls`, and three advertised commands did not
-    /// exist at all. Checking bindings against the registry is not enough —
-    /// both can agree while the binary offers a different word.
+    ///
+    /// This is the invariant the pre-registry command line violated: a
+    /// descriptor said `cli: Some("loom issues list")` beside a clap enum whose
+    /// variant was `Ls`, and three advertised commands did not exist at all.
+    /// Checking bindings against the registry is not enough — both can agree
+    /// while the binary offers a different word.
     ///
     /// It covers hand-written commands too, deliberately. An operation served by
     /// a bespoke command still has to be reachable by the name it advertises.
@@ -1773,6 +1786,94 @@ mod cli_tree_tests {
             drift.len(),
             drift.join("\n")
         );
+    }
+
+    /// Every generic binding is *dispatched to*, not merely present.
+    ///
+    /// Walking the built tree and running the binary are different questions,
+    /// and the gap between them shipped: `loom issues list`, `board`, `update`
+    /// and `actions` were in the tree, documented by `--help` and advertised by
+    /// `/api/operations`, yet every one of them failed with "the subcommand
+    /// wasn't recognized". `Cmd::from_arg_matches` matched the *group* name
+    /// `issues` against the hand-written factory table and handed the parse to
+    /// a clap enum that only knows `ls`.
+    #[test]
+    fn every_generic_binding_dispatches_to_its_operation() {
+        let command = Cli::command();
+        let mut drift = Vec::new();
+        for binding in generic_bindings() {
+            let Some(cli) = binding.operation.cli else {
+                continue;
+            };
+            let argv = smallest_invocation(&command, cli.path);
+            let spelled = argv[1..].join(" ");
+            let matches = match command.clone().try_get_matches_from(&argv) {
+                Ok(matches) => matches,
+                Err(error) => {
+                    drift.push(format!("  `loom {spelled}` does not parse: {error}"));
+                    continue;
+                }
+            };
+            match Cmd::from_arg_matches(&matches) {
+                Ok(Cmd::Operation(resolved, _))
+                    if resolved.operation.id == binding.operation.id => {}
+                Ok(Cmd::Operation(resolved, _)) => drift.push(format!(
+                    "  `loom {spelled}` is {} but dispatched to {}",
+                    binding.operation.id, resolved.operation.id
+                )),
+                Ok(_) => drift.push(format!(
+                    "  `loom {spelled}` is {} but dispatched to a hand-written command",
+                    binding.operation.id
+                )),
+                Err(error) => drift.push(format!(
+                    "  `loom {spelled}` is {} but dispatch refused it: {error}",
+                    binding.operation.id
+                )),
+            }
+        }
+        assert!(
+            drift.is_empty(),
+            "{} advertised command(s) do not reach the operation they name:\n{}",
+            drift.len(),
+            drift.join("\n")
+        );
+    }
+
+    /// The shortest argv that gets `path` past clap: the words themselves, then
+    /// a value for each argument the leaf insists on.
+    ///
+    /// `1` satisfies every value parser the tree uses — the string one and the
+    /// integer one — so the arguments need no introspection beyond whether they
+    /// are required and whether they are positional.
+    fn smallest_invocation(command: &Command, path: &[&str]) -> Vec<String> {
+        let mut node = command;
+        for segment in path {
+            node = node
+                .get_subcommands()
+                .find(|candidate| {
+                    candidate.get_name() == *segment
+                        || candidate.get_all_aliases().any(|alias| alias == *segment)
+                })
+                .unwrap_or_else(|| panic!("`{segment}` is not in the built tree"));
+        }
+        let mut argv: Vec<String> = std::iter::once("loom".to_string())
+            .chain(path.iter().map(|segment| (*segment).to_string()))
+            .collect();
+        let required: Vec<&clap::Arg> = node
+            .get_arguments()
+            .filter(|argument| argument.is_required_set())
+            .collect();
+        for argument in required.iter().filter(|argument| !argument.is_positional()) {
+            let long = argument
+                .get_long()
+                .expect("a required option is spelled with a long flag");
+            argv.push(format!("--{long}"));
+            argv.push("1".to_string());
+        }
+        for _ in required.iter().filter(|argument| argument.is_positional()) {
+            argv.push("1".to_string());
+        }
+        argv
     }
 
     #[test]
