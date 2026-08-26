@@ -62,7 +62,8 @@ pub mod comments {
         ///
         /// Limited to the review's own creator, and rejected once the review
         /// has left `draft` status.
-        #[operation(id = "reviews.comments.delete", actor = User, scope = Global, risk = Write)]
+        #[operation(id = "reviews.comments.delete", actor = User, scope = Global, risk = Write,
+                    render = custom, cli = "review delete-comment")]
         pub struct Input {
             /// The review the comment belongs to.
             #[operand(positional)]
@@ -70,7 +71,9 @@ pub mod comments {
             /// The comment to delete.
             #[operand(positional)]
             pub comment_id: i64,
-            /// Optimistic-concurrency guard on the review's draft revision.
+            /// Optimistic-concurrency guard on the review's draft revision, as
+            /// `loom review ls` or the previous mutation reported it.
+            #[operand(long = "revision")]
             pub expected_revision: i64,
         }
 
@@ -174,12 +177,15 @@ pub mod discard {
     ///
     /// Limited to the review's own creator, and rejected once the review has left
     /// `draft` status.
-    #[operation(id = "reviews.discard", actor = User, scope = Global, risk = Destructive)]
+    #[operation(id = "reviews.discard", actor = User, scope = Global, risk = Destructive,
+                render = custom, cli = "review discard")]
     pub struct Input {
         /// The draft review to discard.
         #[operand(positional)]
         pub id: i64,
-        /// Optimistic-concurrency guard on the review's draft revision.
+        /// Optimistic-concurrency guard on the review's draft revision, as
+        /// `loom review ls` or the previous mutation reported it.
+        #[operand(long = "revision")]
         pub expected_revision: i64,
     }
 
@@ -197,7 +203,8 @@ pub mod get {
     ///
     /// A submitted review is visible to any operator; a draft only to the
     /// operator who created it.
-    #[operation(id = "reviews.get", actor = User, scope = Global, risk = Read)]
+    #[operation(id = "reviews.get", actor = User, scope = Global, risk = Read,
+                cli = "review show")]
     pub struct Input {
         /// The review to fetch.
         #[operand(positional)]
@@ -248,12 +255,15 @@ pub mod retarget {
     ///
     /// Limited to the review's own creator, and rejected once the review has left
     /// `draft` status.
-    #[operation(id = "reviews.retarget", actor = User, scope = Global, risk = Write)]
+    #[operation(id = "reviews.retarget", actor = User, scope = Global, risk = Write,
+                render = custom, cli = "review retarget")]
     pub struct Input {
         /// The draft review to retarget.
         #[operand(positional)]
         pub id: i64,
-        /// Optimistic-concurrency guard on the review's draft revision.
+        /// Optimistic-concurrency guard on the review's draft revision, as
+        /// `loom review show` or the previous mutation reported it.
+        #[operand(long = "revision")]
         pub expected_revision: i64,
     }
 
@@ -267,7 +277,8 @@ pub mod retry_delivery {
     ///
     /// Any operator may retry delivery of any submitted review — unlike
     /// `reviews.submit`, this one is not limited to the creator.
-    #[operation(id = "reviews.retry_delivery", actor = User, scope = Global, risk = Write)]
+    #[operation(id = "reviews.retry_delivery", actor = User, scope = Global, risk = Write,
+                render = custom, cli = "review retry")]
     pub struct Input {
         /// The submitted review whose delivery failed.
         #[operand(positional)]

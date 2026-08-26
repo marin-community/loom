@@ -633,13 +633,23 @@ enum ServerCmd {
     Status,
 }
 
-/// Subcommands under `loom review`.
+// Subcommands under `loom review` that the registry cannot declare. `show`,
+// `discard`, `retarget`, `delete-comment` and `retry` are declared on their
+// operations in `weaver_api::operations::reviews` and merge in beside these.
+// What is left does something one declaration cannot: `ls` pins `subject_kind`
+// to `artifact` and names a session that `reviews.list` takes from context;
+// `add` and `overall` each run two operations in sequence; `add`, `edit` and
+// `reanchor` build a `ReviewAnchorDto`, or a joined multi-word body, out of
+// flags; `submit` updates the summary first when one is given; and
+// `resolve`/`reopen` are two spellings of one operation that differ only in
+// the `resolved` they send.
+//
+// This is a `//` comment because clap would otherwise show the whole
+// explanation as `loom review --help`.
 #[derive(Subcommand)]
 enum ReviewCmd {
     /// List reviews for one artifact in a session.
     Ls { session: String, artifact: String },
-    /// Show the exact server-authoritative review envelope and delivery preview.
-    Show { review_id: i64 },
     /// Add a pending comment, creating the caller's draft when needed.
     Add {
         session: String,
@@ -694,32 +704,10 @@ enum ReviewCmd {
         #[arg(required = true)]
         body: Vec<String>,
     },
-    /// Delete one pending comment.
-    DeleteComment {
-        review_id: i64,
-        comment_id: i64,
-        /// Draft revision shown by `loom review ls` or the previous mutation.
-        #[arg(long)]
-        revision: i64,
-    },
     /// Resolve one submitted review comment.
     Resolve { review_id: i64, comment_id: i64 },
     /// Reopen one resolved review comment.
     Reopen { review_id: i64, comment_id: i64 },
-    /// Discard a draft and all of its pending comments.
-    Discard {
-        review_id: i64,
-        /// Draft revision shown by `loom review ls` or the previous mutation.
-        #[arg(long)]
-        revision: i64,
-    },
-    /// Move an overall-only draft target to the artifact's current revision.
-    Retarget {
-        review_id: i64,
-        /// Draft revision shown by `loom review show` or the previous mutation.
-        #[arg(long)]
-        revision: i64,
-    },
     /// Submit the immutable review and enqueue one structured conversation message.
     Submit {
         review_id: i64,
@@ -732,8 +720,6 @@ enum ReviewCmd {
         #[arg(long)]
         acknowledge_outdated: bool,
     },
-    /// Retry a failed review delivery.
-    Retry { review_id: i64 },
 }
 
 /// Subcommands under `loom sessions` — the uniform way to drive a child session.
@@ -2249,13 +2235,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             }
             Ok(())
         }
-        ReviewCmd::Show { review_id } => {
-            let review = client
-                .invoke::<reviews::get::Op>(&reviews::get::Input { id: review_id })
-                .await?;
-            println!("{}", serde_json::to_string_pretty(&review)?);
-            Ok(())
-        }
         ReviewCmd::Add {
             session,
             artifact,
@@ -2395,24 +2374,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
             );
             Ok(())
         }
-        ReviewCmd::DeleteComment {
-            review_id,
-            comment_id,
-            revision,
-        } => {
-            let review = client
-                .invoke::<reviews::comments::delete::Op>(&reviews::comments::delete::Input {
-                    id: review_id,
-                    comment_id,
-                    expected_revision: revision,
-                })
-                .await?;
-            println!(
-                "deleted comment {comment_id} · draft revision {}",
-                review.draft_revision
-            );
-            Ok(())
-        }
         ReviewCmd::Resolve {
             review_id,
             comment_id,
@@ -2439,35 +2400,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 })
                 .await?;
             println!("reopened comment {}", comment.id);
-            Ok(())
-        }
-        ReviewCmd::Discard {
-            review_id,
-            revision,
-        } => {
-            client
-                .invoke::<reviews::discard::Op>(&reviews::discard::Input {
-                    id: review_id,
-                    expected_revision: revision,
-                })
-                .await?;
-            println!("discarded review {review_id}");
-            Ok(())
-        }
-        ReviewCmd::Retarget {
-            review_id,
-            revision,
-        } => {
-            let review = client
-                .invoke::<reviews::retarget::Op>(&reviews::retarget::Input {
-                    id: review_id,
-                    expected_revision: revision,
-                })
-                .await?;
-            println!(
-                "review {} targets artifact revision {} · draft revision {}",
-                review.id, review.subject.version, review.draft_revision
-            );
             Ok(())
         }
         ReviewCmd::Submit {
@@ -2500,15 +2432,6 @@ async fn run_review(cmd: ReviewCmd) -> Result<()> {
                 "submitted review {} · delivery {}",
                 review.id, review.delivery_state
             );
-            Ok(())
-        }
-        ReviewCmd::Retry { review_id } => {
-            let review = client
-                .invoke::<reviews::retry_delivery::Op>(&reviews::retry_delivery::Input {
-                    id: review_id,
-                })
-                .await?;
-            println!("review {} · delivery {}", review.id, review.delivery_state);
             Ok(())
         }
     }
@@ -5838,6 +5761,13 @@ mod tests {
         ));
     }
 
+    /// Every `loom review` word still parses, and each reaches the half of the
+    /// surface that owns it.
+    ///
+    /// The bundle is split: five commands come from their operation's
+    /// declaration and are dispatched generically, and the rest stay
+    /// hand-written because one declaration cannot express what they do. A
+    /// command silently changing sides is exactly the drift this catches.
     #[test]
     fn review_commands_parse_the_shared_rest_contract() {
         let Cli { cmd, .. } = Cli::try_parse_from([
@@ -5873,7 +5803,6 @@ mod tests {
 
         for args in [
             vec!["loom", "review", "ls", "session-1", "design"],
-            vec!["loom", "review", "show", "4"],
             vec![
                 "loom",
                 "review",
@@ -5907,19 +5836,8 @@ mod tests {
                 "3",
                 "overall note",
             ],
-            vec![
-                "loom",
-                "review",
-                "delete-comment",
-                "4",
-                "9",
-                "--revision",
-                "2",
-            ],
             vec!["loom", "review", "resolve", "4", "9"],
             vec!["loom", "review", "reopen", "4", "9"],
-            vec!["loom", "review", "discard", "4", "--revision", "2"],
-            vec!["loom", "review", "retarget", "4", "--revision", "2"],
             vec![
                 "loom",
                 "review",
@@ -5929,12 +5847,52 @@ mod tests {
                 "2",
                 "--acknowledge-outdated",
             ],
-            vec!["loom", "review", "retry", "4"],
         ] {
-            assert!(matches!(
-                Cli::try_parse_from(args).unwrap().cmd,
-                Cmd::Registered(RegisteredCliCommand::Review(_))
-            ));
+            let spelled = args.join(" ");
+            assert!(
+                matches!(
+                    Cli::try_parse_from(args).unwrap().cmd,
+                    Cmd::Registered(RegisteredCliCommand::Review(_))
+                ),
+                "`{spelled}` no longer reaches its hand-written command"
+            );
+        }
+
+        for (args, id) in [
+            (vec!["loom", "review", "show", "4"], "reviews.get"),
+            (
+                vec![
+                    "loom",
+                    "review",
+                    "delete-comment",
+                    "4",
+                    "9",
+                    "--revision",
+                    "2",
+                ],
+                "reviews.comments.delete",
+            ),
+            (
+                vec!["loom", "review", "discard", "4", "--revision", "2"],
+                "reviews.discard",
+            ),
+            (
+                vec!["loom", "review", "retarget", "4", "--revision", "2"],
+                "reviews.retarget",
+            ),
+            (
+                vec!["loom", "review", "retry", "4"],
+                "reviews.retry_delivery",
+            ),
+        ] {
+            let spelled = args.join(" ");
+            let Cmd::Operation(binding, _) = Cli::try_parse_from(args).unwrap().cmd else {
+                panic!("`{spelled}` is declared by {id} but did not dispatch generically");
+            };
+            assert_eq!(
+                binding.operation.id, id,
+                "`{spelled}` reached the wrong operation"
+            );
         }
     }
 

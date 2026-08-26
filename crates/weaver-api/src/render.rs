@@ -10,4 +10,5 @@
 
 pub mod channels;
 pub mod issues;
+pub mod reviews;
 pub mod session_layout;
