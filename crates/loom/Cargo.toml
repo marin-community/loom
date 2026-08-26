@@ -31,7 +31,9 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-clap = { version = "4", features = ["derive", "env"] }
+# `string`: operand defaults are computed at runtime from the declaration, so
+# clap has to own the strings it shows in `--help` rather than borrow literals.
+clap = { version = "4", features = ["derive", "env", "string"] }
 clap_complete = "4"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"

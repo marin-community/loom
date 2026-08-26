@@ -106,7 +106,7 @@ pub mod programs {
 
     /// CLI-only flags that never cross the wire: the full registry is always
     /// fetched, this only chooses what gets printed.
-    #[derive(Debug, Clone, Default, View)]
+    #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Print one program's embedded script source instead of the table, e.g.
         /// `--source builtin:archive-merged`.

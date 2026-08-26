@@ -228,23 +228,86 @@ pub struct ContextValues {
     pub session: String,
 }
 
+/// How a field's Rust type projects onto a command line.
+///
+/// Syntactic, decided by the macro from the type as written. Anything it does
+/// not recognize is `Json` — one JSON literal on the command line, which is
+/// deliberately explicit about the operands a flag cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperandKind {
+    Bool,
+    Int,
+    Str,
+    OptBool,
+    OptInt,
+    OptStr,
+    VecStr,
+    VecInt,
+    Json,
+}
+
+impl OperandKind {
+    pub const fn is_multi(self) -> bool {
+        matches!(self, Self::VecStr | Self::VecInt)
+    }
+}
+
+/// How the command line spells one operand.
+///
+/// Presentation, and the only part of an [`Operand`] that is. A field with no
+/// `CliSpelling` never reaches the command line — it is dispatcher-supplied
+/// context, or explicitly held back with `#[operand(skip_cli)]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CliSpelling {
+    pub positional: bool,
+    pub long: &'static str,
+    pub short: Option<char>,
+    /// Read the value from the named file, or stdin for `-`.
+    pub from_file: bool,
+}
+
+/// One caller-supplied field of an operation's input.
+///
+/// This is data, not code. It used to be a pair of generated `clap` functions,
+/// which meant every crate that could *describe* an operation also linked a
+/// command-line parser. The command line is built from this list by
+/// `loom::cli::clap_bind`; nothing in this crate knows what a parser is.
+// No `PartialEq`: `default` is a function pointer, and comparing those is
+// meaningless — two codegen units can give the same function two addresses.
+#[derive(Debug, Clone, Copy)]
+pub struct Operand {
+    pub name: &'static str,
+    pub kind: OperandKind,
+    pub help: Option<&'static str>,
+    /// A caller has to supply this one.
+    pub required: bool,
+    /// Filled by the dispatcher rather than the caller.
+    pub context: Option<ContextSource>,
+    /// The declared `#[operand(default = ...)]`, evaluated.
+    ///
+    /// The same expression is also this field's `serde` default, so a REST or
+    /// MCP caller who omits the field gets the identical value without anyone
+    /// consulting this. It is here because a command line has to *show* a
+    /// default in `--help`, and because view flags are not `#[operation]`
+    /// structs and so have no serde attributes of their own.
+    pub default: Option<fn() -> Value>,
+    pub cli: Option<CliSpelling>,
+}
+
 /// The caller-facing argument surface of an operation.
 ///
 /// Derived, never written by hand: one struct yields the JSON body, the MCP
-/// argument schema, and the clap flags, so those three cannot disagree.
+/// argument schema, and the operand list a command line is built from, so those
+/// three cannot disagree.
 pub trait Operands: Serialize + DeserializeOwned + Sized {
     /// Fields the dispatcher supplies from session context.
     const CONTEXT: &'static [ContextField];
 
+    /// Every field, in declaration order.
+    const OPERANDS: &'static [Operand];
+
     /// JSON Schema for what a caller may pass, with context fields elided.
     fn schema() -> Value;
-
-    /// Add this operand set to a clap command.
-    fn augment(cmd: clap::Command) -> clap::Command;
-
-    /// Rebuild from parsed matches. Context fields are left at their default
-    /// and populated by [`Operands::fill_context`].
-    fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String>;
 
     /// Fill dispatcher-supplied fields that the caller left unset.
     fn fill_context(&mut self, context: &ContextValues);
@@ -256,9 +319,8 @@ pub trait Operands: Serialize + DeserializeOwned + Sized {
 /// should behave while fetching one (`--interval`). What must NOT live here is
 /// anything that changes *what the server returns* — that is an operand, or the
 /// transports drift apart again.
-pub trait ViewFlags: Sized {
-    fn augment(cmd: clap::Command) -> clap::Command;
-    fn from_matches(matches: &clap::ArgMatches) -> Result<Self, String>;
+pub trait ViewFlags: DeserializeOwned + Sized {
+    const OPERANDS: &'static [Operand];
 }
 
 /// The view for an operation whose output needs no display options.
@@ -266,11 +328,16 @@ pub trait ViewFlags: Sized {
 pub struct NoView;
 
 impl ViewFlags for NoView {
-    fn augment(cmd: clap::Command) -> clap::Command {
-        cmd
-    }
+    const OPERANDS: &'static [Operand] = &[];
+}
 
-    fn from_matches(_: &clap::ArgMatches) -> Result<Self, String> {
+// Declaring no flags still means decoding whatever the command line handed
+// back, which is the empty object. A derived `Deserialize` on a unit struct
+// insists on `null` and would fail every operation that takes no view flags —
+// which is 211 of the 214.
+impl<'de> Deserialize<'de> for NoView {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
         Ok(Self)
     }
 }

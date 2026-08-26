@@ -289,7 +289,7 @@ pub mod wait {
     pub type Output = ChannelMessageView;
 
     /// CLI-only flags that never cross the wire.
-    #[derive(Debug, Clone, Default, View)]
+    #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Seconds between polls while waiting.
         #[operand(default = 2)]

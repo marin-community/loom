@@ -96,6 +96,9 @@ pub struct Operand {
     pub skip_cli: bool,
     /// CLI-only: interpret this string as a file path or stdin.
     pub from_file: bool,
+    /// The declared field type, used to type-annotate the declared default so a
+    /// bare `None` or `BTreeMap::new()` still infers.
+    pub ty: syn::Type,
 }
 
 impl Operand {
@@ -136,6 +139,7 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
         short: None,
         skip_cli: false,
         from_file: false,
+        ty: field.ty.clone(),
         name,
         ident,
     };
@@ -291,166 +295,71 @@ pub fn doc_comment(attrs: &[Attribute]) -> Option<String> {
     Some(lines.join(" ").trim().to_string())
 }
 
-/// Emit the clap argument builder for one operand.
-pub fn clap_arg(operand: &Operand) -> TokenStream {
+/// One entry of the `Operands::OPERANDS` list.
+///
+/// The command line is built from this at runtime by `loom::cli::clap_bind`,
+/// which is why nothing here mentions `clap`.
+pub fn operand_entry(operand: &Operand) -> TokenStream {
     let name = &operand.name;
-    let long = operand.long_flag();
-    let help = operand.help.clone().unwrap_or_default();
+    let kind = match operand.kind {
+        Kind::Bool => quote!(Bool),
+        Kind::Int => quote!(Int),
+        Kind::Str => quote!(Str),
+        Kind::OptBool => quote!(OptBool),
+        Kind::OptInt => quote!(OptInt),
+        Kind::OptStr => quote!(OptStr),
+        Kind::VecStr => quote!(VecStr),
+        Kind::VecInt => quote!(VecInt),
+        Kind::Json => quote!(Json),
+    };
+    let help = match &operand.help {
+        Some(help) => quote!(::core::option::Option::Some(#help)),
+        None => quote!(::core::option::Option::None),
+    };
     let required = operand.required();
-
-    let base = if operand.positional || operand.from_file {
-        quote!(::clap::Arg::new(#name))
-    } else {
-        let mut builder = quote!(::clap::Arg::new(#name).long(#long));
-        if let Some(short) = operand.short {
-            builder = quote!(#builder.short(#short));
+    let context = match operand.context {
+        Some(source) => {
+            let source = source.tokens();
+            quote!(::core::option::Option::Some(#source))
         }
-        builder
+        None => quote!(::core::option::Option::None),
     };
-
-    let action = match operand.kind {
-        Kind::Bool => quote!(.action(::clap::ArgAction::SetTrue)),
-        Kind::OptBool => quote!(
-            .num_args(0..=1)
-            .default_missing_value("true")
-            .action(::clap::ArgAction::Set)
-        ),
-        Kind::VecStr | Kind::VecInt => {
-            if operand.positional {
-                quote!(.num_args(0..).action(::clap::ArgAction::Append))
-            } else {
-                quote!(.action(::clap::ArgAction::Append))
-            }
+    let default = match &operand.default {
+        Some(default) => {
+            let ty = &operand.ty;
+            quote!(::core::option::Option::Some(|| {
+                ::serde_json::to_value::<#ty>(::core::convert::Into::into(#default))
+                    .unwrap_or(::serde_json::Value::Null)
+            }))
         }
-        _ => quote!(.action(::clap::ArgAction::Set)),
+        None => quote!(::core::option::Option::None),
     };
-
-    let parser = match operand.kind {
-        Kind::Int | Kind::OptInt | Kind::VecInt => {
-            quote!(.value_parser(::clap::value_parser!(i64)))
-        }
-        Kind::OptBool => quote!(.value_parser(::clap::value_parser!(bool))),
-        Kind::Bool => quote!(),
-        _ => quote!(.value_parser(::clap::value_parser!(String))),
-    };
-
-    let required = if required && !operand.kind.is_multi() && !operand.from_file {
-        quote!(.required(true))
-    } else {
-        quote!()
-    };
-
-    let help = if help.is_empty() {
-        quote!()
-    } else {
-        quote!(.help(#help))
-    };
-
-    quote!(cmd = cmd.arg(#base #action #parser #required #help);)
-}
-
-/// Emit the expression that reconstructs one operand from parsed matches.
-pub fn from_matches(operand: &Operand) -> TokenStream {
-    let ident = &operand.ident;
-    let name = &operand.name;
-
-    // Context fields are absent from the command line by construction; they are
-    // populated by `fill_context` before the request is sent.
-    if operand.context.is_some() || operand.skip_cli {
-        return quote!(#ident: ::core::default::Default::default(),);
-    }
-
-    if operand.from_file {
-        let ident = &operand.ident;
-        return quote! {
-            #ident: {
-                use ::std::io::Read as _;
-                match matches.get_one::<String>(#name).map(String::as_str) {
-                    Some(path) if path != "-" => ::std::fs::read_to_string(path)
-                        .map_err(|error| format!("reading {path}: {error}"))?,
-                    _ => {
-                        let mut buffer = String::new();
-                        ::std::io::stdin()
-                            .read_to_string(&mut buffer)
-                            .map_err(|error| format!("reading stdin: {error}"))?;
-                        buffer
-                    }
-                }
-            },
+    let cli = if operand.is_caller_supplied() {
+        let positional = operand.positional;
+        let long = operand.long_flag();
+        let short = match operand.short {
+            Some(short) => quote!(::core::option::Option::Some(#short)),
+            None => quote!(::core::option::Option::None),
         };
-    }
-
-    let value = match operand.kind {
-        Kind::Bool => quote!(matches.get_flag(#name)),
-        Kind::Str => match &operand.default {
-            Some(default) => quote!(matches
-                .get_one::<String>(#name)
-                .cloned()
-                .unwrap_or_else(|| (#default).into())),
-            None => quote!(matches
-                .get_one::<String>(#name)
-                .cloned()
-                .ok_or_else(|| format!("missing required argument --{}", #name))?),
-        },
-        Kind::OptStr => quote!(matches.get_one::<String>(#name).cloned()),
-        Kind::OptBool => quote!(matches.get_one::<bool>(#name).copied()),
-        Kind::Int => {
-            let convert = quote!(::core::convert::TryFrom::try_from(raw)
-                .map_err(|_| format!("--{} is out of range", #name))?);
-            match &operand.default {
-                Some(default) => quote!(match matches.get_one::<i64>(#name).copied() {
-                    Some(raw) => #convert,
-                    None => (#default),
-                }),
-                None => quote!({
-                    let raw = matches
-                        .get_one::<i64>(#name)
-                        .copied()
-                        .ok_or_else(|| format!("missing required argument --{}", #name))?;
-                    #convert
-                }),
-            }
-        }
-        Kind::OptInt => quote!(match matches.get_one::<i64>(#name).copied() {
-            Some(raw) => Some(
-                ::core::convert::TryFrom::try_from(raw)
-                    .map_err(|_| format!("--{} is out of range", #name))?,
-            ),
-            None => None,
-        }),
-        Kind::VecStr => quote!(matches
-            .get_many::<String>(#name)
-            .map(|values| values.cloned().collect())
-            .unwrap_or_default()),
-        Kind::VecInt => quote!({
-            let mut collected = ::std::vec::Vec::new();
-            if let Some(values) = matches.get_many::<i64>(#name) {
-                for raw in values.copied() {
-                    collected.push(
-                        ::core::convert::TryFrom::try_from(raw)
-                            .map_err(|_| format!("--{} is out of range", #name))?,
-                    );
-                }
-            }
-            collected
-        }),
-        // A `Json` operand takes one JSON literal on the command line. Explicit
-        // and ugly on purpose: it marks the operands a flag cannot express.
-        Kind::Json => match &operand.default {
-            Some(default) => quote!(match matches.get_one::<String>(#name) {
-                Some(raw) => ::serde_json::from_str(raw)
-                    .map_err(|error| format!("--{} is not valid JSON: {error}", #name))?,
-                None => (#default),
-            }),
-            None => quote!({
-                let raw = matches
-                    .get_one::<String>(#name)
-                    .ok_or_else(|| format!("missing required argument --{}", #name))?;
-                ::serde_json::from_str(raw)
-                    .map_err(|error| format!("--{} is not valid JSON: {error}", #name))?
-            }),
-        },
+        let from_file = operand.from_file;
+        quote!(::core::option::Option::Some(::weaver_api::operations::CliSpelling {
+            positional: #positional,
+            long: #long,
+            short: #short,
+            from_file: #from_file,
+        }))
+    } else {
+        quote!(::core::option::Option::None)
     };
-
-    quote!(#ident: #value,)
+    quote! {
+        ::weaver_api::operations::Operand {
+            name: #name,
+            kind: ::weaver_api::operations::OperandKind::#kind,
+            help: #help,
+            required: #required,
+            context: #context,
+            default: #default,
+            cli: #cli,
+        }
+    }
 }

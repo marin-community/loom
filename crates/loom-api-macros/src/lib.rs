@@ -85,13 +85,7 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
         }
     }
 
-    let args = operands
-        .iter()
-        .filter(|operand| operand.is_caller_supplied())
-        .collect::<Vec<_>>();
-
-    let clap_args = args.iter().copied().map(field::clap_arg);
-    let builders = operands.iter().map(field::from_matches);
+    let entries = operands.iter().map(field::operand_entry);
 
     // Context fields are stripped from the derived schema: the field travels
     // on the wire but callers cannot supply it.
@@ -115,6 +109,9 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
             const CONTEXT: &'static [::weaver_api::operations::ContextField] =
                 &[#(#context_specs),*];
 
+            const OPERANDS: &'static [::weaver_api::operations::Operand] =
+                &[#(#entries),*];
+
             fn schema() -> ::serde_json::Value {
                 let mut schema = ::serde_json::to_value(
                     ::schemars::schema_for!(#name)
@@ -132,15 +129,6 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     object.remove("description");
                 }
                 schema
-            }
-
-            fn augment(mut cmd: ::clap::Command) -> ::clap::Command {
-                #(#clap_args)*
-                cmd
-            }
-
-            fn from_matches(matches: &::clap::ArgMatches) -> ::core::result::Result<Self, String> {
-                Ok(Self { #(#builders)* })
             }
 
             fn fill_context(
@@ -186,19 +174,12 @@ fn expand_view(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         }
     }
 
-    let clap_args = operands.iter().map(field::clap_arg);
-    let builders = operands.iter().map(field::from_matches);
+    let entries = operands.iter().map(field::operand_entry);
 
     Ok(quote! {
         impl ::weaver_api::operations::ViewFlags for #name {
-            fn augment(mut cmd: ::clap::Command) -> ::clap::Command {
-                #(#clap_args)*
-                cmd
-            }
-
-            fn from_matches(matches: &::clap::ArgMatches) -> ::core::result::Result<Self, String> {
-                Ok(Self { #(#builders)* })
-            }
+            const OPERANDS: &'static [::weaver_api::operations::Operand] =
+                &[#(#entries),*];
         }
     })
 }

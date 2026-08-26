@@ -218,7 +218,7 @@ pub mod list {
 
     /// Presentation flags. These never cross the wire — they choose how the result
     /// is printed, which is why they live here rather than in `Input`.
-    #[derive(Debug, Clone, Default, View)]
+    #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Show every work item in the repository, uncapped.
         pub repo: bool,

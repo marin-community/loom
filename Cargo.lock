@@ -3323,7 +3323,6 @@ name = "weaver-api"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "clap",
  "loom-api-macros",
  "percent-encoding",
  "reqwest",

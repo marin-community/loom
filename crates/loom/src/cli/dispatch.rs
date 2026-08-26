@@ -40,18 +40,12 @@ where
     CliBinding {
         operation: O::SPEC,
         augment: |cmd| {
-            let cmd = <O::Input as Operands>::augment(cmd);
-            <O::View as ViewFlags>::augment(cmd)
+            let cmd = super::clap_bind::augment(cmd, <O::Input as Operands>::OPERANDS);
+            super::clap_bind::augment(cmd, <O::View as ViewFlags>::OPERANDS)
         },
         run: |matches| {
             // Parse before any I/O so a bad invocation fails fast and locally.
-            let parsed = <O::Input as Operands>::from_matches(matches)
-                .map_err(|error| anyhow!(error))
-                .and_then(|input| {
-                    let view = <O::View as ViewFlags>::from_matches(matches)
-                        .map_err(|error| anyhow!(error))?;
-                    Ok((input, view))
-                });
+            let parsed = decode::<O>(matches);
             Box::pin(async move {
                 let (mut input, view) = parsed?;
                 let client = crate::agent_cli::client();
@@ -65,6 +59,22 @@ where
             })
         },
     }
+}
+
+/// Read one invocation's operands and view flags into their own types.
+fn decode<O>(matches: &ArgMatches) -> Result<(O::Input, O::View)>
+where
+    O: Operation,
+{
+    let operands = super::clap_bind::from_matches(matches, <O::Input as Operands>::OPERANDS)
+        .map_err(|error| anyhow!(error))?;
+    let input = serde_json::from_value(operands)
+        .map_err(|error| anyhow!("invalid arguments for {}: {error}", O::SPEC.id))?;
+    let flags = super::clap_bind::from_matches(matches, <O::View as ViewFlags>::OPERANDS)
+        .map_err(|error| anyhow!(error))?;
+    let view = serde_json::from_value(flags)
+        .map_err(|error| anyhow!("invalid display flags for {}: {error}", O::SPEC.id))?;
+    Ok((input, view))
 }
 
 async fn resolve_context(client: &Client) -> Result<ContextValues> {

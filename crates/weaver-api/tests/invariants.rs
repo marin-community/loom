@@ -115,7 +115,11 @@ fn cli_projections_are_well_formed() {
 }
 
 /// The reference vertical, checked end to end: one declaration really does
-/// produce the REST route, the MCP schema, and the clap surface.
+/// produce the REST route, the MCP schema, the response schema, and the
+/// operand list a command line is built from.
+///
+/// The parse itself is checked where the parser lives — `loom::cli::clap_bind`
+/// — because this crate no longer knows what a parser is.
 #[test]
 fn one_declaration_produces_every_projection() {
     use operations::issues;
@@ -128,23 +132,27 @@ fn one_declaration_produces_every_projection() {
     let schema = (spec.schema)();
     assert!(schema["properties"].get("all").is_some());
     assert!(schema["properties"].get("repo_root").is_none());
+    assert!((spec.output_schema)()["items"].get("$ref").is_some());
 
-    let command = <issues::list::View as ViewFlags>::augment(
-        <issues::list::Input as Operands>::augment(clap::Command::new("list")),
-    );
-    let matches = command
-        .try_get_matches_from(["list", "--all", "--mine"])
-        .expect("the advertised flags must parse");
-    assert!(
-        <issues::list::Input as Operands>::from_matches(&matches)
-            .unwrap()
-            .all
-    );
-    assert!(
-        <issues::list::View as ViewFlags>::from_matches(&matches)
-            .unwrap()
-            .mine
-    );
+    let all = operand(<issues::list::Input as Operands>::OPERANDS, "all");
+    assert_eq!(all.cli.unwrap().long, "all");
+    assert!(!all.cli.unwrap().positional);
+
+    // A context field travels on the wire but is never a flag and never in the
+    // advertised schema.
+    let repo_root = operand(<issues::list::Input as Operands>::OPERANDS, "repo_root");
+    assert!(repo_root.context.is_some());
+    assert!(repo_root.cli.is_none());
+
+    let mine = operand(<issues::list::View as ViewFlags>::OPERANDS, "mine");
+    assert_eq!(mine.cli.unwrap().long, "mine");
+}
+
+fn operand(operands: &'static [operations::Operand], name: &str) -> &'static operations::Operand {
+    operands
+        .iter()
+        .find(|operand| operand.name == name)
+        .unwrap_or_else(|| panic!("no operand named `{name}`"))
 }
 
 /// The convention itself, checked: a bundle's operations live in the one file
