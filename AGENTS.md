@@ -98,8 +98,12 @@ when you're ready to land. The rules it enforces:
 
 ## Conventions
 
-- **API-first.** A new feature is a `web.rs` REST route first; the SPA and the
-  `loom` CLI both consume it. No business logic in `bin/loom.rs` or the Vue layer.
+- **API-first.** A new feature is an `#[operation]` declaration first, in the
+  bundle its id names (`issues.list` -> `crates/weaver-api/src/operations/issues.rs`).
+  REST, the `loom` CLI and MCP are all generated from it; nobody writes the
+  route, the clap command or the tool schema down a second time. No business
+  logic in the command line (`crates/loom/src/cli/`), MCP dispatch, or the Vue
+  layer.
 - **The frontend is a thin REST client** ([[ui-built-on-rest-api]]): every call
   goes through `frontend/src/api.ts` (no inline `fetch`), and its types are
   **generated, not mirrored**. `frontend/src/api/generated.ts` is written from

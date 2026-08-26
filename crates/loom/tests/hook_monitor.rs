@@ -1,7 +1,7 @@
 //! Writing a `hook` event row drives the monitor to flip session status on
 //! its next tick. This mirrors what `loom hook --event …` does in practice
-//! (writes an event row, no HTTP); see the `weaver` crate's `agent_cli`
-//! integration test for the binary-driven side.
+//! (writes an event row, no HTTP); see `tests/agent_cli.rs`
+//! for the binary-driven side.
 
 use std::path::Path;
 use std::process::Command;

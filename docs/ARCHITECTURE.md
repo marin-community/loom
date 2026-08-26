@@ -40,7 +40,7 @@ and the rule for placing a new module.
 | `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. It is not a command or product surface. |
 | `crates/weaver-api/` | legacy-named typed Loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver); it is the cross-process API seam. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
-| `crates/loom/src/agent_cli.rs` | HTTP-only implementations behind Loom's session, channel, artifact, issue, status, and settings commands |
+| `crates/loom/src/cli/` | everything behind the `loom` command line: `clap_bind.rs` (the whole of Loom's clap knowledge, driven by an operation's operand list), `dispatch.rs` (invoke a declared operation and render it), `host/` (operator commands that run before there is a server), `commands/` (operator commands that talk to one), `agent/` (what an agent runs inside a session) |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom-ctx/` | leaf utilities and `Ctx` (the storage handle, event bus and server address every layer above threads through). No loom dependency of its own; knows nothing about sessions |
 | `crates/loom-store/` | durable records and storage operations: sessions, chat, channels, layout, runs, history, and the profile record |
@@ -84,7 +84,7 @@ and the rule for placing a new module.
 | `crates/loom-store/src/chat.rs` | the ACP **chat journal**: the durable, block-structured (`chat_blocks`, one row per `(session_id, turn, seq)`) conversation record `loom::acp` writes idempotently and the `/chat` routes read |
 | `crates/loom-forge/src/github.rs` | `gh` CLI shell-out: issue seeding, PR opening, and the PR-status poll loop (snapshots each branch's PR; archives on merge) |
 | `crates/loom/src/client.rs` | HTTP client used by the `loom` CLI to talk to its own daemon |
-| `crates/loom/src/bin/loom.rs` | the orchestrator CLI (`server`, `sessions`, `ps`, `attach`, …) |
+| `crates/loom/src/bin/loom.rs` | the `loom` command tree and its tests, and nothing else; the commands themselves live in `crates/loom/src/cli/` |
 | `crates/loom/frontend/` | Vue 3 SPA, rspack, Tailwind. `api.ts` + views in `views/`; the visual rules live in [loom-ui.md](loom-ui.md) |
 | `crates/loom/static/dist/` | Build output (placeholder; real build overwrites) |
 | `crates/loom/tests/` | integration tests: `integration/` (server suites) + `hook_monitor.rs`; need `git` (they spawn `tapestry` supervisors, built by the same `cargo test`) |
@@ -335,6 +335,27 @@ reaches production.
 server-side from the calling credential, so an agent says "my session" by saying
 nothing. An explicit value still wins, and still faces the scope check.
 
+### Presentation comes off the declaration too
+
+`Render` is how an operation's result becomes text. The default is the
+operation's own JSON, which is honest and complete for the long tail of
+administrative commands, so a new operation has a working CLI the moment it is
+declared. Bundles a human reads all day say `render = custom` and write an impl
+in [`crates/weaver-api/src/render/`](../crates/weaver-api/src/render/) — 50 of
+them do. The CLI and MCP both call it, so one operation prints one way on both.
+
+A renderer is a pure function of `Output` and the view flags. It gets no client
+and makes no calls, which is the line that decides whether a command can be
+served by its declaration at all: `loom summary` and `loom issues ls` stay
+hand-written because the text they print needs reads the operation does not
+return.
+
+`view = View` names a struct of **presentation flags** — six operations have
+one. They never cross the wire; they choose what is printed, which is why they
+live beside the operation rather than in its `Input`. `loom issues list --mine`
+is a `View` field, `--all` is an `Input` field, and the difference is whether
+the server needs to know.
+
 ### Response encoding is the only variable
 
 `io` names how an operation answers, and it is a field on the declaration rather
@@ -546,7 +567,7 @@ Details → Advanced, not as the primary file or work surface.
   implementation; the registry derives Axum routes and discovery, while CLI and
   MCP call those routes through the REST client. Custom adapters remain for the
   minority of transport-specific shapes. Don't put business logic in
-  `bin/loom.rs`, MCP dispatch, or the Vue layer.
+  the command line (`crates/loom/src/cli/`), MCP dispatch, or the Vue layer.
 - **Errors:** the server returns `AppError` (status + message + optional
   `details` map of per-field reasons); the `loom` CLI uses `anyhow` and prints
   `error: {e:#}`.
@@ -555,7 +576,7 @@ Details → Advanced, not as the primary file or work surface.
   `tokio::process::Command`. The `loom` CLI remains synchronous-feeling while
   delegating its reads and writes to the internal typed API client over HTTP.
 - **Events:** state changes flow through `EventBus`; the SSE handlers in
-  `web.rs` fan them out. `loom hook` posts to the branch events route; Loom
+  `web/` fan them out. `loom hook` posts to the branch events route; Loom
   writes the row, and the monitor tick promotes it into session status and a
   fresh `EventBus` notification. Browsers cap HTTP/1.1 at 6 connections per
   origin and an EventSource holds one for its whole life, so the SPA subscribes
