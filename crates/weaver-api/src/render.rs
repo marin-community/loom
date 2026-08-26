@@ -10,3 +10,4 @@
 
 pub mod channels;
 pub mod issues;
+pub mod session_layout;

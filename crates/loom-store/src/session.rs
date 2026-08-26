@@ -1646,7 +1646,7 @@ mod tests {
             &weaver_api::operations::session_layout::groups::create::Input {
                 space_id: "space-user".to_string(),
                 name: "Focused".to_string(),
-                expected_revision: initial.revision,
+                expected_revision: Some(initial.revision),
             },
         )
         .await
@@ -1661,11 +1661,11 @@ mod tests {
         crate::session_layout::move_sessions(
             &db,
             "test",
-            &weaver_api::MoveSessionsReq {
+            &weaver_api::operations::session_layout::r#move::Input {
                 session_ids: vec!["parent".to_string()],
                 destination_group_id: focused_id.clone(),
                 before_session_id: None,
-                expected_revision: focused.revision,
+                expected_revision: Some(focused.revision),
             },
         )
         .await
@@ -1710,7 +1710,7 @@ mod tests {
                     selector_kind: kind,
                     selector_value: value.to_string(),
                     group_id: group_id.to_string(),
-                    expected_revision: revision,
+                    expected_revision: Some(revision),
                 },
             )
             .await
@@ -1766,7 +1766,7 @@ mod tests {
                     .await
                     .unwrap()
                     .revision;
-                crate::session_layout::delete_default(&db, "test", kind, value, revision)
+                crate::session_layout::delete_default(&db, "test", kind, value, Some(revision))
                     .await
                     .unwrap();
             }

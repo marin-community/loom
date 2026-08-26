@@ -2,9 +2,11 @@
 //! and the placement of sessions within them.
 //!
 //! This is dashboard state, not a session credential's surface — every
-//! mutation is keyed off the calling human's own username and every write
-//! carries an `expected_revision` optimistic-concurrency guard, since more
-//! than one open dashboard tab can race to reorganize the same layout.
+//! mutation is keyed off the calling human's own username and every write may
+//! carry an `expected_revision` optimistic-concurrency guard, since more than
+//! one open dashboard tab can race to reorganize the same layout. Omitting the
+//! guard applies the change to whatever is current; `loom_store`'s
+//! `LayoutCommand::begin` says why that is offered.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -20,16 +22,20 @@ pub mod defaults {
         /// selector fall through to a broader default (or the fallback origin `*`,
         /// which cannot itself be removed).
         #[operation(id = "session_layout.defaults.delete", actor = User, scope = Global,
-                    risk = Write, default = custom)]
+                    risk = Write, default = custom, render = custom,
+                    cli = "sessions layout default-delete")]
         pub struct Input {
-            /// Which kind of selector the default to clear matches on.
-            #[operand(json)]
+            /// Which kind of selector the default to clear matches on: `origin`,
+            /// `profile`, or `watch`.
+            #[operand(string, positional)]
             pub selector_kind: SessionPlacementSelectorKind,
+            #[operand(positional)]
             pub selector_value: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         impl Default for Input {
@@ -37,7 +43,7 @@ pub mod defaults {
                 Self {
                     selector_kind: SessionPlacementSelectorKind::Origin,
                     selector_value: String::new(),
-                    expected_revision: 0,
+                    expected_revision: None,
                 }
             }
         }
@@ -51,17 +57,22 @@ pub mod defaults {
         /// Set (or replace) the default group a newly created session lands in for
         /// one selector.
         #[operation(id = "session_layout.defaults.set", actor = User, scope = Global, risk = Write,
-                    default = custom)]
+                    default = custom, render = custom, cli = "sessions layout default-set")]
         pub struct Input {
-            /// Which kind of selector this default matches on.
-            #[operand(json)]
+            /// Which kind of selector this default matches on: `origin`,
+            /// `profile`, or `watch`.
+            #[operand(string, positional)]
             pub selector_kind: SessionPlacementSelectorKind,
+            #[operand(positional)]
             pub selector_value: String,
+            /// The group matching sessions land in.
+            #[operand(long = "to")]
             pub group_id: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         impl Default for Input {
@@ -70,7 +81,7 @@ pub mod defaults {
                     selector_kind: SessionPlacementSelectorKind::Origin,
                     selector_value: String::new(),
                     group_id: String::new(),
-                    expected_revision: 0,
+                    expected_revision: None,
                 }
             }
         }
@@ -95,7 +106,8 @@ pub mod get {
 
     /// The signed-in operator's shared session-dashboard layout: spaces, groups,
     /// session placements, and per-selector placement defaults.
-    #[operation(id = "session_layout.get", actor = User, scope = Global, risk = Read)]
+    #[operation(id = "session_layout.get", actor = User, scope = Global, risk = Read,
+                render = custom, cli = "sessions layout show")]
     pub struct Input {}
 
     pub type Output = SessionLayoutView;
@@ -108,14 +120,19 @@ pub mod groups {
         use super::prelude::*;
 
         /// Create a new group within a space.
-        #[operation(id = "session_layout.groups.create", actor = User, scope = Global, risk = Write)]
+        #[operation(id = "session_layout.groups.create", actor = User, scope = Global, risk = Write,
+                    render = custom, cli = "sessions layout group-add")]
         pub struct Input {
+            /// The space the group is created in.
+            #[operand(positional)]
             pub space_id: String,
+            #[operand(positional)]
             pub name: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;
@@ -128,17 +145,20 @@ pub mod groups {
         /// `destination_group_id` is required whenever the group owns placements or
         /// default-placement selectors, and its contents move there atomically.
         #[operation(id = "session_layout.groups.delete", actor = User, scope = Global,
-                    risk = Destructive)]
+                    risk = Destructive, render = custom, cli = "sessions layout group-delete")]
         pub struct Input {
             /// The group being deleted.
+            #[operand(positional)]
             pub id: String,
             /// Where the group's sessions and placement defaults land. Required
             /// unless the group is empty.
+            #[operand(long = "to")]
             pub destination_group_id: Option<String>,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;
@@ -156,8 +176,12 @@ pub mod groups {
             /// per-operator disclosure preference (`user_session_group_state`), not
             /// shared layout state another dashboard tab could race to change, so there
             /// is nothing to guard against.
+            ///
+            /// Also unlike its siblings it declares no `cli`: the command line spells
+            /// it as two commands, `collapse` and `expand`, and one declaration is one
+            /// invocation. Both stay hand-written in `bin/loom.rs`.
             #[operation(id = "session_layout.groups.preference.set", actor = User, scope = Global,
-                        risk = Write)]
+                        risk = Write, render = custom)]
             pub struct Input {
                 /// The group whose disclosure state is being set.
                 pub id: String,
@@ -172,15 +196,19 @@ pub mod groups {
         use super::prelude::*;
 
         /// Rename a group.
-        #[operation(id = "session_layout.groups.update", actor = User, scope = Global, risk = Write)]
+        #[operation(id = "session_layout.groups.update", actor = User, scope = Global, risk = Write,
+                    render = custom, cli = "sessions layout group-rename")]
         pub struct Input {
             /// The group being renamed.
+            #[operand(positional)]
             pub id: String,
+            #[operand(positional)]
             pub name: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;
@@ -192,17 +220,24 @@ pub mod r#move {
 
     /// Atomically move one or more sessions to an exact insertion point within a
     /// group.
-    #[operation(id = "session_layout.move", actor = User, scope = Global, risk = Write)]
+    #[operation(id = "session_layout.move", actor = User, scope = Global, risk = Write,
+                render = custom, cli = "sessions layout move")]
     pub struct Input {
+        /// The sessions to move, in the order they should land.
+        #[operand(positional)]
         pub session_ids: Vec<String>,
+        /// The group they move into.
+        #[operand(long = "to")]
         pub destination_group_id: String,
         /// Insert before this session in the destination group; omitted appends
         /// to the end.
+        #[operand(long = "before")]
         pub before_session_id: Option<String>,
         /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. Stale calls are rejected to prevent concurrent
-        /// edit conflicts.
-        pub expected_revision: i64,
+        /// composed against. A stale revision is rejected; omitting it applies
+        /// the change to whatever is current.
+        #[operand(long = "revision")]
+        pub expected_revision: Option<i64>,
     }
 
     pub type Output = SessionLayoutView;
@@ -212,21 +247,25 @@ pub mod reorder {
 
     /// Reorder one space, or one group (optionally into another space).
     #[operation(id = "session_layout.reorder", actor = User, scope = Global, risk = Write,
-                default = custom)]
+                default = custom, render = custom, cli = "sessions layout reorder")]
     pub struct Input {
-        /// Whether `id` names a space or a group.
-        #[operand(json)]
+        /// Whether `id` names a `space` or a `group`.
+        #[operand(string, positional)]
         pub kind: SessionLayoutItemKind,
         /// The space or group being repositioned.
+        #[operand(positional)]
         pub id: String,
         /// Insert before this sibling; omitted moves to the end.
+        #[operand(long = "before")]
         pub before_id: Option<String>,
         /// For a group, move it into this space; omitted keeps its current space.
+        #[operand(long = "space")]
         pub destination_space_id: Option<String>,
         /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. Stale calls are rejected to prevent concurrent
-        /// edit conflicts.
-        pub expected_revision: i64,
+        /// composed against. A stale revision is rejected; omitting it applies
+        /// the change to whatever is current.
+        #[operand(long = "revision")]
+        pub expected_revision: Option<i64>,
     }
 
     impl Default for Input {
@@ -236,7 +275,7 @@ pub mod reorder {
                 id: String::new(),
                 before_id: None,
                 destination_space_id: None,
-                expected_revision: 0,
+                expected_revision: None,
             }
         }
     }
@@ -252,14 +291,17 @@ pub mod restore {
     /// The supplied groups must cover exactly the sessions currently placed in
     /// those groups, so an undo fails as a stale whole instead of partially
     /// overwriting an intervening placement.
-    #[operation(id = "session_layout.restore", actor = User, scope = Global, risk = Write)]
+    #[operation(id = "session_layout.restore", actor = User, scope = Global, risk = Write,
+                render = custom, cli = "sessions layout restore")]
     pub struct Input {
+        /// A JSON array of `{"group_id":"…","session_ids":["…"]}` objects.
         #[operand(json)]
         pub groups: Vec<SessionGroupOrderReq>,
         /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. Stale calls are rejected to prevent concurrent
-        /// edit conflicts.
-        pub expected_revision: i64,
+        /// composed against. A stale revision is rejected; omitting it applies
+        /// the change to whatever is current.
+        #[operand(long = "revision")]
+        pub expected_revision: Option<i64>,
     }
 
     pub type Output = SessionLayoutView;
@@ -272,13 +314,16 @@ pub mod spaces {
         use super::prelude::*;
 
         /// Create a new top-level space, seeded with an "Inbox" group.
-        #[operation(id = "session_layout.spaces.create", actor = User, scope = Global, risk = Write)]
+        #[operation(id = "session_layout.spaces.create", actor = User, scope = Global, risk = Write,
+                    render = custom, cli = "sessions layout space-add")]
         pub struct Input {
+            #[operand(positional)]
             pub name: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;
@@ -291,17 +336,20 @@ pub mod spaces {
         /// and placement defaults to `destination_group_id`, which is required
         /// unless the space is empty. The last remaining space cannot be deleted.
         #[operation(id = "session_layout.spaces.delete", actor = User, scope = Global,
-                    risk = Destructive)]
+                    risk = Destructive, render = custom, cli = "sessions layout space-delete")]
         pub struct Input {
             /// The space being deleted.
+            #[operand(positional)]
             pub id: String,
             /// Where the space's sessions and placement defaults land. Required
             /// unless the space is empty.
+            #[operand(long = "to")]
             pub destination_group_id: Option<String>,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Stale calls are rejected to prevent concurrent
-            /// edit conflicts.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;
@@ -311,15 +359,19 @@ pub mod spaces {
         use super::prelude::*;
 
         /// Rename a space.
-        #[operation(id = "session_layout.spaces.update", actor = User, scope = Global, risk = Write)]
+        #[operation(id = "session_layout.spaces.update", actor = User, scope = Global, risk = Write,
+                    render = custom, cli = "sessions layout space-rename")]
         pub struct Input {
             /// The space being renamed.
+            #[operand(positional)]
             pub id: String,
+            #[operand(positional)]
             pub name: String,
             /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. Rejects stale callers to prevent clobbering concurrent
-            /// edits from other dashboard tabs.
-            pub expected_revision: i64,
+            /// composed against. A stale revision is rejected; omitting it applies
+            /// the change to whatever is current.
+            #[operand(long = "revision")]
+            pub expected_revision: Option<i64>,
         }
 
         pub type Output = SessionLayoutView;

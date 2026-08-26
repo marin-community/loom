@@ -8,7 +8,7 @@ use axum::{
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use weaver_api::{MoveSessionsReq, SessionLayoutView};
+use weaver_api::SessionLayoutView;
 
 use weaver_api::operations::session_layout::{
     defaults, events, get, groups, r#move, reorder, restore, spaces,
@@ -190,13 +190,7 @@ async fn move_operation(
 ) -> ApiResult<r#move::Output> {
     let st = context.state;
     let username = context.principal.username;
-    let req = MoveSessionsReq {
-        session_ids: input.session_ids,
-        destination_group_id: input.destination_group_id,
-        before_session_id: input.before_session_id,
-        expected_revision: input.expected_revision,
-    };
-    let result = session_layout::move_sessions(&st.db, &username, &req).await;
+    let result = session_layout::move_sessions(&st.db, &username, &input).await;
     mutation_result(&st, &username, result).await
 }
 

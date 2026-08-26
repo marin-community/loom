@@ -183,6 +183,11 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
                 "skip_cli" => operand.skip_cli = true,
                 "from_file" => operand.from_file = true,
                 "json" => operand.kind = Kind::Json,
+                // A wire enum serializes as a bare string, but [`classify`] is
+                // syntactic and can only see an unfamiliar type name, so it
+                // lands in `Json` and the command line demands the JSON
+                // spelling `'"space"'` for a value a user writes as `space`.
+                "string" => operand.kind = Kind::Str,
                 "default" => operand.default = Some(meta.value()?.parse()?),
                 "long" => {
                     let value: LitStr = meta.value()?.parse()?;

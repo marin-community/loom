@@ -15,10 +15,10 @@ use loom::agent_cli::{
 use serde_json::{json, Value};
 use weaver_api::operations::permissions as perm_ops;
 use weaver_api::operations::session_layout;
+use weaver_api::operations::{NoView, Render};
 use weaver_api::{
-    ArtifactTextAnchorDto, DecidePermissionRequestReq, MoveSessionsReq, ReviewAnchorDto,
-    ReviewAnchorKindDto, ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter,
-    SessionLayoutItemKind, SessionLayoutView, SessionPlacementSelectorKind, SessionSearchAttention,
+    ArtifactTextAnchorDto, DecidePermissionRequestReq, ReviewAnchorDto, ReviewAnchorKindDto,
+    ReviewSubjectKindDto, SearchSessionsOptions, SessionCreatorFilter, SessionSearchAttention,
     SessionSearchStatus, SessionView, SetSessionGithubAccessReq,
 };
 
@@ -1044,102 +1044,17 @@ enum PermissionGrantResource {
     },
 }
 
+// The two `loom sessions layout` commands the registry cannot declare. The
+// other twelve are built from `weaver_api::operations::session_layout` and
+// merge in beside these. `collapse` and `expand` are one operation
+// (`session_layout.groups.preference.set`) reached by two spellings that differ
+// only in the `collapsed` they send, and a declaration is one invocation.
 #[derive(Subcommand)]
 enum SessionLayoutCmd {
-    /// Print spaces, groups, ordered sessions, defaults, and the revision.
-    Show,
-    /// Add a space with an empty Inbox group.
-    SpaceAdd {
-        name: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Rename a space.
-    SpaceRename {
-        id: String,
-        name: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Delete a space, moving any contents/defaults to `--to`.
-    SpaceDelete {
-        id: String,
-        #[arg(long)]
-        to: Option<String>,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Add an empty group to a space.
-    GroupAdd {
-        space: String,
-        name: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Rename a group.
-    GroupRename {
-        id: String,
-        name: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Delete a group, moving any contents/defaults to `--to`.
-    GroupDelete {
-        id: String,
-        #[arg(long)]
-        to: Option<String>,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Move one space or group before an anchor (omit `--before` for the end).
-    Reorder {
-        kind: SessionLayoutItemKind,
-        id: String,
-        #[arg(long)]
-        before: Option<String>,
-        #[arg(long)]
-        space: Option<String>,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Atomically move sessions into a group.
-    Move {
-        #[arg(long)]
-        to: String,
-        #[arg(long)]
-        before: Option<String>,
-        #[arg(long)]
-        revision: Option<i64>,
-        #[arg(required = true)]
-        sessions: Vec<String>,
-    },
-    /// Atomically restore complete group orders from a JSON snapshot.
-    Restore {
-        /// JSON array of {"group_id":"…","session_ids":["…"]} objects.
-        snapshot: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
     /// Collapse one group for the current operator.
     Collapse { group: String },
     /// Expand one group for the current operator.
     Expand { group: String },
-    /// Set a configurable origin/profile placement default.
-    DefaultSet {
-        kind: SessionPlacementSelectorKind,
-        value: String,
-        #[arg(long)]
-        to: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
-    /// Remove a configurable placement default.
-    DefaultDelete {
-        kind: SessionPlacementSelectorKind,
-        value: String,
-        #[arg(long)]
-        revision: Option<i64>,
-    },
 }
 
 /// Subcommands under `loom watch` — the operator + authoring surface. A
@@ -2712,232 +2627,28 @@ fn github_access_session(explicit: Option<String>) -> Result<String> {
         .context("not inside a loom session — pass the target explicitly with --session <session>")
 }
 
-async fn layout_revision(client: &Client, requested: Option<i64>) -> Result<i64> {
-    match requested {
-        Some(revision) => Ok(revision),
-        None => Ok(client
-            .invoke::<session_layout::get::Op>(&session_layout::get::Input {})
-            .await?
-            .revision),
-    }
-}
-
-fn print_session_layout(layout: &SessionLayoutView) {
-    println!("session layout revision {}", layout.revision);
-    for space in &layout.spaces {
-        println!("{}  {}  (rank {})", space.id, space.name, space.rank);
-        for group in &space.groups {
-            println!(
-                "  {}  {}  (rank {}, {})",
-                group.id,
-                group.name,
-                group.rank,
-                if group.collapsed {
-                    "collapsed"
-                } else {
-                    "expanded"
-                }
-            );
-            for session_id in &group.session_ids {
-                println!("    {session_id}");
-            }
-        }
-    }
-    if !layout.defaults.is_empty() {
-        println!("defaults:");
-        for default in &layout.defaults {
-            println!(
-                "  {}:{} -> {}",
-                default.selector_kind, default.selector_value, default.group_id
-            );
-        }
-    }
-}
-
+/// Dispatch the two `loom sessions layout` commands that stay hand-written.
+///
+/// Both print through the operation's own renderer, so the twelve declared
+/// layout commands and these two describe a layout the same way.
 async fn run_session_layout(cmd: SessionLayoutCmd) -> Result<()> {
     let client = client::default()?;
-    let layout = match cmd {
-        SessionLayoutCmd::Show => {
-            client
-                .invoke::<session_layout::get::Op>(&session_layout::get::Input {})
-                .await?
-        }
-        SessionLayoutCmd::SpaceAdd { name, revision } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::spaces::create::Op>(
-                    &session_layout::spaces::create::Input {
-                        name,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::SpaceRename { id, name, revision } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::spaces::update::Op>(
-                    &session_layout::spaces::update::Input {
-                        id,
-                        name,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::SpaceDelete { id, to, revision } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::spaces::delete::Op>(
-                    &session_layout::spaces::delete::Input {
-                        id,
-                        destination_group_id: to,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::GroupAdd {
-            space,
-            name,
-            revision,
-        } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::groups::create::Op>(
-                    &session_layout::groups::create::Input {
-                        space_id: space,
-                        name,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::GroupRename { id, name, revision } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::groups::update::Op>(
-                    &session_layout::groups::update::Input {
-                        id,
-                        name,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::GroupDelete { id, to, revision } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::groups::delete::Op>(
-                    &session_layout::groups::delete::Input {
-                        id,
-                        destination_group_id: to,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::Reorder {
-            kind,
-            id,
-            before,
-            space,
-            revision,
-        } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::reorder::Op>(&session_layout::reorder::Input {
-                    kind,
-                    id,
-                    before_id: before,
-                    destination_space_id: space,
-                    expected_revision,
-                })
-                .await?
-        }
-        SessionLayoutCmd::Move {
-            to,
-            before,
-            revision,
-            sessions,
-        } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .move_sessions(&MoveSessionsReq {
-                    session_ids: sessions,
-                    destination_group_id: to,
-                    before_session_id: before,
-                    expected_revision,
-                })
-                .await?
-        }
-        SessionLayoutCmd::Restore { snapshot, revision } => {
-            let groups = serde_json::from_str(&snapshot)
-                .context("restore snapshot must be a JSON array of group orders")?;
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::restore::Op>(&session_layout::restore::Input {
-                    groups,
-                    expected_revision,
-                })
-                .await?
-        }
-        SessionLayoutCmd::Collapse { group } => {
-            client
-                .invoke::<session_layout::groups::preference::set::Op>(
-                    &session_layout::groups::preference::set::Input {
-                        id: group,
-                        collapsed: true,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::Expand { group } => {
-            client
-                .invoke::<session_layout::groups::preference::set::Op>(
-                    &session_layout::groups::preference::set::Input {
-                        id: group,
-                        collapsed: false,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::DefaultSet {
-            kind,
-            value,
-            to,
-            revision,
-        } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::defaults::set::Op>(
-                    &session_layout::defaults::set::Input {
-                        selector_kind: kind,
-                        selector_value: value,
-                        group_id: to,
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
-        SessionLayoutCmd::DefaultDelete {
-            kind,
-            value,
-            revision,
-        } => {
-            let expected_revision = layout_revision(&client, revision).await?;
-            client
-                .invoke::<session_layout::defaults::delete::Op>(
-                    &session_layout::defaults::delete::Input {
-                        selector_kind: kind,
-                        selector_value: value.to_string(),
-                        expected_revision,
-                    },
-                )
-                .await?
-        }
+    let (group, collapsed) = match cmd {
+        SessionLayoutCmd::Collapse { group } => (group, true),
+        SessionLayoutCmd::Expand { group } => (group, false),
     };
-    print_session_layout(&layout);
+    let layout = client
+        .invoke::<session_layout::groups::preference::set::Op>(
+            &session_layout::groups::preference::set::Input {
+                id: group,
+                collapsed,
+            },
+        )
+        .await?;
+    println!(
+        "{}",
+        <session_layout::groups::preference::set::Op as Render>::text(&layout, &NoView)
+    );
     Ok(())
 }
 

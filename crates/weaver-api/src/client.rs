@@ -12,9 +12,9 @@ use serde_json::Value;
 use crate::operations::{ApiMetaView, Operation, OperationView};
 
 use crate::dto::{
-    ChannelMessageView, CommentDto, DecidePermissionRequestReq, MoveSessionsReq,
-    PermissionRequestView, ReadinessView, SearchSessionsOptions, SendReq, SessionGithubAccessView,
-    SessionLayoutView, SessionView, SetSessionGithubAccessReq,
+    ChannelMessageView, CommentDto, DecidePermissionRequestReq, PermissionRequestView,
+    ReadinessView, SearchSessionsOptions, SendReq, SessionGithubAccessView, SessionView,
+    SetSessionGithubAccessReq,
 };
 
 /// A client for one loom server, identified by its base URL.
@@ -241,19 +241,6 @@ impl Client {
             creator: options.creator,
             automation: options.automation.unwrap_or(true),
             managed: options.managed,
-        })
-        .await
-    }
-
-    // -- Session layout ---------------------------------------------------
-
-    pub async fn move_sessions(&self, req: &MoveSessionsReq) -> Result<SessionLayoutView> {
-        use crate::operations::session_layout::r#move;
-        self.invoke::<r#move::Op>(&r#move::Input {
-            session_ids: req.session_ids.clone(),
-            destination_group_id: req.destination_group_id.clone(),
-            before_session_id: req.before_session_id.clone(),
-            expected_revision: req.expected_revision,
         })
         .await
     }

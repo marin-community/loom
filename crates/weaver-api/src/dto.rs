@@ -2213,16 +2213,6 @@ wire_enum!(SessionLayoutItemKind {
     Group => "group",
 });
 
-/// Atomically move one or more sessions to an exact group insertion point.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MoveSessionsReq {
-    pub session_ids: Vec<String>,
-    pub destination_group_id: String,
-    #[serde(default)]
-    pub before_session_id: Option<String>,
-    pub expected_revision: i64,
-}
-
 /// One complete group order in an atomic layout restore.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionGroupOrderReq {
