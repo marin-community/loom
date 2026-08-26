@@ -135,7 +135,6 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<sessions::archive::Op>(),
         bind::<sessions::changes::Op>(),
         bind::<sessions::chat::Op>(),
-        bind::<sessions::context::Op>(),
         bind::<sessions::conversation::Op>(),
         bind::<sessions::events::create::Op>(),
         bind::<sessions::events::list::Op>(),
@@ -149,7 +148,6 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<sessions::list::Op>(),
         bind::<sessions::mode::Op>(),
         bind::<sessions::preview::Op>(),
-        bind::<sessions::raw::Op>(),
         bind::<sessions::recover::Op>(),
         bind::<sessions::scratch::delete::Op>(),
         bind::<sessions::scratch::limits::Op>(),
@@ -201,6 +199,24 @@ mod tests {
         assert!(
             missing.is_empty(),
             "operations advertise a CLI but have no binding: {missing:?}"
+        );
+    }
+
+    /// And nothing is bound that no command can reach.
+    ///
+    /// A binding whose operation declares `cli = -` is never placed in the tree
+    /// — `generic_bindings` filters it out — so it costs a line here and buys
+    /// nothing. `sessions.context` and `sessions.raw` sat in the list that way.
+    #[test]
+    fn every_binding_names_an_operation_with_a_command() {
+        let stranded: Vec<_> = super::bindings()
+            .iter()
+            .filter(|binding| binding.operation.cli.is_none())
+            .map(|binding| binding.operation.id)
+            .collect();
+        assert!(
+            stranded.is_empty(),
+            "bound operations declare no CLI, so nothing reaches them: {stranded:?}"
         );
     }
 }

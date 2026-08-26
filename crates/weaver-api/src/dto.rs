@@ -85,7 +85,7 @@ impl From<&Tag> for TagView {
     }
 }
 
-/// Branch with denormalized open-issue count, returned by `/api/branches` and
+/// Branch with denormalized open-issue count, returned by `branches.list` and
 /// embedded under `SessionView::branch`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BranchView {
@@ -199,11 +199,11 @@ pub struct SessionTransitionView {
     pub started_at: String,
 }
 
-/// Compact session projection returned by `GET /api/sessions/summary`.
+/// Compact session projection returned by `sessions.summary.list`.
 ///
 /// This is the polling/search contract for fleet indexes. A client follows with
-/// `GET /api/sessions/{id}` only when it opens a session or discloses the row's
-/// complete context.
+/// `sessions.get` only when it opens a session or discloses the row's complete
+/// context.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSummaryView {
     pub id: String,
@@ -233,7 +233,9 @@ pub struct SessionSummaryView {
     pub branch: BranchSummaryView,
 }
 
-/// Session-scoped view returned by the `/api/sessions[/...]` endpoints.
+/// The complete session projection, as against the compact
+/// [`SessionSummaryView`] fleet indexes poll: every field a session detail view
+/// needs, including the session's whole [`BranchView`].
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionView {
     pub id: String,
@@ -1220,7 +1222,7 @@ pub struct RunView {
     pub updated_at: String,
 }
 
-/// One detached background task's lifecycle, as `GET /api/tasks` exposes it —
+/// One detached background task's lifecycle, as `tasks.list` exposes it —
 /// currently the GitHub `@loom` trigger launches, which run off the webhook
 /// request so a slow clone can't blow GitHub's delivery timeout. Human-only
 /// self-service debugging (Settings → Diagnostics), same as the log endpoints:
@@ -1336,7 +1338,7 @@ pub struct DiagnosticFederation {
     pub updated_at: String,
 }
 
-/// Human-readable operational snapshot returned by `/api/diagnostics`.
+/// Human-readable operational snapshot returned by `diagnostics.get`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticsView {
     pub sessions: Vec<DiagnosticSessionCount>,
@@ -1421,19 +1423,14 @@ pub struct IssueActionProblem {
     pub error: String,
 }
 
-/// Aggregate outcome from a successful atomic `POST /api/issues/actions`.
+/// Aggregate outcome shared by every atomic work-item mutation: `issues.actions`
+/// and the `issues.close` / `issues.reopen` / `issues.delete` shorthands.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueActionsResult {
     /// Updated issue views for close, reopen, tag, and untag.
     pub issues: Vec<IssueView>,
     /// Deleted IDs for delete. Empty for every other action.
     pub deleted_ids: Vec<i64>,
-}
-
-/// Response from the scalar `DELETE /api/issues/{id}` operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
-pub struct DeleteIssueResult {
-    pub deleted: bool,
 }
 
 /// The minimal live snapshot of a GitHub thread `loom issues get` renders
@@ -1596,22 +1593,6 @@ pub struct ThreadDto {
     pub created_at: String,
     pub resolved_at: Option<String>,
     pub comments: Vec<CommentDto>,
-}
-
-/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads`: open a new
-/// thread anchored to a quoted span, seeded with its first comment.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct NewThreadBody {
-    pub base_rev: i64,
-    pub anchor: AnchorDto,
-    pub body: String,
-}
-
-/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads/{tid}/comments`:
-/// append a reply to an existing thread.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct NewCommentBody {
-    pub body: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1997,9 +1978,9 @@ impl From<WatchRun> for WatchRunView {
     }
 }
 
-/// One **program** a watch can run, as `GET /api/watches/programs`
-/// exposes it. Builtin programs are Python scripts that ship inside the loom
-/// binary; the embedded source is returned for a read-only view in the panel.
+/// One **program** a watch can run, as `watches.programs` exposes it. Builtin
+/// programs are Python scripts that ship inside the loom binary; the embedded
+/// source is returned for a read-only view in the panel.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProgramView {
     /// The reference a watch's `program` field names it by, e.g.
@@ -2181,10 +2162,12 @@ pub struct ScratchUpload {
     pub content_base64: String,
 }
 
-/// Body for `POST /api/sessions/{id}/handoff`. Canonical `selection` requires
-/// both revisions from `/handoff/resolve` and stamps the target template.
-/// Flattened fields remain for backward compatibility, preserving the
-/// session's stamped profile/policy.
+/// The handoff arguments a caller assembles before invoking `sessions.handoff`,
+/// splatted field-for-field into that operation's input rather than sent as its
+/// own body. Canonical `selection` requires both revisions from
+/// `sessions.handoff.resolve` and stamps the target template. Flattened fields
+/// remain for backward compatibility, preserving the session's stamped
+/// profile/policy.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HandoffReq {
     /// Flattened runtime selector for backward compatibility. Canonical clients use `selection`.
@@ -2226,7 +2209,7 @@ wire_enum!(SessionPlacementSelectorKind {
     Watch => "watch",
 });
 
-/// One desired tag in `PUT /api/sessions/{id}/tags`.
+/// One desired tag in `sessions.tags.replace`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagInput {
     pub key: String,
@@ -2243,7 +2226,9 @@ pub struct TagMatch {
     pub value: String,
 }
 
-/// Body for `POST /api/sessions/{id}/send`: type a message into the agent pane.
+/// In-process arguments for typing a message into a session's agent pane. Not a
+/// wire shape: `Client::nudge` and loom's channel delivery path each translate
+/// it into `sessions.send` input.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SendReq {
     /// The text to type into the agent's pane.
@@ -2273,7 +2258,7 @@ impl SendReq {
     }
 }
 
-/// Result of `POST /api/sessions/{id}/send`.
+/// Result of `sessions.send`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionSendResult {
     pub sent: bool,
@@ -2288,35 +2273,17 @@ pub struct SessionSendResult {
     pub turn: Option<i64>,
 }
 
-/// Result of `POST /api/sessions/{id}/interrupt`.
+/// Result of `sessions.interrupt`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionInterruptResult {
     pub interrupted: bool,
 }
 
-/// Result of `GET /api/sessions/{id}/preview`: the session's terminal pane (or,
-/// for an ACP session, its recent journal) rendered as plain text.
+/// Result of `sessions.preview`: the session's terminal pane (or, for an ACP
+/// session, its recent journal) rendered as plain text.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionPreviewResult {
     pub screen: String,
-}
-
-/// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
-/// a new revision (`author: user`). `title`/`kind` update the envelope; omit
-/// them to keep the current values.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ArtifactWriteBody {
-    pub content: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// Optimistic-concurrency guard: if set and it doesn't match the
-    /// artifact's current latest revision, the server rejects the write with
-    /// 409 instead of silently overwriting a newer edit. Omitted (the
-    /// default) force-writes as before — backward compatible.
-    #[serde(default)]
-    pub base_rev: Option<i64>,
 }
 
 wire_enum!(SettingKind {
@@ -2433,16 +2400,15 @@ pub struct AgentEnvVarView {
     pub updated_at: String,
 }
 
-/// Result of `DELETE /api/watches/{id}`.
+/// Result of `watches.delete`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WatchDeleteResult {
     pub deleted: bool,
     pub id: String,
 }
 
-/// Result of firing a watch round on demand (`POST /api/watches/{id}/run`):
-/// the round's id and its closed outcome, re-read from the run history once
-/// the round finishes.
+/// Result of firing a watch round on demand (`watches.run`): the round's id and
+/// its closed outcome, re-read from the run history once the round finishes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct WatchRunResult {
     pub run_id: i64,
@@ -2483,9 +2449,9 @@ pub struct RecentRepoView {
     pub active_branches: i64,
 }
 
-/// One local git branch of a repo checkout, as `GET /api/repos/branches`
-/// reports it — name, its worktree if one is checked out, and whether it is
-/// the checkout's current branch.
+/// One local git branch of a repo checkout, as `repos.branches` reports it —
+/// name, its worktree if one is checked out, and whether it is the checkout's
+/// current branch.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoBranchView {
     pub name: String,
@@ -2494,7 +2460,7 @@ pub struct RepoBranchView {
 }
 
 /// Result of validating a launch fork point against a repo checkout
-/// (`GET /api/repos/revisions/validate`).
+/// (`repos.revisions.validate`).
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoRevisionValidationView {
     pub valid: bool,
@@ -2533,7 +2499,7 @@ pub struct ShellRestartResult {
 //
 // Mirrors of `loom_agent::agent`'s `AgentMetadata`/`AgentChoice` and
 // `loom_agent::custom_agents::CustomAgent`, plus the ad hoc envelopes
-// `GET /api/agents` and the `/api/agents/custom*` mutations return.
+// `agents.list` and the `agents.custom.*` mutations return.
 // ---------------------------------------------------------------------------
 
 /// One selectable value for an agent's `model` or `effort` choice.  Mirrors
@@ -2586,7 +2552,7 @@ pub struct CustomAgentView {
     pub updated_at: String,
 }
 
-/// `GET /api/agents` — the picker list (builtins + custom) plus the full
+/// `agents.list` — the picker list (builtins + custom) plus the full
 /// custom-agent definitions the editor round-trips.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentsView {
@@ -2595,7 +2561,7 @@ pub struct AgentsView {
     pub default_agent: String,
 }
 
-/// Returned by every `/api/agents/custom*` mutation so the caller can refresh
+/// Returned by every `agents.custom.*` mutation so the caller can refresh
 /// the editor's list in one round trip.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomAgentsView {
@@ -2620,8 +2586,8 @@ pub struct AuthMethods {
     pub github: bool,
 }
 
-/// `GET /api/auth/me` — who the caller is and what the login screen needs. The
-/// SPA hits this on load: `authenticated: false` means show the login view.
+/// `auth.me` — who the caller is and what the login screen needs. The SPA hits
+/// this on load: `authenticated: false` means show the login view.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MeView {
     pub authenticated: bool,
@@ -2637,7 +2603,7 @@ pub struct MeView {
     pub methods: AuthMethods,
 }
 
-/// One API token's non-secret metadata (`GET /api/auth/tokens`). The secret
+/// One API token's non-secret metadata (`auth.tokens.list`). The secret
 /// itself is only ever returned once, in [`CreatedTokenView`].
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TokenView {
@@ -2650,7 +2616,7 @@ pub struct TokenView {
     pub expires_at: Option<String>,
 }
 
-/// `POST /api/auth/tokens` reply — the one and only time the plaintext token is
+/// `auth.tokens.create` reply — the one and only time the plaintext token is
 /// shown. Store it now; the server keeps only a hash.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreatedTokenView {
@@ -2660,14 +2626,14 @@ pub struct CreatedTokenView {
     pub info: TokenView,
 }
 
-/// Body for `POST /api/auth/login` (username/password).
+/// Body for `auth.login` (username/password).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoginReq {
     pub username: String,
     pub password: String,
 }
 
-/// One approved operator (`GET /api/auth/users`). The password hash is never
+/// One approved operator (`auth.users.list`). The password hash is never
 /// exposed — only whether one is set.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserView {
@@ -2678,7 +2644,7 @@ pub struct UserView {
     pub created_at: String,
 }
 
-/// `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret
+/// `auth.github_config.get` — the GitHub App / sign-in setup, secret
 /// withheld. loom is driven by a single GitHub App (see [the GitHub
 /// trigger](../../../docs/github-trigger.md)): its OAuth client powers
 /// "Sign in with GitHub" (`configured`/`client_id`), and the same App's id and
@@ -2707,7 +2673,7 @@ pub struct GithubConfigView {
 }
 
 /// Whether the caller has a personal GitHub token on file, and when it last
-/// changed (`GET`/`PUT`/`DELETE /api/auth/github-token`). Write-only: the
+/// changed (`auth.github_token.get`/`.set`/`.remove`). Write-only: the
 /// value itself is never returned, only this status.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubTokenStatusView {

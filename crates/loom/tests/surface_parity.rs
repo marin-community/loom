@@ -1,7 +1,7 @@
 //! The transport ledger.
 //!
 //! [`TRANSPORT_ROUTES`] lists every hand-mounted route as a decision, not a
-//! gap: nineteen paths the operation DSL cannot express, each with the reason
+//! gap: eighteen paths the operation DSL cannot express, each with the reason
 //! written next to it. A route in `web/mod.rs` with no operation behind it —
 //! no schema, no CLI, no MCP projection, no declared actor policy — is a
 //! second API surface, and this file has no bucket for "temporarily allowed."

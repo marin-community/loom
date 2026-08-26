@@ -153,7 +153,8 @@ impl Client {
 
     // -- Reads (observe) --------------------------------------------------
 
-    /// Active non-automation sessions, as a list of dicts (`GET /api/sessions`).
+    /// Every visible non-archived session, automation included, as a list of
+    /// dicts (`sessions.list`).
     fn sessions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let views = py
             .detach(|| self.rt.block_on(self.inner.list_sessions()))
@@ -162,7 +163,7 @@ impl Client {
     }
 
     /// One session by key — id, branch id, branch name, or `repo:branch`
-    /// (`GET /api/sessions/{key}`).
+    /// (`sessions.get`).
     fn session(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let view = py
             .detach(|| self.rt.block_on(self.inner.invoke::<sessions::get::Op>(&sessions::get::Input {
@@ -173,7 +174,7 @@ impl Client {
     }
 
     /// The session's terminal as plain text, with `lines` of scrollback above
-    /// the visible screen (`GET /api/sessions/{key}/preview`).
+    /// the visible screen (`sessions.preview`).
     #[pyo3(signature = (key, lines=0))]
     fn preview(&self, py: Python<'_>, key: &str, lines: usize) -> PyResult<String> {
         py.detach(|| self.rt.block_on(self.inner.preview(key, lines)))
@@ -181,7 +182,7 @@ impl Client {
     }
 
     /// Typed, bounded worktree changes relative to the session's local base
-    /// (`GET /api/sessions/{key}/changes`).
+    /// (`sessions.changes`).
     fn changes(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let value = py
             .detach(|| self.rt.block_on(self.inner.invoke::<sessions::changes::Op>(&sessions::changes::Input {

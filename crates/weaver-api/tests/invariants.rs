@@ -312,16 +312,12 @@ fn transport_specific_operations_are_pinned() {
     );
 }
 
-/// An operation with no JSON request body takes its operands from the query
-/// string, which axum deserializes before any dispatcher default-filling could
-/// run. So every one of its operands must be optional on the wire — otherwise
 /// An operation describes what it returns, not only what it takes.
 ///
 /// A caller told exactly what to send and nothing about what comes back has to
-/// write the response type out by hand — which is why `frontend/src/types.ts`
-/// holds 179 interfaces mirroring these DTOs. The bytes an `io = Stream`,
-/// `Duplex`, or `Download` operation emits are not JSON and have no schema;
-/// everything else must have one.
+/// write the response type out by hand — which is what `frontend/src/types.ts`
+/// used to be. The bytes an `io = Stream`, `Duplex`, or `Download` operation
+/// emits are not JSON and have no schema; everything else must have one.
 #[test]
 fn operations_describe_their_response() {
     for operation in operations::operations() {
@@ -338,8 +334,11 @@ fn operations_describe_their_response() {
     }
 }
 
-/// the declared route 400s on a caller that named nothing, including exactly the
-/// request a session credential makes when it means "my own session".
+/// An operation with no JSON request body takes its operands from the query
+/// string, which axum deserializes before any dispatcher default-filling could
+/// run. So every one of its operands must be optional on the wire — otherwise
+/// the declared route 400s on a caller that named nothing, including exactly
+/// the request a session credential makes when it means "my own session".
 ///
 /// `io = Session` is exempt: it is a POST with a JSON body, and its response is
 /// special only in carrying a `Set-Cookie`.

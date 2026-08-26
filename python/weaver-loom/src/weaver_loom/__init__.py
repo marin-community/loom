@@ -10,7 +10,8 @@ live runtime either way.
 Two pieces:
 
 * :class:`Client` — a thin, capability-gated wrapper over the REST routes.
-  DTOs cross as plain dicts (the shapes `frontend/types.ts` documents);
+  DTOs cross as plain dicts, shaped by the OpenAPI document the server serves
+  at `/api/openapi.json` (rendered from `crates/weaver-api/src/dto.rs`);
   mutating calls check the granted capability set *before* issuing a request,
   mirroring the intervention-ladder contract of the `weaver-py` binding.
 * :class:`Round` — the watch program context: the round config the engine

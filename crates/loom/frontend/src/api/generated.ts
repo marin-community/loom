@@ -93,7 +93,7 @@ export interface AgentMetadataView {
 }
 
 /**
- * `GET /api/agents` — the picker list (builtins + custom) plus the full
+ * `agents.list` — the picker list (builtins + custom) plus the full
  * custom-agent definitions the editor round-trips.
  */
 export interface AgentsView {
@@ -246,7 +246,7 @@ export interface BranchSummaryView {
 }
 
 /**
- * Branch with denormalized open-issue count, returned by `/api/branches` and
+ * Branch with denormalized open-issue count, returned by `branches.list` and
  * embedded under `SessionView::branch`.
  */
 export interface BranchView {
@@ -531,7 +531,7 @@ export interface ConfigOptionResult {
 }
 
 /**
- * `POST /api/auth/tokens` reply — the one and only time the plaintext token is
+ * `auth.tokens.create` reply — the one and only time the plaintext token is
  * shown. Store it now; the server keeps only a hash.
  */
 export interface CreatedTokenView {
@@ -571,7 +571,7 @@ export interface CustomAgentView {
 }
 
 /**
- * Returned by every `/api/agents/custom*` mutation so the caller can refresh
+ * Returned by every `agents.custom.*` mutation so the caller can refresh
  * the editor's list in one round trip.
  */
 export interface CustomAgentsView {
@@ -770,7 +770,7 @@ export interface DiagnosticSessionCount {
   status: string;
 }
 
-/** Human-readable operational snapshot returned by `/api/diagnostics`. */
+/** Human-readable operational snapshot returned by `diagnostics.get`. */
 export interface DiagnosticsView {
   automation_runs: DiagnosticRunSummary;
   federations: DiagnosticFederation[];
@@ -843,7 +843,7 @@ export interface FederationView {
 }
 
 /**
- * `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret
+ * `auth.github_config.get` — the GitHub App / sign-in setup, secret
  * withheld. loom is driven by a single GitHub App (see [the GitHub
  * trigger](../../../docs/github-trigger.md)): its OAuth client powers
  * "Sign in with GitHub" (`configured`/`client_id`), and the same App's id and
@@ -925,7 +925,7 @@ export interface GithubThreadState {
 
 /**
  * Whether the caller has a personal GitHub token on file, and when it last
- * changed (`GET`/`PUT`/`DELETE /api/auth/github-token`). Write-only: the
+ * changed (`auth.github_token.get`/`.set`/`.remove`). Write-only: the
  * value itself is never returned, only this status.
  */
 export interface GithubTokenStatusView {
@@ -1011,7 +1011,10 @@ export type IssueAction = {
   type: 'delete';
 };
 
-/** Aggregate outcome from a successful atomic `POST /api/issues/actions`. */
+/**
+ * Aggregate outcome shared by every atomic work-item mutation: `issues.actions`
+ * and the `issues.close` / `issues.reopen` / `issues.delete` shorthands.
+ */
 export interface IssueActionsResult {
   /** Deleted IDs for delete. Empty for every other action. */
   deleted_ids: number[];
@@ -1199,8 +1202,8 @@ export interface McpServerProcessView {
 }
 
 /**
- * `GET /api/auth/me` — who the caller is and what the login screen needs. The
- * SPA hits this on load: `authenticated: false` means show the login view.
+ * `auth.me` — who the caller is and what the login screen needs. The SPA hits
+ * this on load: `authenticated: false` means show the login view.
  */
 export interface MeView {
   authenticated: boolean;
@@ -1377,9 +1380,9 @@ export interface ProfilesCloneNestedInput {
 }
 
 /**
- * One **program** a watch can run, as `GET /api/watches/programs`
- * exposes it. Builtin programs are Python scripts that ship inside the loom
- * binary; the embedded source is returned for a read-only view in the panel.
+ * One **program** a watch can run, as `watches.programs` exposes it. Builtin
+ * programs are Python scripts that ship inside the loom binary; the embedded
+ * source is returned for a read-only view in the panel.
  */
 export interface ProgramView {
   /**
@@ -1432,9 +1435,9 @@ export interface RemoveUserResult {
 }
 
 /**
- * One local git branch of a repo checkout, as `GET /api/repos/branches`
- * reports it — name, its worktree if one is checked out, and whether it is
- * the checkout's current branch.
+ * One local git branch of a repo checkout, as `repos.branches` reports it —
+ * name, its worktree if one is checked out, and whether it is the checkout's
+ * current branch.
  */
 export interface RepoBranchView {
   current: boolean;
@@ -1464,7 +1467,7 @@ export interface RepoEnvView {
 
 /**
  * Result of validating a launch fork point against a repo checkout
- * (`GET /api/repos/revisions/validate`).
+ * (`repos.revisions.validate`).
  */
 export interface RepoRevisionValidationView {
   /** Why resolution failed, when `valid` is false. */
@@ -1900,7 +1903,7 @@ export interface SessionIdeInfoView {
   idle_timeout_secs: number;
 }
 
-/** Result of `POST /api/sessions/{id}/interrupt`. */
+/** Result of `sessions.interrupt`. */
 export interface SessionInterruptResult {
   interrupted: boolean;
 }
@@ -1947,8 +1950,8 @@ export interface SessionPlacementView {
 }
 
 /**
- * Result of `GET /api/sessions/{id}/preview`: the session's terminal pane (or,
- * for an ACP session, its recent journal) rendered as plain text.
+ * Result of `sessions.preview`: the session's terminal pane (or, for an ACP
+ * session, its recent journal) rendered as plain text.
  */
 export interface SessionPreviewResult {
   screen: string;
@@ -1958,7 +1961,7 @@ export type SessionSearchAttention = 'needs' | 'ok' | 'attention' | 'blocked';
 
 export type SessionSearchStatus = 'created' | 'running' | 'orphaned' | 'done' | 'error' | 'archived';
 
-/** Result of `POST /api/sessions/{id}/send`. */
+/** Result of `sessions.send`. */
 export interface SessionSendResult {
   /**
    * Whether the prompt was queued behind an active turn. Set only for an ACP
@@ -1984,11 +1987,11 @@ export interface SessionSpaceView {
 }
 
 /**
- * Compact session projection returned by `GET /api/sessions/summary`.
+ * Compact session projection returned by `sessions.summary.list`.
  *
  * This is the polling/search contract for fleet indexes. A client follows with
- * `GET /api/sessions/{id}` only when it opens a session or discloses the row's
- * complete context.
+ * `sessions.get` only when it opens a session or discloses the row's complete
+ * context.
  */
 export interface SessionSummaryView {
   branch: BranchSummaryView;
@@ -2024,7 +2027,11 @@ export interface SessionUrlView {
   url: string;
 }
 
-/** Session-scoped view returned by the `/api/sessions[/...]` endpoints. */
+/**
+ * The complete session projection, as against the compact
+ * [`SessionSummaryView`] fleet indexes poll: every field a session detail view
+ * needs, including the session's whole [`BranchView`].
+ */
 export interface SessionView {
   /** The agent's own on-disk ACP session id for an `acp` session, or `null`. */
   acp_session_id: string | null;
@@ -2225,7 +2232,7 @@ export interface SlackThreadRef {
   thread_ts: string;
 }
 
-/** One desired tag in `PUT /api/sessions/{id}/tags`. */
+/** One desired tag in `sessions.tags.replace`. */
 export interface TagInput {
   key: string;
   /** One-line reason accompanying the tag. */
@@ -2254,7 +2261,7 @@ export interface TagView {
 }
 
 /**
- * One detached background task's lifecycle, as `GET /api/tasks` exposes it —
+ * One detached background task's lifecycle, as `tasks.list` exposes it —
  * currently the GitHub `@loom` trigger launches, which run off the webhook
  * request so a slow clone can't blow GitHub's delivery timeout. Human-only
  * self-service debugging (Settings → Diagnostics), same as the log endpoints:
@@ -2300,7 +2307,7 @@ export interface TitleGenerationView {
 }
 
 /**
- * One API token's non-secret metadata (`GET /api/auth/tokens`). The secret
+ * One API token's non-secret metadata (`auth.tokens.list`). The secret
  * itself is only ever returned once, in [`CreatedTokenView`].
  */
 export interface TokenView {
@@ -2336,7 +2343,7 @@ export interface UserPreferencesEnvelope {
 export type UserRole = 'admin' | 'user';
 
 /**
- * One approved operator (`GET /api/auth/users`). The password hash is never
+ * One approved operator (`auth.users.list`). The password hash is never
  * exposed — only whether one is set.
  */
 export interface UserView {
@@ -2347,16 +2354,15 @@ export interface UserView {
   username: string;
 }
 
-/** Result of `DELETE /api/watches/{id}`. */
+/** Result of `watches.delete`. */
 export interface WatchDeleteResult {
   deleted: boolean;
   id: string;
 }
 
 /**
- * Result of firing a watch round on demand (`POST /api/watches/{id}/run`):
- * the round's id and its closed outcome, re-read from the run history once
- * the round finishes.
+ * Result of firing a watch round on demand (`watches.run`): the round's id and
+ * its closed outcome, re-read from the run history once the round finishes.
  */
 export interface WatchRunResult {
   /**
