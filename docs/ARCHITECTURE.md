@@ -309,18 +309,19 @@ pub type Output = ShellsView;
 ```
 
 `actor` says which credentials may call it, `scope` which resource it is
-authorized against. The attribute emits the serde/schema/clap derives, the
-`Op` marker handlers bind against, and a `Scoped` impl that reads the context
-field `scope` names — so the declared scope and the enforced one cannot drift.
+authorized against. The attribute emits the serde and schema derives, an
+`Operands` impl describing each field as data, the `Op` marker handlers bind
+against, and a `Scoped` impl that reads the context field `scope` names — so
+the declared scope and the enforced one cannot drift.
 
 Everything else is derived from that:
 
 | projection | derived how |
 |---|---|
 | REST route | `POST /api/sessions/shells/delete` — the id with dots as slashes. Not declared; computed. |
-| JSON Schema | `schemars` over `Input`, minus `#[operand(context)]` fields |
+| JSON Schema | `schemars` over `Input`, minus `#[operand(context)]` fields; `Output` answers for the response |
 | MCP tool | name, description, and schema from the same declaration |
-| CLI command | clap `Command` built from the same `Operands` derive, so an advertised invocation and the parser that accepts it are one value read twice |
+| CLI command | `Operands::OPERANDS` describes each field as data; `loom::cli::clap_bind` turns that into a `clap::Command` and reads the parse back, so an advertised invocation and the parser that accepts it are one declaration read twice |
 | authority | `actor`, `grants`, and the resource named by `Scoped` |
 
 `register::<O>(handler)` in `crates/loom/src/web/` binds the declaration to its
