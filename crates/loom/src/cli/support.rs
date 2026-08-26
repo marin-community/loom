@@ -4,7 +4,7 @@ use crate::client;
 use anyhow::Result;
 
 pub fn configure_agent_client() -> Result<()> {
-    crate::agent_cli::set_client_override(client::default()?)
+    crate::cli::agent::set_client_override(client::default()?)
 }
 
 pub fn truncate(s: &str, max: usize) -> String {

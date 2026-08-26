@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Subcommand};
 
-use crate::agent_cli::TagCmd as AgentTagCmd;
+use crate::cli::agent::TagCmd as AgentTagCmd;
 use crate::cli::support::{configure_agent_client, truncate};
 use crate::client::{self, Client};
 use weaver_api::operations::{branches, sessions};
@@ -345,7 +345,7 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
         }
         SessionCmd::Tags { cmd } => {
             configure_agent_client()?;
-            crate::agent_cli::run_tag(cmd).await
+            crate::cli::agent::run_tag(cmd).await
         }
         SessionCmd::Events { session, limit } => {
             if let Some(session) = session {
@@ -365,10 +365,10 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
                 Ok(())
             } else {
                 configure_agent_client()?;
-                crate::agent_cli::run_events(limit).await
+                crate::cli::agent::run_events(limit).await
             }
         }
-        SessionCmd::Transcript { file, json } => crate::agent_cli::run_chatlog(file, json),
+        SessionCmd::Transcript { file, json } => crate::cli::agent::run_chatlog(file, json),
         SessionCmd::Ls {
             archived,
             automation: _,

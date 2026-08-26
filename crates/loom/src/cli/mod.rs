@@ -5,6 +5,7 @@
 //! half of `config` — are not operations and keep their own clap definitions:
 //! they never reach the API, so there is nothing for the registry to own.
 
+pub mod agent;
 pub mod clap_bind;
 pub mod commands;
 pub mod dispatch;

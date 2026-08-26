@@ -48,7 +48,7 @@ where
             let parsed = decode::<O>(matches);
             Box::pin(async move {
                 let (mut input, view) = parsed?;
-                let client = crate::agent_cli::client();
+                let client = crate::cli::agent::client();
                 // Context is resolved once here, avoiding per-command round-trips.
                 if !<O::Input as Operands>::CONTEXT.is_empty() {
                     let context = resolve_context(&client).await?;

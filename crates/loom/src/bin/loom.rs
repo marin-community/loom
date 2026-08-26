@@ -8,7 +8,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
-use loom::agent_cli::{
+use loom::cli::agent::{
     ArtifactCmd as AgentArtifactCmd, ChannelCmd as AgentChannelCmd, ConfigCmd as AgentConfigCmd,
     IssueCmd as AgentIssueCmd, StatusCmd as AgentStatusCmd,
 };
@@ -834,15 +834,15 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
     match command {
         RegisteredCliCommand::Summary => {
             configure_agent_client()?;
-            loom::agent_cli::run_summary().await
+            loom::cli::agent::run_summary().await
         }
         RegisteredCliCommand::SelfContext => {
             configure_agent_client()?;
-            loom::agent_cli::run_self().await
+            loom::cli::agent::run_self().await
         }
         RegisteredCliCommand::Status(cmd) => {
             configure_agent_client()?;
-            loom::agent_cli::run_status(cmd).await
+            loom::cli::agent::run_status(cmd).await
         }
         RegisteredCliCommand::Sessions(cmd) => run_session(cmd).await,
         RegisteredCliCommand::Launch(opts) => cmd_launch(opts.into()).await,
@@ -850,25 +850,25 @@ async fn run_registered_cli(command: RegisteredCliCommand) -> Result<()> {
         RegisteredCliCommand::Attach(session) => cmd_attach(session).await,
         RegisteredCliCommand::Hook(event) => {
             configure_agent_client()?;
-            loom::agent_cli::run_hook(event).await
+            loom::cli::agent::run_hook(event).await
         }
         RegisteredCliCommand::Channels(cmd) => {
             configure_agent_client()?;
-            loom::agent_cli::run_channel(cmd).await
+            loom::cli::agent::run_channel(cmd).await
         }
         RegisteredCliCommand::Artifacts(cmd) => {
             configure_agent_client()?;
-            loom::agent_cli::run_artifact(cmd).await
+            loom::cli::agent::run_artifact(cmd).await
         }
         RegisteredCliCommand::Review(cmd) => run_review(cmd).await,
         RegisteredCliCommand::Issues(cmd) => {
             configure_agent_client()?;
-            loom::agent_cli::run_issue(cmd).await
+            loom::cli::agent::run_issue(cmd).await
         }
         RegisteredCliCommand::Permissions(cmd) => run_permissions(cmd).await,
         RegisteredCliCommand::GithubToken => {
             configure_agent_client()?;
-            loom::agent_cli::run_github_token().await
+            loom::cli::agent::run_github_token().await
         }
     }
 }
@@ -879,7 +879,7 @@ async fn run_host_cli(command: HostCmd) -> Result<()> {
         HostCmd::Doctor => run_doctor().await,
         HostCmd::Settings { cmd } => {
             configure_agent_client()?;
-            loom::agent_cli::run_settings(cmd).await
+            loom::cli::agent::run_settings(cmd).await
         }
         HostCmd::Mcp { cmd } => run_mcp(cmd).await,
         HostCmd::Server { cmd } => run_server(cmd).await,

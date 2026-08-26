@@ -10,7 +10,6 @@
 //! launch, background-watch, and delivery subjects. Each layer is re-exported
 //! here, so `loom::session`, `loom::AppState` and friends keep stable paths.
 
-pub mod agent_cli;
 pub mod cli;
 pub mod client;
 pub mod endpoint;
