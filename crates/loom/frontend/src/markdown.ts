@@ -11,6 +11,7 @@ import type MarkdownIt from 'markdown-it';
 // default export of the `token` module (resolved via the types' `./*` exports).
 import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from './types';
+import { operationPath } from './api';
 
 /** Where to resolve image sources: relative paths use the session's raw
  *  worktree endpoint; `artifact:<name>` uses the stored artifact's raw image
@@ -61,7 +62,8 @@ export function resolvePath(dir: string, rel: string): string {
  *  Download`) with its operands in the query string. */
 export function artifactImageUrl(sessionId: string, name: string, rev?: number): string {
   const query = `branch=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
-  return rev == null ? `/api/artifacts/raw?${query}` : `/api/artifacts/raw?${query}&rev=${rev}`;
+  const path = operationPath('artifacts.raw');
+  return rev == null ? `${path}?${query}` : `${path}?${query}&rev=${rev}`;
 }
 
 /** Map a markdown image source to a viewable URL. `artifact:<name>` resolves
@@ -79,7 +81,7 @@ export function resolveUrl(ctx: RenderContext, url: string): string {
     ? ctx.filePath.slice(0, ctx.filePath.lastIndexOf('/'))
     : '';
   const path = resolvePath(dir, url.replace(/^\.\//, ''));
-  return `/api/sessions/raw?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(path)}`;
+  return `${operationPath('sessions.raw')}?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(path)}`;
 }
 
 // ---------------------------------------------------------------------------

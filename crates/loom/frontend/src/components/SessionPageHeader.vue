@@ -163,6 +163,11 @@ interface SurfacedLink {
 
 const URL_RE = /https?:\/\/[^\s)\]>"'`]+/g;
 const TEXT_KEYS = ['note', 'text', 'message'] as const;
+
+// An event's `data` is `serde_json::Value` on the wire — the kinds carry
+// different keys — so reading one is a decode, done in one place.
+const eventData = (event: WeaverEvent): Record<string, unknown> =>
+  (event.data ?? {}) as Record<string, unknown>;
 const surfacedLinks = computed<SurfacedLink[]>(() => {
   const links: SurfacedLink[] = [];
   const seen = new Set<string>();
@@ -181,7 +186,7 @@ const surfacedLinks = computed<SurfacedLink[]>(() => {
   pushText(statusMessage.value, 'current status');
   for (const event of [...props.events].reverse()) {
     for (const key of TEXT_KEYS) {
-      pushText(event.data?.[key], timeAgo(event.created_at));
+      pushText(eventData(event)[key], timeAgo(event.created_at));
       if (links.length === 12) return links;
     }
   }
@@ -189,7 +194,7 @@ const surfacedLinks = computed<SurfacedLink[]>(() => {
 });
 
 function statusEventLine(event: WeaverEvent): string {
-  const data = event.data ?? {};
+  const data = eventData(event);
   if (event.kind === 'status') {
     const reason = typeof data.reason === 'string' && data.reason ? ` — ${data.reason}` : '';
     return `Lifecycle → ${String(data.status ?? 'unknown')}${reason}`;

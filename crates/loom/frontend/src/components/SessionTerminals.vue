@@ -2,7 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import AgentTerminal from './AgentTerminal.vue';
 import KeyHint from './KeyHint.vue';
-import { invokeOperation } from '../api';
+import { invokeOperation, operationPath } from '../api';
 
 // The session's terminal area: an inner tab strip over the always-mounted agent
 // terminal plus zero or more worktree **debug shells**.
@@ -34,9 +34,7 @@ const noShells = computed(() => props.shellsOnly && shells.value.length === 0);
 
 async function loadShells() {
   try {
-    const idxs = (await invokeOperation('sessions.shells.list', {
-      session: props.id,
-    })) as number[];
+    const idxs = await invokeOperation('sessions.shells.list', { session: props.id });
     // A keyboard command can add the first shell while this mount probe is in
     // flight. Merge rediscovered supervisors with those local tabs so a late
     // empty response never erases the shell the user just opened.
@@ -132,7 +130,7 @@ onMounted(loadShells);
            tabs never drops the PTY; unmounted only when the tab is closed. -->
       <section v-for="idx in shells" v-show="active === idx" :key="idx" class="h-full">
         <AgentTerminal
-          :ws-path="`/api/sessions/shells/terminal?session=${encodeURIComponent(props.id)}&index=${idx}`"
+          :ws-path="`${operationPath('sessions.shells.terminal')}?session=${encodeURIComponent(props.id)}&index=${idx}`"
           class="h-full"
         />
       </section>

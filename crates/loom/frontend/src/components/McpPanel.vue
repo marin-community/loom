@@ -195,7 +195,10 @@ onMounted(() => void load().catch((e) => (error.value = (e as Error).message)));
         ></textarea>
       </label>
       <div class="flex items-center gap-2">
-        <ToggleSwitch :model-value="draft.enabled" @update:model-value="draft.enabled = $event" />
+        <ToggleSwitch
+          :model-value="draft.enabled ?? false"
+          @update:model-value="draft.enabled = $event"
+        />
         <span class="text-xs text-muted">Enabled for ordinary profile selection</span>
       </div>
       <div class="flex gap-2">

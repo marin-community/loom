@@ -33,7 +33,7 @@ function editable(profile: Profile): ProfileInput {
     ambient_allowlist: [...input.ambient_allowlist],
     github_repositories: [...input.github_repositories],
     runtime_permissions: [...input.runtime_permissions],
-    mcp_access: { ...input.mcp_access, groups: [...input.mcp_access.groups] },
+    mcp_access: { ...input.mcp_access, groups: [...(input.mcp_access.groups ?? [])] },
   };
 }
 
@@ -70,6 +70,8 @@ function add() {
   selected.value = '';
   creating.value = true;
   draft.value = {
+    // A profile that does not exist yet has no revision to guard against.
+    expected_revision: null,
     name: '',
     description: '',
     agent_kind: agents.value[0]?.kind ?? 'claude',

@@ -101,10 +101,17 @@ when you're ready to land. The rules it enforces:
 - **API-first.** A new feature is a `web.rs` REST route first; the SPA and the
   `loom` CLI both consume it. No business logic in `bin/loom.rs` or the Vue layer.
 - **The frontend is a thin REST client** ([[ui-built-on-rest-api]]): every call
-  goes through `frontend/src/api.ts` (no inline `fetch`), and
-  `frontend/src/types.ts` mirrors the serde structs in `web.rs` by hand (no
-  codegen — keep them in sync). Don't invent browser-local features the `loom`
-  CLI can't observe.
+  goes through `frontend/src/api.ts` (no inline `fetch`), and its types are
+  **generated, not mirrored**. `frontend/src/api/generated.ts` is written from
+  the OpenAPI document by `crates/weaver-api/tests/typescript.rs`; regenerate it
+  with `UPDATE_TYPES=1 cargo test -p weaver-api --test typescript` whenever a DTO
+  or an operation changes, and the test fails on drift otherwise. That file also
+  carries the operation table `invokeOperation` is keyed on, so an unknown
+  operation id is a compile error and no call site casts its result.
+  `frontend/src/types.ts` keeps only what the server does not declare: the
+  SPA's spelling of each generated name, and the shapes of fields the API
+  serves as free-form JSON. Don't invent browser-local features the `loom` CLI
+  can't observe.
 - **Small SQLite app — don't flag scale.** `~/.weaver/weaver.db` holds ~hundreds
   of rows. Never raise N+1 queries, missing indexes, denormalization, join cost,
   or other scale/perf concerns — they don't apply here. Favor the clean general

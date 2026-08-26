@@ -292,7 +292,7 @@ async function loadBranches() {
   branchesError.value = '';
   if (!path) return;
   try {
-    const res = (await invokeOperation('repos.branches', { cwd: path })) as RepoBranch[];
+    const res = await invokeOperation('repos.branches', { cwd: path });
     if (reqId === branchesReqId) branches.value = res;
   } catch (e) {
     if (reqId === branchesReqId) branchesError.value = (e as Error).message;
@@ -426,7 +426,7 @@ async function refreshLaunchData() {
   resolving.value = false;
   try {
     const [recent, managed, metadata, templates] = await Promise.all([
-      invokeOperation('repos.recent', {}).catch(() => recentRepos.value) as Promise<RecentRepo[]>,
+      invokeOperation('repos.recent', {}).catch(() => recentRepos.value),
       listRepos().catch(() => managedRepos.value),
       listAgents(),
       listProfiles(),
@@ -533,7 +533,7 @@ async function saveAsNewProfile() {
   const submittedGeneration = resolveRequest;
   let saved: Profile;
   try {
-    saved = await cloneProfile(preview.selection.profile, {
+    saved = await cloneProfile(preview.selection.profile ?? '', {
       name: target,
       expected_profile_revision: preview.profile_revision,
       expected_resolver_revision: preview.resolver_revision,
@@ -650,7 +650,7 @@ async function create() {
     }
     // `title` is left out when the form has only a goal (see
     // `createBlockReason` — title OR goal): `sessions.launch` derives it.
-    const session = (await invokeOperation('sessions.launch', body)) as Session;
+    const session = await invokeOperation('sessions.launch', body);
     resetForm();
     emit('created');
     emit('close');

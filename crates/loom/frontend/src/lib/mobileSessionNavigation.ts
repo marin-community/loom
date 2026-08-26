@@ -8,7 +8,7 @@ export type MobileSessionSurface = 'terminal' | 'conversation' | 'artifacts' | '
 
 export interface MobileSessionNavigation {
   id: string;
-  protocol: 'terminal' | 'acp';
+  protocol: string;
   active: MobileSessionSurface;
   select: (surface: MobileSessionSurface) => void | Promise<void>;
   openDetails: () => void;

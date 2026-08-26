@@ -19,6 +19,8 @@
 // having listeners and is pruned at the next reconnect, which keeps returning to
 // a recently-viewed session free.
 
+import { operationPath } from '../api';
+
 type Listener = (data: unknown) => void;
 
 interface Sub {
@@ -119,7 +121,7 @@ function connect(): void {
   if (topics.length === 0) return;
 
   const stream = new EventSource(
-    `/api/events/stream?topics=${encodeURIComponent(topics.join(','))}`,
+    `${operationPath('events.stream')}?topics=${encodeURIComponent(topics.join(','))}`,
   );
   source = stream;
   connected = new Set(topics);

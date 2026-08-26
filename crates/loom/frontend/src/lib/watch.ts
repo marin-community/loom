@@ -1,4 +1,17 @@
-import type { Watch, WatchTrigger, WatchScope } from '../types';
+import type { Watch, WatchAction, WatchRun, WatchTrigger, WatchScope } from '../types';
+
+// A watch stores its `trigger`, `scope`, and `params` — and a run its `actions`
+// — as JSON columns, so the API declares them as free-form values and the
+// generated types say `unknown`. These four are the only place the browser
+// asserts a shape for them.
+export const triggerOf = (watch: Pick<Watch, 'trigger'>): WatchTrigger =>
+  (watch.trigger ?? {}) as WatchTrigger;
+export const scopeOf = (watch: Pick<Watch, 'scope'>): WatchScope =>
+  (watch.scope ?? {}) as WatchScope;
+export const paramsOf = (watch: Pick<Watch, 'params'>): Record<string, unknown> =>
+  (watch.params ?? {}) as Record<string, unknown>;
+export const actionsOf = (run: Pick<WatchRun, 'actions'>): WatchAction[] =>
+  Array.isArray(run.actions) ? (run.actions as WatchAction[]) : [];
 
 // The intervention ladder, calm → loud (mirrors weaver-core's CAPABILITIES).
 // `observe` is implicit — always granted — so the create/edit forms only offer
@@ -59,6 +72,6 @@ export function scopeSummary(s: WatchScope | undefined | null): string {
 
 // The judgement prompt a stock program runs, pulled out of `params`.
 export function promptOf(o: Pick<Watch, 'params'>): string {
-  const p = o.params?.prompt;
+  const p = paramsOf(o).prompt;
   return typeof p === 'string' ? p : '';
 }

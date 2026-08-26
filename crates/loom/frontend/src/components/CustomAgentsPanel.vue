@@ -221,7 +221,7 @@ async function remove(agent: CustomAgent) {
 
       <div class="flex items-center gap-2">
         <ToggleSwitch
-          :model-value="draft.reports_status"
+          :model-value="draft.reports_status ?? false"
           @update:model-value="draft.reports_status = $event"
         />
         <span class="text-xs text-muted">

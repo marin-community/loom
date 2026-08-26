@@ -96,9 +96,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     pinned.value = true;
   }
   try {
-    const data = (await invokeOperation('sessions.conversation', {
-      session: id.value,
-    })) as IrisLog;
+    const data = await invokeOperation('sessions.conversation', { session: id.value });
     if (seq !== loadSeq) return;
     log.value = data;
     state.value = data && data.messages.length ? 'ready' : 'empty';
@@ -328,7 +326,7 @@ const model = computed<Model>(() => {
         key: key++,
         anchor,
         n: turn,
-        time: msg.timestamp,
+        time: msg.timestamp ?? undefined,
         blocks: msg.blocks,
       });
       toc.push({ anchor, n: turn, title: userTitle(msg.blocks) });

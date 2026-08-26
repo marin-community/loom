@@ -201,10 +201,7 @@ function defaultText(value: string): string {
 
 async function load() {
   try {
-    const [res, agentRes] = await Promise.all([
-      invokeOperation('settings.get', {}) as Promise<SettingsEnvelope>,
-      listAgents(),
-    ]);
+    const [res, agentRes] = await Promise.all([invokeOperation('settings.get', {}), listAgents()]);
     if (!Array.isArray(res?.settings)) {
       throw new Error('Unexpected settings.get response — the server may be out of date.');
     }
@@ -260,9 +257,7 @@ async function saveKeys(keys: string[], label: string) {
   const changed = dirtyKeys(keys);
   if (!changed.length) return;
   await act(label, async () => {
-    const res = (await invokeOperation('settings.patch', {
-      changes: patchBody(changed),
-    })) as SettingsEnvelope;
+    const res = await invokeOperation('settings.patch', { changes: patchBody(changed) });
     adopt(res, changed);
     notice.value = `Saved ${label}.`;
   });
@@ -270,9 +265,7 @@ async function saveKeys(keys: string[], label: string) {
 
 async function resetKeys(keys: string[], label: string) {
   await act(label, async () => {
-    const res = (await invokeOperation('settings.patch', {
-      changes: patchBody(keys, true),
-    })) as SettingsEnvelope;
+    const res = await invokeOperation('settings.patch', { changes: patchBody(keys, true) });
     adopt(res, keys);
     notice.value = `Reset ${label}.`;
   });

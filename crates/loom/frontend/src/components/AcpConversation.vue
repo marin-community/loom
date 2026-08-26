@@ -43,9 +43,11 @@ import type {
   AcpCommand,
   AcpConfigOption,
   AcpConfigChoice,
+  AcpMode,
   HandoffPayload,
   AcpUsage,
 } from '../types';
+import type { AcpMetadataView } from '../api/generated';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
@@ -105,6 +107,17 @@ const emptyMetadata = (): AcpMetadata => ({
   steering_supported: false,
 });
 const metadata = ref<AcpMetadata>(emptyMetadata());
+
+// `AcpMetadataView`'s three lists are `Vec<serde_json::Value>` in Rust: Loom
+// relays the adapter's own command and configuration descriptors without
+// interpreting them, so reading one is a decode, and this is the only place
+// the composer performs it.
+const decodeMetadata = (view: AcpMetadataView): AcpMetadata => ({
+  commands: view.commands as AcpCommand[],
+  config_options: view.config_options as AcpConfigOption[],
+  modes: view.modes as AcpMode[],
+  steering_supported: view.steering_supported,
+});
 
 // The live mode, seeded from the session and advanced by `mode_change` blocks or
 // a local set — so the composer chip reads true without a refetch.
@@ -199,7 +212,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     restoreLiveTiming(snap.live_turn, preserveObservedTiming);
     effectiveMode.value = snap.effective_mode ?? null;
     pendingPrompt.value = snap.pending_prompt?.trim() ? snap.pending_prompt : null;
-    applyMetadata(snap.metadata ?? emptyMetadata());
+    applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
     state.value = 'ready';
   } catch (e) {
     if (seq !== loadSeq) return;
@@ -802,8 +815,9 @@ async function pickConfig(option: AcpConfigOption, value: string | boolean) {
     // The response is the full state acknowledged by the agent. This matters
     // when changing one value also changes another control's choices (a model
     // switch can alter its supported reasoning efforts).
-    metadata.value = response.metadata;
-    const mode = response.metadata.config_options.find(isModeOption)?.currentValue;
+    const acknowledged = decodeMetadata(response.metadata);
+    metadata.value = acknowledged;
+    const mode = acknowledged.config_options.find(isModeOption)?.currentValue;
     if (typeof mode === 'string') currentMode.value = mode;
   } catch (e) {
     sendError.value = (e as Error).message ?? 'Failed to change agent configuration';
@@ -910,7 +924,7 @@ function shortTime(ts: string): string {
 
 function usageFromPayload(payload: UsagePayload): AcpUsage | null {
   return typeof payload.used === 'number' && typeof payload.size === 'number' && payload.size > 0
-    ? { used: payload.used, size: payload.size, cost: payload.cost }
+    ? { used: payload.used, size: payload.size, cost: payload.cost ?? null }
     : null;
 }
 
