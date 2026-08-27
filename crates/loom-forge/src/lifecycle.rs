@@ -1,15 +1,13 @@
 //! Session lifecycle operations — archive, adopt, recovery, and warm-session
 //! creation.
 //!
-//! These are the state transitions a session goes through, factored out of the
-//! HTTP handlers that used to own them. The callers that drive a session are
-//! mostly *not* requests — the monitor's reaper, the GitHub merge path, the
-//! restart-time adopt sweep, the watch engine — so keeping the transitions here
-//! lets those paths run without reaching up into the web layer.
+//! The callers that drive a session are mostly *not* requests — the monitor's
+//! reaper, the GitHub merge path, the restart-time adopt sweep, the watch
+//! engine — so the transitions live here rather than in the web layer.
 //!
 //! Errors are plain [`anyhow::Error`]. A refusal the *caller* could have
-//! avoided carries a [`Refusal`] inside it, so the REST adapter can recover the
-//! status it used to return directly; anything else is a genuine 500.
+//! avoided carries a [`Refusal`] inside it, so the REST adapter can recover
+//! the right status; anything else is a genuine 500.
 
 use std::path::PathBuf;
 
@@ -226,7 +224,7 @@ fn transition_is_stale(
 
 /// Whether the process that owns a transition still exists. Only meaningful for
 /// pids in this namespace; a pid from a container that has since been removed
-/// reads as gone, which is exactly what it is.
+/// reads as gone.
 fn owner_pid_alive(pid: Option<i64>) -> bool {
     pid.is_some_and(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
 }
@@ -282,9 +280,8 @@ async fn archive_teardown(
 ) -> Result<Vec<String>> {
     let mut warnings: Vec<String> = Vec::new();
 
-    // Capture the agent's conversation log before teardown. The transcript lives
-    // outside the worktree so it would survive removal, but capturing first keeps
-    // it whole regardless. Best-effort: failures are warnings, never fatal.
+    // Capture the conversation transcript before teardown — it lives outside
+    // the worktree, but capturing first keeps it complete. Best-effort only.
     let (_, log_warnings) = crate::chatlog::capture(&st.db, session, branch).await;
     warnings.extend(log_warnings);
     tracing::debug!(session = %session.id, "captured conversation transcript before teardown");
@@ -293,8 +290,8 @@ async fn archive_teardown(
     // finishes provisioning after this point cannot promote itself.
     crate::runs::cancel_for_session_with_summary(&st.db, &session.id, "session archived").await?;
     transition_step(st, session, branch, "archiving", "Stopping agent").await?;
-    // A supervisor that will not stop is reported, not obeyed: the kill escalates
-    // to removing the runtime, and a session nobody can stop must still archive.
+    // A failed kill is reported as a warning, not fatal — a session nobody can
+    // stop must still archive.
     if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
         tracing::warn!(session = %session.id, %error, "archive could not confirm the agent stopped");
         warnings.push(format!("stop agent: {error}"));
@@ -371,13 +368,11 @@ pub async fn archive_locked(
         // to the repo backlog while preserving source-branch provenance and issue
         // status, just as full session deletion does.
         weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
-        // An archived session is finished with: its agent is gone, so it can no
-        // longer "need me" — nor is it "resting". Clear every loud tag — the agent's
-        // own `attention` and any watch's typed marks (loudness is value-driven, so
-        // match on the value, not a fixed key set) — plus the soothing `idle` mark,
-        // so the dashboard stops flagging or labelling a torn-down workstream —
-        // absence is the calm state. The history (goal, status, events) is kept; the
-        // `description` message stays too, as do any free-form quiet pills.
+        // Clear every loud tag (the agent's `attention`, plus any watch mark —
+        // loudness is value-driven, so match by value, not a fixed key set) and
+        // the `idle` mark, so an archived session no longer shows as flagged.
+        // History (goal, status, events), the `description`, and other quiet
+        // pills are kept.
         for tag in tags::list(&st.db, &branch.id).await? {
             if tags::is_loud_value(&tag.value) || tag.key == tags::IDLE_KEY {
                 tags::clear(&st.db, &branch.id, &tag.key).await?;
@@ -572,11 +567,10 @@ pub async fn transition_step(
 /// and the row is stamped `managed_by = watch.id` so the fleet listing and
 /// every survey hide it.
 ///
-/// A warm session is the watcher's own long-lived agent; its persistence across
-/// rounds (the same terminal/worktree, resumed on adopt) is what gives the watch
-/// across-round memory. The engine calls this once, on first need
-/// ([`crate::watch::ensure_warm_session`]); thereafter it reuses the stored
-/// session id.
+/// A warm session is the watcher's own long-lived agent, persisted across
+/// rounds via the same terminal/worktree resumed on adopt. The engine calls
+/// this once, on first need ([`crate::watch::ensure_warm_session`]); thereafter
+/// it reuses the stored session id.
 pub async fn create_warm_session(
     st: &AppState,
     watch: &Watch,
@@ -987,12 +981,10 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
             "session is done and cannot be adopted".to_string()
         )));
     }
-    // Adoption exists to make a session driveable again, so a session that is
-    // *already* driveable is a row to settle rather than a request to refuse:
-    // `orphaned` alongside a live ACP driver is exactly the contradiction a user
-    // reaches for Adopt to fix, and `adopt_acp` can only answer it with a 409.
-    // Settle before claiming a transition — the reconciliation is fenced on the
-    // row being unowned.
+    // A session that is already driveable (orphaned status but a live ACP
+    // driver) is settled here rather than routed through `adopt_acp`, which
+    // would just 409 on it. Settle before claiming a transition — the
+    // reconciliation is fenced on the row being unowned.
     if session.protocol == "acp"
         && session.status == "orphaned"
         && settle_reattached_session(st, &session.id, &branch.id).await
@@ -1246,8 +1238,8 @@ pub async fn adopt_acp(
         session_mod::set_inflight(&st.db, &session.id, None)
             .await
             .ok();
-        // Reopen via session/load where the adapter advertised it and we have an
-        // id; otherwise a fresh session re-oriented from the goal file.
+        // session/load where the adapter advertised it and we have an id;
+        // otherwise a fresh session re-oriented from the goal file.
         let open = match session.acp_session_id.as_deref().filter(|s| !s.is_empty()) {
             Some(id) => agent::AcpOpen::Load(id.to_string()),
             None => agent::AcpOpen::Fresh,
@@ -1506,8 +1498,7 @@ pub async fn resume_agent(
     let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
     // Re-launch with the same layered env the session started with, so a resumed
     // session keeps its per-repo / config-file environment (not just the global
-    // agent_env). Setup is NOT re-run on adopt — the worktree is already
-    // provisioned; this only resumes the agent.
+    // agent_env).
     let repo_root = PathBuf::from(&branch.repo_root);
     let repo_cfg = repo_cfg_or_default(&repo_root);
     let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;

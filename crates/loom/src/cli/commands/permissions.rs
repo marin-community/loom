@@ -199,8 +199,7 @@ pub async fn run_permissions(cmd: PermissionsCmd) -> Result<()> {
             println!("denied {} — {}", decided.id, decided.repository);
             Ok(())
         }
-        // Granting and revoking are two operations, so the command names one
-        // rather than passing a mode for something downstream to branch on.
+        // Grant and revoke are separate operations, not one command with a mode flag.
         PermissionsCmd::Grant { resource } => {
             let PermissionGrantResource::GithubRepository {
                 repository,

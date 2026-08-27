@@ -184,9 +184,9 @@ struct CodexReasoningLevel {
 
 /// Ask the installed Codex binary for its bundled model catalogue. This is a
 /// stateless local query (`--bundled` forbids a network refresh), so Settings
-/// reflects the version actually installed on the loom host without launching
-/// a throwaway agent session. Older CLIs without `debug models` and malformed
-/// catalogues simply retain the code-shipped fallback above.
+/// reflects the version installed on the loom host without launching a
+/// throwaway agent session. Older CLIs without `debug models` and malformed
+/// catalogues retain the code-shipped fallback above.
 async fn refresh_codex_metadata(metadata: &mut AgentMetadata) {
     let output = tokio::time::timeout(
         Duration::from_secs(3),
@@ -311,8 +311,7 @@ pub async fn exists(db: &Db, kind: &str) -> bool {
 
 /// The lifecycle status a freshly launched or resumed session starts in. Every
 /// runtime is live the moment its terminal spawns, so this is always `running` —
-/// there is no separate `launching` state to wait out. Kept as the single place
-/// that names a new session's initial status.
+/// there is no separate `launching` state to wait out.
 pub async fn initial_status(_db: &Db, _runtime: &str) -> &'static str {
     "running"
 }
@@ -446,8 +445,8 @@ fn codex_command(ctx: &AgentLaunchContext<'_>) -> String {
 /// blank. An empty result execs a bare shell — a setup-only or command-less agent.
 fn custom_command(agent: &CustomAgent, ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
     let launch_with_goal = |cmd: &str| match ctx.goal_file.or(ctx.primer_file) {
-        // The goal *content* is passed as a positional argument, mirroring the
-        // builtin runtimes (`claude "$(cat …)"`), not the file path.
+        // Goal *content*, not the file path, rides positionally (as `claude
+        // "$(cat …)"` does).
         Some(f) if !cmd.is_empty() => format!("{cmd} \"$(cat {})\"", sh_single_quote_path(f)),
         _ => cmd.to_string(),
     };
@@ -606,8 +605,8 @@ impl AgentType for CustomAgentType {
 /// e.g. a goal/primer file path in `"$(cat '…')"` — escaping any embedded single
 /// quote the POSIX way (`'\''` — close the quote, an escaped literal quote,
 /// reopen). Paths come from the operator's filesystem and are arbitrary, so a
-/// stray `'` must not break out of the quotes. (Environment values are *not*
-/// quoted here: they no longer ride in the script — see [`wrap_launch_script`].)
+/// stray `'` must not break out of the quotes. Environment values aren't
+/// quoted here; they ride out of band — see [`wrap_launch_script`].
 fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -861,9 +860,9 @@ pub struct LaunchSpec<'a> {
     /// caller reads these from the database; an empty slice adds nothing.
     pub extra_env: &'a [(String, String)],
     pub env_clear: bool,
-    /// Exact custom-agent definition accepted by canonical resolution. `None`
-    /// resolves a builtin or retains the legacy/adopt behavior of consulting
-    /// the current registry.
+    /// Exact custom-agent definition to launch. `None` resolves a builtin, or
+    /// looks up the named custom agent in the current registry (the adopt
+    /// path).
     pub custom: Option<&'a CustomAgent>,
 }
 
@@ -952,9 +951,8 @@ async fn start_terminal(
         .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    // The env is delivered to the child through the process environment (see
-    // `backend::new_session` → `tapestry::spawn_detached`), not `export`-ed into
-    // the script — so tokens/keys never appear on any process's argv.
+    // Delivered via the process environment, not exported into the script —
+    // see `wrap_launch_script` — so tokens/keys never appear on argv.
     let script = wrap_launch_script(inner, weaver_dir, github_adapter_dir.as_deref());
     tracing::debug!(
         branch = ctx.branch_id,
@@ -1054,8 +1052,7 @@ pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result
         return Ok(declared.to_string());
     }
     if req == "acp" {
-        // Opting into ACP: both builtins have an adapter; a terminal custom
-        // agent does not.
+        // Both builtins have an adapter; a terminal custom agent does not.
         return if meta.builtin {
             Ok("acp".to_string())
         } else {
@@ -1065,9 +1062,8 @@ pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result
             ))
         };
     }
-    // req == "terminal" while declared == "acp": force the terminal fallback. Only
-    // a builtin has a terminal launch path; an acp custom agent has no terminal
-    // command to run.
+    // Declared acp, requested terminal: only a builtin has a terminal launch
+    // path; an acp custom agent has no terminal command to run.
     if meta.builtin {
         Ok("terminal".to_string())
     } else {
@@ -1124,18 +1120,16 @@ pub struct AcpLaunchSpec<'a> {
     pub custom: Option<&'a CustomAgent>,
 }
 
-/// Build the [`AcpLaunch`] for a `protocol='acp'` session. For the builtin claude
-/// this resolves the `claude-agent-acp` adapter command, installs the
-/// SessionStart-only hook bundle (the work-cycle hooks and the launch-gate seed
-/// are redundant under ACP), and maps model/primer/mode into `_meta.claudeCode.
-/// options`. For the builtin codex it resolves the `codex-acp` adapter and maps
-/// the same inputs onto its env contract (`CODEX_CONFIG`, `INITIAL_AGENT_MODE`,
-/// `DEFAULT_AUTH_REQUEST`). Codex's `agent` mode routes approval requests to
-/// Loom, which answers one-shot grants by policy rather than relying on Codex's
-/// model reviewer. Codex is hookless, so the primer rides the opening prompt
-/// exactly as it does on the terminal path. For a custom acp agent it runs the
-/// agent's `launch` command verbatim (its setup stage first) as the adapter, with
-/// no `_meta`.
+/// Build the [`AcpLaunch`] for a `protocol='acp'` session. For the builtin
+/// claude this resolves the `claude-agent-acp` adapter, installs the
+/// SessionStart-only hook bundle, and maps model/primer/mode into
+/// `_meta.claudeCode.options`. For the builtin codex it resolves `codex-acp`
+/// and maps the same inputs onto its env contract (`CODEX_CONFIG`,
+/// `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST`); Codex's `agent` mode routes
+/// approvals to Loom instead of its own model reviewer, and, being hookless,
+/// takes the primer as its opening prompt like the terminal path. A custom
+/// acp agent runs its `launch` command verbatim (setup stage first) as the
+/// adapter, with no `_meta`.
 pub async fn build_acp_launch(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
@@ -1145,17 +1139,16 @@ pub async fn build_acp_launch(
     let is_codex = spec.custom.is_none() && spec.runtime == "codex";
     let is_claude = spec.custom.is_none() && !is_codex;
     let adapter_cmd = match spec.custom {
-        // A custom acp agent's `launch` command *is* the adapter (its setup stage
-        // runs first, as for a terminal custom agent).
+        // The `launch` command *is* the adapter; setup runs first, as for a
+        // terminal custom agent.
         Some(agent) => join_shell(&[agent.setup.trim(), agent.launch.trim()]),
         None if is_codex => codex_acp_cmd(db).await,
         None => claude_acp_cmd(db).await,
     };
 
     if is_claude && spec.prelude == "weaver" && !spec.restricted {
-        // Install only the SessionStart primer hook; the work-cycle hooks and the
-        // launch-gate seed are redundant under ACP (protocol turn edges + the
-        // bypass posture replace them).
+        // SessionStart only (see doc comment above); protocol turn edges and
+        // the bypass posture make the other hooks redundant under ACP.
         let loom_bin = loom_bin_path();
         if let Err(e) = install_hooks(spec.work_dir, &loom_bin, HookMode::Acp).await {
             tracing::warn!(work_dir = %spec.work_dir.display(), error = %e,
@@ -1347,18 +1340,14 @@ async fn codex_acp_cmd(db: &Db) -> String {
     npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
 }
 
-/// Apply Loom's Codex policy while preserving the shared provider login and
-/// operator-supplied adapter configuration.
+/// Apply Loom's Codex policy on top of the shared provider login and any
+/// operator-supplied adapter config.
 ///
-/// codex-acp's `agent` mode supplies the workspace-write sandbox and on-request
-/// approval policy. Loom must receive those requests in order to apply its
-/// deterministic one-shot approval policy, so the default reviewer is `user`
-/// (the ACP client) rather than Codex's model reviewer. An explicit reviewer in
-/// `CODEX_CONFIG` wins over that default. Weaver commands still need to reach
-/// Loom from inside that sandbox, so agent mode also enables Codex's network
-/// proxy with only Loom's known local hostnames allowed. This avoids granting
-/// arbitrary outbound network access just to make the session control plane
-/// usable.
+/// `agent` mode's on-request approval policy needs Loom in the loop to apply
+/// its deterministic one-shot decisions, so the default reviewer is `user`
+/// unless `CODEX_CONFIG` already names one. Weaver commands still need to
+/// reach Loom from inside that sandbox, so `agent` mode also enables Codex's
+/// network proxy, scoped to Loom's known local hostnames.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
@@ -1454,8 +1443,8 @@ fn codex_acp_mode(mode: &str) -> String {
     }
 }
 
-/// The `_meta.claudeCode.options` object for the claude adapter — only the fields
-/// that are actually configured (model, the primer as `appendSystemPrompt`, the
+/// The `_meta.claudeCode.options` object for the claude adapter — only the
+/// fields that are configured (model, the primer as `appendSystemPrompt`, the
 /// permission mode). `None` when nothing is set.
 fn claude_acp_meta(
     model: &str,
@@ -1547,7 +1536,7 @@ pub async fn install_hooks(work_dir: &Path, loom_bin: &str, mode: HookMode) -> R
 ///
 /// On a fresh, persisted container HOME these gates fire in sequence and each
 /// wedges the session (it sits at "launching" with no `loom status`, worktree
-/// idle). Each gate is just state Claude records after a human answers once; we
+/// idle). Each gate is state Claude records after a human answers once; we
 /// write the same state ahead of time. Everything here is additive and
 /// idempotent — only missing/false gates are set, existing config is preserved —
 /// so it is safe to re-run before every launch. Gates handled:
@@ -1561,8 +1550,8 @@ pub async fn install_hooks(work_dir: &Path, loom_bin: &str, mode: HookMode) -> R
 ///   set (i.e. the agent authenticates by API key).
 /// * `bypassPermissionsModeAccepted` — the one-time "you're in Bypass
 ///   Permissions mode" confirmation, **which defaults to *exit***. Seeded only
-///   when this launch actually runs with a bypass flag, since the dialog only
-///   appears then.
+///   when this launch runs with a bypass flag, since the dialog only appears
+///   then.
 pub async fn seed_claude_launch_gates(work_dir: &Path, model: &str, effort: &str) -> Result<()> {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         tracing::debug!("HOME unset; skipping claude launch-gate seed");
@@ -1591,14 +1580,11 @@ pub async fn seed_claude_launch_gates(work_dir: &Path, model: &str, effort: &str
     let launch_args = combine_args(model, effort);
     let bypass = launch_args.contains("--dangerously-skip-permissions")
         || launch_args.contains("bypassPermissions");
-    // Approve the ambient ANTHROPIC_API_KEY by its last 20 chars (how claude keys
-    // these), when one is set and long enough to slice.
+    // Last 20 chars, long enough to slice (see doc comment above).
     let api_key_tail = std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|k| k.len() >= 20)
         .map(|k| k[k.len() - 20..].to_string());
-    // Workspace trust is recorded at the worktree's *main* repo root, which Claude
-    // resolves a git worktree to, so trusting the root covers every worktree.
     let repo_root = match weaver_core::git::repo_root(work_dir).await {
         Ok(r) => Some(r.to_string_lossy().into_owned()),
         Err(e) => {
@@ -1633,12 +1619,9 @@ pub async fn seed_claude_launch_gates(work_dir: &Path, model: &str, effort: &str
 /// The environment-derived inputs for [`apply_launch_gates`], gathered by
 /// [`seed_claude_launch_gates`] so the merge itself is a pure function.
 struct GateSeed<'a> {
-    /// Seed `bypassPermissionsModeAccepted` — only when launching with a bypass
-    /// flag, since the dialog appears only then.
     bypass: bool,
-    /// The ambient `ANTHROPIC_API_KEY`'s last 20 chars to mark approved, if set.
+    /// `ANTHROPIC_API_KEY`'s last 20 chars, if set.
     api_key_tail: Option<&'a str>,
-    /// The worktree's main repo root, to record workspace trust against.
     repo_root: Option<&'a str>,
 }
 
@@ -2386,8 +2369,7 @@ mod tests {
     #[test]
     fn custom_agent_with_no_launch_command_execs_a_bare_shell() {
         // A setup-only (or wholly empty) custom agent produces an empty inner
-        // command, so its session just execs the login shell — the role the old
-        // builtin "shell" agent filled, now expressible as a custom agent.
+        // command, so its session execs the login shell.
         let ctx = test_ctx(Some(Path::new("/x/goal.txt")), None, "", "");
         let a = custom_agent("bare", "", "", "");
         assert_eq!(custom_command(&a, &ctx, LaunchMode::Fresh), "");
@@ -2409,9 +2391,8 @@ mod tests {
         );
         assert!(script.contains("claude \"$(cat '/x/goal.txt')\"; "));
         assert!(script.ends_with("exec \"${SHELL:-/bin/sh}\""));
-        // Regression guard: the session environment is delivered out of band via
-        // the process environment (see `start_terminal` / `backend::new_session`),
-        // so no `export` of an env var may leak into the argv-visible script.
+        // The session environment is delivered out of band (see
+        // `start_terminal`), so no `export` may leak into the argv-visible script.
         assert!(
             !script.contains("export WEAVER_API") && !script.contains("export LOOM_TOKEN"),
             "env must not be baked into the launch script: {script}"
@@ -2420,8 +2401,7 @@ mod tests {
 
     #[test]
     fn claude_primer_rides_in_as_system_prompt_not_a_positional() {
-        // A primer launches as appended system context and not as a positional
-        // prompt. Fresh and adopt both append it.
+        // Fresh and adopt both append the primer.
         let fresh = launch_script(
             "claude",
             None,
@@ -2457,7 +2437,6 @@ mod tests {
 
     #[test]
     fn codex_runtime_runs_codex_with_its_prompt() {
-        // Codex launches with the goal as its opening prompt.
         let fresh = launch_script(
             "codex",
             Some(Path::new("/x/goal.txt")),
@@ -2466,7 +2445,6 @@ mod tests {
             "",
             "",
         );
-        // This rendered shell command is the terminal runtime contract.
         assert_eq!(
             fresh,
             "codex --disable apps \"$(cat '/x/goal.txt')\"; exec \"${SHELL:-/bin/sh}\""
@@ -2506,12 +2484,12 @@ mod tests {
 
     #[test]
     fn operator_env_never_reaches_the_launch_script() {
-        // Operator env vars used to be shell-quoted into the script as
-        // `export NAME='…'`; they are now delivered via the process environment
-        // (`CommandBuilder::env`, off argv) instead. A value with shell
-        // metacharacters therefore needs no quoting and — crucially — must not
-        // appear in the script at all, so `ps` can't read it. The script is a
-        // pure function of the inner command, independent of the env.
+        // Operator env vars are delivered via the process environment
+        // (`CommandBuilder::env`, off argv), not shell-quoted into the script.
+        // A value with shell metacharacters therefore needs no quoting and —
+        // crucially — must not appear in the script at all, so `ps` can't read
+        // it. The script is a pure function of the inner command, independent
+        // of the env.
         let script = launch_script("shell", None, None, LaunchMode::Fresh, "", "");
         assert_eq!(script, "exec \"${SHELL:-/bin/sh}\"");
         assert!(!script.contains("export MSG"), "got: {script}");

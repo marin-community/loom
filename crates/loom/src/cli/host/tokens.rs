@@ -65,7 +65,7 @@ pub(crate) async fn cmd_token_create(name: String, expires_days: Option<i64>) ->
             expires_in_days: expires_days,
         })
         .await?;
-    // The secret is shown once; lead with it and make the one-shot nature plain.
+    // Secret first: it's shown only once.
     println!("{}", created.token);
     eprintln!(
         "\nThis is the only time the token is shown. Store it now, e.g. as a CI \

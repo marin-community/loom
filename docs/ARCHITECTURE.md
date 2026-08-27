@@ -419,7 +419,7 @@ behavior of the routes they now serve.
 decides seven raw paths: the IDE proxy and registry discovery. Everything else is
 `actor` on the declaration plus `authorize()` at the dispatcher — one decision,
 reached identically by REST, the CLI and MCP, so an adapter cannot widen
-authority by choosing a different door.
+authority by choosing a different transport.
 
 Keeping this list short matters. A path-based authority model running alongside
 the registry fails two ways: a newly declared operation is refused until someone

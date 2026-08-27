@@ -67,10 +67,10 @@ async fn op_scratch_list(
 
 /// `sessions.scratch.write` — one file, from the raw request body.
 ///
-/// The authorization already ran in [`super::encodings`], which is why this
-/// takes the state and the input rather than a full `OperationContext`: an
-/// `io = Upload` operation's body is the payload, so its axum handler lives
-/// beside the other non-JSON encodings and calls in here.
+/// Takes the state and input rather than a full `OperationContext` because
+/// authorization already ran in [`super::encodings`]: an `io = Upload`
+/// operation's body is the payload, so its axum handler lives there and calls
+/// in here.
 pub(super) async fn write_scratch_bytes(
     st: &AppState,
     input: &ops::scratch::write::Input,

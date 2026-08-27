@@ -18,16 +18,12 @@ pub struct ConfigPathOpts {
 }
 
 /// Subcommands under `loom config` — the typed `loom.toml` and everything
-/// rendered/pushed from it. The contract deployment tooling builds
-/// against. `render-env` and `push-secrets` resolve
-/// every field from `loom.toml` *or* a same-named env var (env wins) — set
-/// one to override a single invocation without editing the file.
+/// rendered/pushed from it. `render-env` and `push-secrets` resolve every
+/// field from `loom.toml` *or* a same-named env var (env wins) — set one to
+/// override a single invocation without editing the file.
 ///
-/// `set` writes directly to the runtime `settings` table
-/// (`weaver_core::config::REGISTRY`), bypassing `loom.toml`. Written to the
-/// daemon's sqlite database with no server needed. This is what
-/// `deploy/standalone/docker-compose.yml`'s `loom-init` uses to seed the
-/// security-relevant auth settings before loom starts listening.
+/// `set` bypasses `loom.toml` and writes directly to the runtime `settings`
+/// table (`weaver_core::config::REGISTRY`); see the module docs.
 #[derive(Subcommand)]
 pub enum ConfigCmd {
     /// Render `loom.toml` as a dotenv file (e.g. `deploy/standalone/.env`).
@@ -92,9 +88,7 @@ pub async fn run_config(cmd: ConfigCmd) -> Result<()> {
 
 /// `loom config set` — write one runtime setting straight into the sqlite
 /// `settings` table, no running server needed. The direct-db counterpart to
-/// the settings pane's `settings.patch` against a running daemon — the
-/// form a deploy's boot sequence needs, since it must seed the auth settings
-/// *before* loom starts listening.
+/// the settings pane's `settings.patch` against a running daemon.
 pub(crate) async fn cmd_config_set(key: String, value: String) -> Result<()> {
     if let Err(why) = weaver_core::config::validate(&key, &value) {
         bail!("{key}: {why}");
@@ -226,9 +220,7 @@ pub(crate) async fn gcp_push_secret(project: &str, name: &str, value: &str) -> R
     run_gcloud_with_stdin(args, value).await
 }
 
-/// Run `gcloud <args>`, writing `stdin_data` to its stdin and closing it —
-/// the way to pass a secret value without it ever appearing in the argument
-/// list (visible in `ps`) or an error message.
+/// Run `gcloud <args>`, writing `stdin_data` to its stdin and closing it.
 pub(crate) async fn run_gcloud_with_stdin(args: &[&str], stdin_data: &str) -> Result<()> {
     use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("gcloud")
@@ -264,8 +256,7 @@ mod tests {
     use super::*;
 
     /// `loom config set` writes straight to the sqlite `settings` table — no
-    /// HTTP, no running server — the fix for the deploy `loom-init` one-shot,
-    /// which must seed the auth settings before loom starts listening.
+    /// HTTP, no running server.
     #[tokio::test]
     #[serial_test::serial]
     async fn config_set_writes_directly_to_sqlite_with_no_server() {

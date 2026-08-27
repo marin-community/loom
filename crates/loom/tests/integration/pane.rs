@@ -37,8 +37,8 @@ impl SendMode {
 /// With [`SendMode::Submit`] the marker is the command's *output*, which appears only
 /// once the shell has executed it. With [`SendMode::Stage`] nothing executes, so the
 /// marker is the staged text itself — its appearance on the prompt line is the
-/// proof the input reached the PTY, and the point at which a caller can
-/// meaningfully assert the command has *not* run.
+/// proof the input reached the PTY, and the point past which a caller can
+/// assert the command has *not* run.
 async fn send_until(ts: &TestServer, id: &str, send: SendMode, text: &str, marker: &str) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {

@@ -1,14 +1,11 @@
 //! The cross-process wire contract: the request and response (View) DTOs the
-//! loom REST API speaks. These are the single source of truth — the loom server
-//! serializes them, the typed [`crate::Client`] and the future Python binding
-//! deserialize them, and `frontend/types.ts` mirrors them by hand.
+//! loom REST API speaks. The loom server serializes them, the typed
+//! [`crate::Client`] and the future Python binding deserialize them, and
+//! `frontend/types.ts` mirrors them by hand.
 //!
-//! The response (`*View`) types carry `from_parts` constructors that build a
-//! plain wire struct from the `weaver-core` domain types (`Branch`, `Issue`,
-//! `Watch`, …). The async server-side builders that touch the database
-//! (counting open issues, joining the latest run) stay in the loom server and
-//! call these once they've gathered the parts — so the wire struct has exactly
-//! one definition while the DB access stays where the daemon owns it.
+//! Response (`*View`) types carry `from_parts` constructors that build the wire
+//! struct from `weaver-core` domain types (`Branch`, `Issue`, `Watch`, …); the
+//! async DB lookups that gather the parts stay in the loom server.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -101,9 +98,8 @@ pub struct BranchView {
     /// The agent's current-state message, set via `loom status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
     pub description: String,
-    /// Every tag on the branch (the agent's `attention`, a watch's
-    /// `triage`, and any free-form key), ordered by key. Empty when the branch is
-    /// calm and unmarked — absence is the default state, there is no `ok` tag.
+    /// Every tag on the branch (the agent's `attention`, a watch's `triage`,
+    /// and any free-form key), ordered by key. Empty when calm and unmarked.
     pub tags: Vec<TagView>,
     pub repo_root: String,
     pub branch: String,
@@ -122,9 +118,8 @@ pub struct BranchView {
 }
 
 impl BranchView {
-    /// Build the wire view from a branch plus the parts the server gathered (its
-    /// tags, the open-issue count, and the latest GitHub snapshot). The async DB
-    /// lookups that produce those parts live in the loom server.
+    /// Build the wire view from a branch plus the parts the server already
+    /// gathered: tags, open-issue count, and latest GitHub snapshot.
     pub fn from_parts(
         branch: &Branch,
         tags: &[Tag],
@@ -248,9 +243,9 @@ pub struct SessionView {
     pub model: String,
     pub effort: String,
     pub github_repo: Option<String>,
-    /// GitHub issue linked to this session's explicit work item, if any. This is
-    /// separate from `branch.github`, which is the pull request created by the
-    /// work. The compatibility work item remains the source of truth for edits.
+    /// GitHub issue linked to this session's explicit work item, if any —
+    /// distinct from `branch.github`, the pull request the work produced.
+    /// `tracking_issue` remains the field edits go through.
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
@@ -268,8 +263,8 @@ pub struct SessionView {
     pub parent_session_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created warm watch sessions and rows
-    /// that predate the column. A tracking/UX field,
-    /// not a security boundary: the fleet stays co-owned by everyone authenticated.
+    /// that predate the column. Not a security boundary: the fleet stays
+    /// co-owned by everyone authenticated.
     pub created_by: Option<String>,
     /// How this session came to exist: `"user"` (hand-launched), `"agent"`
     /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
@@ -277,8 +272,7 @@ pub struct SessionView {
     #[serde(default = "default_origin")]
     pub origin: String,
     /// Machine tier: `"interactive"` or `"automation"`. Both appear in the
-    /// normal fleet; the class remains useful for policy and compatibility
-    /// filters.
+    /// normal fleet.
     #[serde(default = "default_class")]
     pub class: String,
     /// Completed agent turns on this session.
@@ -521,9 +515,9 @@ impl HistoryKind {
 }
 
 /// One provider-neutral conversation record returned by the session history
-/// API. Optional fields are capability claims, not placeholders: notably,
-/// `tool_input` is absent when the source protocol did not provide invocation
-/// arguments (ACP currently provides only tool title/status/content/locations).
+/// API. Optional fields are capability claims, not placeholders: `tool_input`
+/// is absent when the source protocol did not provide invocation arguments
+/// (ACP currently provides only tool title/status/content/locations).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryRecordView {
     /// Opaque, source-stable position used as the exclusive paging cursor.
@@ -669,9 +663,9 @@ pub struct ProfileEnvView {
     pub updated_at: String,
 }
 
-/// One trusted MCP adapter Loom can launch.  This is deliberately provider
-/// neutral: clients select a capability set, while an agent runtime translates
-/// its tools into that provider's permission vocabulary.
+/// One trusted MCP adapter Loom can launch. Provider neutral: clients select a
+/// capability set, while an agent runtime translates its tools into that
+/// provider's permission vocabulary.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpAdapterView {
     pub name: String,
@@ -1216,8 +1210,8 @@ pub struct RunView {
 /// One detached background task's lifecycle, as `tasks.list` exposes it —
 /// currently the GitHub `@loom` trigger launches, which run off the webhook
 /// request so a slow clone can't blow GitHub's delivery timeout. Human-only
-/// self-service debugging (Settings → Diagnostics), same as the log endpoints:
-/// a task label names a repo/issue an operator can act on.
+/// self-service debugging (Settings → Diagnostics): a task label names a
+/// repo/issue an operator can act on.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TaskView {
     pub id: u64,
@@ -1841,10 +1835,9 @@ pub struct ChangeSetDto {
     pub limits: ChangeLimitsDto,
 }
 
-/// One watch, as the API exposes it. The JSON-bearing columns
-/// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
-/// a UI never re-parses strings; `capabilities` is a real array; the rest is the
-/// stored definition plus its schedule bookkeeping.
+/// One watch, as the API exposes it. The JSON-bearing columns (`trigger`,
+/// `scope`, `params`) are returned as **parsed** structured JSON so a UI never
+/// re-parses strings; `capabilities` is a real array.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchView {
     pub id: String,
@@ -1893,9 +1886,8 @@ pub struct WatchView {
 }
 
 impl WatchView {
-    /// Build the wire view from a watch plus the most recent round's
-    /// outcome (the server reads that from the run history). The JSON columns
-    /// are parsed here via the domain accessors.
+    /// Build the wire view from a watch plus the most recent round's outcome,
+    /// read from the run history.
     pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
         Self {
             id: o.id.clone(),
@@ -1923,10 +1915,9 @@ impl WatchView {
     }
 }
 
-/// One round in a watch's history (the audit trail), with `actions`
-/// parsed back into JSON for a UI to render. The `stdout`/`stderr`/`exit_code`/
-/// `duration_ms` fields are the captured execution log — what the script printed
-/// and returned — surfaced so a run page shows exactly what happened.
+/// One round in a watch's history (the audit trail), with `actions` parsed
+/// back into JSON for a UI to render. `stdout`/`stderr`/`exit_code`/
+/// `duration_ms` are the script's captured execution log.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchRunView {
     pub id: i64,
@@ -2028,10 +2019,8 @@ pub struct ChannelView {
     pub unread_urgent_count: i64,
     #[serde(default)]
     pub last_message: Option<ChannelMessageView>,
-    /// This channel's server-owned delivery bindings. The old MCP `get`/`list`
-    /// tools fetched these with a second call and merged them in by hand;
-    /// they are part of the response itself now, so REST, the CLI, and MCP
-    /// all see the same shape.
+    /// This channel's server-owned delivery bindings, included directly so
+    /// REST, the CLI, and MCP all see the same shape.
     #[serde(default)]
     pub bindings: Vec<ChannelBindingView>,
 }
@@ -2156,9 +2145,8 @@ pub struct ScratchUpload {
 /// The handoff arguments a caller assembles before invoking `sessions.handoff`,
 /// splatted field-for-field into that operation's input rather than sent as its
 /// own body. Canonical `selection` requires both revisions from
-/// `sessions.handoff.resolve` and stamps the target template. Flattened fields
-/// remain for backward compatibility, preserving the session's stamped
-/// profile/policy.
+/// `sessions.handoff.resolve` and stamps the target template; flattened fields
+/// remain for backward compatibility.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HandoffReq {
     /// Flattened runtime selector for backward compatibility. Canonical clients use `selection`.
@@ -2380,10 +2368,9 @@ pub struct UserPreferencesEnvelope {
 }
 
 /// One variable in the default profile's environment, as the
-/// `settings.env.*` compatibility facade returns it and as
-/// `loom_store::agent_env` stores it. Unlike a profile's own environment
-/// metadata ([`ProfileEnvView`]), the value is not redacted — this facade
-/// predates the write-only convention profiles use.
+/// `settings.env.*` compatibility facade returns it and
+/// `loom_store::agent_env` stores it. Unlike [`ProfileEnvView`], the value is
+/// not redacted: this facade predates the write-only convention profiles use.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentEnvVarView {
     pub name: String,
@@ -2461,9 +2448,8 @@ pub struct RepoRevisionValidationView {
 }
 
 /// One per-repo environment variable's metadata, and the row type
-/// `loom_store::repo_env` reads. The value is deliberately omitted: per-repo
-/// variables are write-only, so a stored secret can be replaced but never read
-/// back.
+/// `loom_store::repo_env` reads. The value is omitted: per-repo variables are
+/// write-only, so a stored secret can be replaced but never read back.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoEnvVarView {
     pub name: String,

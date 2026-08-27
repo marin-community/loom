@@ -123,8 +123,8 @@ pub(super) async fn grant_allows(
         Grant::Anonymous => false,
         Grant::Admin => true,
         Grant::User => discovery || super::is_ide_proxy_path(path),
-        // An automation credential exists to report runs, which is exactly what
-        // `runs.create`'s `actor = Internal` admits it to. It reaches no raw path at all.
+        // An automation credential exists to report runs (`runs.create`,
+        // `actor = Internal`); it reaches no raw path at all.
         Grant::Automation { .. } => false,
         Grant::Session { session_id, .. } => {
             if discovery {
@@ -259,8 +259,8 @@ pub(super) async fn require_auth(
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
-        // No credential. An operation that declares `actor = Anonymous` is
-        // reachable anyway — that declaration is what opens the door.
+        // No credential. An operation declared `actor = Anonymous` is still
+        // reachable.
         None => {
             let anonymous_target =
                 weaver_api::operation_for_request(req.method().as_str(), req.uri().path())
@@ -318,11 +318,11 @@ async fn cookie_secure(st: &AppState) -> bool {
     config::get_bool(&st.db, "auth.cookie_secure", config::DEFAULT_COOKIE_SECURE).await
 }
 
-/// [`external_base`], falling back to the address we are bound to when the
-/// request carries no Host — for building a link to hand out (a webhook reply, a
-/// PR back-link, `loom session url`, an artifact URL), where there is no "no
-/// origin" answer and the bound address is the best guess available. A wildcard
-/// host is mapped to loopback (see [`dialable_host`]) so the link resolves.
+/// [`external_base`], falling back to our bound address when the request
+/// carries no Host. Used for links we hand out (a webhook reply, a PR
+/// back-link, `loom session url`, an artifact URL) where no origin is
+/// available. A wildcard host is mapped to loopback (see [`dialable_host`])
+/// so the link resolves.
 pub(crate) async fn public_base(st: &AppState, headers: &HeaderMap) -> String {
     let base = external_base(st, headers)
         .await
@@ -626,7 +626,7 @@ async fn set_password_op(
 }
 
 /// `auth.tokens.list` — the caller's own personal tokens (metadata only).
-/// Scoped to `context.principal.username` by construction, same as before.
+/// Scoped to `context.principal.username` by construction.
 async fn list_tokens_op(
     context: OperationContext,
     _input: tokens::list::Input,
@@ -942,11 +942,8 @@ async fn set_github_config_op(
     github_config_view(&context.state).await
 }
 
-/// The `auth` bundle's operation bindings. `auth.login`, `auth.logout`, and
-/// `auth.federate` are intentionally absent — see the doc comments on
-/// [`me_op`] and the module-level report for why they cannot go through this
-/// path without either bypassing authentication or inventing new transport
-/// plumbing this registry doesn't have.
+/// The `auth` bundle's operation bindings; see the module comment above for
+/// the `auth.login`/`auth.logout`/`auth.federate` exclusions.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<me::Op, _, _>(me_op),
@@ -977,8 +974,6 @@ mod tests {
 
     #[test]
     fn wildcard_hosts_map_to_loopback() {
-        // A wildcard bind is "every interface", not a dialable address — the
-        // link we hand out must point somewhere a browser can actually open.
         assert_eq!(
             dialable_host("http://0.0.0.0:7878"),
             "http://127.0.0.1:7878"
@@ -988,8 +983,6 @@ mod tests {
 
     #[test]
     fn real_origins_pass_through_untouched() {
-        // A configured `auth.base_url` or a real browser's Host never carries a
-        // wildcard, so the common cases are left exactly as-is.
         assert_eq!(
             dialable_host("https://loom.example.com"),
             "https://loom.example.com"

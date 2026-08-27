@@ -106,7 +106,7 @@ generated methods per operand struct — `augment(clap::Command)` and
 `from_matches(&ArgMatches)` — which meant the server, the Python binding and
 every embedder linked a command-line parser merely to *describe* an operation.
 
-## 3. The three doors
+## 3. The three surfaces
 
 ```mermaid
 flowchart LR
@@ -142,7 +142,7 @@ flowchart LR
     SPEC --> M1
 ```
 
-Each door costs **one line per operation** and no more. `bind::<Op>()`,
+Each surface costs **one line per operation** and no more. `bind::<Op>()`,
 `export::<Op>("name")` and `register::<Op>(handler)` are generic over the
 operation's own types, so the closure they produce cannot disagree with the
 descriptor sitting beside it.

@@ -32,11 +32,10 @@ use super::{ApiResult, AppError, AppState};
 
 const MAX_ARTIFACT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Pull a standalone image data URI out of artifact content. New writes store
-/// the URI directly under the explicit `image` kind; the markdown case
-/// preserves artifacts written before that kind existed. Content detection
-/// also keeps historical revisions readable if an artifact's envelope kind
-/// changes later (kind is current metadata, not versioned metadata).
+/// Pull a standalone image data URI out of artifact content: the explicit
+/// `image` kind stores it directly, the markdown fallback covers artifacts
+/// under the older envelope. Kind is current metadata, not versioned, so this
+/// also covers old revisions after a kind change.
 fn artifact_image_uri(content: &str) -> Option<&str> {
     let content = content.trim();
     if content.starts_with("data:image/") {
@@ -212,11 +211,12 @@ pub(super) async fn raw_artifact_bytes(st: &AppState, input: &raw::Input) -> Api
 // Operation registry — `artifacts.*` and `artifacts.threads.*`, bound onto
 // `weaver_api::operations::artifacts`. `branch` resolves to a branch id, a
 // branch name, or an active session's branch, and authorization happens once,
-// centrally, in `web/operations.rs`. `write` creates the artifact if absent.
-// `author` is derived from the credential: `user` for a human, `agent` for a
-// session. Thread operations duplicate the small mapping/resolution helpers in
-// `web/discussion.rs` instead of reaching into that sibling module's private
-// items; the domain calls (`weaver_core::discussion`) are the same.
+// centrally, in `web/operations.rs`. `write` creates the artifact if absent,
+// with authorship derived from the credential (`user` for a human, `agent`
+// for a session) rather than the body. Thread operations duplicate the small
+// mapping/resolution helpers in `web/discussion.rs` instead of reaching into
+// that sibling module's private items; the domain calls
+// (`weaver_core::discussion`) are the same.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -263,9 +263,6 @@ async fn get_operation(context: OperationContext, input: get::Input) -> ApiResul
 /// `content` is an ordinary string field on the wire (see `write.rs`); the
 /// `#[operand(from_file)]` attribute is a CLI-only convenience over the same
 /// JSON body and has no effect here.
-///
-/// Authorship is derived from the credential, never from the body. This makes
-/// attribution true by construction and removes a field a caller could lie in.
 async fn write_operation(
     context: OperationContext,
     input: write::Input,
@@ -290,8 +287,6 @@ async fn write_operation(
         .clone()
         .or_else(|| existing.as_ref().map(|a| a.title.clone()))
         .unwrap_or_default();
-    // Derived, not supplied: a human credential edits as "user", a session
-    // credential as "agent".
     let author = if context.principal.is_human() {
         "user"
     } else {
@@ -414,9 +409,8 @@ async fn history_operation(
 }
 
 /// Map a domain [`discussion::Thread`] to its wire [`ThreadDto`]. Duplicated
-/// from the private `thread_dto` in `web/discussion.rs` — that helper isn't
-/// visible to a sibling module, and this file owns exactly the operations
-/// below.
+/// from the private `thread_dto` in `web/discussion.rs`, which isn't visible
+/// to a sibling module.
 fn thread_dto(t: &discussion::Thread) -> ThreadDto {
     ThreadDto {
         id: t.id,
@@ -584,7 +578,7 @@ mod tests {
     use crate::auth::{AuthVia, Grant, Principal};
     use crate::db::Db;
 
-    /// A session credential — authorship is derived from it, not from a body field.
+    /// A session credential, for authorship-derivation tests.
     fn session_context(state: AppState, branch_id: &str) -> OperationContext {
         OperationContext::new(
             state,
@@ -666,8 +660,7 @@ mod tests {
         assert_eq!(view.meta.rev, 1);
         assert_eq!(view.meta.branch_id.as_deref(), Some(branch.id.as_str()));
 
-        // A second write appends a revision, attributed to `agent` because the
-        // credential is a session — there is no `author` field to disagree with.
+        // Appends a revision; still attributed to `agent` (a session credential).
         let view = write_operation(
             session_context(st.clone(), &branch.id),
             write::Input {

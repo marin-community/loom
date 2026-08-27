@@ -92,8 +92,8 @@ fn handoff_selection(req: &sessions::handoff::Input, session: &Session) -> Resul
             agent: Some(target.to_string()),
             model: req.model.clone(),
             effort: req.effort.clone(),
-            // A flattened handoff historically retained the live session's
-            // permission posture when mode was absent or blank.
+            // Absent or blank mode falls back to the live session's permission
+            // posture, for the flattened handoff form.
             mode: Some(legacy_handoff_mode(&req.mode, &session.launch_mode)),
             ..Default::default()
         },

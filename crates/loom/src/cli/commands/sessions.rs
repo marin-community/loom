@@ -506,12 +506,11 @@ pub enum RepoTarget {
 }
 
 /// Classify `--repo` (absent → the current directory). An existing path is a
-/// local checkout; anything else is a managed-repo reference if it parses as a
-/// clean `owner/name` slug or clone URL — which is what lets you launch into a
-/// repo this machine has never checked out. Neither one is a typo, and saying so
-/// here beats an opaque server-side failure.
+/// local checkout; otherwise it's a managed-repo reference if it parses as a
+/// clean `owner/name` slug or clone URL, letting you launch into a repo this
+/// machine has never checked out.
 ///
-/// A path that exists wins over a slug of the same spelling: a real directory in
+/// An existing path wins over a slug of the same spelling: a real directory in
 /// front of you is never a guess, so `--repo ./acme/widgets` can't be hijacked
 /// into a clone of `github.com/acme/widgets`.
 pub(crate) fn resolve_repo_target(repo: Option<&str>) -> Result<RepoTarget> {
@@ -853,10 +852,10 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
     } = options;
     let client = client::default()?;
     let search = search.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    // `--managed` is the operator inventory: it is the only listing that shows a
-    // watcher's own warm sessions, and `sessions.list` refuses it to anything but
-    // a human credential. `--status`/`--attention` are excluded from it because
-    // the managed survey has never filtered on either, not because it could not.
+    // `--managed` is the operator inventory: the only listing that shows a
+    // watcher's own warm sessions, restricted to a human credential, and
+    // (unlike the plain listing) including automation sessions.
+    // `--status`/`--attention` don't apply to it.
     if managed && (status.is_some() || attention.is_some()) {
         bail!("--status and --attention cannot be combined with --managed");
     }
@@ -869,8 +868,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -883,8 +880,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -896,8 +891,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -909,8 +902,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -922,8 +913,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -935,8 +924,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -948,8 +935,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -962,8 +947,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
                 status,
                 attention,
                 creator,
-                // The plain fleet listing has always omitted automation
-                // sessions; the managed inventory has always included them.
                 automation: Some(managed),
                 managed,
             })
@@ -983,9 +966,6 @@ pub async fn cmd_ps(options: PsOptions) -> Result<()> {
         "ID", "STATUS", "ATTENTION", "NAME", "LOCATION"
     );
     for ws in &rows {
-        // An unplaced session used to print a bare `/`: the untyped reader
-        // could not tell `null` from an object with two empty names, so the
-        // separator was joining nothing to nothing.
         let location = ws.placement.as_ref().map_or_else(
             || "—".to_string(),
             |placement| format!("{}/{}", placement.space_name, placement.group_name),
@@ -1475,8 +1455,8 @@ mod tests {
     }
     #[test]
     fn resolve_repo_target_reads_a_repo_to_clone() {
-        // A repo this machine has never checked out: the whole point — it is
-        // handed to the server as a managed repo rather than failing as a path.
+        // A repo this machine has never checked out is handed to the server as
+        // a managed repo, not treated as a missing path.
         for input in [
             "marin-community/vllm",
             "https://github.com/acme/widgets.git",

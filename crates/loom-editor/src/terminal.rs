@@ -56,9 +56,9 @@ pub async fn terminal_ws(
     // Origin is accepted.
     let base_url = crate::config::get(&st.db, "auth.base_url").await;
     if !origin_ok(headers, &st.addr, base_url.as_deref()) {
-        // This rejection used to be silent — invisible behind a reverse proxy,
-        // where it surfaces only as the browser's endless "reconnecting". Log it
-        // with the Origin/Host so a proxy misconfig is one `docker logs` away.
+        // Log the Origin/Host so a proxy misconfig is one `docker logs` away — a
+        // silent rejection here is invisible, surfacing only as the browser's
+        // endless "reconnecting".
         let origin = header_str(headers, ORIGIN);
         let host = header_str(headers, HOST);
         tracing::warn!(
@@ -232,9 +232,7 @@ async fn bridge(socket: WebSocket, target: String) -> anyhow::Result<()> {
         }
     });
 
-    // Whichever pump finishes first, drop the other — dropping `input` closes the
-    // socket write half, which the supervisor sees as a clean detach (the child
-    // keeps running, a refresh reconnects and repaints).
+    // Whichever pump finishes first, drop the other.
     tokio::select! {
         _ = &mut out_task => in_task.abort(),
         _ = &mut in_task => out_task.abort(),

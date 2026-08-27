@@ -1,9 +1,7 @@
 //! Session lifecycle, status projection, and normalized history.
 //!
-//! The bootstrap read operation (`self.get`) lives in this bundle; its module
-//! is named `context` rather than `self` because `self` is reserved, and it
-//! includes an explicit `bundle = "sessions"` declaration to prevent the id
-//! prefix from being inferred.
+//! The bootstrap read operation (`self.get`) lives in this bundle, named
+//! `context` because `self` is reserved as a module name.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -129,16 +127,7 @@ pub mod context {
     use super::prelude::*;
 
     /// Resolve this caller's session, branch, repository, channel, and links.
-    // `self` cannot be a Rust module name — not even as a raw identifier — so an
-    // id of `self.get` could never live in the file its name promises. MCP calls
-    // it `loom_context::get`: projections are named independently of identity,
-    // which is the point.
-    //
-    // No CLI projection. It advertised `loom context`, but that name belongs to
-    // the credential-context manager (`loom context ls|use|add|current|rm`) and
-    // always has — the operation was never reachable by the words it published.
-    // `loom self` prints this data today by asking `branches.get`; giving this
-    // operation a truthful projection means that command invoking it.
+    // No CLI: `loom context` already names the credential-context manager.
     #[operation(id = "sessions.context", actor = SessionSelf, scope = Session, risk = Read,
                 grants = ["loom/sessions/read@v1"])]
     pub struct Input {
@@ -265,11 +254,8 @@ pub mod events {
         #[operation(id = "sessions.events.stream", actor = SessionSelf, scope = Session,
                     risk = Read, grants = ["loom/sessions/read@v1"], io = Stream)]
         pub struct Input {
-            //
-            // `serde(default)` because a stream's operands arrive in the query string,
-            // which is extracted before the dispatcher's default-filling step can run.
-            // `streams_take_every_operand_from_the_query_string` pins this for all of
-            // them.
+            // `serde(default)`: stream operands arrive via the query string,
+            // extracted before the dispatcher's default-filling step runs.
             #[serde(default)]
             #[operand(context)]
             pub session: String,
@@ -437,9 +423,8 @@ pub mod handoff {
         /// Preview a handoff without applying it: resolve a selection to the exact
         /// non-secret template that would be applied to the session.
         ///
-        /// Same grant as `sessions.handoff` itself, even though this is `risk =
-        /// Read`: a session entitled to hand itself off gains no new surface by
-        /// previewing what that would produce, matching the reasoning documented on
+        /// Same grant as `sessions.handoff` despite `risk = Read`: previewing
+        /// needs no more authority than the write grant already covers, as with
         /// `sessions.launches.resolve`.
         #[operation(id = "sessions.handoff.resolve", actor = SessionSelf, scope = Session,
                     risk = Read, grants = ["loom/sessions/write@v1"])]
@@ -624,8 +609,6 @@ pub mod launch {
         #[operand(context = "branch")]
         pub parent_branch: Option<String>,
 
-        // The fields below are required for the CLI to properly control launch
-        // behavior and prevent silent configuration changes from being missed.
         /// Explicit branch name instead of a generated one.
         pub name: Option<String>,
         /// Attach to a branch that already exists rather than creating one.
@@ -667,11 +650,10 @@ pub mod launches {
 
         /// Resolve a launch selection to its exact non-secret template snapshot —
         /// agent, model, effort, protocol, mode, capacity, and provenance — without
-        /// launching a session. `loom sessions launch` runs this as a canonical
-        /// preflight; not exposed as its own CLI verb since callers reach it through
-        /// that preview instead.
+        /// launching a session. Not its own CLI verb; `loom sessions launch` runs
+        /// this as its preflight.
         ///
-        /// Read-only. A session authorized to delegate a child launch may preview
+        /// Read-only: a session authorized to delegate a child launch may preview
         /// the template it would launch with.
         #[operation(id = "sessions.launches.resolve", actor = SessionSelf, scope = Global,
                     risk = Read, grants = ["loom/sessions/write@v1"])]
@@ -712,8 +694,8 @@ pub mod list {
         pub creator: Option<SessionCreatorFilter>,
         /// Include automation-class sessions.
         ///
-        /// Defaults to including them, which is what a fleet listing means by
-        /// "every session". `loom ps` passes `false` for an interactive-only inventory.
+        /// Defaults to true (a fleet listing means every session); `loom ps`
+        /// passes `false` for an interactive-only inventory.
         #[operand(default = true)]
         pub automation: bool,
         /// Include engine-managed warm sessions.
@@ -812,7 +794,7 @@ pub mod prompt {
         /// or appended to the durable queue while a turn is live; `send_now` instead
         /// cancels an ordinary live turn and starts the message as a normal prompt.
         /// A live compaction always finishes before queued feedback starts. Every
-        /// send records a `nudge` event on the branch (the audit rule).
+        /// send records a `nudge` event on the branch.
         ///
         /// Provenance is derived from the credential: `manual` for a human operator,
         /// `agent` otherwise.
@@ -887,9 +869,8 @@ pub mod raw {
     pub struct Input {
         /// Worktree-relative path to read.
         //
-        // `serde(default)` because a download's operands arrive in the query string,
-        // which axum extracts before any default-filling could run. The handler
-        // rejects an empty path.
+        // `serde(default)`: download operands arrive via the query string,
+        // extracted before defaults fill in. Empty path is rejected by the handler.
         #[serde(default)]
         #[operand(default = String::new())]
         pub path: String,
@@ -1007,20 +988,18 @@ pub mod scratch {
 
         /// Write one Scratch file from a raw request body.
         ///
-        /// The only `io = Upload` operation, and the reason that variant exists: the
-        /// body is the file's bytes, so there is no JSON envelope to put operands in and
-        /// they arrive in the query string instead. Launch-time attachments take the
-        /// other road — `sessions.launch` carries them base64-encoded inside its JSON,
-        /// because there one request has to carry several files *and* the rest of the
-        /// launch configuration.
+        /// The only `io = Upload` operation: the body is the file's bytes, so
+        /// operands arrive in the query string instead of a JSON envelope.
+        /// Launch-time attachments instead go base64-encoded inside
+        /// `sessions.launch`'s JSON, since that request carries several files
+        /// plus the rest of the launch configuration.
         #[operation(id = "sessions.scratch.write", actor = SessionSelf, scope = Session,
                     risk = Write, grants = ["loom/sessions/write@v1"], io = Upload)]
         pub struct Input {
             /// The file name to write, a single path component.
             //
-            // `serde(default)` because an upload's operands arrive in the query string,
-            // which axum extracts before the dispatcher's default-filling step runs. The
-            // handler rejects an empty name.
+            // `serde(default)`: upload operands arrive via the query string,
+            // extracted before defaults fill in. Empty name is rejected by the handler.
             #[serde(default)]
             #[operand(default = String::new())]
             pub name: String,

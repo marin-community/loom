@@ -121,10 +121,8 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     &mut schema,
                     &[#(#context_names),*],
                 );
-                // The operand struct carries the operation's doc comment, so
-                // schemars offers it here as well. Every transport already has
-                // that text as the operation's summary; repeating it inside the
-                // argument schema only widens what each MCP tool advertises.
+                // Every transport already surfaces the operation's doc comment as
+                // its summary; drop it here so the argument schema doesn't repeat it.
                 if let Some(object) = schema.as_object_mut() {
                     object.remove("description");
                 }

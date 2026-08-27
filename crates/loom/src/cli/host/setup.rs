@@ -391,8 +391,7 @@ pub(crate) fn base_url_from_domain(domain: &str) -> Option<String> {
 }
 
 /// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to
-/// Loom's sqlite database directly through its daemon-less setup path;
-/// it does not need the loom daemon to be running.
+/// Loom's sqlite database directly; it does not need the loom daemon running.
 pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     let base_url = opts.base_url.trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -408,9 +407,9 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         .context("opening loom's database")?;
 
     // If an App is already configured, offer to update / re-install it rather
-    // than silently registering a second one. Only fall through to the manifest
-    // create flow when the operator explicitly chooses to replace it (or when
-    // running non-interactively, preserving the historical create behavior).
+    // than silently registering a second one. Falls through to the manifest
+    // create flow only if the operator chooses to replace it, or the run is
+    // non-interactive (no prompt available, so it creates).
     if let Some(app) = existing_app(&db).await {
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
@@ -428,8 +427,8 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     }
 
     // Which account owns the App: an explicit `--org`, else ask interactively
-    // (defaulting to the personal account). A non-interactive run with no `--org`
-    // stays personal, preserving the historical default for scripted setups.
+    // (defaulting to the personal account). A non-interactive run with no
+    // `--org` stays personal.
     let org: Option<String> = match &opts.org {
         Some(o) => Some(o.clone()),
         None => {

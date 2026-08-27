@@ -984,7 +984,7 @@ async fn repeat_trigger_forwards_to_active_session() {
 }
 
 /// When the reaction can't land (an App installation that predates the
-/// reactions permission), the forward falls back to the old ack comment —
+/// reactions permission), the forward falls back to an ack comment —
 /// feedback that the note reached the session beats staying quiet.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

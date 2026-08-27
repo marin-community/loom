@@ -1,20 +1,17 @@
-//! The Watch engine's **wiring**: the dispatcher's event→trigger
-//! matching, rounds landing marks and audit rows against the live server, and
-//! the guardrails (cooldown / no-overlap → `skipped`).
+//! The Watch engine's **wiring**: the dispatcher's event→trigger matching,
+//! rounds landing marks and audit rows against the live server, and the
+//! guardrails (cooldown / no-overlap → `skipped`).
 //!
-//! Test placement: a builtin program's *decision logic* is covered
-//! server-free by pytest (`python/weaver-loom/tests/`); these cases prove the
-//! plumbing — the script runs under the engine, reaches the fleet over REST,
-//! and its mutations land with attribution. Don't re-test program logic here.
+//! Test placement: a builtin program's *decision logic* is pytest-covered
+//! server-free (`python/weaver-loom/tests/`); these cases prove the plumbing —
+//! the script runs under the engine, reaches the fleet over REST, and its
+//! mutations land with attribution. Don't re-test program logic here.
 //!
-//! These cases drive the engine **directly** on the test server's isolated db
-//! rather than through the spawned background loop: the test harness pins the
-//! `watch.enabled` master switch off (it ships on by default), so the
-//! daemon's own engine idles and never races these deterministic calls. Each
-//! test builds its own
-//! `AppState` over the same isolated db (the harness exports `WEAVER_HOME`) and
-//! calls the public engine seams — `dispatch`, `fire_now`, `new_in_flight` /
-//! `fire` — so a round runs without waiting on the timer.
+//! These cases drive the engine directly on the test server's isolated db: the
+//! harness pins `watch.enabled` off, so the daemon's own engine never races
+//! these deterministic calls. Each test builds its own `AppState` over the
+//! same db and calls the engine seams (`dispatch`, `fire_now`,
+//! `new_in_flight`/`fire`) without waiting on the timer.
 
 use std::collections::HashSet;
 
@@ -80,11 +77,9 @@ async fn enabled_watch(state: &AppState, new: watch_store::NewWatch) -> watch_st
     watch_store::get(&state.db, &o.id).await.unwrap().unwrap()
 }
 
-/// The test-owned **survey fixture program** (`programs/survey.py`): records
-/// one `survey` action per surveyed session and mutates nothing. Engine-
-/// mechanics tests run it so they can assert "a round ran over exactly these
-/// sessions" from the run row alone, with no dependency on any builtin
-/// program's behavior (that logic is pytest-owned).
+/// Test-owned fixture program (`programs/survey.py`): records one `survey`
+/// action per surveyed session and mutates nothing, so a round's coverage can
+/// be asserted from the run row alone, independent of builtin program logic.
 fn survey_program() -> String {
     concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -140,8 +135,8 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "watch me").await;
 
-    // The agent declares `blocked` about itself (the reactive signal): its own
-    // `attention` tag.
+    // The agent declares itself `blocked` via its own `attention` tag — the
+    // reactive signal.
     ts.client
         .post(
             "/api/sessions/tags/set",
@@ -167,9 +162,8 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
 
     let in_flight = watch::new_in_flight();
 
-    // A matching reactive event: a `tag` write of the `attention` tag (value
-    // `blocked`) on a branch in this repo. The dispatcher maps the tag's
-    // key/value onto the trigger's match kind/level.
+    // The dispatcher maps a tag write's key/value onto the trigger's match
+    // kind/level.
     let ev = events::Event {
         id: 0,
         branch_id: branch_id.clone(),
@@ -179,8 +173,6 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     };
     watch::dispatch(&state, &in_flight, &ev).await;
 
-    // Exactly one run, and its run row records the survey of the in-scope
-    // session — the engine-observable proof the round ran.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -193,7 +185,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     );
 
     // Re-firing the identical event is idempotent: level-triggered, the round
-    // just re-surveys the current fleet — a fresh run row, same survey.
+    // re-surveys the current fleet — a fresh run row, same survey.
     watch::dispatch(&state, &in_flight, &ev).await;
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
@@ -205,8 +197,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         "the re-fired round re-surveys, it does not 'handle' the event again"
     );
 
-    // The repo filter excludes an event from another repo: same kind/level but a
-    // branch that lives elsewhere must not fire this watch.
+    // The repo filter must exclude an event from another repo.
     let runs_before = watch_store::recent_runs(&state.db, &o.id, 100)
         .await
         .unwrap()
@@ -326,8 +317,6 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
         "the woken round surveyed the in-scope stale session"
     );
 
-    // Once activity resumes (a non-stale pass clears the session from `seen`),
-    // the edge re-arms: a later stale crossing emits a fresh event.
     let watermark2 = events::max_id(&state.db).await.unwrap();
     // A high threshold makes this just-touched session read as not-stale, which
     // re-arms the edge…
@@ -392,14 +381,11 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// The status program's wiring proof: a stale-triggered round asks the judge for
-/// a set of tags and reconciles its own marks — a recommended tag lands as its
-/// own typed key (never the agent's `attention` axis — no mirror), and a
-/// follow-up "nothing needed" verdict clears it. The program's decision logic
-/// (parse, no-judgement vs calm, capability branches, summaries) is covered
-/// server-free in `python/weaver-loom/tests/test_status_program.py`; dry-run
-/// flag propagation through the executor is covered by the lib test
-/// `run_script_round_trips_the_contract`.
+/// The status program's wiring proof: a stale-triggered round asks the judge
+/// for a set of tags and reconciles its own marks — a recommended tag lands on
+/// its own typed key, never the agent's `attention` axis, and a follow-up
+/// "nothing needed" verdict clears it. The program's decision logic is
+/// pytest-covered server-free; this proves the plumbing.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_status_round_applies_typed_tags_and_reconciles() {
@@ -459,7 +445,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         "the watch never mirrors onto the agent's own `attention` axis"
     );
 
-    // The run row records a `tag` action (not the old generic `mark`).
+    // The run row records a `tag` action.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -498,10 +484,9 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
 /// The `resume` builtin's wiring proof: a session whose live screen shows the
 /// transient-error signature (`API Error: 529 Overloaded`) is detected, nudged
 /// to resume, and the round persists its backoff bookkeeping — the lookaside
-/// `state` tracks the session (one attempt) and a dynamic `wake_at` is armed for
-/// the recheck. The backoff math / escalation / capability branches are covered
-/// server-free in `python/weaver-loom/tests/test_resume_program.py`; this proves
-/// the screen-scrape → nudge → state+wake plumbing against a live server.
+/// `state` tracks the session and a dynamic `wake_at` is armed for the
+/// recheck. The backoff math and capability branches are pytest-covered
+/// server-free; this proves the screen-scrape → nudge → state+wake plumbing.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_nudges_a_stalled_session_and_arms_backoff() {
@@ -548,7 +533,6 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         .await
         .unwrap();
 
-    // The run recorded a real `nudge` of the stalled session.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -564,8 +548,7 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         "the round nudges the stalled session: {actions}"
     );
 
-    // The watch now tracks the session (one attempt) and has armed a wake
-    // for the backoff recheck — the lookaside-state + dynamic-wake primitives.
+    // Backoff bookkeeping: one tracked attempt, and a wake armed for the recheck.
     let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
     let tracked = &after.state()[session_id.as_str()];
     assert_eq!(
@@ -651,8 +634,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
         "next_run_at moved forward off the past due time"
     );
 
-    // The dispatcher consumes that cron tick and runs the scheduled round; the
-    // run row records the survey of the in-scope session.
+    // The dispatcher consumes the cron tick and runs the scheduled round.
     let in_flight = watch::new_in_flight();
     watch::dispatch(&state, &in_flight, cron).await;
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
@@ -822,14 +804,12 @@ async fn rest_watch_lifecycle_and_validation() {
     assert_eq!(created["capabilities"][2], "mark");
     assert!(created["last_outcome"].is_null(), "never run yet");
 
-    // A duplicate name is rejected (the client surfaces the error status).
     let dup = ts
         .client
         .post("/api/watches/create", json!({ "name": "rest-watch" }))
         .await;
     assert!(dup.is_err(), "a duplicate name is rejected");
 
-    // A bad capability is rejected at create time.
     let bad_cap = ts
         .client
         .post(
@@ -1211,7 +1191,6 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["session"], open_id.as_str());
     assert_eq!(actions[0]["label"], "weaver");
 
-    // Observe-only: neither session was archived or otherwise mutated.
     for id in [&merged_id, &open_id] {
         let view = ts
             .client
@@ -1264,7 +1243,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     )
     .await;
 
-    // Park: the round stamps `awaiting: review`, attributed to the watch.
+    // Park.
     watch::fire_now(&state, "review-wait", false, "manual")
         .await
         .unwrap();
@@ -1284,7 +1263,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         "the parked mark carries the watch's attribution"
     );
 
-    // Review lands → un-park: the next round clears the watch's own mark.
+    // Review lands → un-park.
     snap.review_decision = Some("APPROVED".to_string());
     loom::github::upsert_status(&state.db, &branch, &snap)
         .await
@@ -1756,7 +1735,6 @@ async fn ensure_warm_session_reuses_the_same_session() {
         .unwrap();
     assert_eq!(first, second, "the same warm session id is reused");
 
-    // Exactly one managed session exists for this watch — no duplicate spawn.
     let managed = session_mod::list_managed(&state.db).await.unwrap();
     let owned: Vec<_> = managed
         .iter()

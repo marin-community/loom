@@ -1,18 +1,14 @@
 //! Session lifecycle and normalized history, served by the generic registry
 //! dispatcher.
 //!
-//! `get`, `summary`, `status_get`, `history`, and `search` are registered
-//! `sessions.*` operations and route straight through
-//! `super::dispatch::call_tool`. A caller-omitted session resolves to this
-//! session through the same `#[operand(context)]` fill every other bundle
-//! uses, in one `self_context()` call shared across the whole request.
+//! `get`, `summary`, `status_get`, `history`, and `search` route straight
+//! through `super::dispatch::call_tool`; a caller-omitted session resolves via
+//! the same `#[operand(context)]` fill every other bundle uses.
 //!
-//! `status_set` (and its legacy alias `status`) stay hand-written: setting
-//! the branch's status also posts a channel message, and the old adapter
-//! reports that delivered message (`Client::get_channel(..).last_message`)
-//! alongside the updated branch. `sessions.status.set`'s plain response is
-//! only the branch, so routing this one through the generic dispatcher would
-//! silently drop that delivery confirmation.
+//! `status_set` (and its legacy alias `status`) stay hand-written: setting the
+//! branch's status also posts a channel message, and callers expect that
+//! message back alongside the updated branch — `sessions.status.set`'s own
+//! response carries only the branch.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -29,9 +25,8 @@ const SERVER_NAME: &str = "loom_session";
 
 /// The tools this server exports, in the order it advertises them.
 ///
-/// `status` and `status_set` are the same operation under two names — the
-/// former is what sessions pinned to `mcp/session/status@v1` called it before
-/// the rename, and saying so here is the whole of that alias.
+/// `status` is a legacy alias for `status_set`, kept for sessions pinned to
+/// `mcp/session/status@v1`.
 fn exports() -> &'static [Export] {
     static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
     EXPORTS.get_or_init(|| {
@@ -128,15 +123,12 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     let client = super::runtime_client("session")?;
     match name {
         "status_set" | "status" => set_status(&client, name, arguments).await,
-        // `status` and `status_set` are the same operation under two names;
-        // every other tool here maps 1:1 onto its own registered operation.
         _ => super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await,
     }
 }
 
-/// Update the branch's durable status and report the channel message that
-/// delivery produced — data `sessions.status.set`'s plain response (just the
-/// updated branch) does not carry.
+/// Applies the status update, then folds in the channel message it posted
+/// (which `sessions.status.set`'s own response omits).
 async fn set_status(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
     if !super::runtime_tool_allowed(name) {
         bail!("session tool '{name}' is not allowed by this session");

@@ -297,8 +297,6 @@ fn canonical_capability_successor(name: &str) -> Option<&'static str> {
 /// no translation table of their own: they name sets like any other, and a set
 /// resolves to grants the same way whatever it is called.
 fn capability_set_grants(name: &str) -> Vec<&'static str> {
-    // A superseded name resolves through its successor, whether or not anything
-    // still publishes the old name.
     let name = canonical_capability_successor(name).unwrap_or(name);
     let mut grants = Vec::new();
     for adapter in adapters() {
@@ -809,101 +807,10 @@ mod tests {
     }
 
     #[test]
-    /// The digests pin what each capability advertises to an agent.
-    ///
-    /// They move when a tool's schema moves, which is the point: a session
-    /// launched with `loom/artifacts/write@v1` should be able to tell that the
-    /// shape of `write` changed underneath it. Re-pin only with a reason.
-    ///
-    /// Last re-pinned for four deliberate contract fixes: `artifacts.write.kind`
-    /// became optional so omitting it keeps the artifact's current kind instead
-    /// of resetting it to markdown; `artifacts.threads.list` swapped an `all`
-    /// flag for `open_only` so the default keeps returning resolved threads;
-    /// and `issues.list` gained the `backlog` filter that `?scope=backlog` used
-    /// to provide.
-    ///
-    /// Re-pinned again when `channel`, `artifact`, and `permission` switched
-    /// their canonical (`loom/*@v1`) sets from a hand-authored tool order to
-    /// `super::dispatch::derive_capability_sets`, which groups a bundle's
-    /// operations by their own `grants` field and sorts each group's tools
-    /// alphabetically: `loom/channels/read@v1`, `loom/channels/write@v1`,
-    /// `loom/artifacts/read@v1`, `loom/artifacts/write@v1`, and
-    /// `loom/permissions/read@v1` all keep the exact same tool *membership*,
-    /// just reordered (e.g. artifacts' read set was `[list, get, history,
-    /// threads]`, now `[get, history, list, threads]`). Their legacy `mcp/*@v1`
-    /// twins, `loom/sessions/*@v1`, `loom/context/read@v1`, and
-    /// `loom/permissions/request@v1` (one tool — nothing to reorder) stay
-    /// hand-authored and are untouched by this re-pin; see each adapter's own
-    /// module doc comment for why.
-    ///
-    /// Re-pinned again for two new operations joining an existing grant:
-    /// `channels.archive` widened `loom/channels/write@v1` (and its
-    /// `mcp/channel/write@v1` twin) by one tool, and `issues.update` widened
-    /// `loom/issues/write@v1` the same way.
-    ///
-    /// Re-pinned again after rewriting the doc comments on `artifacts.*`,
-    /// `issues.*`, and `channels.*` operation structs for clarity — those doc
-    /// comments are the MCP tool description, so the digest moved with the
-    /// text. No schema or behavior changed.
-    ///
-    /// Re-pinned again after `loom-api-macros::field::doc_comment` stopped
-    /// joining an operation's entire multi-paragraph doc comment into its MCP
-    /// description; it now stops at the first blank `///` line, so any
-    /// operation whose doc comment went on to explain grant reasoning or a
-    /// route it replaced stopped advertising that explanation to an agent.
-    /// `artifacts.write`, `channels.archive`/`channels.create` and their
-    /// legacy `mcp/*@v1` twins were the only descriptions that changed.
-    ///
-    /// Re-pinned again when `mcp/artifact/*@v1` and `mcp/channel/*@v1` stopped
-    /// restating their tool lists and became aliases of the canonical sets they
-    /// were renamed from — the previous re-pin left them hand-authored, which
-    /// meant an operation joining `loom/artifacts/read@v1` would silently not
-    /// join the older name for it.
-    ///
-    /// Re-pinned again when adapters started naming the operations they export
-    /// instead of operations naming the server that exports them. A capability
-    /// set's tools now follow the order its adapter advertises them in, which
-    /// is the only order declared anywhere, rather than a second alphabetical
-    /// one applied on the way out. Membership is identical in all 23 sets.
-    ///
-    /// Re-pinned again when the last three adapters that hand-wrote their
-    /// `tools/list` stopped. `history`, `messaging`, and `github` each
-    /// advertised bounds their operation did not carry — history's
-    /// `limit`/`kinds`/`q`, status's level enum and message length, slack's
-    /// text length, GitHub's `number`/`body`/`title` shapes — so the schema an
-    /// agent saw was written in the MCP layer while the server enforced the
-    /// same rule elsewhere. The bounds moved onto the operands, `kinds` became
-    /// a `HistoryKind` enum instead of `Vec<String>`, and the six GitHub tool
-    /// shapes are declared next to the operation that serves them. The
-    /// advertised schemas therefore changed in every set containing those
-    /// tools; membership is identical in all 23.
-    ///
-    /// Re-pinned again after `#[operation]` started emitting each declared
-    /// `#[operand(default = ...)]` as the field's `serde` default. `schemars`
-    /// reads `serde` attributes, so until now a field with a declared default
-    /// was still advertised `required`: 23 of the 48 built-in tools demanded
-    /// arguments their own operation called optional (`channel/send` wanted
-    /// `channel`, `kind`, `urgency`, and `payload`; `channel/read` wanted all
-    /// five of its operands; `issue/add` wanted `body`). Those fields are now
-    /// optional and carry their declared `default` in the schema. The same
-    /// re-pin restores the bounds the earlier port to the generic dispatcher
-    /// dropped — `channel`'s kind/urgency/mode enums and body, name, topic and
-    /// idempotency-key lengths, `artifact`'s name and revision bounds,
-    /// `issue`'s id and key/value minimums, `permission`'s `owner/repo`
-    /// pattern and reason length — each declared on the operand rather than in
-    /// the adapter. Membership is identical in all 23 sets and no tool
-    /// description changed.
-    /// Re-pinned again when three optional operands stopped advertising a
-    /// closed enum that excluded `null`. `channels.wait`'s `kind`,
-    /// `permissions.requests.list`'s `state` and `issues.update`'s `status` are
-    /// each `Option<String>` — serde accepts an explicit `null` and reads it as
-    /// "no filter" — while the schema listed only the string values, so an
-    /// agent sending `null` was sending something the tool said was invalid.
-    /// The SPA was doing exactly that. `null` is a member of each enum now.
-    /// Only the two `channel/read` sets and `permissions/read` move;
-    /// `issues.update` is not exported as a tool. Membership is identical in
-    /// all 23 sets and no description changed.
-    ///
+    /// The digests pin what each capability advertises to an agent: they move
+    /// when a tool's schema changes, so a session holding e.g.
+    /// `loom/artifacts/write@v1` can tell that `write`'s shape changed under it.
+    /// Re-pin only with a reason, and check whether tool *membership* moved too.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (

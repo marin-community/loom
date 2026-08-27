@@ -67,10 +67,8 @@ pub(crate) fn client() -> Client {
 }
 
 /// The branch key every command operates against: `$WEAVER_BRANCH`, set by
-/// loom for every session it launches. There is no other way to identify
-/// "the current branch" once the CLI no longer reads local git/db state —
-/// without it, this only works as a bare client of a server that's told it
-/// which branch it's fetching.
+/// loom for every session it launches. Required — the CLI is a bare client
+/// with no local git/db state to fall back to.
 fn branch_key() -> Result<String> {
     let key = std::env::var("WEAVER_BRANCH").unwrap_or_default();
     let key = key.trim();
@@ -100,8 +98,7 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
 
 /// The live status of the branch working an issue, as `"<branch> · <attention>
 /// — <message>"`, or `None` when the branch row can't be resolved (a stale
-/// `claimed_branch` name, or a network hiccup — best-effort). This is what
-/// turns an issue lookup into a poll of a delegated sub-tree.
+/// `claimed_branch` name, or a network hiccup — best-effort).
 async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) -> Option<String> {
     let key = format!("{repo_root}:{claimed}");
     let b = client
@@ -113,9 +110,9 @@ async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) 
     Some(format!("{claimed} · {}", status_line(&b)))
 }
 
-/// One operation's own rendering of a result a hand-written command fetched
-/// itself. What the declaration prints and what the bespoke command prints are
-/// then the same function, so they cannot drift.
+/// An operation's own rendering, for a result a hand-written command fetched
+/// itself — so the declaration's output and the bespoke command's output stay
+/// the same function.
 fn render<O: Operation + Render>(output: &O::Output) -> String
 where
     O::View: Default,

@@ -322,10 +322,10 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// Typing multi-line text verbatim ([`send_literal`]) and following it with a bare
 /// `Enter` does not submit: an agent TUI (Claude Code) treats the burst as a paste
 /// and folds the trailing `\r` into the composer as one more newline, so the whole
-/// message lands in the entry box unsent. Wrapping the text in bracketed-paste
-/// markers is how the interactive terminal avoids this — xterm.js frames every
-/// paste the same way — and the closing marker ends the paste so the subsequent
-/// `Enter` counts as a submit. Newlines are normalized to `\r`, matching xterm.js.
+/// message lands in the entry box unsent. Bracketed-paste markers avoid this —
+/// xterm.js frames every paste the same way — and the closing marker ends the
+/// paste so the subsequent `Enter` counts as a submit. Newlines are normalized
+/// to `\r`, matching xterm.js.
 ///
 /// Loom only drives agents that enable bracketed paste; where 2004 mode is off the
 /// markers would land as literal text, so this is not a general typing primitive.
@@ -469,7 +469,7 @@ mod tests {
         let framed = frame_paste("line one\nline two\r\nline three");
         let s = String::from_utf8(framed).unwrap();
         // The block is delimited so the TUI reads it as content and the following
-        // Enter as a distinct submit — the whole point of the fix.
+        // Enter as a distinct submit.
         assert!(
             s.starts_with("\x1b[200~"),
             "missing paste-start marker: {s:?}"

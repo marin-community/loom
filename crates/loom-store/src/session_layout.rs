@@ -117,12 +117,8 @@ impl<'a> LayoutCommand<'a> {
     /// Open the transaction every layout mutation runs in, holding the caller
     /// to the revision it composed against.
     ///
-    /// `None` means the caller never read a revision, so there is nothing it
-    /// could be stale against: apply the change to whatever is current. A
-    /// dashboard tab always has the revision it rendered from and keeps sending
-    /// it, which is what the guard is for. The CLI never had one — it fetched
-    /// the layout first purely to echo the revision back, which is this same
-    /// "apply to current" with a wasted round trip and the look of a check.
+    /// `None` means the caller never read a revision, so the change applies to
+    /// whatever is current.
     async fn begin(
         db: &'a Db,
         username: &'a str,

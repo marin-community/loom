@@ -25,8 +25,7 @@ mod support_schema;
 use support_schema::seed_migrated_db;
 
 /// The title and goal every fixture branch carries. The session channel is
-/// named after the one and opens with the other, which is what
-/// `channel_cli_reads_and_appends_typed_history` asserts.
+/// named after the one and opens with the other.
 const BRANCH_TITLE: &str = "CLI channel";
 const BRANCH_GOAL: &str = "coordinate durably";
 
@@ -69,8 +68,8 @@ async fn seed_session(db: &weaver_core::db::Db, branch_id: &str) -> loom::sessio
 }
 
 /// An ordinary unrestricted launch policy — the shape loom stamps on a session
-/// it starts. `restricted: false` is what makes the minted credential carry the
-/// full session capability set, as a real agent's does.
+/// it starts. `restricted: false` mints a credential carrying the full session
+/// capability set, as a real agent's does.
 fn launch_policy() -> session_mod::SessionLaunchPolicy {
     session_mod::SessionLaunchPolicy {
         profile: loom::profile::DEFAULT_PROFILE.to_string(),
@@ -120,9 +119,8 @@ impl Env {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
         seed_migrated_db();
-        // `seed_owner` no longer defaults to a real login — this suite's
-        // requests (the `weaver` CLI, over loopback) need a seeded owner to
-        // resolve to.
+        // This suite's requests (the `weaver` CLI, over loopback) need a seeded
+        // owner to resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -327,9 +325,7 @@ async fn issue_lifecycle() {
     assert!(out.contains("another task"), "ls output: {out}");
     assert_eq!(out.matches("[ ]").count(), 2, "two open issues");
 
-    // Close #1, then list defaults to open only (should drop it). `close`,
-    // `reopen` and `rm` are served by their declarations, so each answers with
-    // the items it changed rather than a count.
+    // `close`, `reopen` and `rm` answer with the items they changed, not a count.
     let closed = env.run(&["issues", "close", "1"]);
     assert!(closed.contains("closed #1"), "close: {closed}");
     let out = env.run(&["issues", "ls"]);
@@ -344,7 +340,6 @@ async fn issue_lifecycle() {
         "closed marker should appear with --all"
     );
 
-    // Reopen, then rm.
     let reopened = env.run(&["issues", "reopen", "1"]);
     assert!(reopened.contains("reopened #1"), "reopen: {reopened}");
     let out = env.run(&["issues", "ls"]);
@@ -471,8 +466,8 @@ async fn issue_ls_separates_branch_work_from_repo_backlog() {
     assert!(out.contains("open issues: 1"), "status: {out}");
 }
 
-/// `issue show` surfaces the live status of the branch working the issue, which
-/// is what lets a parent agent poll a delegated sub-tree.
+/// `issue show` surfaces the live status of the branch working the issue,
+/// letting a parent agent poll a delegated sub-tree.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn issue_show_includes_the_working_branch_status() {
@@ -554,10 +549,9 @@ async fn issue_ls_shows_delegated_sub_trees() {
 /// description — reproducing the state a `loom session launch` from inside
 /// the parent would create.
 ///
-/// Including the child's own session, parented to the launching branch: a
-/// session credential reaches the branches of its own session tree, and it is
-/// that parent link — not the issue's `source_branch` — that puts the child in
-/// it. Without one, the parent's poll of its sub-tree is correctly refused.
+/// Also seeds the child's own session, parented to the launching branch: the
+/// parent's poll of its sub-tree depends on that session-tree link, not the
+/// issue's `source_branch`. Without it, the poll is correctly refused.
 async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, description: &str) {
     let child_id = weaver_core::branch::new_id();
     weaver_core::branch::insert(&env.db, &child_id, &env.repo_root, child, "main")
@@ -697,9 +691,8 @@ async fn summary_with_no_open_tasks_suggests_wrapping_up() {
 #[serial]
 async fn artifact_write_show_ls_and_revisions() {
     let env = Env::start().await;
-    // Write from stdin (no file arg). The CLI prints a dashboard URL (now
-    // always known — the write only succeeds because loom is reachable) and
-    // the new revision.
+    // Write from stdin (no file arg); the CLI prints a dashboard URL and the
+    // new revision.
     let out = env.run_with_stdin(&["artifacts", "write", "plan"], "# Plan\n\nDesign here.\n");
     assert!(
         out.contains("/artifacts/plan"),
@@ -746,9 +739,6 @@ async fn artifact_write_show_ls_and_revisions() {
     assert!(!ls.contains("plan"), "rm should remove it: {ls}");
 }
 
-/// `history` and `resolve` are served by their declarations now, so their text
-/// comes from `weaver_api::render::artifacts` rather than a hand-written
-/// printer. Both are here because neither had CLI coverage before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn artifact_history_lists_every_revision() {
@@ -948,7 +938,7 @@ async fn hook_without_weaver_branch_is_a_silent_no_op() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    // And it recorded nothing against the seeded branch — the whole point.
+    // It also recorded nothing against the seeded branch.
     let log = env.run(&["sessions", "events"]);
     assert!(
         !log.contains("idle") && !log.contains("hook"),
@@ -956,8 +946,7 @@ async fn hook_without_weaver_branch_is_a_silent_no_op() {
     );
 }
 
-/// `loom help` renders the code-registered operation catalogue without a
-/// separate Markdown command manual.
+/// `loom help` renders the code-registered operation catalogue.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn help_prints_the_registered_loom_guide() {

@@ -1027,14 +1027,6 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
 /// A branch key is not a branch. Whatever a session credential spells, the
 /// branch it reaches is the one the key *resolves* to, and that row has to be
 /// in its own tree.
-///
-/// This is the property `require_branch_access` and `require_branch` used to
-/// disagree about. The check matched `id = ? OR branch = ?` while the handler
-/// resolved with `branch::resolve_key`, and branch names are unique per
-/// repository rather than globally — so a session on `<repo>:main` could send
-/// `{"branch": "main"}`, satisfy the check against its own row, and have the
-/// handler act on a *different* repository's `main`. Nothing pinned it, which is
-/// why it survived to be found by hand.
 #[tokio::test]
 #[serial]
 async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
@@ -1088,11 +1080,10 @@ async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
         foreign.id.clone(),
         "zzzz".to_string(),
         format!("{foreign_repo}:{branch_name}"),
-        // The bare name is ambiguous and resolves to the newest match, which is
-        // the foreign row. Denying is the fail-closed answer; returning the
-        // foreign branch's contents was the bug.
+        // The bare name is ambiguous and resolves to the newest match — the
+        // foreign row; denying is the fail-closed answer.
         branch_name.clone(),
-        // `LIKE` metacharacters, which resolve literally now.
+        // `LIKE` metacharacters resolve literally, not as SQL wildcards.
         "%".to_string(),
         "_".to_string(),
     ] {
@@ -1104,9 +1095,8 @@ async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
         );
     }
 
-    // The forms that name the caller's own branch still work — including
-    // `repo_root:name`, which the check used to reject outright, and the empty
-    // key, which is how an agent says "my branch" by saying nothing.
+    // The forms that name the caller's own branch still work — `repo_root:name`,
+    // and the empty key, which is how an agent says "my branch" by saying nothing.
     for key in [
         branch_id.clone(),
         format!("{}:{branch_name}", ts.cwd()),

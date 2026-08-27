@@ -66,9 +66,8 @@ enum HostCmd {
     },
     /// Inspect trusted MCP capability sets, or run an internal stdio adapter.
     ///
-    /// Named for its bundle so the hand-written commands and the declared ones
-    /// land in one group. Two groups a letter apart — `loom mcp` beside `loom
-    /// mcps` — is how the same registry ended up answering to two words.
+    /// Named for its bundle, with a `mcp` alias so both `loom mcp` and `loom
+    /// mcps` reach the same registry.
     #[command(name = "mcps", visible_alias = "mcp")]
     Mcp {
         #[command(subcommand)]
@@ -246,8 +245,6 @@ enum Cmd {
 /// Both kinds coexist deliberately. A hand-written command exists because its
 /// output is worth formatting by hand; the generic dispatcher exists so that
 /// declaring an operation makes it reachable immediately, with no second edit.
-/// `operations_reachable_from_the_command_line` counts the split, so the
-/// hand-written set can shrink without anyone losing track of what is left.
 fn generic_bindings() -> Vec<loom::cli::CliBinding> {
     loom::cli::bindings()
         .into_iter()
@@ -545,17 +542,12 @@ fn registered_cli_factory(name: &str) -> Option<&'static CliCommandFactory> {
 
 impl FromArgMatches for Cmd {
     fn from_arg_matches(matches: &ArgMatches) -> clap::error::Result<Self> {
-        // Generic bindings go first. `generic_bindings` has already dropped
-        // every path the hand-written tree answers, so whatever resolves here
-        // is an operation no bespoke command implements.
-        //
-        // The factory table used to be asked first, and it matches on the
-        // *group* name, so a group with any hand-written command swallowed
-        // every declared one beside it. That was 18 invocations across
-        // `channels`, `issues` and `sessions` — `loom issues list` among them.
-        // The tree offered them, `--help` documented them, `/api/operations`
-        // advertised them, and running one said the subcommand was not
-        // recognized.
+        // Generic bindings go first: whatever resolves here is an operation no
+        // bespoke command implements. Asking the hand-written factory table
+        // first would match on the *group* name, letting a group with any
+        // hand-written command swallow every declared operation beside it
+        // (e.g. `loom issues list`), even though the tree, `--help`, and
+        // `/api/operations` all advertise it as reachable.
         let bindings = generic_bindings();
         if let Some((binding, operation_matches)) = loom::cli::resolve(&bindings, matches) {
             return Ok(Self::Operation(*binding, operation_matches));
@@ -632,14 +624,13 @@ mod cli_tree_tests {
 
     /// Every advertised invocation exists in the tree the binary really uses.
     ///
-    /// This is the invariant the pre-registry command line violated: a
-    /// descriptor said `cli: Some("loom issues list")` beside a clap enum whose
-    /// variant was `Ls`, and three advertised commands did not exist at all.
-    /// Checking bindings against the registry is not enough — both can agree
-    /// while the binary offers a different word.
+    /// Checking bindings against the registry is not enough — a descriptor and
+    /// a clap enum can each look right while naming different commands, so
+    /// only walking the built tree catches the drift.
     ///
-    /// It covers hand-written commands too, deliberately. An operation served by
-    /// a bespoke command still has to be reachable by the name it advertises.
+    /// It covers hand-written commands too, deliberately: an operation served
+    /// by a bespoke command still has to be reachable by the name it
+    /// advertises.
     #[test]
     fn every_advertised_invocation_exists_in_the_real_tree() {
         let command = Cli::command();
@@ -688,13 +679,10 @@ mod cli_tree_tests {
 
     /// Every generic binding is *dispatched to*, not merely present.
     ///
-    /// Walking the built tree and running the binary are different questions,
-    /// and the gap between them shipped: `loom issues list`, `board`, `update`
-    /// and `actions` were in the tree, documented by `--help` and advertised by
-    /// `/api/operations`, yet every one of them failed with "the subcommand
-    /// wasn't recognized". `Cmd::from_arg_matches` matched the *group* name
-    /// `issues` against the hand-written factory table and handed the parse to
-    /// a clap enum that only knows `ls`.
+    /// Walking the built tree and running the binary are different questions:
+    /// a command can sit in the tree, documented by `--help` and advertised by
+    /// `/api/operations`, yet never be reached if `Cmd::from_arg_matches`
+    /// resolves its group name to a hand-written command first.
     #[test]
     fn every_generic_binding_dispatches_to_its_operation() {
         let command = Cli::command();
@@ -817,10 +805,9 @@ async fn run() -> Result<()> {
         Cmd::Operation(binding, matches) => {
             configure_agent_client()?;
             let rendered = (binding.run)(&matches).await?;
-            // Printed as the renderer built it. `artifacts get` renders an
-            // artifact's own bytes, so trimming here truncated what
-            // `loom artifacts get plan > plan.md` wrote; the only thing added
-            // is the final newline a terminal expects.
+            // Printed as the renderer built it: trimming would truncate an
+            // artifact's own bytes (`loom artifacts get plan > plan.md`); the
+            // only addition is the final newline a terminal expects.
             if !rendered.is_empty() {
                 if rendered.ends_with('\n') {
                     print!("{rendered}");

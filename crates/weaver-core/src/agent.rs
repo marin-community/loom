@@ -11,10 +11,10 @@ pub enum HookMode {
     /// (primer) plus the work-cycle hooks (`UserPromptSubmit`/`Notification`/
     /// `Stop`) that drive working/waiting/idle.
     Terminal,
-    /// Only `SessionStart` (primer + compaction re-orientation) — for an ACP
-    /// session, whose turn boundaries come from the protocol itself, so the
-    /// work-cycle hooks are redundant and are dropped (loom drives status/idle
-    /// from the ACP turn edges instead; see `loom::acp` / `loom::monitor`).
+    /// Only `SessionStart` (primer + compaction re-orientation) — an ACP
+    /// session's turn boundaries come from the protocol itself, so loom drives
+    /// status/idle from the ACP turn edges instead (see `loom::acp` /
+    /// `loom::monitor`) and the work-cycle hooks are dropped.
     Acp,
 }
 
@@ -24,9 +24,7 @@ pub enum HookMode {
 /// current branch (from `$WEAVER_BRANCH` or cwd) and writes an `events` row;
 /// the orchestrator picks it up on its monitor tick. No daemon required.
 ///
-/// `mode` selects the bundle: a terminal session installs the full set;
-/// an ACP session installs only `SessionStart`, since its working/idle edges
-/// are the protocol's turn boundaries, not the work-cycle hooks.
+/// `mode` selects the bundle — see [`HookMode`].
 pub fn hooks_json(loom_bin: &str, mode: HookMode) -> Value {
     let hook = |event: &str| {
         json!([{
@@ -46,10 +44,8 @@ pub fn hooks_json(loom_bin: &str, mode: HookMode) -> Value {
     json!({ "hooks": hooks })
 }
 
-/// Compact builtin orientation. Executable reference belongs to Loom's
-/// operation registry and `loom help`, not a separately maintained Markdown
-/// catalogue. Repository-specific `WEAVER.md` overrides remain readable during
-/// the compatibility window.
+/// Compact builtin orientation. Command reference belongs to `loom help`, not
+/// a separately maintained Markdown catalogue.
 const BUILTIN_WEAVER_MD: &str = r#"# Loom session
 
 You are working in a detached Loom session. Your opening task is the goal.
@@ -109,8 +105,6 @@ mod tests {
 
     #[test]
     fn acp_mode_installs_only_the_session_start_hook() {
-        // An ACP session's turn boundaries are the protocol's, so only the
-        // primer hook is installed — the work-cycle hooks are dropped.
         let hooks = hooks_json("/usr/bin/loom", HookMode::Acp);
         let obj = hooks["hooks"].as_object().unwrap();
         assert_eq!(

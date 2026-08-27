@@ -21,10 +21,6 @@ const BANNER: &str = "\
 // -- Type expressions --------------------------------------------------------
 
 /// Render one JSON Schema as a TypeScript type expression.
-///
-/// Deliberately partial. Anything outside the constructs schemars actually
-/// emits for Loom's DTOs becomes `unknown` rather than a guess: an unchecked
-/// type is better than a confidently wrong one.
 fn ts_type(schema: &Value, indent: usize) -> String {
     let map = match schema {
         // schemars writes `true` for a field that accepts any JSON.
@@ -268,11 +264,10 @@ fn read_operations(document: &Value) -> Vec<Operation> {
 
 /// The caller-facing input type for one operation.
 ///
-/// The request schema elides the fields the dispatcher fills from session
-/// context, because a session caller cannot supply them. The SPA is a `User`
-/// caller with no session of its own, so it must: `x-loom-context` names them
-/// and they come back as optional strings, which is what "fill only what the
-/// caller left unset" means for a caller with no context to fill from.
+/// The request schema elides fields the dispatcher fills from session
+/// context, since a session caller cannot supply them. The SPA is a `User`
+/// caller with no session context of its own, so it must supply them itself:
+/// `x-loom-context` names them, and they come back here as optional strings.
 fn input_declaration(name: &str, operation: &Operation) -> String {
     let map = operation.operands.as_object().cloned().unwrap_or_default();
     let mut out = format!("export interface {name} {{\n");

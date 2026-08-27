@@ -178,8 +178,7 @@ pub(crate) fn watch_path(name: &str) -> std::path::PathBuf {
 }
 
 /// `loom watch new` — scaffold a starter program file and print its path.
-/// A local file-convention command: it touches no server (T8 file convention),
-/// so it works before the Python binding exists.
+/// Touches no server, so it works before the Python binding exists.
 pub(crate) async fn cmd_watch_new(name: String) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {
@@ -278,7 +277,6 @@ pub(crate) async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
     Ok(())
 }
 
-/// `loom watch rm` — delete a watch.
 /// `loom watch programs` — the builtin program table, or one program's source.
 ///
 /// The table is `watches.programs`' own renderer. `--source` is the reason this
@@ -377,7 +375,6 @@ mod tests {
         // The docstring opens with exactly three quotes (a malformed `""` would
         // be the most likely raw-string bug).
         assert!(out.contains("\"\"\"test-watch — "));
-        // It documents the program contract and uses the API layer.
         assert!(out.contains("WEAVER_WATCH"));
         assert!(out.contains("from weaver_loom import Round"));
         assert!(out.contains("loom watch add test-watch"));

@@ -23,8 +23,6 @@ use crate::db::{now_iso, Db};
 /// Names loom owns and exports itself ([`crate::agent::launch`]). Operator vars
 /// are exported *after* these, so allowing one of these names through would let a
 /// stored value shadow Loom's control variables or GitHub credential policy.
-/// We reserve the whole `WEAVER_`/`LOOM_` prefix space plus the stock GitHub
-/// clients' token names.
 const RESERVED_PREFIXES: &[&str] = &["WEAVER_", "LOOM_"];
 const RESERVED_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
 
@@ -33,13 +31,11 @@ pub fn is_github_token_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// Validate an environment-variable name. Accept the POSIX-portable identifier
-/// shape (`[A-Za-z_][A-Za-z0-9_]*`): a leading letter or underscore, then
-/// letters, digits, or underscores. This is exactly what the `export NAME=…` in
-/// the launch script can carry, and rejecting anything else keeps a stray name
-/// from corrupting the script. Names in loom's own [`RESERVED_PREFIXES`] are also
-/// rejected so an operator var can't shadow the environment loom needs. The error
-/// is a key-free reason so callers can prefix it with whatever context they like.
+/// Validate an environment-variable name against the POSIX-portable shell
+/// identifier shape (`[A-Za-z_][A-Za-z0-9_]*`) — what `export NAME=…` in the
+/// launch script can carry — and reject names in loom's own
+/// [`RESERVED_PREFIXES`]. The error is a key-free reason so callers can
+/// prefix it with whatever context they like.
 pub fn validate_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() {
         return Err("name must not be empty".to_string());
@@ -154,8 +150,6 @@ mod tests {
 
     #[test]
     fn validate_name_rejects_loom_reserved_names() {
-        // Operator vars are exported after loom's own, so these must not be
-        // settable or they'd shadow the environment the agent depends on.
         assert!(validate_name("WEAVER_API").is_err());
         assert!(validate_name("WEAVER_BRANCH").is_err());
         assert!(validate_name("LOOM_TOKEN").is_err());
@@ -172,7 +166,6 @@ mod tests {
         set(&db, "GH_HOST", "github.example.com").await.unwrap();
         set(&db, "API_TOKEN", "secret").await.unwrap();
         let all = list(&db).await.unwrap();
-        // Ordered by name: API_TOKEN before GH_HOST.
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].name, "API_TOKEN");
         assert_eq!(all[1].name, "GH_HOST");

@@ -40,16 +40,15 @@ async fn mutation_response(
     }
 }
 
-/// The `session_layout.events` operation — a fleet-global layout tail. The
-/// browser still performs a normal read after an event; the event is only
-/// invalidation, so reconnects and dropped messages cannot corrupt local
-/// selection/disclosure state.
+/// The `session_layout.events` operation — a fleet-global layout tail. Events
+/// carry no data; they just trigger a normal read, so reconnects or dropped
+/// messages can't corrupt local selection/disclosure state.
 pub(super) async fn session_layout_events(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
     Query(input): Query<events::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    // `actor = User` ensures only signed-in operators can access their own dashboard state.
+    // Scoped to the signed-in operator's own dashboard state.
     super::encodings::authorized::<events::Op>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
@@ -66,12 +65,11 @@ pub(super) async fn session_layout_events(
 
 // ---------------------------------------------------------------------------
 // Operation registry — `session_layout.*`, bound onto
-// `weaver_api::operations::session_layout`. Every revision-guarded mutation
-// funnels through `mutation_response`/`mutation_result`, so the
-// optimistic-concurrency conflict shape — refetch the current layout and
-// hand it back alongside the 409 — is consistent. `session_layout.groups.preference.set`
-// is the one exception: a collapse toggle carries no `expected_revision`,
-// so there is nothing to conflict on.
+// `weaver_api::operations::session_layout`. Revision-guarded mutations funnel
+// through `mutation_response`/`mutation_result`, which refetch the current
+// layout and hand it back alongside the 409 on conflict.
+// `session_layout.groups.preference.set` is the exception: a collapse toggle
+// carries no `expected_revision`, so there is nothing to conflict on.
 // ---------------------------------------------------------------------------
 
 /// The operation-typed twin of [`mutation_response`], unwrapping the `Json`

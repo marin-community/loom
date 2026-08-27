@@ -75,9 +75,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
     ]
 }
 
-/// `agents.list`. Merges the agent metadata registry with custom agents
-/// from the database. The `agent::agent_metadata`, `custom_agents::list`,
-/// and `crate::profile` calls below provide the shared domain logic.
+/// `agents.list` — merges the agent metadata registry with custom agents
+/// from the database.
 async fn list_operation(
     context: OperationContext,
     _input: ops::list::Input,
@@ -131,9 +130,7 @@ async fn custom_create_operation(
     custom_agents_view(&st.db).await
 }
 
-/// `agents.custom.update`. `name` is a caller-supplied operand here rather
-/// than a path segment, but is still immutable the same way: it selects the
-/// row, and is never taken from the stored/updated fields.
+/// `agents.custom.update` — `name` selects the row and is immutable.
 async fn custom_update_operation(
     context: OperationContext,
     input: ops::custom::update::Input,

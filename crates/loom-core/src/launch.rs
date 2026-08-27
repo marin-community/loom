@@ -19,8 +19,8 @@ use crate::profile::Profile;
 
 const RESOLVER_SCHEMA_VERSION: &str = "launch-resolver-v1";
 
-/// Context-derived class for producers such as watches. `None` lets the profile
-/// supply its class, which is the ordinary interactive launch behavior.
+/// Context-derived class for producers such as watches. `None` lets the
+/// profile supply its class, the default for interactive launches.
 #[derive(Debug, Clone, Default)]
 pub struct ResolveOptions {
     pub default_class: Option<String>,
@@ -46,8 +46,8 @@ pub struct ResolvedLaunch {
 }
 
 /// Private extension of the public launch view stored in `sessions.launch_snapshot`.
-/// Flattening preserves the shape written before custom-agent commands were
-/// redacted from [`ResolvedLaunchView`], so existing rows remain readable.
+/// Flattened to match rows written before custom-agent commands were redacted
+/// from [`ResolvedLaunchView`]; keeps those rows readable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedLaunchSnapshot {
     #[serde(flatten)]
@@ -184,10 +184,10 @@ async fn resolver_revision(
     custom_agents: &[crate::custom_agents::CustomAgent],
     policy_defaults: (i64, i64),
 ) -> Result<String> {
-    // This is intentionally a global registry fingerprint. A custom runtime or
-    // MCP definition changing forces every open launch form to re-preview, even
-    // when its selected profile did not change. The hash never exposes custom
-    // MCP source; only the server computes it.
+    // A global registry fingerprint: a custom runtime or MCP definition
+    // changing forces every open launch form to re-preview, even when its
+    // selected profile did not change. The hash never exposes custom MCP
+    // source; only the server computes it.
     let mut mcp_registry = crate::mcp::registry();
     mcp_registry.custom_servers = crate::custom_mcp::list(db).await?;
     let payload = serde_json::to_vec(&(
@@ -227,10 +227,10 @@ pub async fn resolve(
     if overrides.agent.is_some() && agent.is_empty() {
         bail!("launch override agent must not be empty");
     }
-    // Read the custom registry once. For a custom selection, both metadata and
-    // the resolver fingerprint derive from this same row, and the row itself is
-    // retained through launch. An edit after this point therefore either
-    // conflicts with the caller's preview or cannot change the command we run.
+    // Read the custom registry once: metadata and the resolver fingerprint
+    // derive from this same row, and it is retained through launch. An edit
+    // after this point either conflicts with the caller's preview or can't
+    // change the command run.
     let custom_agents = crate::custom_agents::list(db).await?;
     let custom_agent = if crate::agent::builtin_agent_type(&agent).is_some() {
         None

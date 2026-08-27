@@ -1,20 +1,20 @@
 //! Slack integration — Socket Mode.
 //!
 //! The Slack analog of the GitHub `@loom` trigger ([`crate::github_trigger`] +
-//! [`crate::github`]), with the transport inverted: instead of receiving an
-//! inbound, HMAC-verified webhook, loom is an **outbound websocket client**. A
-//! background task ([`run`]) opens a [Socket Mode] connection with the app-level
-//! token, receives `slash_commands` / `app_mention` envelopes, and — for an
-//! authorized trigger — continues the session already wired to that thread or
-//! pulls the conversation and launches one, replying in-thread with a live "On
-//! it" card only for a launch. As the session reports `loom status`,
-//! [`sync_status_message`] edits that Slack message in place, exactly as
-//! [`crate::github::sync_status_comment`] edits the GitHub comment.
+//! [`crate::github`]), but transport-inverted: loom is an **outbound websocket
+//! client** rather than an HMAC-verified inbound webhook. A background task
+//! ([`run`]) opens a [Socket Mode] connection with the app-level token, receives
+//! `slash_commands` / `app_mention` envelopes, and — for an authorized trigger —
+//! continues the session already wired to that thread or pulls the conversation
+//! and launches one, replying in-thread with a live "On it" card only for a
+//! launch. As the session reports `loom status`, [`sync_status_message`] edits
+//! that Slack message in place, exactly as [`crate::github::sync_status_comment`]
+//! edits the GitHub comment.
 //!
-//! The socket is authenticated (the app token) and single-workspace, so there is
-//! no HMAC to verify — but delivery is still *at-least-once* (a missed 3-second
-//! ACK or a reconnect boundary redelivers), so we keep GitHub's
-//! [`crate::github_trigger::record_delivery`] dedupe, keyed on Slack's `event_id`.
+//! The socket is single-workspace, so there is no HMAC to verify — but delivery
+//! is still *at-least-once* (a missed ACK or a reconnect redelivers), so we
+//! reuse GitHub's [`crate::github_trigger::record_delivery`] dedupe, keyed on
+//! Slack's `event_id`.
 //!
 //! [Socket Mode]: https://docs.slack.dev/apis/events-api/using-socket-mode/
 
@@ -134,7 +134,7 @@ fn now() -> String {
 }
 
 /// `env`, else the `key` setting; empty when neither is set. Mirrors
-/// [`crate::github_trigger`]'s private resolver — kept per-module by design.
+/// [`crate::github_trigger`]'s private resolver.
 async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     if let Ok(v) = std::env::var(env) {
         let v = v.trim().to_string();
@@ -215,8 +215,8 @@ pub async fn access(db: &Db) -> Access {
 }
 
 /// Why a trigger was not acted on. Every variant is logged, counted, and shown
-/// in the Connections pane — a silently dropped mention is indistinguishable
-/// from a broken socket, which is the failure this whole path exists to avoid.
+/// in the Connections pane, so a silently dropped mention doesn't look like a
+/// broken socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denial {
     /// From another Slack workspace, including a Slack Connect channel shared
@@ -490,11 +490,10 @@ impl SlackWeb {
 pub struct AuthTest {
     pub user_id: String,
     pub team_id: String,
-    /// Set only for a real bot token. `auth.test` answers for a human's user
-    /// token (`xoxp-…`) too — with that person's user id and no `bot_id` — so a
+    /// Set only for a real bot token. `auth.test` also answers for a human's
+    /// user token (`xoxp-…`), with that person's user id and no `bot_id` — so a
     /// deployment handed the wrong token connects, reports healthy, and then
-    /// discards every mention its operator types as loom's own. This field is
-    /// what tells the two apart.
+    /// discards every mention its operator types as loom's own.
     pub bot_id: Option<String>,
 }
 
@@ -1316,7 +1315,6 @@ async fn launch_inner(
     let branch_name = format!("slack-{}", short_hash(&wiring));
     let branch_ref = format!("weaver/{branch_name}");
 
-    // Pull the conversation to seed the session.
     let history = pull_history(web, trigger).await;
 
     // Reuse or relaunch: does a branch already exist for this thread?
@@ -1355,9 +1353,7 @@ async fn launch_inner(
                             "slack: recording forwarded follow-up failed"
                         );
                     }
-                    // Acknowledge only after the conversation accepted the
-                    // follow-up. The eyes reaction therefore means "delivered
-                    // to the session", not merely "received by loom".
+                    // Ack only after the follow-up is accepted, not merely received.
                     if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
                         web.add_reaction(&trigger.channel_id, event_ts, "eyes")
                             .await
@@ -1870,9 +1866,8 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 ))
                 .await
                 .ok();
-                // Every arriving envelope is logged. Whether loom is receiving
-                // at all is the first question a stalled integration raises, and
-                // it used to be unanswerable from the outside.
+                // Every arriving envelope is logged, so whether loom is
+                // receiving at all is answerable from the outside.
                 let event_type = payload["event"]["type"].as_str().unwrap_or("-");
                 tracing::info!(
                     kind = %kind,
@@ -1894,7 +1889,7 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 let trigger = match kind.as_str() {
                     "slash_commands" => trigger_from_slash(&payload),
                     "events_api" => trigger_from_event(&payload),
-                    _ => None, // `interactive` is unused in V1
+                    _ => None, // `interactive` is unused
                 };
                 match trigger {
                     Some(trigger) => {
@@ -2031,9 +2026,7 @@ mod tests {
         assert!(trigger_from_event(&payload).is_none());
     }
 
-    /// The default boundary: the workspace plus the channel invite. No list to
-    /// maintain, and a deployment that ships tokens works for the people who can
-    /// already see the bot.
+    /// The default boundary: workspace membership plus the channel invite.
     #[test]
     fn workspace_access_admits_any_person_in_the_workspace() {
         let bot = auth("BOT", "T1");
@@ -2044,14 +2037,11 @@ mod tests {
     #[test]
     fn workspace_access_rejects_other_apps() {
         let bot = auth("BOT", "T1");
-        // An alerting bot whose message happens to contain `@loom` must not
-        // launch a privileged session.
         assert_eq!(
             authorize(&Access::Workspace, &bot, &trigger("U2", "T1", true)),
             Err(Denial::Automation)
         );
-        // …unless its identity is named explicitly, which is how an approved
-        // automation opts in.
+        // …unless explicitly listed.
         assert_eq!(
             authorize(
                 &Access::Listed(vec!["U2".into()]),
@@ -2263,8 +2253,7 @@ mod tests {
         assert_eq!(session.id, "s-ops");
     }
 
-    /// The fall-through cases all mean "let the ordinary launch path handle it",
-    /// which is what keeps an unrelated mention from being swallowed.
+    /// The fall-through cases all mean "let the ordinary launch path handle it".
     #[tokio::test]
     async fn an_unrouted_thread_falls_through_to_a_launch() {
         let (db, _branch) = db_with_routed_alert("running").await;

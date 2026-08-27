@@ -353,8 +353,8 @@ async fn interactive_profile_brokers_its_current_github_repository() {
 }
 
 /// A session's own repository is its baseline App scope. The profile allowlist
-/// governs expansion *beyond* the current repository, so an empty one no longer
-/// leaves the session unable to push the branch it was created on.
+/// governs expansion *beyond* the current repository, so an empty one still
+/// lets the session push the branch it was created on.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_session_brokers_its_own_repository_without_an_allowlist() {
@@ -853,9 +853,8 @@ async fn session_records_its_creating_principal() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    // Who the harness authenticates as — the resolved principal for these calls.
-    // Asserting against this (rather than a hardcoded name) proves attribution is
-    // read from the Principal, not pinned to one user.
+    // Assert against the harness's actual resolved principal rather than a
+    // hardcoded name, so this proves attribution is read from the Principal.
     let me = client.post("/api/auth/me", json!({})).await.unwrap();
     let who = me["username"].as_str().unwrap().to_string();
     assert!(!who.is_empty(), "the loopback caller resolves to a user");
@@ -1205,9 +1204,7 @@ async fn automation_class_hidden_from_the_default_listing() {
         "the request's class override sticks"
     );
 
-    // `automation` is what decides whether the class is visible, and it is an
-    // operand rather than a per-route default. This ensures consistent behavior
-    // across all queries for this visibility.
+    // `automation` visibility is an operand, not a per-route default.
     let hidden = client
         .post("/api/sessions/list", json!({ "automation": false }))
         .await

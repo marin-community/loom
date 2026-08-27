@@ -1,5 +1,9 @@
 //! Creator-private draft feedback that, once submitted, becomes a durable
 //! review delivered into the reviewed session's own conversation.
+//!
+//! Draft-mutating operations (`comments.delete`, `comments.update`, `discard`,
+//! `retarget`, `update`) are limited to the review's own creator and rejected
+//! once the review leaves `draft` status.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -59,9 +63,6 @@ pub mod comments {
         use super::prelude::*;
 
         /// Remove a draft review comment.
-        ///
-        /// Limited to the review's own creator, and rejected once the review
-        /// has left `draft` status.
         #[operation(id = "reviews.comments.delete", actor = User, scope = Global, risk = Write,
                     render = custom, cli = "review delete-comment")]
         pub struct Input {
@@ -109,8 +110,6 @@ pub mod comments {
         ///
         /// Replacing the anchor requires `subject_version`, `anchor_kind`, and
         /// `anchor` together — a partial anchor replacement is rejected.
-        ///
-        /// Operator-only. Rejected once the review has left `draft` status.
         #[operation(id = "reviews.comments.update", actor = User, scope = Global, risk = Write)]
         pub struct Input {
             /// The review the comment belongs to.
@@ -174,9 +173,6 @@ pub mod discard {
     use super::prelude::*;
 
     /// Permanently discard a draft review.
-    ///
-    /// Limited to the review's own creator, and rejected once the review has left
-    /// `draft` status.
     #[operation(id = "reviews.discard", actor = User, scope = Global, risk = Destructive,
                 render = custom, cli = "review discard")]
     pub struct Input {
@@ -252,9 +248,6 @@ pub mod retarget {
     /// Retarget a draft review's subject onto its current version — an
     /// artifact's latest revision, or the branch's current change-set — in one
     /// step, without touching anything else.
-    ///
-    /// Limited to the review's own creator, and rejected once the review has left
-    /// `draft` status.
     #[operation(id = "reviews.retarget", actor = User, scope = Global, risk = Write,
                 render = custom, cli = "review retarget")]
     pub struct Input {
@@ -316,9 +309,6 @@ pub mod update {
 
     /// Edit a draft review's summary, or retarget it onto a caller-supplied
     /// subject version.
-    ///
-    /// Limited to the review's own creator, and rejected once the review has left
-    /// `draft` status.
     #[operation(id = "reviews.update", actor = User, scope = Global, risk = Write)]
     pub struct Input {
         /// The draft review to update.

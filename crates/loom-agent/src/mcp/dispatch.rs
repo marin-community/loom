@@ -14,12 +14,12 @@
 //! The server, however, deserializes the *whole* `Input` with no leniency of
 //! its own (see `loom::web::operations::register`), so a partial JSON object
 //! has to be completed before it is sent. This dispatcher completes it the same
-//! way the CLI does — a field the caller did not supply gets its `Default`
-//! value, exactly what `Operands::from_matches` fills an absent flag with —
-//! and then [`Operands::fill_context`] overwrites the context fields from the
-//! session, same as the CLI. A field the schema marks `required` still has to
-//! come from the caller; missing required fields are checked before the merge
-//! and fail with a clear error.
+//! way the CLI does: a field the caller did not supply gets its `Default`
+//! value — exactly what `Operands::from_matches` fills an absent flag with —
+//! then [`Operands::fill_context`] overwrites the context fields from the
+//! session. A field the schema marks `required` still has to come from the
+//! caller; missing required fields are checked before the merge and fail with
+//! a clear error.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -85,10 +85,9 @@ where
         tool,
         operation: O::SPEC,
         call: |client, context, arguments| {
-            // Cloned before the `async move` block so the returned future owns
-            // its data rather than borrowing `client`/`context` — mirroring how
-            // the CLI's `bind` uses `matches` synchronously before its own
-            // `async move` (see `crate::cli::dispatch::bind`).
+            // Cloned so the returned future owns its data rather than borrowing
+            // `client`/`context` — mirrors `crate::cli::dispatch::bind`, which
+            // clones `matches` the same way before its own `async move`.
             let client = client.clone();
             let context = context.clone();
             Box::pin(async move {
@@ -137,10 +136,8 @@ fn missing_required(schema: &Value, arguments: &Value) -> Vec<String> {
 /// Resolve `tool` against this adapter's exports, fetch context if the
 /// operation needs any, and run it.
 ///
-/// Resolves the tool before connecting: a call naming a tool that does not
-/// exist should say so, whatever else is wrong with the environment. Building
-/// the client first hides that — `loom_context::not_a_tool` once reported a
-/// missing `LOOM_TOKEN` instead of an unknown tool.
+/// Resolves the tool before connecting: an unknown tool must be reported as
+/// such, not masked by an unrelated client failure like a missing `LOOM_TOKEN`.
 pub(crate) async fn call_adapter_tool(
     adapter: &str,
     server: &str,
@@ -210,7 +207,6 @@ pub(crate) fn tools(exports: &[Export]) -> Value {
     )
 }
 
-/// Look one of an adapter's tools up by its advertised name.
 pub(crate) fn lookup<'a>(exports: &'a [Export], tool: &str) -> Option<&'a Export> {
     exports.iter().find(|export| export.tool == tool)
 }

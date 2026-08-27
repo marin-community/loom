@@ -25,9 +25,7 @@ use super::{ApiResult, AppError, AppState};
 /// Every `issues.*` operation, bound to the code that serves it.
 ///
 /// One line per operation, in the order the ids sort. `assert_registry_is_complete`
-/// fails startup if a declared operation is missing from this list, so the
-/// bundle cannot drift back into the state where `issues.actions` was declared
-/// and served while three other operations were declared and were not.
+/// fails startup if a declared operation is missing from this list.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<issue_operations::actions::Op, _, _>(issue_actions_operation),
@@ -61,7 +59,7 @@ pub(super) async fn issue_views(db: &Db, issues: Vec<Issue>) -> ApiResult<Vec<Is
 }
 
 /// Every issue across every repo, minus the ones an automation-class session
-/// has claimed unless `automation` asks for them. Shared by `issues.board`.
+/// has claimed unless `automation` asks for them.
 async fn collect_issue_board(
     st: &AppState,
     all: bool,
@@ -71,8 +69,8 @@ async fn collect_issue_board(
     if !automation {
         // Branches whose current claim-holder is an automation-class session,
         // as (repo_root, branch) pairs — issues key their claim by branch name,
-        // not branch id. Archived sessions never own work, including historical
-        // rows whose claims predate archive cleanup.
+        // not branch id. Archived sessions never own work, including rows whose
+        // claims predate archive cleanup.
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT b.repo_root, b.branch FROM sessions s
              JOIN branches b ON b.id = s.branch_id
@@ -199,10 +197,10 @@ pub(super) async fn get_issue_operation(
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
     // The declared scope is `Repository(repo_root)`, but this operation is
-    // addressed by *issue id* — so the repository that matters is the issue's,
-    // not the one the caller named. Checking only the latter would let a session
-    // read another repository's work item by asking for it with its own
-    // `repo_root`. `issues.actions` already checks the same way.
+    // addressed by *issue id* — the repository that matters is the issue's,
+    // not the one the caller named, else a session could read another
+    // repository's item by naming its own `repo_root`. `issues.actions` and
+    // `issues.update` check the same way.
     require_repo_access(&st, &context.principal, &issue.repo_root).await?;
     let mut view = issue_view(&st.db, issue).await?;
     // Best-effort live snapshot of the linked GitHub thread, so `loom issues
@@ -303,10 +301,8 @@ pub(super) async fn update_issue_operation(
     let issue = weaver_core::issue::get(&st.db, input.id)
         .await?
         .ok_or_else(|| AppError::not_found("issue"))?;
-    // The declared scope is `Repository(repo_root)`, but this operation is
-    // addressed by *issue id* — so the repository that matters is the issue's,
-    // not the one the caller named and `authorize()` already checked.
-    // `issues.get` and `issues.actions` check the same way.
+    // Same repo check as `issues.get`: access is against the issue's own
+    // repo_root, not the caller's.
     require_repo_access(&st, &context.principal, &issue.repo_root).await?;
     apply_issue_edits(
         &st,
@@ -827,8 +823,7 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.claimed_branch, None);
 
-        // Claims are made by launching against an issue, not by editing it.
-        // The `unclaim: bool` field reflects this: it only clears, never assigns.
+        // Only clears — `claimed_branch` never appears as a settable field.
         let schema = (weaver_api::operation("issues.update")
             .expect("declared")
             .schema)();

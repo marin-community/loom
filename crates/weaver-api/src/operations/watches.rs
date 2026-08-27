@@ -154,7 +154,7 @@ pub mod runs {
     #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Print each round's summary and the actions it took, not one row per
-        /// round. This is what `loom watch logs` used to mean.
+        /// round.
         pub verbose: bool,
     }
 }

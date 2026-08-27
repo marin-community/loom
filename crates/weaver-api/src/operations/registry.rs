@@ -1,14 +1,12 @@
 //! The transport-neutral operation contract.
 //!
 //! One operation is one declaration. This module holds the vocabulary that
-//! declaration is written in and the traits the derives target; the projections
-//! onto REST, CLI, and MCP read every fact they need from here.
+//! declaration is written in and the traits the derives target; REST, CLI, and
+//! MCP projections read every fact they need from here.
 //!
-//! The invariant that makes the registry worth having: every operation
-//! description has a corresponding implementation. `OperationSpec` derives its
-//! route, argument list, and command string from the operation's own `Input` type
-//! through function pointers, eliminating any hand-maintained alignment between
-//! the declaration and the implementation.
+//! `OperationSpec` derives its route, argument list, and command string from
+//! the operation's own `Input` type through function pointers, so there is no
+//! hand-maintained copy to drift from the declaration.
 
 use schemars::JsonSchema;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -16,30 +14,23 @@ use serde_json::Value;
 
 /// Who may call an operation.
 ///
-/// This is the axis that replaces excluding administrative or human-only
-/// endpoints from the registry: an operator-only action is `Admin`, not absent.
+/// An operator-only action is declared `Admin`, never left out of the registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorPolicy {
     SessionSelf,
     /// The session credential itself, and nothing else — not even a human.
     ///
-    /// `SessionSelf` lets a human operator stand in for a session, which is
-    /// right for almost everything: an operator reading a session's issues is
-    /// ordinary. It is wrong for operations that hand back *credential
-    /// material*, where standing in means one user obtaining another user's
-    /// session token. `permissions.github.token` is that case: `SessionOnly`
-    /// refuses Admin and User outright, admitting only the session itself.
+    /// Unlike `SessionSelf`, an operator cannot stand in: that would let one
+    /// user obtain another's session token. `permissions.github.token` is why
+    /// this exists.
     SessionOnly,
     User,
     Admin,
     Internal,
     /// Reachable with no credential at all.
     ///
-    /// This is how you log in: `auth.login` must run before a principal exists.
-    /// Declaring it makes the unauthenticated surface enumerable and testable.
-    /// `anonymous_operations_are_pinned` asserts the exact set, so widening it
-    /// requires a deliberate test edit.
+    /// `auth.login` needs this: it must run before a principal exists.
     Anonymous,
 }
 
@@ -57,9 +48,8 @@ impl ActorPolicy {
 
     /// Whether an agent may reach this operation at all.
     ///
-    /// Used by the invariant that forbids an MCP projection on a human-only
-    /// operation, which is how "agents cannot approve their own permission
-    /// requests" stops being an absence and becomes a checked property.
+    /// Gates MCP projection, so a human-only operation — e.g. approving one's
+    /// own permission request — has none.
     pub const fn agent_reachable(self) -> bool {
         matches!(self, Self::SessionSelf | Self::SessionOnly)
     }
@@ -93,10 +83,9 @@ pub enum OperationScope {
     Branch,
     /// One channel, named by the operation's `channel` operand.
     ///
-    /// Distinct from `Branch` because a channel is reachable from more than one
-    /// branch: a session subscribes to channels across its tree. `Branch` would
-    /// compare the caller's own branch, which every session-credentialed request
-    /// satisfies, and let any channel id through.
+    /// Distinct from `Branch`: a channel is reachable from more than one branch
+    /// (a session subscribes across its tree), so comparing the caller's own
+    /// branch would let any channel id through.
     Channel,
     Repository,
     /// Not scoped to one resource — fleet-wide reads and administration.
@@ -117,9 +106,9 @@ impl OperationScope {
 
 /// How an operation's response is encoded.
 ///
-/// This is the *only* axis on which a registered operation may be special.
-/// Streaming and upload endpoints keep their descriptor, typed input, and
-/// authorization instead of becoming unchecked special cases.
+/// The only axis on which a registered operation may be special: streaming
+/// and upload endpoints still keep their descriptor, typed input, and
+/// authorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Io {
@@ -131,22 +120,19 @@ pub enum Io {
     Duplex,
     /// Raw request body: multipart or octet-stream.
     ///
-    /// `Io` describes the wire encoding, not the CLI interface. A JSON string
-    /// stays `Json` even if the CLI allows naming a file for it (`from_file`).
+    /// Describes the wire encoding, not the CLI interface — a JSON string
+    /// stays `Json` even when the CLI takes a file for it (`from_file`).
     /// Non-JSON operations cannot expose MCP tools.
     Upload,
     /// Raw response body: bytes plus a guessed content type.
     ///
-    /// For browser fetches through `<img src>` or download links.
-    /// Operands arrive in the query string. Like all encodings, this describes
-    /// the wire; an operation answering with base64 inside JSON stays `Json`.
+    /// For browser fetches through `<img src>` or download links. Operands
+    /// arrive in the query string.
     Download,
     /// JSON body plus a browser session-cookie effect.
     ///
-    /// Login and logout operations respond with `Set-Cookie` for HttpOnly
-    /// sessions. A custom handler carries the response with this header;
-    /// the generic dispatcher cannot emit it. Naming this makes the exception
-    /// explicit and testable.
+    /// Login and logout respond with `Set-Cookie` for HttpOnly sessions; a
+    /// custom handler carries it since the generic dispatcher cannot emit it.
     Session,
 }
 
@@ -239,8 +225,7 @@ pub struct ContextValues {
 /// How a field's Rust type projects onto a command line.
 ///
 /// Syntactic, decided by the macro from the type as written. Anything it does
-/// not recognize is `Json` — one JSON literal on the command line, which is
-/// deliberately explicit about the operands a flag cannot express.
+/// not recognize is `Json` — one JSON literal for operands a flag can't express.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperandKind {
     Bool,
@@ -276,10 +261,8 @@ pub struct CliSpelling {
 
 /// One caller-supplied field of an operation's input.
 ///
-/// This is data, not code. It used to be a pair of generated `clap` functions,
-/// which meant every crate that could *describe* an operation also linked a
-/// command-line parser. The command line is built from this list by
-/// `loom::cli::clap_bind`; nothing in this crate knows what a parser is.
+/// This is data, not code: the command line is built from this list by
+/// `loom::cli::clap_bind`, so nothing in this crate knows what a parser is.
 // No `PartialEq`: `default` is a function pointer, and comparing those is
 // meaningless — two codegen units can give the same function two addresses.
 #[derive(Debug, Clone, Copy)]
@@ -370,10 +353,8 @@ pub struct OperationSpec {
     pub schema: fn() -> Value,
     /// JSON Schema for what this operation returns.
     ///
-    /// Derived from `Output`, the same way `schema` is derived from `Input`.
-    /// Without it a caller could be told exactly what to send and nothing at
-    /// all about what comes back, which is why `frontend/src/types.ts` was
-    /// hand-written.
+    /// Derived from `Output`, the same way `schema` is derived from `Input`,
+    /// so callers learn what comes back and not just what to send.
     pub output_schema: fn() -> Value,
     pub context: &'static [ContextField],
 }
@@ -381,8 +362,8 @@ pub struct OperationSpec {
 impl OperationSpec {
     /// The canonical REST route, derived from the identity.
     ///
-    /// `issues.tags.set` is always `POST /api/issues/tags/set`. Computed from
-    /// identity, not declared, so all surfaces report the same endpoint.
+    /// `issues.tags.set` is always `POST /api/issues/tags/set` — computed, not
+    /// declared, so all surfaces report the same endpoint.
     pub fn path(&self) -> String {
         format!("/api/{}", self.id.replace('.', "/"))
     }
@@ -406,8 +387,8 @@ pub trait Operation: Send + Sync + 'static {
 
 /// How an operation's input names the resource it acts on.
 ///
-/// This replaces synthesizing a URL and re-running a path matcher: scope is read
-/// off typed input, so REST, CLI, and MCP reach the identical decision.
+/// Scope is read off typed input rather than a URL, so REST, CLI, and MCP
+/// reach the identical decision.
 pub trait Scoped {
     fn scope_ref(&self) -> ScopeRef<'_>;
 }
@@ -425,10 +406,9 @@ pub enum ScopeRef<'a> {
 pub trait Render: Operation {
     /// How the CLI prints this operation's result.
     ///
-    /// The default is the operation's own JSON, which is honest and complete for
-    /// the long tail of administrative commands. Bundles a human reads all day —
-    /// `issues list`, `sessions list` — override it. The default ensures that
-    /// adding an operation works immediately without a custom renderer.
+    /// Defaults to the operation's own JSON, adequate for the long tail of
+    /// administrative commands; bundles a human reads all day (`issues list`,
+    /// `sessions list`) override it.
     fn text(output: &Self::Output, _view: &Self::View) -> String {
         serde_json::to_string_pretty(output)
             .unwrap_or_else(|error| format!("could not render result: {error}"))
@@ -437,9 +417,9 @@ pub trait Render: Operation {
 
 /// Remove dispatcher-supplied fields from a derived schema.
 ///
-/// The fields stay on the wire — the server still receives `repo_root` — they
-/// simply are not something a caller may supply, so they must not appear in the
-/// MCP tool schema or in generated help.
+/// The fields stay on the wire — the server still receives `repo_root` — but
+/// they are not something a caller may supply, so they must not appear in the
+/// MCP tool schema or generated help.
 pub fn strip_context_fields(schema: &mut Value, context: &[&str]) {
     if context.is_empty() {
         return;
@@ -487,7 +467,6 @@ mod tests {
 
     #[test]
     fn routes_are_derived_from_identity_not_declared() {
-        // Routes are derived from `id`, so all surfaces report the same endpoint.
         fn schema() -> Value {
             Value::Null
         }

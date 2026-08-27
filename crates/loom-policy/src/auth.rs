@@ -94,9 +94,9 @@ pub enum Grant {
     User,
     /// No credential was presented.
     ///
-    /// Only operations declaring `actor = Anonymous` accept this. This allows
-    /// "runs before a principal exists" to be reasoned about in the same
-    /// authorization function instead of mounted outside it.
+    /// Only operations declaring `actor = Anonymous` accept this, so a request
+    /// with no principal yet is still authorized through the ordinary
+    /// `authorize()` path.
     Anonymous,
     Automation {
         subject: String,
@@ -126,10 +126,8 @@ pub struct Principal {
 impl Principal {
     /// The caller that presented nothing.
     ///
-    /// Constructed by the auth middleware only for a request whose target
-    /// operation declares `actor = Anonymous`, so that logging in reaches the
-    /// same `authorize()` as everything else instead of living on a router that
-    /// skips it.
+    /// Constructed by the auth middleware only for requests whose target
+    /// operation declares `actor = Anonymous`. See [`Grant::Anonymous`].
     pub fn anonymous() -> Self {
         Self {
             username: String::new(),
@@ -210,7 +208,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 /// Constant-time verify a password against a stored argon2 hash. A malformed
-/// stored hash simply fails (never panics).
+/// stored hash fails (never panics).
 fn verify_password(password: &str, stored: &str) -> bool {
     match PasswordHash::new(stored) {
         Ok(parsed) => Argon2::default()
@@ -1055,9 +1053,9 @@ async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     crate::config::get(db, key).await.unwrap_or_default()
 }
 
-/// The configured OAuth client id (env-or-settings), or empty when unset.
-/// The public half of the sign-in credential shown in the settings UI.
-/// Resolved the same way as [`github_oauth`] so the two stay in sync.
+/// The configured OAuth client id (env-or-settings), or empty when unset —
+/// the public half shown in the settings UI. Resolved the same way as
+/// [`github_oauth`] so the two stay in sync.
 pub async fn oauth_client_id(db: &Db) -> String {
     env_or_setting(db, "LOOM_GITHUB_CLIENT_ID", GH_CLIENT_ID_KEY).await
 }
@@ -1175,8 +1173,8 @@ pub async fn exchange_code(cfg: &GithubOAuth, code: &str, redirect_uri: &str) ->
 }
 
 /// The authenticated user's GitHub profile, as much as sign-in needs: `login`
-/// for the allowlist check, and `id`/`name` for commit attribution (design
-/// §6.3, Level A). `name` is the free-text profile name and may be absent.
+/// for the allowlist check, and `id`/`name` for commit attribution. `name` is
+/// the free-text profile name and may be absent.
 pub struct GithubUser {
     pub login: String,
     pub id: i64,

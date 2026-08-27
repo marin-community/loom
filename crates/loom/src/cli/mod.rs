@@ -210,7 +210,7 @@ mod tests {
     ///
     /// A binding whose operation declares `cli = -` is never placed in the tree
     /// — `generic_bindings` filters it out — so it costs a line here and buys
-    /// nothing. `sessions.context` and `sessions.raw` sat in the list that way.
+    /// nothing.
     #[test]
     fn every_binding_names_an_operation_with_a_command() {
         let stranded: Vec<_> = super::bindings()

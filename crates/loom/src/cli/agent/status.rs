@@ -51,21 +51,17 @@ pub async fn run_summary() -> Result<()> {
 /// How many backlog items `loom summary` lists before collapsing the rest.
 const SUMMARY_TASK_CAP: usize = 10;
 
-/// Render the `loom summary` catch-up as a string. Kept
-/// separate from the printing so the post-compaction hook can replay the same
-/// text into the agent's context as `additionalContext` (see [`cmd_hook`]).
+/// Render the `loom summary` catch-up as a string, kept separate from printing
+/// so the post-compaction hook can replay the same text as `additionalContext`
+/// (see [`cmd_hook`]).
 ///
-/// Not a `Render` on `sessions.summary.get`, though it is the obvious
-/// candidate. `SessionCatchupView` carries the goal, the level and message, the
-/// channel row, the artifacts and the issues — but not the `github` tag this
-/// prints, not the last three channel messages, and not the open threads across
-/// every artifact. Those are three more reads, one of them per artifact, and
-/// each delegated sub-tree costs a fourth to fetch the working branch's live
-/// status. It also *writes*: reading the catch-up advances this agent's own
-/// read marker on its channel. A renderer is a pure function of one `Output`
-/// and can do none of that. Widening the view to carry it all would make
-/// `sessions.summary.get` fan out server-side for every caller, including the
-/// dashboard, which needs none of it.
+/// Not a `Render` on `sessions.summary.get`, despite being the obvious
+/// candidate: this also does several more reads (channel messages, per-artifact
+/// threads, a delegated branch's live status) and one write (advancing the
+/// channel's read marker) that a pure `Render` of one `Output` cannot do.
+/// Widening the view to carry all of that would make `sessions.summary.get`
+/// fan out server-side for every caller, including the dashboard, which needs
+/// none of it.
 pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();

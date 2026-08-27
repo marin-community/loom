@@ -16,8 +16,7 @@ fn trigger_summary(trigger: &Value) -> String {
         return format!("every {every}");
     }
     // `on` is the shape every reactive watch is stored in — a list of event
-    // names, each optionally `name=level`. Reading only the legacy singular
-    // `event` key meant the TRIGGER column showed a dash for all of them.
+    // names, each optionally `name=level`.
     if let Some(events) = trigger.get("on").and_then(Value::as_array) {
         let names: Vec<&str> = events.iter().filter_map(Value::as_str).collect();
         if !names.is_empty() {
@@ -160,8 +159,8 @@ impl Render for watches::programs::Op {
 }
 
 impl Render for watches::runs::Op {
-    /// The round history. `--verbose` is the old `loom watch logs`: each round
-    /// on its own lines with the actions it took, rather than one row each.
+    /// The round history. `--verbose` prints each round on its own lines with
+    /// the actions it took, rather than one row each.
     fn text(output: &Vec<WatchRunView>, view: &watches::runs::View) -> String {
         if output.is_empty() {
             return "no rounds yet — fire one with `loom watch run <name>`".to_string();
