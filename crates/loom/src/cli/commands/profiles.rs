@@ -1,14 +1,12 @@
-//! `loom profile` — the launch-profile commands a declaration cannot serve.
+//! `loom profile` — launch profiles and the environment they carry.
 //!
-//! `loom profiles list` renders the table now (`weaver_api::render::profiles`),
-//! so the hand-written `ls` that printed a second version of it is gone. What
-//! is left each does something one declaration cannot: `add` reads an
-//! instructions file off disk; `show` picks between two operations
-//! (`profiles.get` and `profiles.effective`) from a flag; `resolve` exits
-//! non-zero when the snapshot is invalid; `clone` resolves first so it can send
-//! the revisions it reviewed; and `env set`/`secret` are two spellings of
-//! `profiles.env.set` that differ in whether the value is a literal or a Secret
-//! Manager reference.
+//! `add` reads an instructions file off disk. `show` picks between
+//! `profiles.get` and `profiles.effective` on a flag. `resolve` exits non-zero
+//! when the snapshot is invalid. `clone` resolves first, so it can send the
+//! revisions it reviewed. `env set` and `env secret` are two spellings of
+//! `profiles.env.set` differing in whether the value is a literal or a Secret
+//! Manager reference. The profile table is `loom profiles list`, rendered by
+//! `weaver_api::render::profiles`.
 
 use crate::client;
 use anyhow::{bail, Context, Result};

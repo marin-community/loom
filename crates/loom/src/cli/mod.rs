@@ -146,6 +146,7 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<sessions::get::Op>(),
         bind::<sessions::github::access::list::Op>(),
         bind::<sessions::handoff::Op>(),
+        bind::<sessions::history::list::Op>(),
         bind::<sessions::ide_info::Op>(),
         bind::<sessions::interrupt::Op>(),
         bind::<sessions::launch::Op>(),

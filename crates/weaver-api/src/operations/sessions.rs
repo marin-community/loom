@@ -500,7 +500,8 @@ pub mod history {
         /// Page this session's normalized records, newest tail first; follow
         /// `older_cursor` backward for the page before.
         #[operation(id = "sessions.history.list", actor = SessionSelf, scope = Session, risk = Read,
-                    grants = ["loom/sessions/read@v1"])]
+                    grants = ["loom/sessions/read@v1"], cli = "sessions history",
+                    render = custom)]
         pub struct Input {
             /// Page backward from this cursor (exclusive). Omit for the newest tail.
             #[schemars(length(min = 1))]

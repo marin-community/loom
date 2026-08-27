@@ -1,4 +1,4 @@
-//! `loom channels` — the commands no channel declaration can express.
+//! `loom channels` — session channels and the custom ones opened beside them.
 
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -8,15 +8,10 @@ use weaver_api::operations::{branches, channels};
 
 use super::{branch_key, channel_key, client, render};
 
-// The channel commands whose arguments no declaration can express. Everything
-// else under `loom channels` is served by its `#[operation]` declaration and
-// printed by `weaver_api::render::channels`; what is left here takes an
-// argument shape an operand cannot. `open` and `send` join the trailing words
-// of the command line into one value, so `loom channels send ready for review`
-// still works unquoted, and `wait` polls from the client so it can acknowledge
-// what it scans and print every matching message rather than only the first.
-//
-// A doc comment here would replace the group's `about` in `--help`.
+// - `open` and `send` join their trailing words into one value, so
+//   `loom channels send ready for review` works unquoted.
+// - `wait` polls from the client, so it can acknowledge what it scans and print
+//   every matching message rather than only the first.
 #[derive(Subcommand)]
 pub enum ChannelCmd {
     /// Open a custom channel alongside the current session channel.

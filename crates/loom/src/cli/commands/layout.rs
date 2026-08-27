@@ -1,9 +1,10 @@
-//! The two `loom sessions layout` commands the registry cannot declare.
+//! `loom sessions layout` — the dashboard's grouping and ordering.
 //!
-//! The other twelve are built from `weaver_api::operations::session_layout` and
-//! merge in beside these. `collapse` and `expand` are one operation
-//! (`session_layout.groups.preference.set`) reached by two spellings that differ
-//! only in the `collapsed` they send, and a declaration is one invocation.
+//! `collapse` and `expand` are two spellings of
+//! `session_layout.groups.preference.set`, differing only in the `collapsed`
+//! they send, and a declaration is one invocation. The other twelve commands are
+//! declared in `weaver_api::operations::session_layout` and merge in beside
+//! these.
 
 use crate::client;
 use anyhow::Result;

@@ -1,17 +1,20 @@
-//! HTTP-only implementations for Loom's agent-facing commands.
+//! The commands an agent runs from inside its own session.
 //!
-//! An HTTP-only client of loom: every command drives the loom REST API
-//! through `weaver-api::Client`, never a local database. The target server is
-//! resolved from `$WEAVER_API` (or the address a local loom recorded while
-//! serving), authenticated with `$LOOM_TOKEN` when set — the same resolution
-//! `loom`'s own CLI uses (see `weaver_api::endpoint`). "Current branch"
-//! resolves from `$WEAVER_BRANCH`, set by loom for every session it launches;
-//! without it, or without a reachable loom, a command fails with a plain-text
-//! error rather than falling back to any local state.
+//! Everything here reaches loom over HTTP through `weaver_api::Client`; none of
+//! it opens the database. The server comes from `$WEAVER_API` (or the address a
+//! local loom recorded while serving) and the credential from `$LOOM_TOKEN`, the
+//! same resolution the rest of the CLI uses — see `weaver_api::endpoint`.
+//! "Current branch" comes from `$WEAVER_BRANCH`, which loom sets for every
+//! session it launches. Without it, or without a reachable loom, a command fails
+//! with a plain-text error instead of falling back to local state.
 //!
-//! One module per command group; this file holds only what more than one of
-//! them needs — the client, the branch and channel keys the group commands
-//! resolve against, and the small shared formatting helpers.
+//! One module per command group. This file holds what more than one of them
+//! needs: the client, the branch and channel keys they resolve against, and the
+//! shared formatting helpers.
+//!
+//! Each group's `#[derive(Subcommand)]` enum carries its notes as `//` comments
+//! rather than `///`: a doc comment there becomes the group's `about` in
+//! `--help`, which is not where an implementation note belongs.
 
 pub mod artifacts;
 pub mod channels;

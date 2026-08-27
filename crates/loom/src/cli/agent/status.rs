@@ -11,16 +11,10 @@ use weaver_core::tags;
 
 use super::{branch_key, channel_key, client, render, truncate, working_branch_status};
 
-// `sessions.status.get` and `.set` declare these two invocations and now print
-// them — `weaver_api::render::sessions` holds the only copy of the text. What
-// keeps the clap enum is the *group*: `status` is these two verbs and nothing
-// else, so letting the declarations place them would leave `loom status` a
-// registry-assembled group with no description in `loom --help` and clap's
-// "the subcommand 'status' wasn't recognized" where it now says "a subcommand
-// is required". Removing it also means editing `bin/loom.rs`, which is being
-// split elsewhere.
-//
-// A doc comment here would replace the group's `about` in `--help`.
+// `sessions.status.get` and `.set` declare both invocations and print them.
+// The enum survives for the *group*: a registry-assembled `loom status` has no
+// description in `loom --help`, and answers a bare `loom status` with "the
+// subcommand wasn't recognized" instead of "a subcommand is required".
 #[derive(Subcommand)]
 pub enum StatusCmd {
     /// Print the current attention level and message.

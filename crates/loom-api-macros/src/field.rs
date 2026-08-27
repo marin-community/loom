@@ -112,7 +112,26 @@ impl Operand {
         if let Some(explicit) = self.required_override {
             return explicit;
         }
-        !self.kind.is_optional() && self.default.is_none() && !self.kind.is_multi()
+        !self.kind.is_optional() && self.default.is_none() && !self.is_list()
+    }
+
+    /// Any `Vec<_>`, whatever it holds.
+    ///
+    /// `Kind::is_multi` only knows the two element types the command line can
+    /// repeat, so `Vec<HistoryKind>` classified as `Json` and came out
+    /// *required* — `loom sessions history` demanded a `--kinds` argument for a
+    /// filter whose empty value means "no filter".
+    fn is_list(&self) -> bool {
+        if self.kind.is_multi() {
+            return true;
+        }
+        let Type::Path(path) = &self.ty else {
+            return false;
+        };
+        path.path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Vec")
     }
 
     pub fn long_flag(&self) -> String {

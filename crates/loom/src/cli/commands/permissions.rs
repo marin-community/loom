@@ -1,11 +1,10 @@
-//! `loom permissions` — the access commands a declaration cannot serve.
+//! `loom permissions` — what a session may reach, and the requests to widen it.
 //!
-//! `explain` is declared now; it was `invoke` and pretty-print. The rest each
-//! keep a flag the declaration has no room for. `show`, `requests` and
-//! `request` take `--session`, and the declared `session` is a context operand
-//! with no command-line spelling, so converting them would delete the only way
-//! an operator inspects a session other than the one they are standing in.
-//! `grant`/`revoke` default that same target from the environment, where the
+//! Each command here keeps a flag its operation has no room for. `show`,
+//! `requests` and `request` take `--session`; the declared `session` is a
+//! context operand with no command-line spelling, so this is the only way an
+//! operator inspects a session other than the one they are standing in.
+//! `grant`/`revoke` default that target from the environment, where the
 //! declaration requires it. `approve`/`deny` join their trailing argv words
 //! into one `reason`, and a declared operand is a single value.
 

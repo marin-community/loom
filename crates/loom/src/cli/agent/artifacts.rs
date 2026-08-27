@@ -7,22 +7,13 @@ use weaver_api::operations::artifacts;
 
 use super::{branch_key, client};
 
-// The three artifact commands no declaration can serve. `list`, `get`,
-// `history`, `threads` and `resolve` are their `#[operation]`s now, printed by
-// `weaver_api::render::artifacts`; what is left does something a declaration
-// plus a pure renderer cannot:
-//
 // - `write` reads a local file (or stdin), sniffs an image and encodes it as a
-//   data URI, and then asks the server for the artifact's externally-visible
-//   dashboard link — a second round trip, after the write.
-// - `delete` resolves the artifact first so it can name the scope and revision
-//   it removed and say "no artifact 'x'" when there is none;
-//   `ArtifactDeleteResult` carries only `{deleted, name}`.
-// - `comment` joins its trailing words into one body, and opening a thread
-//   needs the artifact's current revision to anchor against — fetched first,
-//   then sent.
-//
-// A doc comment here would replace the group's `about` in `--help`.
+//   data URI, then asks the server for the artifact's dashboard link.
+// - `delete` resolves the artifact first, so it can name the scope and revision
+//   it removed and say "no artifact 'x'"; `ArtifactDeleteResult` carries only
+//   `{deleted, name}`.
+// - `comment` joins its trailing words into one body, and anchoring a new thread
+//   needs the artifact's current revision, fetched first.
 #[derive(Subcommand)]
 pub enum ArtifactCmd {
     /// Write an artifact: append a new revision (creating it if absent). Reads

@@ -1,14 +1,13 @@
-//! `loom watch` — the watch commands a declaration cannot serve.
+//! `loom watch` — scheduled and reactive programs, and their runs.
 //!
-//! `ls`, `runs` and `get` are declared operations now, printed by
-//! `weaver_api::render::watches`. What is left: `new` scaffolds a local file
-//! and never touches the server; `add` builds the `trigger` and `scope` JSON
-//! out of flag sugar (`--cron`, `--every`, `--on-event`, `--repo`); `run`
-//! names the watch and says whether the round was a dry run, neither of which
-//! `WatchRunResult` carries; `enable`/`disable` are two spellings of
-//! `watches.update` that differ only in the `enabled` they send; and
-//! `programs` takes `--source <name>`, a lookup that can miss, which a
-//! renderer has no way to report as a failure.
+//! `new` scaffolds a local file and never touches the server. `add` builds the
+//! `trigger` and `scope` JSON out of flag sugar (`--cron`, `--every`,
+//! `--on-event`, `--repo`). `run` names the watch and says whether the round was
+//! a dry run, neither of which `WatchRunResult` carries. `enable` and `disable`
+//! are two spellings of `watches.update` differing only in the `enabled` they
+//! send. `programs` takes `--source <name>`, a lookup that can miss, and a
+//! renderer has no way to report a failure. `ls`, `runs` and `get` are declared,
+//! rendered by `weaver_api::render::watches`.
 
 use crate::client;
 use anyhow::{bail, Context, Result};

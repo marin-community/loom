@@ -1,14 +1,13 @@
-//! The `loom review` subcommands the registry cannot declare.
+//! `loom review` — comment threads anchored in an artifact.
 //!
-//! `show`, `discard`, `retarget`, `delete-comment` and `retry` are declared on
-//! their operations in `weaver_api::operations::reviews` and merge in beside
-//! these. What is left does something one declaration cannot: `ls` pins
-//! `subject_kind` to `artifact` and names a session that `reviews.list` takes
-//! from context; `add` and `overall` each run two operations in sequence;
+//! `ls` pins `subject_kind` to `artifact` and names a session `reviews.list`
+//! takes from context. `add` and `overall` each run two operations in sequence.
 //! `add`, `edit` and `reanchor` build a `ReviewAnchorDto`, or a joined
-//! multi-word body, out of flags; `submit` updates the summary first when one
-//! is given; and `resolve`/`reopen` are two spellings of one operation that
-//! differ only in the `resolved` they send.
+//! multi-word body, out of flags. `submit` updates the summary first when one is
+//! given. `resolve` and `reopen` are two spellings of one operation differing
+//! only in the `resolved` they send. The rest — `show`, `discard`, `retarget`,
+//! `delete-comment`, `retry` — are declared in
+//! `weaver_api::operations::reviews` and merge in beside these.
 
 use crate::client;
 use anyhow::{anyhow, bail, Result};

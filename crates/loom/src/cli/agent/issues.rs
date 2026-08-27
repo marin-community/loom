@@ -11,20 +11,13 @@ use weaver_core::tags;
 
 use super::{branch_key, client, working_branch_status};
 
-// `close`, `reopen` and `delete` are served by `issues.close`/`.reopen`/
-// `.delete` and printed by `weaver_api::render::issues`. The rest stay because
-// a declaration plus a pure renderer cannot express them:
-//
 // - `add` joins its trailing words into a title and picks between two
 //   operations — `issues.create` or `issues.backlog.create` — on `--repo`.
-// - `ls`, `get` and `wait` each poll the branch working an issue for its live
-//   status, which is a round trip per delegated sub-tree. That is what makes
-//   them a poll rather than a record lookup, and a renderer has no client.
+// - `ls`, `get` and `wait` poll the branch working each issue for its live
+//   status: a round trip per delegated sub-tree, and a renderer has no client.
 // - `tag set`/`delete` take a run of ids followed by a key (and a value), which
 //   one declared positional cannot be; `issues.tags.*` act on a single id.
 // - `tag ls` has no operation: nothing declared lists one item's tags.
-//
-// A doc comment here would replace the group's `about` in `--help`.
 #[derive(Subcommand)]
 pub enum IssueCmd {
     /// Add an issue. By default it is claimed by the current branch; `--repo`

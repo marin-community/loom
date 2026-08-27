@@ -1,11 +1,11 @@
-//! `loom mcp` — the MCP registry commands a declaration cannot serve.
+//! `loom mcp` — custom MCP servers and the capability registry.
 //!
-//! The registry table lives in `weaver_api::render::mcps` and reaches the
-//! command line as `loom mcps get`. What is left: `show` searches one response
-//! for a custom server *or* a capability set, so the answer depends on which
-//! collection the name is in; `add` reads a script and its tests off disk, then
-//! chooses create or update from what the registry already holds; and `serve`
-//! / `serve-custom` are long-running stdio servers, not a marshal-and-print.
+//! `show` searches one response for a custom server *or* a capability set, so
+//! the answer depends on which collection holds the name. `add` reads a script
+//! and its tests off disk, then chooses create or update from what the registry
+//! already holds. `serve` and `serve-custom` are long-running stdio servers.
+//! The registry table itself is `loom mcps get`, rendered by
+//! `weaver_api::render::mcps`.
 
 use crate::client;
 use anyhow::{anyhow, bail, Context, Result};

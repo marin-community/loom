@@ -8,7 +8,7 @@
 
 use weaver_core::tags;
 
-use crate::dto::BranchView;
+use crate::dto::{BranchView, HistoryPageView};
 use crate::operations::sessions;
 use crate::operations::{NoView, Render};
 
@@ -81,5 +81,42 @@ impl Render for sessions::status::set::Op {
     // the response is how the caller sees that.
     fn text(output: &BranchView, _: &NoView) -> String {
         format!("status: {}", status_line(output))
+    }
+}
+
+impl Render for sessions::history::list::Op {
+    /// One line per record, oldest first — the reverse of the wire order, which
+    /// is newest-first so a paging client can stop early. A terminal reads a log
+    /// downward, and `older_cursor` is echoed last because that is the argument
+    /// for the next page.
+    fn text(output: &HistoryPageView, _: &NoView) -> String {
+        let mut lines: Vec<String> = output
+            .records
+            .iter()
+            .rev()
+            .map(|record| {
+                let label = match record.kind.as_str() {
+                    "tool_call" | "tool_result" => record
+                        .tool_name
+                        .clone()
+                        .unwrap_or_else(|| record.kind.clone()),
+                    _ => record.role.clone().unwrap_or_else(|| record.kind.clone()),
+                };
+                let body = record.content.as_deref().unwrap_or("").replace('\n', " ");
+                format!(
+                    "{:<10} {:<12} {}",
+                    record.kind,
+                    label,
+                    crate::render::truncate(&body, 120)
+                )
+            })
+            .collect();
+        if lines.is_empty() {
+            return format!("(no {} records)", output.source);
+        }
+        if let Some(cursor) = &output.older_cursor {
+            lines.push(format!("\n-- older: --before {cursor}"));
+        }
+        lines.join("\n")
     }
 }
