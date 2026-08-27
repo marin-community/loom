@@ -334,7 +334,7 @@ flowchart LR
 
     S --> OA["openapi_document()<br/>$defs hoisted to components/schemas"]
     OS --> OA
-    OA --> TS["tests/typescript.rs<br/>UPDATE_TYPES=1"]
+    OA --> TS["bin/generate-types"]
     TS --> GEN["frontend/src/api/generated.ts<br/>5,522 lines · 420 declarations<br/>closed OperationId union"]
     GEN --> API["api.ts — zero `as Promise&lt;T&gt;` casts"]
 

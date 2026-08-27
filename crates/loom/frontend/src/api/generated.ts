@@ -1,8 +1,7 @@
-// Generated from Loom's OpenAPI document by crates/weaver-api/tests/typescript.rs
-// — do not edit. Every type below is derived from the same `OperationSpec` that
-// answers `/api/openapi.json`.
+// Generated from Loom's OpenAPI document — do not edit. Every type below is
+// derived from the same `OperationSpec` that answers `/api/openapi.json`.
 //
-// Regenerate: UPDATE_TYPES=1 cargo test -p weaver-api --test typescript
+// Regenerate: cargo run -p weaver-api --bin generate-types
 
 // -- Shared types ---------------------------------------------------------
 

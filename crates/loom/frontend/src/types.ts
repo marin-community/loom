@@ -1,6 +1,6 @@
 // What the server declares, the server generates: every DTO the API returns or
 // accepts now lives in `api/generated.ts`, which
-// `crates/weaver-api/tests/typescript.rs` writes from the same OpenAPI document
+// `cargo run -p weaver-api --bin generate-types` writes from the OpenAPI document
 // `/api/openapi.json` serves. This file used to restate all of them by hand,
 // which is exactly how a mirror drifts.
 //

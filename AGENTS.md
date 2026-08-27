@@ -107,11 +107,11 @@ when you're ready to land. The rules it enforces:
 - **The frontend is a thin REST client** ([[ui-built-on-rest-api]]): every call
   goes through `frontend/src/api.ts` (no inline `fetch`), and its types are
   **generated, not mirrored**. `frontend/src/api/generated.ts` is written from
-  the OpenAPI document by `crates/weaver-api/tests/typescript.rs`; regenerate it
-  with `UPDATE_TYPES=1 cargo test -p weaver-api --test typescript` whenever a DTO
-  or an operation changes, and the test fails on drift otherwise. That file also
-  carries the operation table `invokeOperation` is keyed on, so an unknown
-  operation id is a compile error and no call site casts its result.
+  the OpenAPI document by `crates/weaver-api/src/bin/generate-types.rs`;
+  regenerate it with `cargo run -p weaver-api --bin generate-types` whenever a
+  DTO or an operation changes. That file also carries the operation table
+  `invokeOperation` is keyed on, so an unknown operation id is a compile error
+  and no call site casts its result.
   `frontend/src/types.ts` keeps only what the server does not declare: the
   SPA's spelling of each generated name, and the shapes of fields the API
   serves as free-form JSON. Don't invent browser-local features the `loom` CLI

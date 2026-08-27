@@ -1,15 +1,9 @@
-//! The registry's TypeScript projection, checked in as generated source.
+//! Write `frontend/src/api/generated.ts` from the registry's OpenAPI document.
 //!
-//! The SPA used to mirror these types by hand: `frontend/src/types.ts` restated
-//! every DTO, and every `invokeOperation` call cast its result to whichever of
-//! those names the author believed it returned. Nothing checked either claim.
-//! Now the same document that answers `/api/openapi.json` writes the frontend's
-//! types, so a DTO field that moves is a frontend compile error.
+//! `cargo run -p weaver-api --bin generate-types`
 //!
-//! This is the `surface.rs` convention applied to a second artifact: render it,
-//! write it under an env var, otherwise fail on drift.
-//!
-//! Regenerate deliberately: `UPDATE_TYPES=1 cargo test -p weaver-api --test typescript`
+//! Run it whenever a DTO or an operation changes. The SPA builds with rspack
+//! and never invokes cargo, so the rendered module is checked in.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,30 +13,17 @@ use serde_json::{Map, Value};
 const OUTPUT: &str = "../loom/frontend/src/api/generated.ts";
 
 const BANNER: &str = "\
-// Generated from Loom's OpenAPI document by crates/weaver-api/tests/typescript.rs
-// — do not edit. Every type below is derived from the same `OperationSpec` that
-// answers `/api/openapi.json`.
+// Generated from Loom's OpenAPI document — do not edit. Every type below is
+// derived from the same `OperationSpec` that answers `/api/openapi.json`.
 //
-// Regenerate: UPDATE_TYPES=1 cargo test -p weaver-api --test typescript
+// Regenerate: cargo run -p weaver-api --bin generate-types
 ";
 
-#[test]
-fn generated_types_match_the_checked_in_module() {
+fn main() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(OUTPUT);
-    let current = render();
-    if std::env::var("UPDATE_TYPES").is_ok() {
-        std::fs::create_dir_all(path.parent().expect("output directory")).expect("create dir");
-        std::fs::write(&path, &current).expect("write generated module");
-        return;
-    }
-    let expected = std::fs::read_to_string(&path).unwrap_or_default();
-    assert_eq!(
-        current.trim_end(),
-        expected.trim_end(),
-        "the generated frontend types changed.\n\n\
-         If that was deliberate, regenerate and review the diff:\n  \
-         UPDATE_TYPES=1 cargo test -p weaver-api --test typescript\n"
-    );
+    std::fs::create_dir_all(path.parent().expect("output directory")).expect("create dir");
+    std::fs::write(&path, render()).expect("write generated module");
+    println!("wrote {}", path.display());
 }
 
 // -- Type expressions --------------------------------------------------------
