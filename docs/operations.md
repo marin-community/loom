@@ -355,7 +355,6 @@ suite, not production:
 | invariant | where | what it catches |
 |---|---|---|
 | `assert_registry_is_complete` | boot | a declaration with no handler, or a handler with no declaration |
-| `surface_parity.rs` | test | a hand-mounted `.route(` that is not one of the 18 declared exceptions |
 | `every_advertised_invocation_parses` | test | a `cli =` string that names a command the tree does not build |
 | `every_generic_binding_dispatches_to_its_operation` | test | a command that parses but whose invocation is intercepted (this is the one that names all 18 unreachable commands when the dispatch fix is reverted) |
 | `every_binding_names_an_operation_with_a_command` | test | the converse — a binding for an operation with no CLI |

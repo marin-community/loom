@@ -387,8 +387,9 @@ stands in for.
 
 ### What is not an operation
 
-Nineteen paths, each with a documented reason, enumerated in
-[`crates/loom/tests/surface_parity.rs`](../crates/loom/tests/surface_parity.rs):
+Eighteen paths, each mounted in
+[`crates/loom/src/web/mod.rs`](../crates/loom/src/web/mod.rs) with its reason
+written beside it:
 
 * the reverse proxy to the embedded editor, which forwards an arbitrary sub-path
   into a container and streams back whatever comes out;
@@ -400,10 +401,10 @@ Nineteen paths, each with a documented reason, enumerated in
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
-That list is the entire hand-mounted surface. `surface_parity.rs` asserts this
-as an invariant: a `.route(` in `web/mod.rs` that is not a declared transport
-fails the test in either direction — an undeclared route, or a declared
-transport nobody mounts.
+That is the entire hand-mounted surface, and it is the whole of what `.route(`
+appears for. An endpoint carrying a JSON contract and a Loom principal is an
+`#[operation]`; its route is derived from its id and mounted by the dispatcher,
+so writing one here is visible in review as the exception it is.
 
 Reaching it took eleven new operations — `issues.update`, `issues.board`,
 `sessions.summary.list`, `sessions.tags.replace`, `sessions.github.access.list`,

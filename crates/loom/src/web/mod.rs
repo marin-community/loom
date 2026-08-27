@@ -23,12 +23,12 @@
 //!   types. Operands arrive in the query string, which is the sole place where
 //!   encoding affects the wire format.
 //!
-//! The remainder mounts by hand, tracked by `crates/loom/tests/surface_parity.rs`:
-//! what is listed there comprises transport that is not operation-backed
-//! (the code-server proxy, liveness probes, the GitHub webhook, OAuth redirects),
-//! routes that operations have superseded but whose callers have not yet migrated,
-//! and routes with no operation at all. The test enforces that this file and the
-//! ledger remain synchronized.
+//! Eighteen routes mount by hand, each with its reason written beside it below:
+//! the code-server proxy, the liveness and readiness probes, the metrics scrape,
+//! the GitHub webhook, the browser OAuth redirects, the three `io = Session`
+//! operations, and the four registry-discovery endpoints. Nothing else belongs
+//! here — an endpoint that carries a JSON contract and a Loom principal is an
+//! `#[operation]`, and its route is derived from its id.
 //!
 //! Response encoding is the only thing an operation's declaration varies about
 //! its transport; see `docs/ARCHITECTURE.md` for the projection table.
@@ -758,11 +758,16 @@ fn public_api_router() -> Router<AppState> {
         .route("/health/live", get(liveness))
         .route("/ready", get(readiness))
         .route("/health/ready", get(readiness))
+        // The three `io = Session` operations. They are declared, authorized and
+        // dispatched like any other; they mount here because their response must
+        // carry a `Set-Cookie`, which the generic dispatcher cannot emit. The
+        // path is the one their id derives, so this is the same route either way.
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
+        .route("/auth/federate", post(federate))
+        // Browser OAuth: a 303 and a cookie, never a JSON body.
         .route("/auth/github/login", get(github_login))
         .route("/auth/github/callback", get(github_callback))
-        .route("/auth/federate", post(federate))
         // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
         // authenticated cryptographically by the HMAC signature it carries, not
         // by a loom principal. The handler is the untrusted-input boundary.
