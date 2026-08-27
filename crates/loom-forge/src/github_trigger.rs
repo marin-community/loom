@@ -1,7 +1,7 @@
 //! The inbound GitHub trigger: a webhook that turns an `@loom` issue body,
 //! issue/PR comment, or submitted PR review into a session and replies with its
 //! URL (shared-loom design §6.3). This is the **untrusted-input boundary** — the
-//! receiver is exposed to the internet, so every step here is a gate:
+//! endpoint is exposed to the internet, so every step here is a gate:
 //!
 //! 1. **Authenticate the delivery cryptographically.** GitHub signs each
 //!    delivery with HMAC-SHA256 over the raw body; [`verify_signature`] checks it
@@ -17,11 +17,11 @@
 //!    allowlist. Anyone else is ignored after an access-info reply; a per-repo
 //!    rate limit blunts spam.
 //!
-//! The HTTP glue that sequences these (and then creates the session + replies)
-//! lives in [`crate::web::github_webhook`], which has access to the session
-//! create path; the security primitives live here so they can be unit-tested in
-//! isolation. External GitHub calls (the permission check and the reply) go
-//! through the [`GithubApi`] gateway so tests can substitute a fake for the App.
+//! The handler that sequences these steps (and then creates the session and
+//! replies) is [`crate::web::github_webhook`], which has access to the session
+//! create path; the checks live here so they can be unit-tested in isolation.
+//! External GitHub calls (the permission check and the reply) go through the
+//! [`GithubApi`] gateway so tests can substitute a fake for the App.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -47,7 +47,7 @@ pub const WEBHOOK_SECRET_KEY: &str = "github.webhook_secret";
 pub const BOT_LOGIN_KEY: &str = "github.bot_login";
 
 /// Read `LOOM_GITHUB_WEBHOOK_SECRET`, else the `github.webhook_secret` setting.
-/// Empty means the webhook is **not configured** — the receiver then rejects
+/// Empty means the webhook is **not configured** — the endpoint then rejects
 /// every delivery (it cannot verify a signature without it).
 pub async fn webhook_secret(db: &Db) -> String {
     env_or_setting(db, "LOOM_GITHUB_WEBHOOK_SECRET", WEBHOOK_SECRET_KEY).await
@@ -75,7 +75,7 @@ pub async fn trigger_phrase(db: &Db) -> String {
 /// self-trigger loop. `LOOM_GITHUB_BOT_LOGIN`, else the `github.bot_login`
 /// setting; `None` when unset.
 ///
-/// Optional, but worth setting: loom's own replies never carry the phrase, and
+/// Optional: loom's own replies never carry the phrase, and
 /// [`is_trigger`] ignores quoted text, so the common loops are already closed —
 /// but a session that replies on its thread and *mentions* the phrase in prose
 /// would tag itself. [`authorize`] is the backstop (the bot identity is not
@@ -108,8 +108,9 @@ async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
 /// `false` — never panicking — for an empty secret (not configured), a missing
 /// or malformed header, or any mismatch.
 ///
-/// `body` MUST be the bytes exactly as received: the signature is over the wire
-/// bytes, so re-serializing a parsed JSON value would change the digest.
+/// `body` MUST be the bytes exactly as received: the signature is computed over
+/// the raw request bytes, so re-serializing a parsed JSON value would change
+/// the digest.
 pub fn verify_signature(secret: &str, body: &[u8], header: Option<&str>) -> bool {
     if secret.is_empty() {
         return false;
@@ -558,11 +559,10 @@ pub fn valid_login(login: &str) -> bool {
 /// gates signing in to the app (checked with no GitHub call). Fails **closed**: a
 /// malformed login, an unknown user, or a store error all deny.
 ///
-/// One people-allowlist governs both surfaces: whoever may sign in to loom may
-/// also trigger a session from a new issue or comment, and no one else. Having
-/// write access to the repo is *not* by itself a grant. (Extension point: a
-/// future org-scoped rule such as "admins of org X" would be evaluated here,
-/// consulting the GitHub API; deliberately not implemented yet.)
+/// Having write access to the repo is *not* by itself a grant. (Extension
+/// point: a future org-scoped rule such as "admins of org X" would be
+/// evaluated here, consulting the GitHub API; deliberately not implemented
+/// yet.)
 pub async fn authorize(db: &Db, login: &str) -> bool {
     if !valid_login(login) {
         tracing::warn!(login, "rejecting trigger from a malformed GitHub login");
@@ -634,7 +634,7 @@ pub trait GithubApi: Send + Sync {
     async fn react_to_comment(&self, repo: &str, comment_id: i64, content: &str) -> Result<()>;
 
     /// Fetch the live state of issue-or-PR `number` of `repo` — the minimal
-    /// snapshot `loom issues get` renders beside the Loom ledger.
+    /// snapshot `loom issues get` renders beside loom's own stored issue record.
     async fn issue_state(&self, repo: &str, number: i64) -> Result<IssueState>;
 }
 

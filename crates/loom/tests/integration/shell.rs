@@ -182,7 +182,7 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     await_shell_ready(&mut sh1, "RDY1").await;
     assert_eq!(shell::list_debug(&id).await, vec![0, 1], "both shells live");
 
-    // Closing one tab (DELETE) kills just that supervisor.
+    // Closing one tab (DELETE) kills only that supervisor.
     client
         .post(
             "/api/sessions/shells/delete",

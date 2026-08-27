@@ -2,7 +2,7 @@
 
 ## Configuration ownership
 
-Choose the configuration surface from who owns the value and how widely it
+Choose where to configure a value based on who owns it and how widely it
 should apply:
 
 | Owner | Configure in | Use for |

@@ -424,8 +424,8 @@ async fn metric_snapshot(db: &Db) -> Result<DiagnosticsView> {
     })
 }
 
-/// The `diagnostics` bundle's REST-reachable half — `diagnostics.get`.
-/// Its sibling `diagnostics.status` is bound in `web/logview.rs`.
+/// `diagnostics.get`'s route binding. Its sibling `diagnostics.status` is
+/// bound in `web/logview.rs`.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![register::<diagnostics_operations::get::Op, _, _>(
         diagnostics_operation,
@@ -623,8 +623,8 @@ async fn render_metrics(db: &Db, view: &DiagnosticsView) -> Result<String> {
     Ok(output)
 }
 
-/// Public scrape surface. It contains aggregates only; the richer inventory is
-/// human-gated at `/api/diagnostics`.
+/// The Prometheus scrape route. It contains aggregates only; the richer
+/// inventory is human-gated at `/api/diagnostics`.
 pub(super) async fn metrics(State(st): State<AppState>) -> Response {
     match metric_snapshot(&st.db).await {
         Ok(view) => match render_metrics(&st.db, &view).await {

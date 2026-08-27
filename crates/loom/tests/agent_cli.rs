@@ -1,5 +1,5 @@
 //! Agent-facing CLI flows against a real (locally isolated) loom server — the
-//! CLI's only mode now that it is an HTTP-only client of loom (see
+//! CLI's only mode: an HTTP-only client of loom (see
 //! `weaver_api::endpoint`). Each test boots its own server on a random port
 //! with an isolated `WEAVER_HOME`, seeds one branch and the session running on
 //! it, and drives the `weaver` binary as a subprocess pointed at it via
@@ -67,7 +67,7 @@ async fn seed_session(db: &weaver_core::db::Db, branch_id: &str) -> loom::sessio
     .unwrap()
 }
 
-/// An ordinary unrestricted launch policy — the shape loom stamps on a session
+/// An ordinary unrestricted launch policy — what loom assigns to a session
 /// it starts. `restricted: false` mints a credential carrying the full session
 /// capability set, as a real agent's does.
 fn launch_policy() -> session_mod::SessionLaunchPolicy {
@@ -106,9 +106,9 @@ struct Env {
     session_id: String,
     /// The session credential loom hands an agent as `$LOOM_TOKEN`.
     ///
-    /// Not decoration: a declaration-served command resolves `repo_root`,
-    /// `branch` and `session` from the caller's own credential, so without a
-    /// session token every operand the dispatcher supplies would be empty.
+    /// A declaration-served command resolves `repo_root`, `branch` and
+    /// `session` from the caller's own credential, so without a session token
+    /// every operand the dispatcher supplies would be empty.
     token: String,
     db: weaver_core::db::Db,
     _home: tempfile::TempDir,
@@ -415,7 +415,7 @@ async fn channel_cli_reads_and_appends_typed_history() {
     );
 }
 
-/// `issue tag set` sets a free-form label, `issue show` surfaces it, and
+/// `issue tag set` sets a free-form label, `issue show` prints it, and
 /// `issue tag rm` clears it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -466,7 +466,7 @@ async fn issue_ls_separates_branch_work_from_repo_backlog() {
     assert!(out.contains("open issues: 1"), "status: {out}");
 }
 
-/// `issue show` surfaces the live status of the branch working the issue,
+/// `issue show` reports the live status of the branch working the issue,
 /// letting a parent agent poll a delegated sub-tree.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -584,7 +584,7 @@ async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, descripti
     )
     .await
     .unwrap();
-    // The attention level lives on the `attention` tag now; `ok` is absence.
+    // The attention level lives on the `attention` tag; `ok` is absence.
     if attention == "ok" {
         weaver_core::tags::clear(&env.db, &child_id, weaver_core::tags::ATTENTION_KEY)
             .await
@@ -618,7 +618,7 @@ async fn seed_delegated_issue(env: &Env, child: &str, attention: &str, descripti
     .unwrap();
 }
 
-/// `summary` is the agent catch-up: it surfaces the goal, the current status,
+/// `summary` is the agent catch-up: it prints the goal, the current status,
 /// the explicit backlog, and a generated next-step hint.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
@@ -1330,7 +1330,7 @@ async fn config_get_ls_reads_settings() {
     assert!(out.contains("(default)"), "ls should mark defaults: {out}");
 
     // Settings are written by operators (`loom config set` / the settings
-    // pane); the in-session surface only reads them.
+    // pane); the in-session `settings` command only reads them.
     weaver_core::config::apply(
         &env.db,
         &[("server.auto_adopt".to_string(), Some("true".to_string()))],

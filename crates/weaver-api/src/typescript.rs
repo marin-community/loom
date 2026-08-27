@@ -1,4 +1,4 @@
-//! The registry's TypeScript projection.
+//! Generates the registry's TypeScript types.
 //!
 //! `crates/loom/build.rs` writes the result to `frontend/src/api/generated.ts`
 //! before it builds the SPA, so the module is a build product and not a
@@ -63,8 +63,9 @@ fn ts_type(schema: &Value, indent: usize) -> String {
 fn scalar(name: &str, map: &Map<String, Value>, indent: usize) -> String {
     match name {
         "string" => "string".to_string(),
-        // JavaScript has one number type and the wire format is JSON, so the
-        // Rust integer width `format` records is nothing a caller could act on.
+        // JavaScript has one number type, and everything here is serialized as
+        // JSON, so the Rust integer width `format` records is nothing a caller
+        // could act on.
         "integer" | "number" => "number".to_string(),
         "boolean" => "boolean".to_string(),
         "null" => "null".to_string(),

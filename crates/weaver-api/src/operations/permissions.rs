@@ -26,7 +26,8 @@ pub mod effective {
 pub mod explain {
     use super::prelude::*;
 
-    /// Explain one registered operation's actor, risk, and projections.
+    /// Explain one registered operation's actor, risk, route, CLI command, and
+    /// tool schema.
     #[operation(id = "permissions.explain", actor = SessionSelf, scope = Global, risk = Read,
                 grants = ["loom/permissions/read@v1"], cli = "permissions explain")]
     pub struct Input {
@@ -43,8 +44,7 @@ pub mod github {
     //! Session-scoped GitHub App credentials and human-authorized overrides.
     pub(super) use super::prelude;
     pub mod grant {
-        //! Granting repository access without a prior request is a human decision,
-        //! expressed through `actor = User`.
+        //! Granting repository access without a prior request is a human decision.
 
         use super::prelude::*;
 
@@ -64,7 +64,7 @@ pub mod github {
     }
 
     pub mod restricted {
-        //! The fixed-target GitHub surface exposed to policy-restricted sessions.
+        //! The fixed-target GitHub tools exposed to policy-restricted sessions.
         pub(super) use super::prelude;
 
         use serde::{Deserialize, Serialize};
@@ -109,10 +109,10 @@ pub mod github {
         const _: () = assert!(BODY_MAX_BYTES == 65_536 && TITLE_MAX_BYTES == 256);
 
         /// One fixed tool `invoke` serves: the name a transport advertises, what
-        /// it does, and the shape of the `arguments` it takes.
+        /// it does, and the JSON Schema of the `arguments` it takes.
         ///
         /// `invoke` takes `arguments` as an opaque object because one operation
-        /// serves all six, so the shapes are declared here rather than by
+        /// serves all six, so the JSON Schemas are declared here rather than by
         /// whichever transport happens to expose them.
         pub struct Tool {
             pub name: &'static str,
@@ -183,9 +183,6 @@ pub mod github {
     }
 
     pub mod revoke {
-        //! Revoke explicit GitHub repository access from a live session.
-        //! This is expressed through `actor = User`.
-
         use super::prelude::*;
 
         /// Revoke one explicit GitHub repository override from a live session.
@@ -227,8 +224,8 @@ pub mod requests {
     //! Durable, human-decided external-access requests.
     pub(super) use super::prelude;
     pub mod approve {
-        //! A human decides a pending request. This operation uses `actor = User`,
-        //! which means it is not available to agents.
+        //! A human decides a pending request; `actor = User` keeps it unavailable
+        //! to agents.
 
         use super::prelude::*;
 

@@ -3,9 +3,9 @@
 //!
 //! `loom config render-env`, `secret-names`, `push-secrets`, and `set` are
 //! deliberately absent: they read/write `loom.toml` or the sqlite `settings`
-//! table directly with no running server, so they are not operations. The
-//! REST surface here — `settings.get`/`settings.patch` and the
-//! `settings.env.*` facade they expose to operators — is.
+//! table directly with no running server, so they are not operations. What's
+//! declared here — `settings.get`/`settings.patch` and the `settings.env.*`
+//! facade they expose to operators — is.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;

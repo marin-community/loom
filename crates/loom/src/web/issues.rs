@@ -204,9 +204,10 @@ pub(super) async fn get_issue_operation(
     require_repo_access(&st, &context.principal, &issue.repo_root).await?;
     let mut view = issue_view(&st.db, issue).await?;
     // Best-effort live snapshot of the linked GitHub thread, so `loom issues
-    // get` surfaces "closed / re-titled while you worked". Single-issue reads
+    // get` shows "closed / re-titled while you worked". Single-issue reads
     // only (lists would fan out), bounded so a slow GitHub can't hang the CLI,
-    // and a failure just leaves the field absent — the ledger still stands.
+    // and a failure leaves the field absent — the rest of the view still
+    // stands.
     if let (Some(repo), Some(number)) = (view.github_repo.clone(), view.github_issue) {
         view.github_state = tokio::time::timeout(
             std::time::Duration::from_secs(4),
@@ -548,7 +549,7 @@ pub(super) async fn reopen_issue_operation(
 }
 
 // ---------------------------------------------------------------------------
-// Repo-scoped issues (the backlog / board surface)
+// Repo-scoped issues (backlog and board)
 // ---------------------------------------------------------------------------
 
 /// Resolve a repo identity from an explicit `repo_root` or, failing that, a
@@ -593,7 +594,7 @@ async fn require_repo_access(
     }
 }
 
-/// The repo-wide issue board, or just the unclaimed backlog with `backlog: true`.
+/// The repo-wide issue board, or the unclaimed backlog with `backlog: true`.
 ///
 /// Repo access is checked by `authorize()` from `Scoped`, before this is called.
 pub(super) async fn list_repo_issues_operation(

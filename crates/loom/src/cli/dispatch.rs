@@ -2,10 +2,7 @@
 //!
 //! There is no per-command code here and no per-command code anywhere else. The
 //! clap tree is *built from* the registry, so an advertised invocation and the
-//! parser that accepts it are the same declaration read twice. The surface this
-//! replaces kept a `cli: Some("loom issues list")` string beside a clap enum
-//! whose variant was `Ls`, and shipped three advertised commands that did not
-//! exist.
+//! parser that accepts it are the same declaration read twice.
 
 use anyhow::{anyhow, Result};
 use clap::{ArgMatches, Command};
@@ -163,7 +160,7 @@ pub fn resolve<'a>(
     matches: &ArgMatches,
 ) -> Option<(&'a CliBinding, ArgMatches)> {
     for binding in bindings {
-        // A registered operation with no CLI projection is not reachable
+        // A registered operation with no declared CLI command is not reachable
         // from the command line; skip it.
         let Some(cli) = binding.operation.cli else {
             continue;

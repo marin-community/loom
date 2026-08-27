@@ -309,10 +309,10 @@ async fn collect_sessions(
                 continue;
             }
             if let Some(needle) = &needle {
-                // The wire view already carries every promised search facet:
+                // `view` already carries every promised search facet:
                 // qualified placement, title/goal, repo/branch, issue/PR, tags,
-                // status, profile, and provenance. Searching only its values
-                // keeps that vocabulary synchronized without matching JSON keys.
+                // status, profile, and provenance. Searching its values keeps
+                // the search in sync with what SessionView actually exposes.
                 let hay = view_search_haystack(&view);
                 if !hay.contains(needle) {
                     continue;
@@ -567,7 +567,7 @@ async fn remove_locked(
     weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch)
         .await
         .ok();
-    // Drop the branch row too — deleting a session takes its branch with it.
+    // Deleting a session takes its branch with it.
     branch_mod::delete(&st.db, &branch.id).await?;
     if warnings.is_empty() {
         tracing::info!(session = %session.id, branch = %branch.id, keep_branch, "session deleted");
@@ -818,8 +818,8 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
 
 // ---------------------------------------------------------------------------
 // Raw worktree bytes — serves a single file's bytes (with a guessed content
-// type) for Markdown inline images. The embedded editor ([`crate::ide`]) is the
-// file browsing/editing surface; this endpoint only reads, never writes.
+// type) for Markdown inline images. The embedded editor ([`crate::ide`])
+// handles file browsing and editing; this endpoint only reads, never writes.
 // ---------------------------------------------------------------------------
 
 /// Validate a client-supplied repo-relative path: reject absolute paths and any
@@ -981,10 +981,10 @@ pub(super) async fn send_session(
 // ---------------------------------------------------------------------------
 // The ACP chat journal + drive routes (protocol='acp' sessions)
 //
-// The conversation-first surface for ACP sessions: the journaled transcript
-// (`/chat`), its live delta stream (`/chat/stream`), and the drive routes a
-// person or watch uses — a durable queueing send (`/prompt`), a
-// permission answer (`/permissions/{request_id}`), and a mode change (`/mode`).
+// The ACP session routes: the journaled transcript (`/chat`), its live delta
+// stream (`/chat/stream`), and the drive routes a person or watch uses — a
+// durable queueing send (`/prompt`), a permission answer
+// (`/permissions/{request_id}`), and a mode change (`/mode`).
 // ---------------------------------------------------------------------------
 
 /// Guard: the route only applies to an ACP session; a terminal session 409s (it
@@ -1265,7 +1265,7 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
     session_view(&st.db, &created.session, &created.branch).await
 }
 
-/// `sessions.send` — ported from [`send_session`].
+/// `sessions.send` — mirrors [`send_session`]; both must agree.
 async fn op_send(
     context: OperationContext,
     input: ops::send::Input,
@@ -1374,9 +1374,9 @@ async fn op_events_list(
 }
 
 /// `sessions.events.create` — the session-scoped counterpart of
-/// [`create_branch_event`](super::branches) (branches.rs, not ported here):
-/// same escape-hatch semantics, resolved from a session id instead of a
-/// branch key.
+/// [`events_create_operation`](super::branches) (branches.rs, not ported
+/// here): same escape-hatch semantics, resolved from a session id instead of
+/// a branch key.
 async fn op_events_create(
     context: OperationContext,
     input: ops::events::create::Input,
@@ -1630,7 +1630,7 @@ async fn op_archive(
     let warnings = archive(st, &session, &branch).await.map_err(|error| {
         // A refusal names a state the caller can act on (another transition
         // owns the session); only a genuine failure becomes the reassuring
-        // 500. Same distinction `archive_session` makes.
+        // 500.
         if error.downcast_ref::<crate::lifecycle::Refusal>().is_some() {
             return AppError::from(error);
         }

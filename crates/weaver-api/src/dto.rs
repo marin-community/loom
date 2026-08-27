@@ -1,11 +1,11 @@
-//! The cross-process wire contract: the request and response (View) DTOs the
-//! loom REST API speaks. The loom server serializes them, the typed
-//! [`crate::Client`] and the future Python binding deserialize them, and
-//! `frontend/types.ts` mirrors them by hand.
+//! The request and response (View) types the loom REST API speaks. The loom
+//! server serializes them, the typed [`crate::Client`] and the future Python
+//! binding deserialize them, and `frontend/types.ts` mirrors them by hand.
 //!
-//! Response (`*View`) types carry `from_parts` constructors that build the wire
-//! struct from `weaver-core` domain types (`Branch`, `Issue`, `Watch`, …); the
-//! async DB lookups that gather the parts stay in the loom server.
+//! Response (`*View`) types carry `from_parts` constructors that build the
+//! response struct from `weaver-core` domain types (`Branch`, `Issue`,
+//! `Watch`, …); the async DB lookups that gather the parts stay in the loom
+//! server.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -118,7 +118,7 @@ pub struct BranchView {
 }
 
 impl BranchView {
-    /// Build the wire view from a branch plus the parts the server already
+    /// Build the view from a branch plus the parts the server already
     /// gathered: tags, open-issue count, and latest GitHub snapshot.
     pub fn from_parts(
         branch: &Branch,
@@ -152,9 +152,9 @@ impl BranchView {
     }
 }
 
-/// Compact branch projection embedded in [`SessionSummaryView`]. It carries
-/// only the identity, status, search, and GitHub fields fleet surfaces render;
-/// large goal text and detail-only metadata remain on [`BranchView`].
+/// Compact branch view embedded in [`SessionSummaryView`]. It carries only the
+/// identity, status, search, and GitHub fields fleet indexes carry; large goal
+/// text and detail-only metadata remain on [`BranchView`].
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BranchSummaryView {
     pub id: String,
@@ -194,7 +194,7 @@ pub struct SessionTransitionView {
     pub started_at: String,
 }
 
-/// Compact session projection returned by `sessions.summary.list`.
+/// Compact session view returned by `sessions.summary.list`.
 ///
 /// This is the polling/search contract for fleet indexes. A client follows with
 /// `sessions.get` only when it opens a session or discloses the row's complete
@@ -228,7 +228,7 @@ pub struct SessionSummaryView {
     pub branch: BranchSummaryView,
 }
 
-/// The complete session projection, as against the compact
+/// The complete session view, as against the compact
 /// [`SessionSummaryView`] fleet indexes poll: every field a session detail view
 /// needs, including the session's whole [`BranchView`].
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -500,7 +500,7 @@ pub enum HistoryKind {
 }
 
 impl HistoryKind {
-    /// The wire spelling, matching `HistoryRecordView::kind`.
+    /// The JSON spelling, matching `HistoryRecordView::kind`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Message => "message",
@@ -901,8 +901,8 @@ pub struct LaunchProvenanceView {
 }
 
 /// Capacity observed while resolving a launch. The repository launch gate
-/// rechecks it immediately before provisioning, so this is an honest preview,
-/// not an admission reservation.
+/// rechecks it immediately before provisioning: this is a preview, not a
+/// reserved slot.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchCapacityView {
     pub active: i64,
@@ -1238,7 +1238,8 @@ pub struct MigrationStreamView {
 }
 
 /// Public readiness response. Liveness remains the process-only `/api/health`;
-/// this shape proves that the database and both migration streams are usable.
+/// this response proves that the database and both migration streams are
+/// usable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ReadinessView {
     pub status: String,
@@ -1362,7 +1363,8 @@ pub struct IssueView {
     /// Live state of the linked GitHub thread, fetched at read time by the
     /// single-issue endpoint when the issue carries a `github_repo` +
     /// `github_issue` link. Absent on list endpoints (no fan-out of GitHub
-    /// calls) and when the fetch fails — the ledger fields above still stand.
+    /// calls) and when the fetch fails — the issue's own fields above still
+    /// stand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_state: Option<GithubThreadState>,
 }
@@ -1419,8 +1421,9 @@ pub struct IssueActionsResult {
 }
 
 /// The minimal live snapshot of a GitHub thread `loom issues get` renders
-/// beside the weaver ledger: enough to notice "this was closed / re-titled
-/// while I worked". An agent that needs the discussion reads it with `gh`.
+/// beside loom's own issue record: enough to notice "this was closed /
+/// re-titled while I worked". An agent that needs the discussion reads it
+/// with `gh`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubThreadState {
     /// `open` | `closed`.
@@ -1431,7 +1434,7 @@ pub struct GithubThreadState {
 }
 
 impl IssueView {
-    /// Build the wire view from an [`Issue`] and the tags gathered for it.
+    /// Build the view from an [`Issue`] and the tags gathered for it.
     pub fn from_parts(i: Issue, tags: &[Tag]) -> Self {
         IssueView {
             id: i.id,
@@ -1453,7 +1456,7 @@ impl IssueView {
 }
 
 impl From<Issue> for IssueView {
-    /// Convenience for call sites that don't surface tags (the tag list is left
+    /// Convenience for call sites without tags to attach (the tag list is left
     /// empty). Tag-aware endpoints use [`IssueView::from_parts`].
     fn from(i: Issue) -> Self {
         IssueView::from_parts(i, &[])
@@ -1462,9 +1465,9 @@ impl From<Issue> for IssueView {
 
 // ---------------------------------------------------------------------------
 // Artifacts — named, versioned documents an agent (or the user) writes to
-// weaver. The envelope, a version row, and the full view (content + projected
-// references). The projection backs both the SPA chips and `loom artifacts
-// show`. See docs/artifacts.md.
+// weaver. The envelope, a version row, and the full view (content + reference
+// map). The reference map backs both the SPA chips and `loom artifacts show`.
+// See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
 /// An artifact envelope as the API exposes it: identity, kind, title, scope, and
@@ -1505,8 +1508,8 @@ pub struct IssueRefStatus {
     pub claimed_branch: Option<String>,
 }
 
-/// The projected reference map an artifact's content names. Keyed by id-as-string
-/// so it round-trips cleanly through JSON object keys. v1 projects issues; the
+/// The reference map an artifact's content names. Keyed by id-as-string so it
+/// round-trips cleanly through JSON object keys. v1 covers issues; the
 /// `artifact:`/`session:` reference kinds are reserved for later probes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactRefs {
@@ -1518,7 +1521,7 @@ pub struct ArtifactRefs {
 
 /// The full artifact view returned by the artifact GET/PUT: the envelope, the
 /// content of the selected (default latest) revision, the version list for a
-/// picker, and the projected reference map.
+/// picker, and the reference map.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactView {
     pub meta: ArtifactMeta,
@@ -1526,7 +1529,8 @@ pub struct ArtifactView {
     pub content: String,
     /// Every revision, newest first, for the version picker.
     pub versions: Vec<ArtifactVersion>,
-    /// References found in the content, resolved against the live ledger.
+    /// References found in the content, resolved against current issue
+    /// records.
     pub refs: ArtifactRefs,
 }
 
@@ -1582,7 +1586,7 @@ pub struct ThreadDto {
 
 // ---------------------------------------------------------------------------
 // Reviews — creator-private draft feedback over versioned artifacts. The
-// generic subject/anchor shapes are shared with the future changes viewer.
+// generic subject/anchor types are shared with the future changes viewer.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1886,7 +1890,7 @@ pub struct WatchView {
 }
 
 impl WatchView {
-    /// Build the wire view from a watch plus the most recent round's outcome,
+    /// Build the view from a watch plus the most recent round's outcome,
     /// read from the run history.
     pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
         Self {
@@ -2020,7 +2024,7 @@ pub struct ChannelView {
     #[serde(default)]
     pub last_message: Option<ChannelMessageView>,
     /// This channel's server-owned delivery bindings, included directly so
-    /// REST, the CLI, and MCP all see the same shape.
+    /// REST, the CLI, and MCP all see the same data.
     #[serde(default)]
     pub bindings: Vec<ChannelBindingView>,
 }
@@ -2091,8 +2095,8 @@ pub struct SelfContextView {
 
 /// Where a session reads its own channel, artifacts, and session record.
 ///
-/// Each value is an operation's path, not a per-id URL: the operand these three
-/// reads take is the caller's own context, so a session credential posting an
+/// Each value is a route, not a per-id URL: the operand these three reads
+/// take is the caller's own context, so a session credential posting an
 /// empty body to any of them gets its own.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SelfContextLinks {
@@ -2205,9 +2209,9 @@ pub struct TagMatch {
     pub value: String,
 }
 
-/// In-process arguments for typing a message into a session's agent pane. Not a
-/// wire shape: `Client::nudge` and loom's channel delivery path each translate
-/// it into `sessions.send` input.
+/// In-process arguments for typing a message into a session's agent pane, not
+/// sent directly as a request body: `Client::nudge` and loom's channel
+/// delivery path each translate it into `sessions.send` input.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SendReq {
     /// The text to type into the agent's pane.
@@ -2400,7 +2404,7 @@ pub struct WatchRunResult {
 // Managed repositories
 //
 // Mirrors of `loom-forge::repo`'s `ManagedRepo`/`RecentRepo` and the
-// `crates/loom/src/web/repos.rs` / `repo_env.rs` ad hoc response shapes.
+// `crates/loom/src/web/repos.rs` / `repo_env.rs` ad hoc response types.
 // weaver-api depends only on weaver-core, not on loom-forge or loom-store, so
 // these types are defined here rather than imported.
 // ---------------------------------------------------------------------------
@@ -2507,7 +2511,7 @@ pub struct AgentMetadataView {
 }
 
 /// One operator-defined custom agent definition — a row of the
-/// `custom_agents` table and the shape the API returns for the editor.
+/// `custom_agents` table and the type the API returns for the editor.
 /// Mirrors `loom_agent::custom_agents::CustomAgent`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomAgentView {
@@ -2751,8 +2755,8 @@ pub struct ChatCursorView {
 }
 
 /// Agent-owned controls for the conversation composer, mirrored from the live
-/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON to
-/// preserve the extensible protocol surface.
+/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON so
+/// new ACP fields pass through without a schema change.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpMetadataView {
     #[serde(default)]

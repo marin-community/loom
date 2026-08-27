@@ -144,7 +144,7 @@ async fn http_send_submits_via_bracketed_paste() {
         .unwrap();
     let id = session["id"].as_str().unwrap().to_string();
 
-    // Wait for the shell to be executing (not just echoing) before sending, using
+    // Wait for the shell to be executing (not merely echoing) before sending, using
     // the same arithmetic marker the roundtrip test uses.
     let mut term = connect_terminal(&ts.addr, &id).await;
     let mut ready = false;

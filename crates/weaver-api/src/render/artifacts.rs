@@ -121,8 +121,7 @@ impl Render for artifacts::threads::list::Op {
 }
 
 impl Render for artifacts::threads::resolve::Op {
-    // The thread itself, which now reads `[resolved]` — rather than echoing the
-    // id the caller just passed in.
+    // The full thread, now showing `[resolved]` — not the bare id the caller passed in.
     fn text(output: &ThreadDto, _: &NoView) -> String {
         thread(output)
     }

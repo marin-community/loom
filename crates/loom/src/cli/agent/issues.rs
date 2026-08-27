@@ -188,9 +188,8 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
                 "  claimed: {}",
                 i.claimed_branch.as_deref().unwrap_or("(backlog)")
             );
-            // Surface the live status of the branch working this issue — what
-            // makes `issue show` a poll of a delegated sub-tree, not just a
-            // record lookup.
+            // Show the live status of the branch working this issue, not only
+            // the issue record.
             if let Some(claimed) = &i.claimed_branch {
                 if let Some(progress) = working_branch_status(&client, &i.repo_root, claimed).await
                 {

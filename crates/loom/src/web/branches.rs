@@ -22,7 +22,7 @@ use weaver_api::operations::channels;
 /// back as the default.
 const CALM_STATUS: &str = "ok";
 
-/// `state`'s wire name, matching `SocketState`'s own `#[serde(rename_all =
+/// `state`'s serialized name, matching `SocketState`'s own `#[serde(rename_all =
 /// "snake_case")]` — reproduced by hand because `loom_deliver::slack` does
 /// not derive `Deserialize`/`JsonSchema` on it, so it cannot be `weaver-api`'s
 /// operation `Output` type directly (see [`slack_connection_status_view`]).
@@ -131,14 +131,10 @@ async fn slack_connection_status_operation(
 // and `require_branch_access` for the `Branch`-scoped ones) happens once,
 // centrally, in `web/operations.rs` — none of it is re-checked here.
 //
-// `branches.events.list` reimplements [`branch_events`]'s one line
-// (`events::history`, capped at 200 rows) instead of calling it, because that
-// handler lives in `web/sessions.rs`; `events::history` is the shared logic,
-// used the same way by [`create_branch_event`] below and by
-// `sessions.events.list`. `branches.issues.list` similarly calls
-// `super::issues::issue_views`, the `pub(super)` mapping helper
-// `list_branch_issues` (in `web/issues.rs`) also shares, instead of
-// duplicating its projection.
+// `branches.events.list` and `sessions.events.list` (`web/sessions.rs`) both
+// read through `events::history`, capped at 200 rows. `branches.issues.list`
+// shares `super::issues::issue_views` with the other call sites in
+// `web/issues.rs`.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
@@ -361,9 +357,7 @@ async fn slack_reply_operation(
         return Err(AppError::bad_request("text is required"));
     }
     if input.thread.is_none() {
-        // When no thread is specified, reply to the branch wiring instead.
-        // The branch wiring is checked before appending, matching this
-        // endpoint's behavior.
+        // No thread named: fall back to the branch's wired Slack thread.
         let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
             .await?
             .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
@@ -531,7 +525,7 @@ async fn tags_delete_operation(
 }
 
 /// `branches.issues.list`. Reuses [`super::issues::issue_views`] rather than
-/// duplicating the issue → `IssueView` projection.
+/// duplicating the issue → `IssueView` mapping.
 async fn issues_list_operation(
     context: OperationContext,
     input: ops::issues::list::Input,
@@ -620,8 +614,7 @@ mod tests {
             view.tags.iter().all(|t| t.key != tags::ATTENTION_KEY),
             "ok clears the tag rather than storing it"
         );
-        // The message is untouched by a bare `ok` — the tag event is what
-        // moved, not the description.
+        // A bare `ok` clears the tag; the description is untouched.
         assert_eq!(view.description, "need review");
 
         let events = events::history(&db, &branch.id, 10).await.unwrap();
@@ -685,8 +678,8 @@ mod tests {
         let branch = branch_mod::upsert(&db, "/r", "weaver/a", "main")
             .await
             .unwrap();
-        // No session row exists for this branch at all — this is exactly the
-        // case `require_session` rejects and `require_branch` accepts.
+        // No session row exists for this branch — the case `require_session`
+        // rejects and `require_branch` accepts.
 
         let view = tags_set_operation(
             admin_context(st.clone()),

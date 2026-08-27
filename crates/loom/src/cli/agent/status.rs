@@ -11,7 +11,7 @@ use weaver_core::tags;
 
 use super::{branch_key, channel_key, client, render, truncate, working_branch_status};
 
-// `sessions.status.get` and `.set` declare both invocations and print them.
+// `sessions.status.get` and `.set` declare both commands and print them.
 // The enum survives for the *group*: a registry-assembled `loom status` has no
 // description in `loom --help`, and answers a bare `loom status` with "the
 // subcommand wasn't recognized" instead of "a subcommand is required".
@@ -55,13 +55,12 @@ const SUMMARY_TASK_CAP: usize = 10;
 /// so the post-compaction hook can replay the same text as `additionalContext`
 /// (see [`cmd_hook`]).
 ///
-/// Not a `Render` on `sessions.summary.get`, despite being the obvious
-/// candidate: this also does several more reads (channel messages, per-artifact
-/// threads, a delegated branch's live status) and one write (advancing the
-/// channel's read marker) that a pure `Render` of one `Output` cannot do.
-/// Widening the view to carry all of that would make `sessions.summary.get`
-/// fan out server-side for every caller, including the dashboard, which needs
-/// none of it.
+/// Not a `Render` on `sessions.summary.get`: this does more reads (channel
+/// messages, per-artifact threads, a delegated branch's live status) and one
+/// write (advancing the channel's read marker) than a pure `Render` of one
+/// `Output` can do. Widening `sessions.summary.get`'s response to cover all of
+/// that would make it fan out server-side for every caller, including the
+/// dashboard, which needs none of it.
 pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<String> {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -175,7 +174,7 @@ pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<St
     }
 
     // Open discussion: unresolved comment threads across every artifact visible
-    // from this branch — so a reviewer's feedback surfaces here even if the
+    // from this branch — so a reviewer's feedback appears here even if the
     // agent never re-opens the artifact that carries it.
     let mut open_threads: Vec<(String, ThreadDto)> = Vec::new();
     for a in &artifacts {
@@ -244,9 +243,8 @@ pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<St
     } else {
         let total = open.len() + delegated.len();
         let _ = writeln!(out, "Backlog ({total}):  (loom issues list)");
-        // Cap the whole list (own issues first, then delegated sub-trees) so a
-        // branch that delegated many sub-trees can't blow the summary up; the
-        // overflow collapses into one trailing line.
+        // Cap the whole list so a branch that delegated many sub-trees can't
+        // blow up the summary; the overflow collapses into one trailing line.
         let mut shown = 0;
         for i in open.iter().take(SUMMARY_TASK_CAP) {
             let _ = writeln!(out, "  #{:<4} {}", i.id, i.title);
@@ -269,9 +267,8 @@ pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<St
         }
     }
 
-    // Hint for the next step: a generated next-action drawn from the open work.
-    // The current status (where work was left off) is already on the `Status:`
-    // line above, sourced from the status-description trail.
+    // The current status is already on the `Status:` line above, sourced from
+    // the status-description trail; this section only suggests what to do next.
     out.push('\n');
     let _ = writeln!(out, "Next steps:  (loom sessions events · loom status get)");
     let _ = writeln!(out, "  - {}", next_action_hint(&open, &delegated));
@@ -317,12 +314,12 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
 /// Report the agent's status: set the attention level and, when a message is
 /// given, the accompanying current-state note. The level lives on the
 /// `attention` tag — `ok` clears it (absence is the calm state), `attention`/
-/// `blocked` set it. One call to loom (`POST /branches/{id}/status`), which
-/// writes the description, sets or clears the tag, and records a single `tag`
-/// event atomically server-side. An empty message leaves the previous message
-/// in place — `loom status set --tag ok` just lowers the level without wiping
-/// what the agent last said, and the reply says so, because what is printed is
-/// the session's status as it now stands rather than the arguments sent.
+/// `blocked` set it. One call (`POST /branches/{id}/status`) writes the
+/// description, sets or clears the tag, and records a single `tag` event
+/// atomically server-side. An empty message leaves the previous message in
+/// place — `loom status set --tag ok` lowers the level without wiping what
+/// the agent last said. The reply reflects that: it prints the session's
+/// status as it now stands, not the arguments that were sent.
 async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str) -> Result<()> {
     let level = level.trim().to_ascii_lowercase();
     // `ok` is a valid *input* (return to calm) but is never stored — it clears

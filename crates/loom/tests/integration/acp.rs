@@ -1100,7 +1100,7 @@ async fn permission_answered_over_rest() {
         .await
         .unwrap();
 
-    // The request surfaces as an open permission_request block (no auto-answer).
+    // The request appears as an open permission_request block (no auto-answer).
     let chat = poll_chat(&ts, "acp-rest", Duration::from_secs(10), |blocks| {
         blocks
             .iter()
@@ -2133,8 +2133,8 @@ async fn relay_disconnect_detaches_the_session_with_recovery_feedback() {
     .await;
 
     // Tapestry permits one live relay subscriber. A replacement subscriber
-    // evicts Loom's driver while leaving the relay and ACP child alive, which is
-    // the production failure shape this regression covers.
+    // evicts Loom's driver while leaving the relay and ACP child alive — the
+    // production failure this test reproduces.
     let _replacement = backend::subscribe_relay(&session.term_session, 0)
         .await
         .expect("replacement relay subscriber connects");

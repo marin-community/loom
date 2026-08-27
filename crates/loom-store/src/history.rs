@@ -4,8 +4,8 @@
 //! providers keep native JSONL outside Loom, so their existing Iris normalizer
 //! is read on demand (with `chatlog`'s file-fingerprint cache) and the archived
 //! Iris capture remains the durable fallback. This module flattens either source
-//! into one honest record vocabulary without manufacturing data a provider did
-//! not supply.
+//! into one record vocabulary without manufacturing data a provider did not
+//! supply.
 
 use std::collections::HashSet;
 

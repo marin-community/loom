@@ -15,8 +15,8 @@
 //! `sessions.chat.stream`) remain the documented one-stream-per-connection API;
 //! this is the browser's connection-thrifty path over the same feeds.
 //!
-//! Authorization is deliberately *not* a new policy surface. `events.stream` is
-//! a container: reaching it grants nothing, and each topic is authorized against
+//! This adds no enforcement path of its own. `events.stream` is a container:
+//! reaching it grants nothing, and each topic is authorized against
 //! the *declaration* of the single-topic operation it stands in for — the same
 //! actor policy, grants, and `Scoped` resource check that operation gets when
 //! called directly. So a credential reaches exactly the topics it could already
@@ -61,7 +61,7 @@ const KEEPALIVE_KEY: &str = "__keepalive";
 
 /// One frame on the multiplexed stream. `event` is the event name the
 /// single-stream route would have used, so the client's per-topic handlers are
-/// unchanged from the un-multiplexed shape.
+/// unchanged from the un-multiplexed stream.
 #[derive(Debug, Serialize)]
 struct Frame<'a> {
     topic: &'a str,

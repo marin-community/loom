@@ -271,11 +271,10 @@ pub(super) async fn create_permission_request_operation(
     .await?;
 
     // An `owner/*` entry on the launch policy is a standing human decision for
-    // that owner, so a matching request is applied now instead of parking the
-    // session on a human who may not be at a terminal. The App installation is
-    // still validated, and the grant is still recorded and revocable. If the
-    // App cannot actually grant it, fall through to the human path — a person
-    // can install the App and then approve.
+    // that owner, so a matching request is granted immediately rather than
+    // waiting on a human. The GitHub App installation is still validated, and
+    // the grant is still recorded and revocable. If the App cannot grant it,
+    // fall through to human approval — installing the App later unblocks it.
     let patterns = policy_repository_patterns(&session)
         .map_err(|error| AppError::internal("could not resolve GitHub access", error))?;
     if let Some(pattern) = patterns

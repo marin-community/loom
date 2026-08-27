@@ -1,10 +1,9 @@
 //! Text rendering for session operations.
 //!
-//! The three projections of `BranchView` below are `pub` because they are the
-//! session's status vocabulary, not private formatting: `loom summary` and the
-//! delegated-sub-tree line in `loom issues` report the same level and message
-//! this renderer does, and a second copy of "absence means `ok`" is exactly the
-//! drift this module exists to prevent.
+//! The functions below are `pub` because `loom summary` and the
+//! delegated-sub-tree line in `loom issues` report the same attention level and
+//! status message this renderer does; a second copy of "absence means `ok`"
+//! would drift from this one.
 
 use weaver_core::tags;
 
@@ -76,19 +75,18 @@ impl Render for sessions::status::get::Op {
 }
 
 impl Render for sessions::status::set::Op {
-    // The session's status as it now stands, not the arguments that were sent:
-    // `--tag blocked` with no message keeps the previous message, and reporting
-    // the response is how the caller sees that.
+    // The status as it now stands, not the arguments sent: `--tag blocked` with
+    // no message keeps the previous message.
     fn text(output: &BranchView, _: &NoView) -> String {
         format!("status: {}", status_line(output))
     }
 }
 
 impl Render for sessions::history::list::Op {
-    /// One line per record, oldest first — the reverse of the wire order, which
-    /// is newest-first so a paging client can stop early. A terminal reads a log
-    /// downward, and `older_cursor` is echoed last because that is the argument
-    /// for the next page.
+    /// One line per record, oldest first — the reverse of the response order,
+    /// which is newest-first so a paging client can stop early. A terminal reads
+    /// a log downward, and `older_cursor` is echoed last because that is the
+    /// argument for the next page.
     fn text(output: &HistoryPageView, _: &NoView) -> String {
         let mut lines: Vec<String> = output
             .records

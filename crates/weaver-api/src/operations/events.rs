@@ -1,10 +1,10 @@
 //! The multiplexed event stream.
 //!
-//! One bundle, one operation: the single SSE connection a browser tab holds
-//! open instead of spending one of its ~6 per-origin sockets per panel. It is
-//! registered like everything else — the only thing `io = Stream` changes is
-//! that the response is an event stream, so a custom handler serves it rather
-//! than the generic JSON dispatcher.
+//! One bundle, one operation: a browser tab holds a single SSE connection
+//! open, instead of one socket per panel against the browser's ~6-per-origin
+//! limit. It registers like any other operation; `io = Stream` only swaps
+//! the generic JSON dispatcher for a custom handler that streams the
+//! response.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -24,8 +24,8 @@ pub mod stream {
         /// Comma-separated topic list: `layout`, `logs`, `session:<key>`,
         /// `chat:<key>`. Empty parks the connection on keep-alive.
         //
-        // `serde(default)` because a stream's operands arrive in the query string,
-        // which is extracted before the dispatcher's default-filling step runs.
+        // `serde(default)`: a stream's operands arrive in the query string,
+        // extracted before the dispatcher's default-filling step runs.
         #[serde(default)]
         #[operand(default = String::new())]
         pub topics: String,

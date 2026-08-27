@@ -125,7 +125,7 @@ pub mod register {
     use super::prelude::*;
 
     /// Register a repo in the managed store — add it to the clone allowlist. The
-    /// clone itself is lazy (it happens on first use); this just adds an entry.
+    /// clone itself is lazy (it happens on first use); this adds an entry.
     #[operation(id = "repos.register", actor = User, scope = Global, risk = Write,
                 cli = "repos register")]
     pub struct Input {

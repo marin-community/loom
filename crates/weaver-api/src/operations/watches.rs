@@ -1,6 +1,6 @@
 //! Watches — periodic / triggered watch programs over the fleet.
 //!
-//! The operator + authoring surface over `weaver_core::watch`: register a
+//! Operator and authoring operations over `weaver_core::watch`: register a
 //! watch, arm/disarm it, fire a round on demand, and inspect its round
 //! history.
 
@@ -149,7 +149,7 @@ pub mod runs {
 
     pub type Output = Vec<WatchRunView>;
 
-    /// CLI-only flags that never cross the wire: the whole history is fetched
+    /// CLI-only flags that never leave the client: the whole history is fetched
     /// either way, this only chooses how much of each round gets printed.
     #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {

@@ -37,11 +37,11 @@ and the rule for placing a new module.
 
 | Path | What's in it |
 |---|---|
-| `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. It is not a command or product surface. |
+| `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. No commands and no routes of its own — the loom crates link it as a library. |
 | `crates/weaver-api/` | legacy-named typed Loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver); it is the cross-process API seam. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/loom/src/cli/` | everything behind the `loom` command line: `clap_bind.rs` (the whole of Loom's clap knowledge, driven by an operation's operand list), `dispatch.rs` (invoke a declared operation and render it), `host/` (operator commands that run before there is a server), `commands/` (operator commands that talk to one), `agent/` (what an agent runs inside a session) |
-| `crates/loom/src/web/` | axum routes, request/response types, SSE — **the API surface** (incl. the auth middleware + login/token/user handlers) |
+| `crates/loom/src/web/` | axum routes, request/response types, SSE — **the HTTP API** (incl. the auth middleware + login/token/user handlers) |
 | `crates/loom-ctx/` | leaf utilities and `Ctx` (the storage handle, event bus and server address every layer above threads through). No loom dependency of its own; knows nothing about sessions |
 | `crates/loom-store/` | durable records and storage operations: sessions, chat, channels, layout, runs, history, and the profile record |
 | `crates/loom-agent/` | agent mechanisms: ACP, builtin/custom runtimes, and trusted MCP adapters |
@@ -157,8 +157,8 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
   - Loom tables (`crates/loom-store/src/db.rs`): `sessions` (`origin` — the channel
     it was created through: `user`/`agent`/`github`/`slack`/`watch`/`actions`/
     `ops`, stamped server-side at create; `class` — `interactive`/`automation`,
-    retained as machine provenance and for policy rather than as a separate
-    fleet surface. A
+    retained as machine provenance and for policy, not as a separate
+    view over the fleet. A
     request may set `class` explicitly; otherwise `watch`/`actions`/`ops`
     origins default to `automation` while `github`/`slack` stay `interactive` —
     a person asked for those sessions and expects to find them on the board;
@@ -210,7 +210,7 @@ than deleting issues. The in-worktree CLI reads its claims plus a bounded
 unclaimed backlog; the Loom board reads the repository-wide set.
 
 Visible sessions have one shared Spaces → Groups → Sessions placement.
-Attention, All, and History are projections over it. Successful automation is
+Attention, All, and History are views over it. Successful automation is
 placed as an ordinary session in Ops; an unmatched provisioning or failed run
 is projected as an Intervention in Attention/Ops without inventing a browser-
 local session. Hidden warm infrastructure has no placement.
@@ -221,7 +221,7 @@ sessions inherit their parent's placement.
 
 The schema has two owners even though both currently share one SQLite file:
 
-- `weaver-core` owns the durable work ledger (`branches`, issues, tags,
+- `weaver-core` owns the durable domain tables (`branches`, issues, tags,
   events, artifacts, discussions, watches) and `schema_migrations`. Its
   original baseline also physically creates `settings`; operator config is a
   loom concern, but moving that table is still future boundary work.
@@ -244,14 +244,14 @@ decoding uses `FromRow`, and new conflict clauses should use portable
 SQLite introspection, and runtime queries use SQLite placeholders. These
 changes make a future backend explicit; they do not claim PostgreSQL support.
 
-The first useful shared-PostgreSQL move is the durable ledger, not host-local
-sessions. Its main data-model gate is a logical repository identity: today
-ledger rows key repos by absolute checkout paths, so two hosts would otherwise
-create two unrelated histories for the same repository. After that change —
-and after removing the FK/join and relocating `settings` noted above — a
-PostgreSQL implementation of the database seam and a real PostgreSQL CI lane
-can move the ledger while each runtime host keeps its sessions and chat in
-local SQLite.
+The first useful shared-PostgreSQL move is the durable domain tables, not
+host-local sessions. Its main data-model gate is a logical repository
+identity: today domain rows key repos by absolute checkout paths, so two
+hosts would otherwise create two unrelated histories for the same repository.
+After that change — and after removing the FK/join and relocating `settings`
+noted above — a PostgreSQL implementation of the database seam and a real
+PostgreSQL CI lane can move those tables while each runtime host keeps its
+sessions and chat in local SQLite.
 - **`server.json`** in `$WEAVER_HOME`: pid + bound addr, written when `loom`
   comes up. The `loom` CLI uses it to find the daemon when `WEAVER_API` is
   unset.
@@ -280,7 +280,7 @@ local SQLite.
 ## REST API
 
 Routes live under `/api`; the Vue SPA, CLI, and MCP adapters are clients of the
-same surface. The rule is one line:
+same HTTP API. The rule is one line:
 
 > Anything that reaches the API is a registered operation. The only axis that
 > varies is response encoding.
@@ -288,8 +288,8 @@ same surface. The rule is one line:
 ### The operation registry
 
 [operations.md](operations.md) walks the whole flow with diagrams: what the
-macro emits, how each of the three surfaces is assembled from it, and the
-invariants that keep them in step. This section is the summary.
+macro emits, how each of the HTTP API, the CLI, and MCP is assembled from it,
+and the invariants that keep them in step. This section is the summary.
 
 An operation is declared exactly once, in
 [`crates/weaver-api/src/operations/`](../crates/weaver-api/src/operations/) —
@@ -320,7 +320,7 @@ the declared scope and the enforced one cannot drift.
 
 Everything else is derived from that:
 
-| projection | derived how |
+| derived artifact | derived how |
 |---|---|
 | REST route | `POST /api/sessions/shells/delete` — the id with dots as slashes. Not declared; computed. |
 | JSON Schema | `schemars` over `Input`, minus `#[operand(context)]` fields; `Output` answers for the response |
@@ -342,9 +342,8 @@ nothing. An explicit value still wins, and still faces the scope check.
 ### Presentation comes off the declaration too
 
 `Render` is how an operation's result becomes text. The default is the
-operation's own JSON, which is honest and complete for the long tail of
-administrative commands, so a new operation has a working CLI the moment it is
-declared. Bundles a human reads all day say `render = custom` and write an impl
+operation's own JSON, which is complete for the long tail of administrative
+commands, so a new operation has a working CLI the moment it is declared. Bundles a human reads all day say `render = custom` and write an impl
 in [`crates/weaver-api/src/render/`](../crates/weaver-api/src/render/) — 50 of
 them do. The CLI and MCP both call it, so one operation prints one way on both.
 
@@ -355,10 +354,10 @@ hand-written because the text they print needs reads the operation does not
 return.
 
 `view = View` names a struct of **presentation flags** — six operations have
-one. They never cross the wire; they choose what is printed, which is why they
-live beside the operation rather than in its `Input`. `loom issues list --mine`
-is a `View` field, `--all` is an `Input` field, and the difference is whether
-the server needs to know.
+one. They never appear in the request body; they choose what is printed, so
+they live beside the operation rather than in its `Input`. `loom issues list
+--mine` is a `View` field, `--all` is an `Input` field, and the difference is
+whether the server needs to know.
 
 ### Response encoding is the only variable
 
@@ -395,14 +394,14 @@ written beside it:
   into a container and streams back whatever comes out;
 * unauthenticated infrastructure (`/health`, `/metrics`, `/ready`), the
   HMAC-authenticated GitHub webhook, and the browser OAuth redirects;
-* the three `io = Session` operations, which *are* registered and appear in the
-  surface — they are mounted beside the auth routes only because their response
+* the three `io = Session` operations, which *are* registered operations —
+  they are mounted beside the auth routes only because their response
   must carry a `Set-Cookie`;
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
-That is the entire hand-mounted surface, and it is the whole of what `.route(`
-appears for. An endpoint carrying a JSON contract and a Loom principal is an
+That is the entire hand-mounted route list, and it is the whole of what
+`.route(` appears for. An endpoint carrying a JSON contract and a Loom principal is an
 `#[operation]`; its route is derived from its id and mounted by the dispatcher,
 so writing one here is visible in review as the exception it is.
 
@@ -438,13 +437,13 @@ A channel gets its own `OperationScope` rather than riding on `Branch` because
 a channel is reachable from more than one branch — a session subscribes across
 its tree. `scope = Branch` would compare `branch`, a context operand always
 naming the caller's own, which every session-credentialed request satisfies:
-any channel id would pass. Declaring `scope = Channel` is what makes the check
+any channel id would pass. Declaring `scope = Channel` forces the check to
 run, so a new channel operation cannot forget it.
 
 One capability is narrower now: an automation credential reaches no raw path,
 only `actor = Internal` operations — `runs.create` alone. Nothing used its old
-ability to `GET /sessions/{id}` for sessions it had created, which is what made
-the narrowing safe; `Internal` is what an automation credential is for.
+ability to `GET /sessions/{id}` for sessions it had created, so the narrowing
+was safe; automation credentials are scoped to `Internal` operations.
 
 Review drafts are REST-private and emit no branch-wide event until submission;
 other tabs refresh the creator's draft when they regain focus. `ReviewDto`
@@ -540,8 +539,8 @@ Builtin ACP launches have one additional admission check because provider
 account entitlements cannot be inferred from Loom's static agent metadata.
 After resolving the repository/profile environment but before creating a
 worktree or session row, Loom opens a disposable, prompt-free ACP session and
-applies the selected model, effort, and mode through the adapter's live config
-surface. An unavailable selector is returned as launch validation; the
+applies the selected model, effort, and mode through the adapter's live
+configuration calls. An unavailable selector is returned as launch validation; the
 transient relay is always removed and receives no MCP servers or session token.
 Operator-defined adapters retain the recoverable failed-session path because
 their launch commands and validation semantics are operator-owned.
@@ -573,7 +572,7 @@ arbitrary upstream or another session's worktree. The proxy preserves
 Host/Origin for code-server's WebSocket checks. `sessions.ide_info` is the availability
 probe; a development install without code-server remains usable. Archive and
 remove stop the editor with the session. The UI exposes it under
-Details → Advanced, not as the primary file or work surface.
+Details → Advanced, not as the primary file browser or editor.
 
 ## Runtime conventions
 
@@ -581,7 +580,7 @@ Details → Advanced, not as the primary file or work surface.
   first. Routine operations declare arguments and authority beside their typed
   implementation; the registry derives Axum routes and discovery, while CLI and
   MCP call those routes through the REST client. Custom adapters remain for the
-  minority of transport-specific shapes. Don't put business logic in
+  minority of transport-specific behavior. Don't put business logic in
   the command line (`crates/loom/src/cli/`), MCP dispatch, or the Vue layer.
 - **Errors:** the server returns `AppError` (status + message + optional
   `details` map of per-field reasons); the `loom` CLI uses `anyhow` and prints
@@ -600,7 +599,7 @@ Details → Advanced, not as the primary file or work surface.
 - **No tracking-branch state in the server:** loom can be killed and restarted
   at any time. Terminal *and* relay supervisors and worktrees survive (the
   supervisor is a detached process, independent of `loom server run`); "orphaned"
-  is a first-class status, recovered via `loom sessions adopt` (or the Adopt button
+  is an ordinary status, recovered via `loom sessions adopt` (or the Adopt button
   in the UI). On startup and periodically afterward, the active loom generation
   re-attaches every live-relay ACP session missing its in-process driver so its
   journal keeps flowing; a `loom.json` ownership fence prevents an older draining
@@ -772,7 +771,7 @@ lives outside the worktree — Claude Code under `~/.claude/projects/<munged-cwd
 Codex under `~/.codex/sessions/` — so it survives the worktree removal; capture
 locates it and normalizes it through `weaver_core::transcript`. An `acp` session
 has no external JSONL: its transcript **is** loom's own chat journal, mapped to
-the same iris shape (`chatlog::journal_to_log`). Either way capture produces the
+the same iris format (`chatlog::journal_to_log`). Either way capture produces the
 same pipeline output (raw → **iris format** → a rendered markdown log) and writes
 `chat.json` (iris) + `chat.md` under
 `<session.log_dir>/<branch>/` (`session.log_dir` defaults to
@@ -912,8 +911,8 @@ controls keep reassociation secondary. The PR editor can pin an explicit number
 through `sessions.github.set` (`POST /api/sessions/github/set`) or return to
 live-branch discovery through `sessions.github.clear`
 (`POST /api/sessions/github/clear`); the issue editor patches the GitHub link
-on the session's weaver tracking issue, which remains the source of truth for
-that association.
+on the session's weaver tracking issue, which remains the only place that
+association is written.
 
 **Archive on merge.** When a poll finds a branch's PR has merged and
 `github.archive_on_merge` is on (the default), loom archives the session
@@ -960,8 +959,8 @@ while gating who may drive the fleet. The core (crypto, the tables, the
 GitHub OAuth calls) lives in `crate::auth`, deliberately `axum`-free; the HTTP
 glue (the middleware, cookie handling, route handlers) lives in `crate::web`.
 
-Every `/api` route except the public health surface (`/api/health`,
-`/api/health/live`, `/api/health/ready`, `/api/ready`), the public login surface
+Every `/api` route except the public health routes (`/api/health`,
+`/api/health/live`, `/api/health/ready`, `/api/ready`), the public login routes
 (`/api/auth/me`, `/api/auth/login`, `/api/auth/logout`, `/api/auth/github/*`),
 the OIDC-authenticated `/api/auth/federate`, and the HMAC-authenticated GitHub
 webhook passes through the `require_auth` middleware. The root `/metrics`
@@ -1107,7 +1106,7 @@ enabled, validated custom definitions and pins the exact result to that profile
 revision. Launch copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
-descriptors whose subprocess tool surfaces are filtered to the stamped rules.
+descriptors whose exposed tools are filtered to the stamped rules.
 Built-in adapters include `loom_context`, `loom_channel`, `loom_artifact`, and
 `loom_session`, alongside the specialized history, messaging, and
 fixed-repository GitHub adapters. Resource tools return concise text plus
@@ -1117,7 +1116,7 @@ descriptions, input schemas, and invocation target from `OperationSpec`;
 genuinely nested or special behavior remains an explicit custom adapter. Builtin
 capability digest goldens ensure this declaration migration cannot invalidate a
 pinned profile accidentally.
-Small remote projections map session defaults when needed and add the
+Small remote adapters map session defaults when needed and add the
 established text presentation. The shared descriptor-driven dispatcher retains
 runtime allow-list gating and object-argument checks; authorization and domain
 validation remain authoritative at the REST boundary.

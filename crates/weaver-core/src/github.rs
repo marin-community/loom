@@ -4,7 +4,7 @@
 //! table and served under `BranchView::github` — a plain serializable row. The
 //! polling that *produces* it (shelling out to the `gh` CLI) lives in the loom
 //! orchestrator; this is only the model and its serialization, shared by the
-//! daemon and the API surface.
+//! daemon and the HTTP API.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

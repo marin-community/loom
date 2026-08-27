@@ -12,7 +12,7 @@ final boundary.
   and schemas, and an adapter launch descriptor.
 - **A profile selects and pins policy.** `mcp_access` is `none`, `all`, or an
   explicit group list. Saving the profile resolves enabled registry content and
-  pins the exact identities, digests, custom revisions, and tool surface to that
+  pins the exact identities, digests, custom revisions, and tool schemas to that
   profile revision.
 - **A profile owns deployment instructions.** Its optional multiline
   `instructions` are appended to the first prompt for every origin selecting
@@ -34,8 +34,8 @@ name Loom integrations.
 
 Builtins are trusted code shipped with Loom. Their content digest covers the
 adapter identity, capability metadata, ordered tools, and advertised schemas.
-Builtins provide resource-shaped context, channel, artifact, and session
-families, plus compatible fixed-repository GitHub, fixed-thread messaging, and
+Builtins provide resource families for context, channel, artifact, and session,
+plus compatible fixed-repository GitHub, fixed-thread messaging, and
 self-history adapters. They call Loom's typed REST client and return
 machine-readable `structuredContent`; service credentials and provider routing
 remain in the server.
@@ -112,7 +112,7 @@ short-lived repository-scoped installation token internally.
 See [Restricted sessions](restricted-sessions.md) for automation identity,
 idempotency, and deployment boundaries.
 
-## Operator surface
+## Operator commands
 
 ```sh
 loom mcps get

@@ -15,7 +15,7 @@ fn trigger_summary(trigger: &Value) -> String {
     if let Some(every) = trigger.get("every").and_then(Value::as_str) {
         return format!("every {every}");
     }
-    // `on` is the shape every reactive watch is stored in — a list of event
+    // `on` is how every reactive watch's trigger is stored — a list of event
     // names, each optionally `name=level`.
     if let Some(events) = trigger.get("on").and_then(Value::as_array) {
         let names: Vec<&str> = events.iter().filter_map(Value::as_str).collect();

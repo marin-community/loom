@@ -31,7 +31,7 @@ use super::{ApiResult, AppError, AppState};
 // Three credentials resolve to one `auth::Principal`: an `Authorization: Bearer`
 // API token, a login session cookie, or a trusted-loopback request. The
 // `require_auth` middleware enforces this on every route except the public login
-// surface (`/auth/me`, `/auth/login`, `/auth/logout`, `/auth/github/*`), the
+// routes (`/auth/me`, `/auth/login`, `/auth/logout`, `/auth/github/*`), the
 // cryptographically authenticated federation/webhook routes, and
 // health/readiness probes. The root `/metrics` route is outside this nested API
 // middleware entirely. The crypto and storage live in `crate::auth`; this is
@@ -114,8 +114,8 @@ pub(super) async fn grant_allows(
     }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
     // The registry describing itself. Readable by anything holding a
-    // credential: an agent discovers the operation surface through it, and it
-    // reports only what `/api/operations` would report to any caller.
+    // credential: an agent discovers which operations exist through it, and
+    // it reports only what `/api/operations` would report to any caller.
     let discovery = *method == axum::http::Method::GET
         && (matches!(path, "/meta" | "/operations" | "/openapi.json")
             || path.starts_with("/operations/"));
@@ -141,8 +141,8 @@ pub(super) async fn grant_allows(
 /// The session id an IDE-proxy path addresses, if it is one.
 ///
 /// [`super::is_ide_proxy_path`] answers the same question without the id, and
-/// this shares its shape deliberately: a path that one accepts and the other
-/// parses differently would be a hole.
+/// this deliberately parses the same paths: one accepting a path the other
+/// rejects (or parses differently) would be a hole.
 fn ide_proxy_session(path: &str) -> Option<&str> {
     let path = path.strip_prefix("/api").unwrap_or(path);
     let rest = path.strip_prefix("/sessions/")?;
@@ -698,7 +698,7 @@ async fn list_federations_op(
 /// fields below. `crate::automation::federation_add` upserts on `name` and
 /// requires it to pass `crate::profile::validate_name` (starts with a letter;
 /// then letters, digits, `-`, `_`; at most 64 bytes), so the chosen identity
-/// field is slugified into that shape before use.
+/// field is slugified into that format before use.
 fn derive_federation_name(input: &federations::create::Input) -> String {
     let seed = match input.provider.trim().to_ascii_lowercase().as_str() {
         "google" => input

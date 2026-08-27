@@ -1,8 +1,9 @@
 //! Loom's operation registry.
 //!
 //! Every operation that reaches the Loom API is declared here exactly once, and
-//! REST, the CLI, MCP, and the SPA are projections of those declarations rather
-//! than parallel catalogues. The rule is short enough to state in one line:
+//! REST, the CLI, MCP, and the SPA are generated from those declarations rather
+//! than maintained as parallel catalogues. The rule is short enough to state in
+//! one line:
 //!
 //! > Anything that reaches the API is registered. The only axis that varies is
 //! > response encoding.
@@ -214,8 +215,7 @@ pub fn all_session_capabilities() -> Vec<String> {
 
 /// Enforce the registry's structural invariants.
 ///
-/// Runs at server startup as well as in tests. Validates that operations are
-/// unique, consistent, and properly configured.
+/// Runs at server startup as well as in tests.
 pub fn validate_operation_registry() -> Result<(), String> {
     let mut bundle_names = std::collections::BTreeSet::new();
     let mut ids = std::collections::BTreeSet::new();
@@ -260,8 +260,7 @@ fn check_operation(operation: &OperationSpec) -> Result<(), String> {
     let fail = |why: String| Err(format!("operation {}: {why}", operation.id));
 
     for grant in operation.grants {
-        // One capability vocabulary. The design this replaces carried two
-        // (`mcp/*@v1` and `loom/*@v1`) bridged by a hand-written match.
+        // One capability vocabulary.
         if !grant.starts_with("loom/") || !grant.contains('@') {
             return fail(format!("grant `{grant}` is not loom/<bundle>/<verb>@vN"));
         }
@@ -326,7 +325,7 @@ fn check_operation(operation: &OperationSpec) -> Result<(), String> {
     Ok(())
 }
 
-// -- OpenAPI projection ------------------------------------------------------
+// -- OpenAPI document ---------------------------------------------------------
 
 /// Where a hoisted schema lives in the document.
 const COMPONENTS: &str = "#/components/schemas/";
@@ -426,8 +425,8 @@ fn shared_schemas() -> (serde_json::Map<String, Value>, SchemaNames) {
                 }
             }
             // A response is one named type more often than not; hoisting the
-            // root too is what stops `SessionView` appearing inline a dozen
-            // times beside the copy already under `$defs`.
+            // root too keeps `SessionView` from appearing inline a dozen times
+            // beside the copy already under `$defs`.
             if let Some(title) = schema.get("title").and_then(Value::as_str) {
                 if is_shared_name(title) {
                     claims
@@ -556,7 +555,6 @@ fn require_every_property(schema: &mut Value) {
 /// `style: form` with `explode: true` over an object schema is OpenAPI's
 /// spelling of `?name=value&other=value`, which is how the byte-encoded
 /// operations — streams, websockets, downloads, uploads — carry their operands.
-/// Their operand list used to be missing from the document entirely.
 fn query_parameters(schema: Value) -> Value {
     json!([{
         "name": "operands",
@@ -571,10 +569,7 @@ fn query_parameters(schema: Value) -> Value {
 /// Render the registry as an OpenAPI 3.1 document.
 ///
 /// Routes are unique by construction, so this is a straight map over the
-/// registry. The generator it replaces had to merge colliding `path` + `method`
-/// pairs into an `x-loom-operation-ids` array — a symptom of descriptors that
-/// declared their own routes — and it emitted no request schema at all, because
-/// `ArgumentSpec` could not describe one.
+/// registry.
 pub fn openapi_document(version: &str) -> Value {
     let (mut schemas, names) = shared_schemas();
     // A schema only a response mentions describes what the server writes, where

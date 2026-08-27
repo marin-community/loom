@@ -302,8 +302,8 @@ pub struct SlackWeb {
 }
 
 async fn slack_response(method: &str, response: reqwest::Response) -> Result<Value> {
-    // HTTP 429 carries a `Retry-After` (seconds); surface it so the caller
-    // can back off rather than hammer a rate-limited method.
+    // HTTP 429 carries a `Retry-After` (seconds); include it in the error
+    // so the caller can back off.
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let retry = response
             .headers()
@@ -439,7 +439,7 @@ impl SlackWeb {
     /// One page of a thread's replies, oldest-first (Slack returns them in
     /// order) — up to [`THREAD_FETCH_CAP`], which the caller trims to the
     /// context budget. Best-effort: a `not_in_channel` (the bot was never
-    /// invited) surfaces as the error so the caller can tell the user.
+    /// invited) comes back as the error, so the caller can tell the user.
     pub async fn conversations_replies(&self, channel: &str, ts: &str) -> Result<Vec<HistMsg>> {
         let limit = THREAD_FETCH_CAP.to_string();
         let v = self
@@ -650,7 +650,6 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
     let team_id = payload["team_id"].as_str().unwrap_or_default().to_string();
     let channel_id = event["channel"].as_str()?.to_string();
     let event_ts = event["ts"].as_str()?.to_string();
-    // Anchor on the enclosing thread if there is one, else the mention itself.
     let root_ts = event["thread_ts"].as_str().unwrap_or(&event_ts).to_string();
     let text = strip_leading_mention(event["text"].as_str().unwrap_or_default());
     let dedupe_id = payload["event_id"]
@@ -669,7 +668,7 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
 }
 
 /// Drop a leading `<@U…>` bot mention (and following whitespace) from an
-/// app_mention's text, leaving just the user's instruction.
+/// app_mention's text, leaving only the user's instruction.
 fn strip_leading_mention(text: &str) -> String {
     let t = text.trim_start();
     if let Some(rest) = t.strip_prefix('<') {
@@ -682,7 +681,7 @@ fn strip_leading_mention(text: &str) -> String {
     t.to_string()
 }
 
-/// Split an optional `owner/name:` repo prefix off the command text. Returns
+/// Split an optional `owner/name:` repo prefix off the message text. Returns
 /// `(repo, remaining_text)`. Only a bare `owner/name:` at the very start counts
 /// — anything else leaves the text untouched and the repo `None`.
 pub fn parse_repo_prefix(text: &str) -> (Option<String>, String) {
@@ -1025,9 +1024,9 @@ pub fn parse_wiring(value: &str) -> Option<(String, String, String)> {
 }
 
 /// Validate a caller-supplied [`weaver_api::SlackThreadRef`] into a trimmed
-/// `(channel, thread_ts)`. Slack ids are opaque, so this is a shape check, not a
-/// existence check: enough that a malformed or injected value cannot reach a Web
-/// API call or be stored as a route. Existence is Slack's answer to give, at
+/// `(channel, thread_ts)`. Slack ids are opaque, so this is a format check, not
+/// an existence check: enough that a malformed or injected value cannot reach a
+/// Web API call or be stored as a route. Existence is Slack's answer to give, at
 /// `chat.postMessage` time.
 pub fn parse_thread_ref(
     target: &weaver_api::SlackThreadRef,
@@ -1057,12 +1056,12 @@ pub fn parse_thread_ref(
     Ok((channel.to_string(), thread_ts.to_string()))
 }
 
-/// Spawn every status-card mirror a branch is wired for. The one seam the status
-/// write path (and artifact publish/delete) calls — GitHub self-gates on the
-/// `github` tag, Slack on the `slack` tag, so an unwired branch is a no-op for
-/// each. Fans a status change out to whichever origin thread(s) a session came
-/// from; adding a third surface is one line here, not another edit at five call
-/// sites.
+/// Spawn every status-card mirror a branch is wired for. Called from the
+/// status-write path and from artifact publish/delete; GitHub self-gates on
+/// the `github` tag, Slack on the `slack` tag, so an unwired branch is a no-op
+/// for each. Fans a status change out to every origin thread a session is
+/// wired to; adding a new origin means one more call here, not an edit at
+/// every status-write call site.
 pub fn spawn_status_mirrors(state: AppState, branch_id: String) {
     weaver_core::spawn_boxed(Box::pin(crate::github::sync_status_comment(
         state.clone(),
@@ -1080,7 +1079,7 @@ pub fn spawn_status_mirrors(state: AppState, branch_id: String) {
 /// tiny, so one global lock (rather than a per-wiring map) is ample.
 static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Act on an authorized-shaped trigger: dedupe, authorize, resolve the repo,
+/// Act on a parsed trigger: dedupe, authorize, resolve the repo,
 /// launch (or forward), wire the branch, and post the "On it" card. Runs in a
 /// detached task after the envelope is ACKed. `bot` is our own identity (its
 /// `team_id` is the authorization boundary).
@@ -1765,9 +1764,9 @@ pub async fn run(state: AppState) {
     }
 }
 
-/// How often a live socket re-reads `slack.enabled`. The switch documents
-/// itself as closing a live connection, so it cannot wait for Slack's own
-/// refresh (tens of minutes away) to take effect.
+/// How often a live socket re-reads `slack.enabled`. The kill switch closes a
+/// live connection, so it can't wait for Slack's own refresh (tens of minutes
+/// away) to take effect.
 const KILL_SWITCH_POLL: Duration = Duration::from_secs(10);
 
 /// One connection lifecycle: open the socket, then read/ACK/dispatch until Slack

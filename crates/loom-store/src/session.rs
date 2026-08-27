@@ -48,7 +48,9 @@ pub struct Session {
     pub managed_by: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `None` for engine-created sessions and rows that
-    /// predate the column. A tracking/UX field, never a security boundary.
+    /// predate the column. Stamped once at creation from the resolving
+    /// principal, never re-derived; a tracking/UX field, never a security
+    /// boundary.
     pub created_by: Option<String>,
     /// Historical input retained so the layout migration can map explicit
     /// `parked` rows into a normal `Later` group. API reads are derived from
@@ -161,9 +163,10 @@ const SESSION_COLUMNS: &str = "\
     parent_session_id, automation_run_id, mutation_revision";
 
 fn select_sessions(suffix: &str) -> String {
-    // Explicit columns, not `SELECT *`: sqlx caches the row shape at prepare
-    // time, and a rolling restart can widen the table via ALTER while an older
-    // generation's connection is still open, panicking on the wildcard.
+    // Explicit columns, not `SELECT *`: sqlx caches the query's column layout
+    // at prepare time, and a rolling restart can widen the table via ALTER
+    // while an older generation's connection is still open, panicking on the
+    // wildcard.
     format!("SELECT {SESSION_COLUMNS} FROM sessions {suffix}")
 }
 
@@ -215,8 +218,8 @@ pub struct NewSession {
 }
 
 /// Resolved profile/security metadata stamped with a new session. Keeping this
-/// separate preserves the compact `NewSession` fixture surface while real
-/// runtime launches use [`insert_with_policy`].
+/// separate keeps `NewSession` small for test fixtures; real runtime launches
+/// use [`insert_with_policy`].
 pub struct SessionLaunchPolicy {
     pub profile: String,
     pub launch_mode: String,
@@ -1074,7 +1077,7 @@ pub async fn set_current_mode(db: &Db, id: &str, mode_id: &str) -> Result<()> {
 
 /// Store the latest complete provider-owned ACP composer metadata. It remains
 /// available after the live task or loom process disappears, and is replaced
-/// atomically whenever the adapter advertises a refreshed control surface.
+/// atomically whenever the adapter advertises refreshed composer controls.
 pub async fn set_acp_metadata(db: &Db, id: &str, metadata: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO session_acp_metadata (session_id, metadata, updated_at)
@@ -1277,7 +1280,7 @@ pub async fn rollback_handoff_claim(
     Ok(Some(next_generation))
 }
 
-/// Record an honest provider-less error after the source cannot be restored.
+/// Record a provider-less error after the source cannot be restored.
 pub async fn fail_handoff_claim(
     db: &Db,
     id: &str,
@@ -1425,7 +1428,8 @@ pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
     };
 
     let result = sqlx::query(
-        // Clear to '' (never NULL) — see the `pending_prompt` field doc.
+        // Clear to '' rather than NULL: the column is `NOT NULL DEFAULT ''`,
+        // and a NULL here fails the next consume and wedges the queue.
         "UPDATE sessions SET pending_prompt = ''
          WHERE id = ? AND pending_prompt = ?",
     )
@@ -1537,8 +1541,9 @@ mod tests {
             .unwrap();
         replacement.close().await;
 
-        // Explicit projections keep the old binary's row shape stable; sqlx 0.8
-        // panics if `SELECT *` gets recompiled to expose the added column.
+        // Selecting explicit columns keeps the old binary's column layout
+        // stable; sqlx 0.8 panics if `SELECT *` gets recompiled to expose the
+        // added column.
         assert_eq!(
             branch_mod::get(&db, &branch.id)
                 .await

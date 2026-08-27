@@ -133,7 +133,7 @@ fn cmd_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
         }
         None => {
             // Agents key their transcript off the worktree root (where the agent
-            // was launched), so resolve that rather than the possibly-deeper cwd.
+            // was launched), not the possibly-deeper cwd.
             let cwd = std::env::current_dir()?;
             let root = worktree_root(&cwd);
             let (_, files) = transcript::locate(&root)
@@ -188,7 +188,7 @@ fn read_hook_source() -> Option<String> {
 /// The concise Loom re-orientation replayed after a context compaction: a short
 /// reminder that this is still a Loom session, the supplied catch-up summary,
 /// and the load-bearing rules an agent must not lose (status, no blocking TUI
-/// prompts, PR-not-merge, and typed result delivery). The command surface is
+/// prompts, PR-not-merge, and typed result delivery). Commands are
 /// discoverable through `loom help`.
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
@@ -206,8 +206,7 @@ async fn cmd_hook(event: String) -> Result<()> {
     // lifecycle hooks; with no branch to key on, the hook is intentionally inert.
     // Return quietly — writing nothing, printing nothing — rather than surfacing
     // the "not in a loom session" error `branch_key` would raise for a real
-    // command. This is the server-side half of the fix: even a nested agent that
-    // still fires the hook cannot stamp the parent branch's lifecycle.
+    // command.
     if std::env::var("WEAVER_BRANCH")
         .unwrap_or_default()
         .trim()

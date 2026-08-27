@@ -3,8 +3,7 @@
 //! A command lands here when it manages this machine rather than the fleet —
 //! it starts a process, prompts at a terminal, reads or writes a file under
 //! `~/.weaver`, or opens loom's sqlite database directly. The operation
-//! registry can never own one, which is why they sit apart from the commands
-//! it can.
+//! registry can never own one.
 
 pub mod config;
 pub mod contexts;

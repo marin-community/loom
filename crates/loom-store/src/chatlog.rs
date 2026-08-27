@@ -225,8 +225,8 @@ fn clip(s: &str, max: usize) -> &str {
 pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
     for (m, message) in log.messages.iter_mut().enumerate() {
         for (b, block) in message.blocks.iter_mut().enumerate() {
-            // The pointer names the operation and operands, reachable across all
-            // surfaces the reader might hold: the API, `loom`, or an MCP tool.
+            // The pointer names the operation and operands, reachable the same way
+            // from the HTTP API, the `loom` CLI, or an MCP tool.
             let full =
                 format!("sessions.conversation.block session={session_id} message={m} block={b}");
             match block {
@@ -260,8 +260,8 @@ pub fn elide_tool_payloads(log: &mut Log, session_id: &str) {
 }
 
 /// The session's conversation as an iris [`Log`](transcript::Log), for the
-/// dashboard viewer. For an ACP session the source of truth is loom's own chat
-/// journal, mapped to iris ([`journal_to_log`]) — served live so the existing
+/// dashboard viewer. For an ACP session this reads loom's own chat journal
+/// directly, mapped to iris ([`journal_to_log`]) — served live so the existing
 /// Conversation tab keeps working before the SPA rewires to `/chat`. For a
 /// terminal session, prefer the live transcript (always fresh), falling back to
 /// the captured `chat.json` for an archived session whose transcript files have

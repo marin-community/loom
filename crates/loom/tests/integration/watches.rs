@@ -1,11 +1,11 @@
-//! The Watch engine's **wiring**: the dispatcher's event→trigger matching,
-//! rounds landing marks and audit rows against the live server, and the
-//! guardrails (cooldown / no-overlap → `skipped`).
+//! The Watch engine: the dispatcher's event→trigger matching, rounds landing
+//! marks and audit rows against the live server, and the guardrails (cooldown
+//! / no-overlap → `skipped`).
 //!
 //! Test placement: a builtin program's *decision logic* is pytest-covered
-//! server-free (`python/weaver-loom/tests/`); these cases prove the plumbing —
-//! the script runs under the engine, reaches the fleet over REST, and its
-//! mutations land with attribution. Don't re-test program logic here.
+//! server-free (`python/weaver-loom/tests/`); these cases run the script
+//! under the engine, reaching the fleet over the HTTP API, with mutations
+//! landing attributed. Don't re-test program logic here.
 //!
 //! These cases drive the engine directly on the test server's isolated db: the
 //! harness pins `watch.enabled` off, so the daemon's own engine never races
@@ -341,8 +341,8 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
 }
 
 /// Point the built-in Claude ACP adapter setting at the scripted test adapter
-/// with a fixed response. Base64 keeps arbitrary judgement JSON out of the
-/// shell command's quoting surface.
+/// with a fixed response. Base64 keeps arbitrary judgement JSON out of
+/// shell quoting.
 fn fake_judge_agent(_name: &str, out: &str) -> EnvVarGuard {
     fake_judge_runtime("WEAVER_CODEX_ACP_CMD", out)
 }
@@ -381,11 +381,11 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// The status program's wiring proof: a stale-triggered round asks the judge
+/// The status program end to end: a stale-triggered round asks the judge
 /// for a set of tags and reconciles its own marks — a recommended tag lands on
 /// its own typed key, never the agent's `attention` axis, and a follow-up
 /// "nothing needed" verdict clears it. The program's decision logic is
-/// pytest-covered server-free; this proves the plumbing.
+/// pytest-covered server-free; this test runs the script against the live server.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_status_round_applies_typed_tags_and_reconciles() {
@@ -481,12 +481,13 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .unwrap();
 }
 
-/// The `resume` builtin's wiring proof: a session whose live screen shows the
+/// The `resume` builtin end to end: a session whose live screen shows the
 /// transient-error signature (`API Error: 529 Overloaded`) is detected, nudged
 /// to resume, and the round persists its backoff bookkeeping — the lookaside
 /// `state` tracks the session and a dynamic `wake_at` is armed for the
 /// recheck. The backoff math and capability branches are pytest-covered
-/// server-free; this proves the screen-scrape → nudge → state+wake plumbing.
+/// server-free; this test runs the screen-scrape → nudge → state+wake path
+/// against the live server.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_nudges_a_stalled_session_and_arms_backoff() {
@@ -611,7 +612,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     let watermark = events::max_id(&state.db).await.unwrap();
     watch::tick_timer(&state).await;
 
-    // The tick is a first-class, logged `cron` system event carrying our id.
+    // The tick is a logged `cron` system event carrying our id.
     let new_events = events::since(&state.db, watermark).await.unwrap();
     let cron = new_events
         .iter()
@@ -750,7 +751,7 @@ async fn cooldown_and_overlap_refire_are_refused() {
         .unwrap();
 }
 
-/// T8/T9: the operator REST surface end to end — create via `watches.create`,
+/// T8/T9: the operator HTTP API end to end — create via `watches.create`,
 /// read back via `watches.get`, enable via `watches.update`, fire a `dry_run`
 /// round via `watches.run` (the audit row comes back with an outcome), list
 /// the round history via `watches.runs`, then `watches.delete`. Plus the
@@ -975,7 +976,7 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
     }
 }
 
-/// The registry over REST: every builtin carries its defaults, script programs
+/// The registry over the HTTP API: every builtin carries its defaults, script programs
 /// carry their read-only source, and `validate_program` rejects an unknown
 /// builtin at create time (naming the registry) while accepting a known one.
 #[serial]
@@ -1078,7 +1079,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
 }
 
 /// The embedded builtin scripts end to end: each runs as a real `python3`
-/// subprocess against the live test server's REST API. `archive-merged` flags
+/// subprocess against the live test server's HTTP API. `archive-merged` flags
 /// the session whose stored PR snapshot is merged; `pr-label` flags the one
 /// with an open PR. This fixture grants the labeller only `observe`, so both
 /// rounds report their actions without mutating the fleet.
@@ -1211,9 +1212,9 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
 /// review-wait end to end: the embedded script runs as a real `python3`
 /// subprocess against the live server and *mutates* — it parks a session whose
 /// PR awaits an external review (`REVIEW_REQUIRED`) with the quiet
-/// `awaiting: review` mark, and un-parks it once the review lands. Proves the
-/// wiring (script → REST → tag, attributed) and the park/un-park reconcile that
-/// pytest covers in isolation.
+/// `awaiting: review` mark, and un-parks it once the review lands. Exercises
+/// the script → HTTP API → tag path, attributed, and the park/un-park
+/// reconcile that pytest covers in isolation.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
@@ -1701,7 +1702,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 
 /// T12: the engine reuses one warm session across rounds — asked twice to ensure
 /// a warm session for the same watch, it returns the same id and spawns no
-/// duplicate (the reuse that gives across-round memory).
+/// duplicate.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_warm_session_reuses_the_same_session() {
@@ -1748,12 +1749,12 @@ async fn ensure_warm_session_reuses_the_same_session() {
     }
 }
 
-/// The end-to-end subscription path: a watch created over REST has its trigger
-/// reconciled from the script's register-mode manifest; a `pr_merged` event
-/// normalizes to `pr.merged`, wakes the subscribed watch, and the round —
+/// The end-to-end subscription path: a watch created over the HTTP API has its
+/// trigger reconciled from the script's register-mode manifest; a `pr_merged`
+/// event normalizes to `pr.merged`, wakes the subscribed watch, and the round —
 /// handed the triggering session — surveys only that branch (not the whole
 /// fleet). The run row records the captured execution log (stdout, exit code,
-/// trigger event), which is the watch execution log the UI renders.
+/// trigger event) that the UI renders.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
@@ -1765,10 +1766,10 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     let state = engine_state(&ts).await;
     let (merged_id, merged_branch, _repo) = make_session(&ts, "merged work").await;
     // A second live session in the same repo: it must NOT be surveyed, proving
-    // the round scoped to the triggering branch instead of the whole fleet.
+    // the round scoped to the triggering branch, not the whole fleet.
     let (_other_id, _other_branch, _repo) = make_session(&ts, "other work").await;
 
-    // Create the watch over REST: the script declares `on: [pr.merged]`, and the
+    // Create the watch over the HTTP API: the script declares `on: [pr.merged]`, and the
     // register-mode reconcile stores it (the script — not the caller — picks the
     // event), with no explicit trigger in the request.
     let created = ts

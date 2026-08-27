@@ -2,7 +2,7 @@
 //! untyped `get`/`post`/`patch`/`delete` are kept for callers that pretty-print
 //! raw JSON (the `loom` CLI), and the typed methods over them each invoke one
 //! code-registered operation, serializing its `Input` and deserializing its
-//! `Output` — the surface the Python binding wraps.
+//! `Output` — the client API the Python binding wraps.
 
 use anyhow::{anyhow, bail, Result};
 use reqwest::Method;
@@ -414,8 +414,6 @@ impl Client {
     // -- API tokens -------------------------------------------------------
 }
 
-/// Parse the wire spelling of a review subject kind, which
-/// [`Client::list_session_reviews`] still takes as a plain string.
 #[cfg(test)]
 mod tests {
     use super::Client;

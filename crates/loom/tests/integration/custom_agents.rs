@@ -1,4 +1,4 @@
-//! Custom agents over HTTP: the `agents.custom.*` CRUD surface, how the
+//! Custom agents over HTTP: the `agents.custom.*` CRUD operations, how the
 //! definitions merge into `agents.list`, and launching a session with one.
 
 use std::path::Path;
@@ -29,8 +29,7 @@ async fn agents_list_merges_builtins_and_custom() {
     let claude = find(agents, "claude").expect("claude is builtin");
     assert_eq!(claude["builtin"], true);
     assert!(find(agents, "codex").is_some(), "codex is builtin");
-    // The old builtin "shell" agent is gone; the test fixture seeds it as a
-    // custom agent instead, so it shows up as non-builtin.
+    // The fixture seeds "shell" as a custom agent, so it shows up as non-builtin.
     let shell = find(agents, "shell").expect("fixture seeds a custom shell agent");
     assert_eq!(shell["builtin"], false);
     // The full custom definitions ride alongside the picker list.

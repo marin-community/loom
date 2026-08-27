@@ -295,7 +295,7 @@ pub mod wait {
 
     pub type Output = ChannelMessageView;
 
-    /// CLI-only flags that never cross the wire.
+    /// CLI-only flags that never reach the operation's JSON body.
     #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Seconds between polls while waiting.

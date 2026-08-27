@@ -665,7 +665,7 @@ pub(crate) fn attention_summary(ws: &SessionView) -> String {
 
 /// `loom sessions url` — print a session's dashboard URL, defaulting to the
 /// session we are running inside. The server resolves the URL (only it knows
-/// loom's public origin); this just prints it bare, so it composes into a
+/// loom's public origin); this prints it bare, so it composes into a
 /// `gh pr create --body "$(…)"` without any trimming.
 pub(crate) async fn cmd_session_url(key: Option<String>) -> Result<()> {
     let key = match key {
@@ -1348,11 +1348,11 @@ mod tests {
         }
     }
     /// Decoding the fixture through `SessionView` keeps it answerable to the
-    /// wire contract: a renamed field fails here instead of silently reading as
-    /// absent.
+    /// response schema: a renamed field fails here instead of silently reading
+    /// as absent.
     fn view(status: &str, attention: &str, description: &str) -> SessionView {
         // `ok` is the calm, tag-less state; any other level is the `attention`
-        // tag's value, mirroring the wire `branch.tags` shape.
+        // tag's value, mirroring `branch.tags` as the API returns it.
         let tags = if attention == "ok" {
             json!([])
         } else {

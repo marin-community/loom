@@ -2,7 +2,7 @@
 //! coding-agent conversation, plus its markdown renderer.
 //!
 //! Every agent (Claude Code, Codex, …) records its conversation in its own raw
-//! shape. The per-agent converters ([`super::claude`], [`super::codex`]) flatten
+//! format. The per-agent converters ([`super::claude`], [`super::codex`]) flatten
 //! those into this single [`Log`] — a list of [`Message`]s, each a role and an
 //! ordered list of [`Block`]s. Everything downstream (the markdown renderer
 //! here, anything that wants to read a captured log) speaks only iris, so it
@@ -93,7 +93,7 @@ impl Log {
     }
 
     /// Render this conversation as a markdown-like log (see module-level docs of
-    /// [`super`]). Delegates to [`render_markdown`].
+    /// [`super`]).
     pub fn render_markdown(&self) -> String {
         render_markdown(self)
     }
@@ -261,7 +261,7 @@ fn fence(out: &mut String, lang: &str, body: &str) {
 }
 
 /// The `HH:MM:SS` of an ISO-8601 timestamp (`2026-06-17T18:30:00.000Z`), or the
-/// whole string when it isn't in that shape.
+/// whole string when it isn't in that format.
 fn short_time(ts: &str) -> String {
     let bytes = ts.as_bytes();
     if bytes.len() >= 19 && bytes[10] == b'T' {

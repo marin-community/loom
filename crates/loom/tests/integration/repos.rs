@@ -2,9 +2,9 @@
 //! `{repo: "owner/name"}` and loom clones the repo into the managed store and
 //! forks the worktree from that clone — no `cwd`. It works whether the repo was
 //! registered up front (`repos.register`) or is being named for the first time,
-//! which is what lets `loom launch --repo owner/name` reach a repo this machine
-//! has never checked out. Plus the security gate that survives: traversal
-//! identifiers are rejected.
+//! so `loom launch --repo owner/name` can reach a repo this machine has never
+//! checked out. Plus the security gate that survives: traversal identifiers
+//! are rejected.
 //!
 //! The clone source is a *local bare repo* (named by a `file://` URL), so these
 //! tests never touch the network.
@@ -198,11 +198,11 @@ async fn launching_into_an_unregistered_repo_registers_and_clones_it() {
 /// Security: a traversal identifier is rejected with a 400 before any clone is
 /// attempted, on both the create and the register path.
 ///
-/// Note what is *not* asserted here: an unregistered repo. Naming a repo on an
+/// This does not assert an unregistered repo: naming a repo on an
 /// authenticated create is the grant that registers it (see the test above) — the
 /// `repos` allowlist gates the *unauthenticated* GitHub webhook, which resolves
 /// its own clone through `repo::resolve_clone` before it reaches the shared
-/// create path. That gate is proven in `repo::tests::resolve_clone_enforces_allowlist_then_clones`.
+/// create path.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_rejects_traversal_identifiers() {

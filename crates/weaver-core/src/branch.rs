@@ -188,7 +188,7 @@ const BRANCH_COLUMNS: &str =
      created_at, updated_at";
 
 fn select_branches(suffix: &str) -> String {
-    // Keep the projection stable across rolling upgrades. An older process can
+    // Keep the column list stable across rolling upgrades. An older process can
     // still be draining while a replacement adds a column; SQLite may recompile
     // `SELECT *` after sqlx captured the old row metadata and panic while
     // materializing the wider row.
@@ -253,7 +253,7 @@ pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
 /// Quote a caller's string so `LIKE` reads it literally.
 ///
 /// `_` matches any one character and `%` any run of them, so an unquoted key
-/// resolved by shape as well as by prefix: `a_c` matched the id `abc`.
+/// matched by wildcard as well as by prefix: `a_c` matched the id `abc`.
 fn like_prefix(key: &str) -> String {
     let mut quoted = String::with_capacity(key.len());
     for ch in key.chars() {
@@ -303,9 +303,9 @@ pub async fn upsert(db: &Db, repo_root: &str, branch: &str, base_branch: &str) -
 
 /// Write the branch's goal: append a `goal` artifact revision (the source of
 /// truth) authored by `author` (`"user"` | `"agent"`), then refresh the
-/// denormalized `branches.goal` cache. The funnel every goal *setter* goes
-/// through; code that writes the goal artifact directly instead refreshes the
-/// cache via [`sync_goal_cache`].
+/// denormalized `branches.goal` cache. Every goal setter should go through
+/// this function; code that writes the goal artifact directly instead
+/// refreshes the cache via [`sync_goal_cache`].
 pub async fn set_goal(db: &Db, id: &str, goal: &str, author: &str) -> Result<()> {
     let Some(branch) = get(db, id).await? else {
         return Ok(());

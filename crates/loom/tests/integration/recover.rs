@@ -1,6 +1,6 @@
 //! Recovering an archived session is the inverse of archiving: it rebuilds the
 //! worktree from the kept branch and resumes the agent, flipping the row back out
-//! of the terminal `archived` state and into the live fleet — the same shape as
+//! of the terminal `archived` state and into the live fleet — structured like
 //! adopting an orphaned session, but starting from a torn-down worktree.
 
 use std::path::Path;
@@ -469,9 +469,9 @@ async fn plant_abandoned_transition(ts: &TestServer, id: &str, transition: &str,
         .unwrap();
 }
 
-/// A person must always be able to archive a session. An abandoned marker used
-/// to refuse every archive and adopt until the server restarted, because only
-/// startup reconciled interrupted transitions.
+/// A person must always be able to archive a session, even one stuck behind an
+/// abandoned transition marker — recovering it must not require a server
+/// restart.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn archive_takes_over_a_transition_whose_owner_is_gone() {

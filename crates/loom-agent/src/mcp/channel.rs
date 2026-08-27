@@ -1,10 +1,10 @@
 //! Durable channel operations, served by the generic registry dispatcher.
 //!
 //! Every tool here is a registered `channels.*` operation: `tools/list` and
-//! `tools/call` are both read off [`exports`]. Argument shaping — resolving
-//! `channel == "self"`, bounding `read`'s scan window, running `wait`'s poll
-//! loop — belongs in the operation handler, not here: see
-//! `channels.messages.list` and `channels.wait` in
+//! `tools/call` are both read off [`exports`]. Resolving `channel == "self"`,
+//! bounding `read`'s scan window, and running `wait`'s poll loop belong in the
+//! operation handler, not here: see `channels.messages.list` and
+//! `channels.wait` in
 //! `crates/loom/src/web/channels.rs`.
 //!
 //! `list`/`get` responses include delivery bindings via `ChannelView::bindings`.
@@ -37,8 +37,7 @@ fn exports() -> &'static [Export] {
     })
 }
 
-// The names these sets carried before the `loom/` rename. Sessions pinned to
-// one still resolve it.
+// Old names for these sets; sessions pinned to one still resolve it.
 const SUPERSEDED: &[(&str, &str)] = &[
     ("mcp/channel/read@v1", "loom/channels/read@v1"),
     ("mcp/channel/write@v1", "loom/channels/write@v1"),
@@ -62,9 +61,8 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 /// Capability sets are derived from the registry: every `channels.*` operation
-/// whose MCP projection targets this server contributes its tool to the set
-/// named by its grant, plus the same sets under the names they were superseded
-/// away from.
+/// exported to this server contributes its tool to the set named by its
+/// grant, plus the same sets under the names they were superseded away from.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {

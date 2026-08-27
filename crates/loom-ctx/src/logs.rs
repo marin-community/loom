@@ -256,8 +256,7 @@ impl LogBuffer {
     }
 }
 
-/// The process-global log buffer, created on first access. Both the tracing layer
-/// and the HTTP handlers resolve the same instance through this.
+/// The process-global log buffer, created on first access.
 pub fn buffer() -> &'static Arc<LogBuffer> {
     static BUFFER: OnceLock<Arc<LogBuffer>> = OnceLock::new();
     BUFFER.get_or_init(|| Arc::new(LogBuffer::new()))

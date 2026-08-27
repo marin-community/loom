@@ -2,6 +2,9 @@
 //!
 //! Launch policy remains an immutable snapshot. These small overrides are the
 //! audited escape hatch for work that legitimately expands to another repo.
+//!
+//! Every operation here declares `actor = User`, enforced centrally — none of
+//! the handlers below re-check who is calling.
 
 use axum::http::StatusCode;
 use serde_json::json;
@@ -41,8 +44,8 @@ pub(super) fn policy_repository_patterns(
     Ok(crate::runtime::repository_patterns(&policy))
 }
 
-/// Validate that the GitHub App can actually grant write access to one
-/// repository. Nothing is stored until this succeeds.
+/// Validate that the GitHub App can grant write access to one repository.
+/// Nothing is stored until this succeeds.
 ///
 /// Only the new repository is minted, never the session's whole prospective
 /// set: tokens are brokered per repository, so a session may hold access
@@ -75,8 +78,7 @@ pub(super) async fn validate_github_write(st: &AppState, repository: &str) -> Ap
     Ok(())
 }
 
-/// `sessions.github.access.list`. The `actor = User` declaration on the
-/// operation already enforces the human-only restriction centrally.
+/// `sessions.github.access.list`.
 pub(super) async fn list_github_access_operation(
     context: OperationContext,
     input: session_operations::github::access::list::Input,
@@ -96,9 +98,7 @@ pub(super) async fn list_github_access_operation(
 }
 
 /// Shared body for `permissions.github.grant` and `permissions.github.revoke`:
-/// store the requested mode for one repository and audit the change. Which
-/// humans may reach this at all is `actor = User` on each declaration,
-/// enforced centrally — nothing here re-checks who the caller is.
+/// store the requested mode for one repository and audit the change.
 async fn set_github_access_and_record(
     st: &AppState,
     granted_by: &str,

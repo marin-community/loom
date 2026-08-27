@@ -1,4 +1,4 @@
-//! Session lifecycle over the REST API: create → list → recent-repos → delete,
+//! Session lifecycle over the HTTP API: create → list → recent-repos → delete,
 //! plus adoption of an externally-killed session and the no-goal create path.
 
 use std::os::unix::fs::PermissionsExt;
@@ -487,7 +487,7 @@ async fn settings_validate_agent_model_effort_against_registry() {
     );
 }
 
-/// The active fleet and archived history remain disjoint at the REST boundary:
+/// The active fleet and archived history remain disjoint at the HTTP API:
 /// the default (and therefore `loom session ls`) contains only actionable work,
 /// while inventory callers can opt into both with `?archived=true`. Search
 /// narrows the selected set over qualified Group / Task names and other fleet
@@ -853,8 +853,8 @@ async fn session_records_its_creating_principal() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    // Assert against the harness's actual resolved principal rather than a
-    // hardcoded name, so this proves attribution is read from the Principal.
+    // Assert against the harness's actual resolved principal, not a hardcoded
+    // name, so a coincidental match can't hide a broken read.
     let me = client.post("/api/auth/me", json!({})).await.unwrap();
     let who = me["username"].as_str().unwrap().to_string();
     assert!(!who.is_empty(), "the loopback caller resolves to a user");
@@ -1057,8 +1057,8 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
     let branch_id = ws["branch"]["id"].as_str().unwrap().to_string();
 
     // With no `auth.base_url`, the origin is derived from the request's Host —
-    // for a loopback CLI that is the server it just talked to. Honest, and right
-    // for a single-machine loom where the browser is on that same box.
+    // for a loopback CLI that is the server it just talked to — right for a
+    // single-machine loom where the browser is on that same box.
     let derived = client
         .post("/api/sessions/url", json!({ "session": id }))
         .await

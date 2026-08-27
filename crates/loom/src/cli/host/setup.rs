@@ -49,7 +49,7 @@ pub struct GithubAppOpts {
     /// How long to wait for the browser confirmation, in seconds.
     #[arg(long, default_value = "300")]
     timeout: u64,
-    /// Don't try to open a browser automatically — just print the confirmation
+    /// Don't try to open a browser automatically — print the confirmation
     /// page's URL.
     #[arg(long)]
     no_open: bool,
@@ -101,8 +101,8 @@ pub(crate) async fn cmd_setup_init() -> Result<()> {
         .context("opening loom's database")?;
 
     // Pre-fill each step's default from any existing config, so re-running the
-    // wizard updates in place instead of restarting from scratch. The operator
-    // login falls back to the seeded primary user when loom.toml has none yet.
+    // wizard updates in place. The operator login falls back to the seeded
+    // primary user when loom.toml has none yet.
     let existing_cfg = crate::loom_config::load(&config_path).ok();
     let prefill_owner = existing_cfg
         .as_ref()
@@ -359,7 +359,7 @@ pub(crate) async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
             ),
         },
         // Install / re-install / adjust repo access. The install page also
-        // surfaces any pending permission re-approval.
+        // shows any pending permission re-approval.
         1 => match &app.slug {
             Some(slug) => {
                 let url = crate::github_manifest::install_url(slug);
@@ -593,7 +593,6 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // live to the running daemon here, and to loom.toml (`LOOM_OWNER_GITHUB`)
     // below for a fresh DB. Their triggers on any repo the App is installed on
     // auto-register it — so an org install needs no separate owner allowlist.
-    // Add more people in Settings → People & security.
     if crate::auth::get_user(&db, owner_login).await?.is_none() {
         crate::auth::add_user(
             &db,

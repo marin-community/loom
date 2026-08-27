@@ -1,5 +1,6 @@
 //! A migrated-schema template, shared by every suite that boots a server on a
-//! throwaway `WEAVER_HOME`. Pulled in with `#[path]`, like `support/tapestry.rs`.
+//! throwaway `WEAVER_HOME`. Pulled in with `#[path]` because separate
+//! integration-test targets cannot share code any other way.
 //!
 //! `loom::db::connect` on an empty file replays the whole ordered migration set,
 //! each in its own transaction — ~250ms of dead wall-clock in front of every

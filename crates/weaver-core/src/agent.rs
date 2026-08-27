@@ -11,10 +11,10 @@ pub enum HookMode {
     /// (primer) plus the work-cycle hooks (`UserPromptSubmit`/`Notification`/
     /// `Stop`) that drive working/waiting/idle.
     Terminal,
-    /// Only `SessionStart` (primer + compaction re-orientation) — an ACP
+    /// Only `SessionStart` (primer + compaction re-orientation). An ACP
     /// session's turn boundaries come from the protocol itself, so loom drives
     /// status/idle from the ACP turn edges instead (see `loom::acp` /
-    /// `loom::monitor`) and the work-cycle hooks are dropped.
+    /// `loom::monitor`).
     Acp,
 }
 

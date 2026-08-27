@@ -130,7 +130,7 @@ pub async fn run_watch(cmd: WatchCmd) -> Result<()> {
 
 /// The starter program a `loom watch new` scaffolds: a small, runnable
 /// template against the `weaver_loom` API layer and the program contract the
-/// engine speaks — the same shape the builtin scripts implement
+/// engine speaks — the same contract the builtin scripts implement
 /// (`loom watch programs --source <name>` prints one as a fuller
 /// example). Plain `replace` rather than `format!`, so the template's literal
 /// braces (JSON, f-strings) stay readable.
@@ -280,7 +280,7 @@ pub(crate) async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 /// `loom watch programs` — the builtin program table, or one program's source.
 ///
 /// The table is `watches.programs`' own renderer. `--source` is the reason this
-/// is not simply a declared command: naming a program that does not exist has
+/// is not a declared command: naming a program that does not exist has
 /// to exit non-zero, and a `Render` has no way to say so.
 pub(crate) async fn cmd_watch_programs(source: Option<String>) -> Result<()> {
     let client = client::default()?;

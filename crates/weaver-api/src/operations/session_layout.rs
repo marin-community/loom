@@ -1,7 +1,7 @@
 //! The signed-in operator's shared session-dashboard layout: spaces, groups,
 //! and the placement of sessions within them.
 //!
-//! This is dashboard state, not a session credential's surface — every
+//! This is dashboard state, not something a session credential can reach — every
 //! mutation is keyed off the calling human's own username and every write may
 //! carry an `expected_revision` optimistic-concurrency guard, since more than
 //! one open dashboard tab can race to reorganize the same layout. Omitting the
@@ -31,9 +31,7 @@ pub mod defaults {
             pub selector_kind: SessionPlacementSelectorKind,
             #[operand(positional)]
             pub selector_value: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -68,9 +66,7 @@ pub mod defaults {
             /// The group matching sessions land in.
             #[operand(long = "to")]
             pub group_id: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -128,9 +124,7 @@ pub mod groups {
             pub space_id: String,
             #[operand(positional)]
             pub name: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -154,9 +148,7 @@ pub mod groups {
             /// unless the group is empty.
             #[operand(long = "to")]
             pub destination_group_id: Option<String>,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -204,9 +196,7 @@ pub mod groups {
             pub id: String,
             #[operand(positional)]
             pub name: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -233,9 +223,7 @@ pub mod r#move {
         /// to the end.
         #[operand(long = "before")]
         pub before_session_id: Option<String>,
-        /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. A stale revision is rejected; omitting it applies
-        /// the change to whatever is current.
+        /// Layout revision to guard against.
         #[operand(long = "revision")]
         pub expected_revision: Option<i64>,
     }
@@ -261,9 +249,7 @@ pub mod reorder {
         /// For a group, move it into this space; omitted keeps its current space.
         #[operand(long = "space")]
         pub destination_space_id: Option<String>,
-        /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. A stale revision is rejected; omitting it applies
-        /// the change to whatever is current.
+        /// Layout revision to guard against.
         #[operand(long = "revision")]
         pub expected_revision: Option<i64>,
     }
@@ -297,9 +283,7 @@ pub mod restore {
         /// A JSON array of `{"group_id":"…","session_ids":["…"]}` objects.
         #[operand(json)]
         pub groups: Vec<SessionGroupOrderReq>,
-        /// Optimistic-concurrency guard: the layout revision this call was
-        /// composed against. A stale revision is rejected; omitting it applies
-        /// the change to whatever is current.
+        /// Layout revision to guard against.
         #[operand(long = "revision")]
         pub expected_revision: Option<i64>,
     }
@@ -319,9 +303,7 @@ pub mod spaces {
         pub struct Input {
             #[operand(positional)]
             pub name: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -345,9 +327,7 @@ pub mod spaces {
             /// unless the space is empty.
             #[operand(long = "to")]
             pub destination_group_id: Option<String>,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }
@@ -367,9 +347,7 @@ pub mod spaces {
             pub id: String,
             #[operand(positional)]
             pub name: String,
-            /// Optimistic-concurrency guard: the layout revision this call was
-            /// composed against. A stale revision is rejected; omitting it applies
-            /// the change to whatever is current.
+            /// Layout revision to guard against.
             #[operand(long = "revision")]
             pub expected_revision: Option<i64>,
         }

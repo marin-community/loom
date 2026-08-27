@@ -59,8 +59,6 @@ async fn personal_github_token_is_self_service_and_write_only() {
         Some("github_pat_write_only")
     );
 
-    // `auth.github_token.remove` is an ordinary operation and replies 200 with
-    // the typed status view (matching the post-removal `get`).
     let deleted = http
         .post(&remove_endpoint)
         .json(&json!({}))
@@ -120,8 +118,6 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     assert!(token.starts_with("loom_"), "token is prefixed: {token}");
     let token_id = created["id"].as_str().unwrap().to_string();
 
-    // `auth.set_password` is an ordinary operation and replies 200 with the
-    // caller's `UserView`.
     let r = http
         .post(url(&ts, "/api/auth/set_password"))
         .json(&json!({ "new_password": "correct horse" }))
@@ -219,8 +215,7 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
         .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
-    // 5. Revoking the token invalidates it immediately. `auth.tokens.revoke`
-    // replies 200 with the typed result.
+    // 5. Revoking the token invalidates it immediately.
     let r = http
         .post(url(&ts, "/api/auth/tokens/revoke"))
         .bearer_auth(&token)
@@ -448,10 +443,10 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0]["name"], "alice-api");
 
-    // Every operation dispatch deserializes the body into its `Input` before
-    // the actor check runs, so a shape-empty `{}` would 400 on any operation
-    // with a required field before ever reaching the 403 this loop is after —
-    // each entry below carries the minimal body its operation actually needs.
+    // Operation dispatch deserializes the body before the actor check runs, so
+    // an empty `{}` would 400 on any operation with a required field before
+    // ever reaching the 403 this loop checks for — each entry below carries
+    // the minimal body its operation needs.
     let forbidden = [
         (reqwest::Method::POST, "/api/settings/patch", json!({})),
         (
@@ -606,7 +601,6 @@ async fn health_is_public_but_protected_routes_are_not() {
         .unwrap();
     assert_eq!(me["authenticated"], false);
 
-    // A protected route is gated.
     let r = http
         .post(url(&ts, "/api/branches/list"))
         .json(&json!({}))
@@ -776,8 +770,6 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .await
         .unwrap();
     assert_eq!(child_channel.status(), StatusCode::OK);
-    // `channels.create` is an ordinary operation and replies 200 with the
-    // typed `ChannelView`.
     let custom = http
         .post(url(&ts, "/api/channels/create"))
         .bearer_auth(&token)

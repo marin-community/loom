@@ -1,4 +1,5 @@
-//! Derives that project one operation declaration onto REST, CLI, and MCP.
+//! Derives that turn one operation declaration into its REST route, CLI
+//! command, and MCP tool.
 //!
 //! An operation is declared once — `#[operation(...)]` on its `Input` struct.
 //! Everything a transport needs is read back off that declaration: the JSON
@@ -13,12 +14,12 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 mod field;
 mod operation;
 
-/// Derive the caller-facing argument surface of an operation.
+/// Derive an operation's caller-supplied arguments.
 ///
-/// Emits one impl carrying the JSON Schema (context fields elided), the clap
-/// projection, and the dispatcher hooks that fill context fields. The type's
-/// serde impls are left alone: this derive describes arguments, it does not
-/// reinvent serialization.
+/// Emits one impl carrying the JSON Schema (context fields elided), the
+/// operand list clap builds its flags from, and the dispatcher hooks that
+/// fill context fields. The type's serde impls are left alone: this derive
+/// describes arguments, it does not reinvent serialization.
 #[proc_macro_derive(Operands, attributes(operand))]
 pub fn derive_operands(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -29,9 +30,9 @@ pub fn derive_operands(input: TokenStream) -> TokenStream {
 
 /// Derive a presentation-only flag set.
 ///
-/// View flags never cross the wire. They exist so `--mine` and `--repo` can go
-/// on keeping their CLI affordance without being mistaken for operation
-/// arguments.
+/// View flags never reach the operation's JSON body. They exist so `--mine`
+/// and `--repo` can go on keeping their CLI affordance without being mistaken
+/// for operation arguments.
 #[proc_macro_derive(View, attributes(operand))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -40,7 +41,8 @@ pub fn derive_view(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Declare one operation: its identity, authority, and transport projections.
+/// Declare one operation: its identity, authority, and its REST, CLI, and MCP
+/// bindings.
 #[proc_macro_attribute]
 pub fn operation(args: TokenStream, item: TokenStream) -> TokenStream {
     operation::expand(args.into(), item.into())
@@ -87,8 +89,8 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
 
     let entries = operands.iter().map(field::operand_entry);
 
-    // Context fields are stripped from the derived schema: the field travels
-    // on the wire but callers cannot supply it.
+    // Context fields are stripped from the derived schema: the field is still
+    // part of the serialized struct, but callers cannot supply it.
     let context_names = operands
         .iter()
         .filter(|operand| operand.context.is_some())
@@ -121,7 +123,7 @@ fn expand_operands(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
                     &mut schema,
                     &[#(#context_names),*],
                 );
-                // Every transport already surfaces the operation's doc comment as
+                // Every transport already exposes the operation's doc comment as
                 // its summary; drop it here so the argument schema doesn't repeat it.
                 if let Some(object) = schema.as_object_mut() {
                     object.remove("description");

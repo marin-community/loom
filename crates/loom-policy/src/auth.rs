@@ -1,7 +1,7 @@
 //! Authentication for the loom daemon — who may drive the fleet over HTTP.
 //!
 //! This is a loom-only concern: the daemon-less `weaver` CLI talks straight to
-//! sqlite and never authenticates. Three credential shapes all resolve to one
+//! sqlite and never authenticates. Three credential kinds all resolve to one
 //! [`Principal`]:
 //!
 //! * **API tokens** (`loom_…`) — the `LOOM_TOKEN` a CI job or remote `loom` CLI
@@ -323,7 +323,7 @@ pub struct CommitIdentity {
 /// login on file (a password-only operator — nothing to attribute to). The
 /// email is GitHub's stable `<id>+<login>@users.noreply.github.com` form, which
 /// links the commit to the account without exposing a private address; it falls
-/// back to the id-less `<login>@…` shape for a user who hasn't signed in via
+/// back to the id-less `<login>@…` form for a user who hasn't signed in via
 /// GitHub since [`update_github_profile`] began recording the id. The name is
 /// the captured display name, else the login.
 pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIdentity>> {
@@ -1197,7 +1197,7 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
         .send()
         .await
         .context("fetching GitHub user")?;
-    // Surface GitHub's status + body instead of a bare "request failed" — a 401
+    // Report GitHub's status + body instead of a bare "request failed" — a 401
     // here means the token was rejected, which is otherwise invisible.
     let status = resp.status();
     if !status.is_success() {

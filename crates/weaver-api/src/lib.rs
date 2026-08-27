@@ -4,8 +4,8 @@
 //! runtime (terminals, worktrees, the monitor); everything outside it — the `loom`
 //! CLI, the Python binding, scripted watches — drives sessions through this
 //! client over HTTP, never the runtime directly. The [`dto`] types are the single
-//! definition of the wire contract the server serializes and these consumers
-//! deserialize (and that `frontend/types.ts` mirrors).
+//! definition of what the server serializes and these consumers deserialize
+//! (and that `frontend/types.ts` mirrors).
 
 // The operation derives emit `::weaver_api::` paths so they work identically
 // inside this crate and outside it.

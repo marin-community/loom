@@ -283,8 +283,9 @@ pub mod write {
 
     /// Create an artifact or append a guarded revision.
     ///
-    /// The wire format is always a JSON string. Reading `content` from a file
-    /// or stdin is a convenience the command line applies before sending.
+    /// The request body always carries `content` as a JSON string. Reading it
+    /// from a file or stdin is a convenience the command line applies before
+    /// sending.
     #[operation(id = "artifacts.write", actor = SessionSelf, scope = Branch, risk = Write,
                 grants = ["loom/artifacts/write@v1"], cli = "artifacts write")]
     pub struct Input {

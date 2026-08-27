@@ -1,8 +1,8 @@
-# How one declaration becomes three surfaces
+# How one declaration becomes REST, the CLI, and MCP
 
 The premise: **an operation is declared once, and REST, the CLI and MCP are
 derived from that declaration.** Nothing about an operation is written down
-twice, so no two surfaces can disagree about it.
+twice, so no two of them can disagree about it.
 
 This is the code flow end to end. For the current catalogue ask a running
 loom: `GET /api/operations` lists every declaration, and `/api/openapi.json`
@@ -32,7 +32,7 @@ pub mod list {
 
     pub type Output = Vec<IssueView>;
 
-    /// Presentation flags. These never cross the wire.
+    /// Presentation flags: client-only.
     #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         pub mine: bool,
@@ -81,10 +81,10 @@ flowchart TD
 
 Two emitted pieces do the real work downstream.
 
-**`OperationSpec`** is the transport-facing description. Note what it does
-*not* contain: no method, no path, no argument list, no command string. The
-route is computed from `id` (`OperationSpec::path()` at
-`registry.rs:378`), and the arguments are read from the input type.
+**`OperationSpec`** is the transport-facing description. It contains no
+method, no path, no argument list, no command string: the route is computed
+from `id` (`OperationSpec::path()` at `registry.rs:378`), and the arguments
+are read from the input type.
 
 **`Operands::OPERANDS`** is the argument list as plain data — one `Operand`
 per field:
@@ -101,12 +101,11 @@ pub struct Operand {
 }
 ```
 
-This is the piece that made `weaver-api` clap-free. It used to be two
-generated methods per operand struct — `augment(clap::Command)` and
-`from_matches(&ArgMatches)` — which meant the server, the Python binding and
-every embedder linked a command-line parser merely to *describe* an operation.
+This is the piece that keeps `weaver-api` clap-free: the server, the Python
+binding, and every embedder read an operation's arguments as plain data,
+with no command-line parser linked in to describe one.
 
-## 3. The three surfaces
+## 3. REST, the CLI, and MCP
 
 ```mermaid
 flowchart LR
@@ -142,7 +141,7 @@ flowchart LR
     SPEC --> M1
 ```
 
-Each surface costs **one line per operation** and no more. `bind::<Op>()`,
+REST, the CLI, and MCP each need one line per operation: `bind::<Op>()`,
 `export::<Op>("name")` and `register::<Op>(handler)` are generic over the
 operation's own types, so the closure they produce cannot disagree with the
 descriptor sitting beside it.
@@ -207,18 +206,18 @@ flowchart TD
 `clap_bind.rs` is the whole of Loom's clap knowledge — 252 lines, written
 once, driven by data:
 
-| `OperandKind` | clap shape |
+| `OperandKind` | clap mapping |
 |---|---|
 | `Bool` | `ArgAction::SetTrue` |
 | `OptBool` | tri-state: `--submit`, `--submit=false`, or absent |
 | `VecStr` / `VecInt` | `ArgAction::Append`, `num_args(0..)` when positional |
 | everything else | `ArgAction::Set` with an `i64` or `String` parser |
 
-`from_matches` reads the parse back out as **JSON**, not as the struct.
-Building the struct field by field would need each field's type at compile
-time — which is exactly what forced the generated code. Going through JSON
-means one runtime function serves all 214 operations, and a malformed value is
-reported by `serde`, in the same place REST and MCP report it.
+`from_matches` reads the parse back out as **JSON**, not as the struct —
+building the struct field by field would need each field's type at compile
+time. Going through JSON means one runtime function serves all 214
+operations, and a malformed value is reported by `serde`, in the same place
+REST and MCP report it.
 
 ```mermaid
 sequenceDiagram
@@ -244,8 +243,8 @@ sequenceDiagram
 ```
 
 The dispatcher prints exactly what the renderer returned; the only thing it
-adds is a final newline. (It used to `trim_end()`, which silently truncated
-`loom artifacts get plan > plan.md`.)
+adds is a final newline. It never trims trailing output — `loom artifacts get
+plan > plan.md` depends on that.
 
 ### MCP
 
@@ -297,17 +296,17 @@ same impl**, so one operation prints one way on both.
 ```mermaid
 flowchart LR
     O["Output"] --> RT["Render::text(Output, View)"]
-    V["View flags<br/>(never on the wire)"] --> RT
+    V["View flags<br/>(client-only)"] --> RT
     RT --> CLI["stdout"]
     RT --> MCP["MCP structured_result"]
 
     RT -.->|"no client, no clock,<br/>no env, no second call"| PURE["a renderer is a pure function<br/>of Output and the view flags"]
 ```
 
-The default impl is the output's own pretty JSON, which is honest and complete
-for the long tail of administrative commands — so a newly declared operation
-has a working CLI immediately. 50 operations say `render = custom` and write
-an impl in `crates/weaver-api/src/render/`.
+The default impl is the output's own pretty JSON, sufficient for the long
+tail of administrative commands — so a newly declared operation has a
+working CLI immediately. 50 operations say `render = custom` and write an
+impl in `crates/weaver-api/src/render/`.
 
 **Purity is the rule that decides what can be declared at all.** A command
 whose text needs a second read cannot be a renderer, and stays hand-written
@@ -342,10 +341,9 @@ flowchart LR
 ```
 
 `strip_context_fields` removes `repo_root` / `branch` / `session` from the
-caller-facing schema. The fields stay on the wire — the server still receives
-them — they simply are not something a caller may supply. **An agent says "my
-session" by saying nothing.** An explicit value still wins, and still faces the
-scope check.
+caller-facing schema. The server still fills in these fields — they are not
+something a caller may supply. **An agent says "my session" by saying
+nothing.** An explicit value still wins, and still faces the scope check.
 
 ## 6. What holds it together
 
@@ -378,7 +376,7 @@ suite, not production:
 | `crates/loom-agent/src/mcp/dispatch.rs` | `export`, `call_tool`, `capability_sets` |
 | `crates/loom/src/bin/loom.rs` | the clap tree and its tests, 1,326 lines, nothing else |
 
-## The shape in one sentence
+## In one sentence
 
 An id, an actor, a scope and an argument struct; the route is the id, the
 command is a string in the same attribute, the tool is one line in an adapter,

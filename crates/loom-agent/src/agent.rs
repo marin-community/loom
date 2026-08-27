@@ -518,8 +518,6 @@ impl AgentType for ClaudeAgentType {
             supports_hooks: true,
             builtin: true,
             supports_acp: true,
-            // ACP is the builtin default; `--protocol terminal` keeps the PTY
-            // fallback.
             protocol: "acp".to_string(),
         }
     }
@@ -550,8 +548,6 @@ impl AgentType for CodexAgentType {
             supports_hooks: false,
             builtin: true,
             supports_acp: true,
-            // ACP is the builtin default; `--protocol terminal` keeps the PTY
-            // fallback.
             protocol: "acp".to_string(),
         }
     }
@@ -1084,8 +1080,8 @@ pub enum AcpOpen {
 }
 
 /// Everything [`build_acp_launch`] needs — the ACP analogue of [`LaunchSpec`],
-/// carrying the same launch inputs but mapping them onto the adapter / `_meta` /
-/// goal shape the protocol takes.
+/// carrying the same launch inputs but mapping them onto the adapter command,
+/// `_meta`, and goal fields the protocol takes.
 pub struct AcpLaunchSpec<'a> {
     /// Durable Loom session id, exposed only to the session-scoped MCP bridge.
     pub session_id: &'a str,
@@ -1266,8 +1262,8 @@ pub fn claude_projects_dir() -> Option<PathBuf> {
 /// claude munges the cwd into a directory name (every non-alphanumeric byte
 /// becomes `-`) holding one `<session-id>.jsonl` per conversation. These are
 /// the sessions `claude --continue` resumes, and the ACP adapter loads the same
-/// ids — which is what lets an orphaned terminal session adopt into ACP over
-/// its own history. `None` when nothing is recorded for that directory.
+/// ids, so an orphaned terminal session can adopt into ACP over its own
+/// history. `None` when nothing is recorded for that directory.
 pub fn latest_claude_session_id(projects_dir: &Path, work_dir: &Path) -> Option<String> {
     let munged: String = work_dir
         .display()
@@ -1737,7 +1733,7 @@ struct OneShotLaunchPolicy<'a> {
     profile_effort: &'a str,
 }
 
-/// Central agent-resolution and non-interactive prompt surface. Interactive
+/// Resolves agents and runs non-interactive prompts against them. Interactive
 /// launches and transient prompts both resolve the same registered runtime;
 /// provider-specific execution remains behind that runtime's ACP adapter.
 pub struct AgentManager<'a> {
@@ -2414,7 +2410,7 @@ mod tests {
             fresh,
             "claude --append-system-prompt-file '/x/primer.txt'; exec \"${SHELL:-/bin/sh}\""
         );
-        // No positional `$(cat …)` prompt — that is what made it take a turn on boot.
+        // No positional `$(cat …)` prompt, which would take a turn on boot.
         assert!(!fresh.contains("$(cat"), "got: {fresh}");
 
         // Adopt re-appends the primer (the system prompt is rebuilt per launch) and
@@ -2744,7 +2740,7 @@ mod tests {
 
     #[test]
     fn replaces_a_non_object_root() {
-        // A corrupt/unexpected shape is reset rather than panicking.
+        // A non-object root is reset rather than panicking.
         let mut root = json!("not an object");
         assert!(apply_launch_gates(&mut root, &seed(false, None, None)));
         assert!(root.is_object());

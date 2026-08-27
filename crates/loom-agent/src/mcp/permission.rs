@@ -7,7 +7,7 @@
 //! the response — no per-tool summary formatting lives here.
 //! `permissions.requests.approve`/`.deny` stay unreachable through this
 //! adapter because they are `actor = User`, not `SessionSelf`: the registry
-//! rejects an MCP projection on a non-agent-reachable operation, so this
+//! refuses to export a non-agent-reachable operation as an MCP tool, so this
 //! adapter needs no extra check to keep an agent from approving its own
 //! permission request.
 
@@ -50,8 +50,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 /// Capability sets are derived from the registry: every `permissions.*` operation
-/// whose MCP projection targets this server contributes its tool to the set named
-/// by its grant.
+/// exported on this server contributes its tool to the set named by its grant.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {

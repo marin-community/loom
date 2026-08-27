@@ -1,22 +1,20 @@
 //! `weaver_py` — a Pythonic, synchronous wrapper over [`weaver_api`].
 //!
-//! This is the out-of-process seam from the watch design: a scripted
-//! watch (or an agent iterating on one, or a human at a REPL) drives the
-//! loom fleet through the same typed REST surface the `loom` CLI uses, never
-//! touching the terminal runtime directly. The loom daemon stays the single owner of the live
-//! runtime.
+//! An out-of-process consumer — a scripted watch, an agent iterating on one,
+//! or a human at a REPL — drives the loom fleet through the same typed HTTP
+//! API the `loom` CLI uses, without touching the terminal runtime directly.
+//! The loom daemon stays the single owner of the live runtime.
 //!
-//! Two design points worth stating:
+//! Two things a caller should know:
 //!
 //! - **Synchronous API.** `weaver_api::Client` is async; rather than push
 //!   `async`/`await` into Python (pyo3-asyncio), each method drives a private
 //!   single-thread tokio runtime to completion with `block_on`. Python callers
 //!   see plain blocking methods.
-//! - **Capability enforcement lives below the glue.** Every mutating method
-//!   calls [`weaver_api::require`] — the pure, workspace-tested gate — *before*
-//!   it issues a request, so a `Client` built without `nudge` cannot nudge even
-//!   if the server would allow it. Read methods need only the implicit
-//!   `observe`.
+//! - **Capability enforcement happens before each request.** Every mutating
+//!   method calls [`weaver_api::require`] before it issues a request, so a
+//!   `Client` built without `nudge` cannot nudge even if the server would
+//!   allow it. Read methods need only the implicit `observe`.
 //!
 //! DTOs cross into Python as plain dicts via `serde_json` → `pythonize`, so a
 //! script reads `s["id"]`, `s["branch"]["description"]`, and the branch's
@@ -300,9 +298,9 @@ impl Client {
 
     /// The persistent watch session, created-or-reused across rounds.
     ///
-    /// Not yet available: the warm-session lifecycle is T12 of the watch
-    /// plan and has no `weaver-api` backing today. It raises rather than faking
-    /// a session so a program never silently no-ops.
+    /// Not yet available: the warm-session lifecycle has no `weaver-api`
+    /// backing today. It raises rather than faking a session so a program
+    /// never silently no-ops.
     fn warm_session(&self) -> PyResult<Py<PyAny>> {
         Err(PyNotImplementedError::new_err(
             "warm_session() arrives with the warm-session lifecycle (watch plan T12); \

@@ -1,7 +1,7 @@
 //! Text rendering for review operations.
 //!
 //! A renderer is a pure function of the operation's `Output`, so these say what
-//! the review now is rather than naming the comment or revision the caller just
+//! the review now is rather than naming the comment or revision the caller
 //! passed in — `reviews.comments.delete` answers with the whole review, and the
 //! deleted comment is precisely what it no longer contains.
 

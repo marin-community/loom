@@ -270,7 +270,7 @@ docker compose run --rm loom \
 ```
 
 Running locally (loom on your own machine, not in a container)? Simpler — CWD
-is already the repo root, so the defaults just work:
+is already the repo root, so the defaults work:
 
 ```sh
 loom setup github-app --base-url http://localhost:7878   # opens a browser for you
@@ -470,7 +470,7 @@ The agent tooling the image ships splits by how it updates:
   the build it needs. The shared cache under `$HOME` has neither problem.
   Firefox and WebKit need a much larger dependency set that is *not* installed
   (63 more packages for Firefox). `playwright install-deps --dry-run <browser>`
-  lists them and `sudo apt-get install -y …` installs them; note that `sudo
+  lists them and `sudo apt-get install -y …` installs them; `sudo
   playwright install-deps` itself is refused, since the grant covers only the
   package tools. Put them in the Dockerfile if you want them fleet-wide.
 

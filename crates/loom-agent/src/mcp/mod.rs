@@ -29,8 +29,8 @@ pub(crate) mod context;
 pub(crate) mod issue;
 pub(crate) mod permission;
 
-// Converted except for a handful of tools that stay hand-written on purpose —
-// see each module's own doc comment for exactly which and why (a response
+// These stay hand-written rather than bound via `dispatch::bind` — see each
+// module's own doc comment for exactly which tool and why (a response
 // enrichment the plain operation does not carry, or an operation that has no
 // registry entry under this adapter's own server name).
 pub(crate) mod artifact;
@@ -566,7 +566,7 @@ pub fn runtime_tools(tools: Value) -> Value {
     )
 }
 
-/// Build the scoped REST client shared by Loom's resource-shaped adapters.
+/// Build the scoped REST client shared by Loom's resource adapters.
 pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
     let token = weaver_api::endpoint::token_from_env()
         .with_context(|| format!("{adapter} MCP is missing its session-scoped LOOM_TOKEN"))?;
@@ -574,7 +574,7 @@ pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
 }
 
 /// MCP results expose the typed value directly while retaining a compact text
-/// projection for clients that do not consume `structuredContent` yet.
+/// summary for clients that do not consume `structuredContent` yet.
 pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Result<Value> {
     let value = serde_json::to_value(value)?;
     let structured = if value.is_object() {
@@ -590,7 +590,7 @@ pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Resul
 }
 
 /// Shared JSON-RPC stdio loop for the resource adapters. Domain modules own
-/// only their schemas and REST projection; framing stays consistent.
+/// only their schemas and REST calls; framing stays consistent.
 pub(crate) async fn serve_stdio(
     server_name: &'static str,
     tools: fn() -> Value,
@@ -695,7 +695,7 @@ pub(crate) fn server_configs_for_snapshot(
     servers
 }
 
-/// Convert Loom's trusted server map to ACP v1's provider-neutral stdio shape.
+/// Convert Loom's trusted server map to ACP v1's provider-neutral stdio config.
 pub fn acp_server_configs(
     allowed_rules: &[String],
     snapshot: Option<&weaver_api::McpPolicySnapshot>,
@@ -809,8 +809,9 @@ mod tests {
     #[test]
     /// The digests pin what each capability advertises to an agent: they move
     /// when a tool's schema changes, so a session holding e.g.
-    /// `loom/artifacts/write@v1` can tell that `write`'s shape changed under it.
-    /// Re-pin only with a reason, and check whether tool *membership* moved too.
+    /// `loom/artifacts/write@v1` can tell that `write`'s tool definition
+    /// changed under it. Re-pin only with a reason, and check whether tool
+    /// *membership* moved too.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -919,9 +920,8 @@ mod tests {
             }
         }
         assert_eq!(actual.len(), expected.len());
-        // Report EVERY drift at once. Failing on the first one hides how much
-        // moved, which is exactly when re-pinning stops being a decision and
-        // becomes a reflex.
+        // Report every drift at once, not just the first failure, so a re-pin
+        // is a deliberate decision informed by everything that changed.
         let drift: Vec<String> = expected
             .iter()
             .filter(|(name, digest)| actual.get(**name).map(String::as_str) != Some(**digest))

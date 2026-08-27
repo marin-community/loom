@@ -290,8 +290,8 @@ async fn archive_teardown(
     // finishes provisioning after this point cannot promote itself.
     crate::runs::cancel_for_session_with_summary(&st.db, &session.id, "session archived").await?;
     transition_step(st, session, branch, "archiving", "Stopping agent").await?;
-    // A failed kill is reported as a warning, not fatal — a session nobody can
-    // stop must still archive.
+    // A kill that times out escalates to removing the runtime, and a failure
+    // past that is a warning: a session nobody can stop must still archive.
     if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
         tracing::warn!(session = %session.id, %error, "archive could not confirm the agent stopped");
         warnings.push(format!("stop agent: {error}"));
@@ -983,7 +983,7 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
     }
     // A session that is already driveable (orphaned status but a live ACP
     // driver) is settled here rather than routed through `adopt_acp`, which
-    // would just 409 on it. Settle before claiming a transition — the
+    // would 409 on it. Settle before claiming a transition — the
     // reconciliation is fenced on the row being unowned.
     if session.protocol == "acp"
         && session.status == "orphaned"
@@ -1189,7 +1189,7 @@ pub async fn settle_reattached_session(st: &AppState, session_id: &str, branch_i
 
 /// Adopt an ACP session: respawn its relay + adapter and reopen the conversation.
 /// When the relay supervisor is still alive but loom has no task for it (a crashed
-/// task), just re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
+/// task), re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
 /// it and reopen via `session/load` (the adapter advertised `loadSession` and we
 /// have its id), falling back to a fresh session re-oriented from the goal file.
 pub async fn adopt_acp(
@@ -1238,8 +1238,8 @@ pub async fn adopt_acp(
         session_mod::set_inflight(&st.db, &session.id, None)
             .await
             .ok();
-        // session/load where the adapter advertised it and we have an id;
-        // otherwise a fresh session re-oriented from the goal file.
+        // Reopen via session/load where the adapter advertised it and we have
+        // an id; otherwise a fresh session re-oriented from the goal file.
         let open = match session.acp_session_id.as_deref().filter(|s| !s.is_empty()) {
             Some(id) => agent::AcpOpen::Load(id.to_string()),
             None => agent::AcpOpen::Fresh,

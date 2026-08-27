@@ -1,10 +1,10 @@
 //! loom — the orchestration CLI.
 //!
 //! Most subcommands talk to the running loom daemon over HTTP (session
-//! lifecycle, archive, adopt). `loom server run` runs the daemon itself in the
+//! lifecycle, archive, adopt). `loom server run` runs the daemon in the
 //! foreground; `loom server start`/`stop`/`restart`/`status` manage its
-//! background lifecycle. To interact with an agent, `loom sessions attach` to its
-//! terminal (the browser terminal is the other interaction surface).
+//! background lifecycle. To interact with an agent, use `loom sessions attach`
+//! or the browser terminal.
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgMatches, Args, Command, CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -65,9 +65,6 @@ enum HostCmd {
         cmd: SettingsCmd,
     },
     /// Inspect trusted MCP capability sets, or run an internal stdio adapter.
-    ///
-    /// Named for its bundle, with a `mcp` alias so both `loom mcp` and `loom
-    /// mcps` reach the same registry.
     #[command(name = "mcps", visible_alias = "mcp")]
     Mcp {
         #[command(subcommand)]
@@ -193,8 +190,8 @@ enum HostCmd {
     /// `settings` table (the keys the settings pane exposes over HTTP), with
     /// no server required.
     ///
-    /// `loom.toml` is the single authored source of truth for every
-    /// credential/setting — the shared contract deployment tooling consumes:
+    /// `loom.toml` is the only place every credential/setting is written —
+    /// the shared contract deployment tooling consumes:
     ///
     ///     loom config render-env                # -> deploy/standalone/.env
     ///     loom config secret-names               # the secret fields' ENV_NAMEs
@@ -234,7 +231,7 @@ enum Cmd {
     Registered(RegisteredCliCommand),
     /// An operation reached through the generic registry dispatcher.
     ///
-    /// No per-command code: the clap surface, the request, and the printing all
+    /// No per-command code: the clap command, the request, and the printing all
     /// come from the operation's own declaration.
     Operation(loom::cli::CliBinding, ArgMatches),
     Host(HostCmd),
@@ -249,7 +246,7 @@ fn generic_bindings() -> Vec<loom::cli::CliBinding> {
     loom::cli::bindings()
         .into_iter()
         .filter(|binding| {
-            // Skip only when the hand-written surface already offers this exact
+            // Skip only when the hand-written tree already offers this exact
             // invocation. Groups merge; clap panics on duplicates. Test the
             // whole path, not just its head.
             binding
@@ -655,10 +652,10 @@ mod cli_tree_tests {
                 }
             }
             // Landing on a *group* means the advertised words reach something
-            // else entirely: `sessions.context` once advertised `loom context`,
-            // which is the credential-context manager and takes a subcommand of
-            // its own. Finding a command by that name is not enough — an
-            // operation is one invocation, so what it names has to be runnable.
+            // else entirely, e.g. `loom context` — the credential-context
+            // manager, which takes a subcommand of its own, not a runnable
+            // leaf. An operation is one invocation, so what it names has to
+            // be runnable.
             if let Some(leaf) = node {
                 if leaf.get_subcommands().next().is_some() {
                     drift.push(format!(
@@ -1019,8 +1016,8 @@ mod tests {
         ));
     }
 
-    /// Every `loom review` word still parses, and each reaches the half of the
-    /// surface that owns it.
+    /// Every `loom review` word still parses, and each reaches the half that
+    /// owns it.
     ///
     /// The bundle is split: five commands come from their operation's
     /// declaration and are dispatched generically, and the rest stay

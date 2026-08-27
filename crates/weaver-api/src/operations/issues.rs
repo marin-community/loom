@@ -192,7 +192,7 @@ pub mod get {
 }
 
 pub mod list {
-    //! `issues.list` — the reference shape for every operation in the registry.
+    //! `issues.list` — the reference example for every operation in the registry.
     //!
     //! Read top to bottom, this is the whole contract: who may call it, what it
     //! accepts, what it returns, and how it prints. REST, the CLI, and MCP are all
@@ -216,8 +216,8 @@ pub mod list {
 
     pub type Output = Vec<IssueView>;
 
-    /// Presentation flags. These never cross the wire — they choose how the result
-    /// is printed, which is why they live here rather than in `Input`.
+    /// Presentation flags: client-only, choosing how the result prints — not
+    /// carried on `Input`.
     #[derive(Debug, Clone, Default, Deserialize, View)]
     pub struct View {
         /// Show every work item in the repository, uncapped.

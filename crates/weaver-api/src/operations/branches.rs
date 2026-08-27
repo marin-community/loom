@@ -107,10 +107,10 @@ pub mod slack {
         ///
         /// Without `thread`, replies to the branch's own Slack wiring; with `thread`,
         /// targets a delivered thread.
-        // Its own grant rather than `loom/branches/write@v1`: this is the only
-        // branch write an agent reaches over MCP, and `mcp/slack/message@v1`
-        // confers what its tools claim. Sharing the broad grant would hand a
-        // session that asked to post to Slack the whole of `branches.update`.
+        // A grant of its own: this is the only branch write an agent reaches
+        // over MCP, matching what `mcp/slack/message@v1` tools claim. The broad
+        // `loom/branches/write@v1` would hand a session that only asked to post
+        // to Slack the whole of `branches.update`.
         #[operation(id = "branches.slack.reply", actor = SessionSelf, scope = Branch,
                     risk = ExternalWrite, grants = ["loom/branches/slack@v1"],
                     cli = "branches slack reply")]

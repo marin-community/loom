@@ -57,13 +57,6 @@ fn mtime(path: &Path) -> SystemTime {
         .unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-// Builds the Vue frontend into `static/dist` as part of `cargo build`, so a
-// successful build always leaves a ready-to-serve bundle (loom serves it from
-// `static/dist` at runtime — see `web::static_dir`). `rerun-if-changed` keeps it
-// cheap: rspack only re-runs when a frontend source changes, so backend-only
-// edits don't pay for it. When npm or the frontend sources are missing (a
-// Node-less, backend-only checkout), it degrades to a placeholder page instead
-// of failing the build.
 /// Write the SPA's generated types from the operation registry.
 ///
 /// Only when the text actually changes: this lands inside `frontend/src`, which

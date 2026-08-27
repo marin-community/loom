@@ -2,7 +2,7 @@
 //!
 //! One operation is one declaration. This module holds the vocabulary that
 //! declaration is written in and the traits the derives target; REST, CLI, and
-//! MCP projections read every fact they need from here.
+//! MCP each read every fact they need from here.
 //!
 //! `OperationSpec` derives its route, argument list, and command string from
 //! the operation's own `Input` type through function pointers, so there is no
@@ -21,9 +21,9 @@ pub enum ActorPolicy {
     SessionSelf,
     /// The session credential itself, and nothing else — not even a human.
     ///
-    /// Unlike `SessionSelf`, an operator cannot stand in: that would let one
-    /// user obtain another's session token. `permissions.github.token` is why
-    /// this exists.
+    /// Unlike `SessionSelf`, neither `Admin` nor `User` may stand in: standing
+    /// in would let one user obtain another's session token.
+    /// `permissions.github.token` is why this exists.
     SessionOnly,
     User,
     Admin,
@@ -48,8 +48,8 @@ impl ActorPolicy {
 
     /// Whether an agent may reach this operation at all.
     ///
-    /// Gates MCP projection, so a human-only operation — e.g. approving one's
-    /// own permission request — has none.
+    /// Gates whether the operation is exposed as an MCP tool, so a human-only
+    /// operation — e.g. approving one's own permission request — has none.
     pub const fn agent_reachable(self) -> bool {
         matches!(self, Self::SessionSelf | Self::SessionOnly)
     }
@@ -114,20 +114,21 @@ impl OperationScope {
 pub enum Io {
     /// JSON request, JSON response. The overwhelming majority.
     Json,
-    /// Server-sent events. The CLI projects `--follow`; MCP normally abstains.
+    /// Server-sent events. The CLI adds `--follow`; MCP normally abstains.
     Stream,
     /// Bidirectional websocket (terminals, the IDE proxy).
     Duplex,
     /// Raw request body: multipart or octet-stream.
     ///
-    /// Describes the wire encoding, not the CLI interface — a JSON string
-    /// stays `Json` even when the CLI takes a file for it (`from_file`).
-    /// Non-JSON operations cannot expose MCP tools.
+    /// Describes the HTTP request body encoding, not the CLI interface — a
+    /// JSON string stays `Json` even when the CLI takes a file for it
+    /// (`from_file`). Non-JSON operations cannot expose MCP tools.
     Upload,
     /// Raw response body: bytes plus a guessed content type.
     ///
     /// For browser fetches through `<img src>` or download links. Operands
-    /// arrive in the query string.
+    /// arrive in the query string. This describes the response body, so an
+    /// operation answering with base64 inside JSON stays `Json`.
     Download,
     /// JSON body plus a browser session-cookie effect.
     ///
@@ -213,7 +214,7 @@ pub struct ContextField {
 
 /// The resolved session context a dispatcher fills context fields from.
 ///
-/// Fetched once per invocation, avoiding redundant context lookups in each operation.
+/// Fetched once per invocation.
 #[derive(Debug, Clone, Default)]
 pub struct ContextValues {
     pub repo_root: String,
@@ -222,7 +223,7 @@ pub struct ContextValues {
     pub session: String,
 }
 
-/// How a field's Rust type projects onto a command line.
+/// How a field's Rust type is represented on the command line.
 ///
 /// Syntactic, decided by the macro from the type as written. Anything it does
 /// not recognize is `Json` — one JSON literal for operands a flag can't express.
@@ -285,7 +286,7 @@ pub struct Operand {
     pub cli: Option<CliSpelling>,
 }
 
-/// The caller-facing argument surface of an operation.
+/// The caller-facing input of an operation.
 ///
 /// Derived, never written by hand: one struct yields the JSON body, the MCP
 /// argument schema, and the operand list a command line is built from, so those
@@ -324,8 +325,8 @@ impl ViewFlags for NoView {
 
 // Declaring no flags still means decoding whatever the command line handed
 // back, which is the empty object. A derived `Deserialize` on a unit struct
-// insists on `null` and would fail every operation that takes no view flags —
-// which is 211 of the 214.
+// insists on `null` and would fail almost every operation that takes no view
+// flags.
 impl<'de> Deserialize<'de> for NoView {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         serde::de::IgnoredAny::deserialize(deserializer)?;
@@ -335,9 +336,9 @@ impl<'de> Deserialize<'de> for NoView {
 
 /// Everything a transport needs to know about one operation.
 ///
-/// Note what is *absent*: no method, no path, no argument list, no command
-/// string. The route is derived from `id`, and the arguments are read from the
-/// input type through `schema`. There is no second copy to drift.
+/// What is *absent*: no method, no path, no argument list, no command string.
+/// The route is derived from `id`, and the arguments are read from the input
+/// type through `schema`. There is no second copy to drift.
 #[derive(Debug, Clone, Copy)]
 pub struct OperationSpec {
     pub id: &'static str,
@@ -363,7 +364,8 @@ impl OperationSpec {
     /// The canonical REST route, derived from the identity.
     ///
     /// `issues.tags.set` is always `POST /api/issues/tags/set` — computed, not
-    /// declared, so all surfaces report the same endpoint.
+    /// declared, so the HTTP API, the CLI, and MCP all report the same
+    /// endpoint.
     pub fn path(&self) -> String {
         format!("/api/{}", self.id.replace('.', "/"))
     }
@@ -417,9 +419,9 @@ pub trait Render: Operation {
 
 /// Remove dispatcher-supplied fields from a derived schema.
 ///
-/// The fields stay on the wire — the server still receives `repo_root` — but
-/// they are not something a caller may supply, so they must not appear in the
-/// MCP tool schema or generated help.
+/// The fields remain in the request — the server still receives `repo_root`
+/// — but they are not something a caller may supply, so they must not appear
+/// in the MCP tool schema or generated help.
 pub fn strip_context_fields(schema: &mut Value, context: &[&str]) {
     if context.is_empty() {
         return;

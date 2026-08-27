@@ -80,7 +80,7 @@ const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
-// Public surface
+// Public API
 // ---------------------------------------------------------------------------
 
 /// How to open the ACP session at [`start`]: a fresh `session/new`, or a
@@ -667,7 +667,7 @@ pub struct PromptAck {
     pub turn: Option<i64>,
 }
 
-/// The outcome of answering a permission request over REST.
+/// The outcome of answering a permission request over the HTTP API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermAnswer {
     /// Answered — the JSON-RPC response was sent and the block resolved.
@@ -687,9 +687,8 @@ pub struct SseEvent {
 }
 
 /// Agent-owned controls for the conversation composer, kept as ACP-shaped
-/// JSON: command inputs and config options are an extensible protocol
-/// surface, so loom forwards fields it doesn't render rather than narrowing
-/// the wire contract.
+/// JSON: command inputs and config options are open-ended, so loom forwards
+/// fields it doesn't render instead of dropping them.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AcpMetadata {
@@ -701,8 +700,8 @@ pub struct AcpMetadata {
     pub steering_supported: bool,
 }
 
-/// A live session's control surface, held in the [`AcpRegistry`]: send commands
-/// to its task and subscribe to its SSE stream.
+/// A live session's handle, held in the [`AcpRegistry`]: send commands to its
+/// task and subscribe to its SSE stream.
 #[derive(Clone)]
 pub struct AcpHandle {
     cmd_tx: mpsc::Sender<Command>,
@@ -3453,8 +3452,8 @@ impl Task {
                 // Submitted review feedback lives in the protected inbox, not
                 // the editable pending prompt: replace ordinary live work with
                 // one visible review turn instead of queueing it silently. A
-                // wake for a review already in flight is just a retry and
-                // must not interrupt that same review.
+                // wake for a review already in flight is a retry and must
+                // not interrupt that same review.
                 if self.inflight_review.is_some()
                     || self.compaction_turn
                     || self.automatic_dispatch_paused

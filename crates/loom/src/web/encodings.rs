@@ -1,4 +1,4 @@
-//! The registered operations whose wire encoding is not JSON.
+//! The registered operations whose `io` is not JSON.
 //!
 //! `io` changes exactly one thing about an operation: how the request or the
 //! response is encoded. The declaration, the actor policy, the grants, the
@@ -16,16 +16,15 @@
 //! | `Upload` | the *request* body is the payload's raw bytes |
 //! | `Download` | the *response* body is raw bytes plus a content type |
 //!
-//! Two consequences worth stating, because getting either wrong is how the
-//! previous surface drifted:
+//! Two things must stay true here:
 //!
 //! * **The route is derived from the registry.** [`mount`] walks the registry and
 //!   mounts every non-JSON operation at `spec.path()`. A session stream takes
 //!   `?session=…` as a query parameter, not a path segment: an operand is an
 //!   operand regardless of encoding, and a path parameter would make the real
 //!   route unequal to the declared one. Every operand of an operation mounted
-//!   here is optional on the wire — the query string is extracted before any
-//!   default-filling could run.
+//!   here must be optional in the query string, since it is extracted before
+//!   any default-filling could run.
 //! * **Authorization runs through the dispatcher.** Every handler calls
 //!   [`super::operations::authorize_declared`], which is the same context fill
 //!   and the same `authorize` the JSON dispatcher runs. Actor policy is also
@@ -74,8 +73,8 @@ fn mount_inner(router: Router<AppState>) -> (Router<AppState>, Vec<&'static str>
             "shell.terminal" => routing::get(shell_terminal),
             "sessions.raw" => routing::get(session_raw_file),
             "artifacts.raw" => routing::get(artifact_raw_image),
-            // The body limit is the scratch file cap, not the JSON cap: this is
-            // the one route where a large body is the point.
+            // The body limit here is the scratch file cap, not the JSON cap:
+            // this route allows large uploads; others don't.
             "sessions.scratch.write" => routing::post(write_scratch_file).layer(
                 DefaultBodyLimit::max(crate::scratch::MAX_SCRATCH_FILE_BYTES),
             ),
@@ -223,9 +222,9 @@ mod tests {
 
     /// A non-JSON operation's operands arrive in the query string, and axum's
     /// `Query` runs before any dispatcher default-filling could. So every operand
-    /// of one must be optional on the wire — otherwise the declared
-    /// route 400s on a request that named nothing, including exactly the request
-    /// a session credential makes when it means "my own session".
+    /// of one must be optional in the query string — otherwise the declared
+    /// route 400s on a request that named nothing, including the request a
+    /// session credential makes when it means "my own session".
     ///
     /// Checked through the real extractor rather than through `serde_json`,
     /// because urlencoded and JSON disagree about what a missing field is.
@@ -295,7 +294,7 @@ mod tests {
     /// `mount` skips an id it does not recognize, which is right for
     /// `io = Session` and wrong for an encoding someone declared and forgot to
     /// serve. This is the check that tells them apart — and building the router
-    /// is also what proves no two of them claim one path.
+    /// also proves no two of them claim the same path.
     #[test]
     fn every_non_json_operation_is_mounted() {
         let declared: Vec<&str> = weaver_api::operations()

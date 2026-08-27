@@ -1,8 +1,8 @@
 //! Field-level parsing shared by the `Operands` and `View` derives.
 //!
-//! Both derives project the *same* struct onto a clap surface, so the attribute
-//! vocabulary and the type classification live here rather than being written
-//! twice with a chance to disagree.
+//! Both derives turn a struct into command-line arguments, so the attribute vocabulary and
+//! type classification live here rather than being written twice with a
+//! chance to disagree.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -11,7 +11,7 @@ use syn::{Attribute, Expr, Field, Ident, Lit, LitStr, Meta, Type};
 /// How a field's Rust type projects onto a command line.
 ///
 /// Anything the CLI cannot express as a flag or positional lands in `Json`,
-/// which is deliberately explicit: operands with complex shapes must declare
+/// which is deliberately explicit: operands with complex types must declare
 /// themselves.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -117,10 +117,10 @@ impl Operand {
 
     /// Any `Vec<_>`, whatever it holds.
     ///
-    /// `Kind::is_multi` only knows the two element types the command line can
-    /// repeat, so `Vec<HistoryKind>` classified as `Json` and came out
-    /// *required* — `loom sessions history` demanded a `--kinds` argument for a
-    /// filter whose empty value means "no filter".
+    /// `Kind::is_multi` only recognizes the two element types the command line
+    /// can repeat; other `Vec<_>` types classify as `Json`, which without this
+    /// check would count as required, forcing a caller to pass an argument for
+    /// a filter whose absence should mean "no filter".
     fn is_list(&self) -> bool {
         if self.kind.is_multi() {
             return true;
@@ -202,10 +202,11 @@ pub fn parse(field: &Field) -> syn::Result<Operand> {
                 "skip_cli" => operand.skip_cli = true,
                 "from_file" => operand.from_file = true,
                 "json" => operand.kind = Kind::Json,
-                // A wire enum serializes as a bare string, but [`classify`] is
-                // syntactic and can only see an unfamiliar type name, so it
-                // lands in `Json` and the command line demands the JSON
-                // spelling `'"space"'` for a value a user writes as `space`.
+                // An enum that serializes to JSON as a bare string, but
+                // [`classify`] is syntactic and can only see an unfamiliar
+                // type name, so it lands in `Json` and the command line
+                // demands the JSON spelling `'"space"'` for a value a user
+                // writes as `space`.
                 "string" => operand.kind = Kind::Str,
                 "default" => operand.default = Some(meta.value()?.parse()?),
                 "long" => {
@@ -239,10 +240,9 @@ pub fn outer_ident(ty: &Type) -> Option<String> {
     Some(path.path.segments.last()?.ident.to_string())
 }
 
-/// Classify a field's type by its surface tokens.
-///
-/// Deliberately syntactic: a proc macro cannot resolve aliases. Unrecognized
-/// types become `Json` and require explicit handling.
+/// Classify a field's type from its written syntax; deliberately does not
+/// resolve aliases, since a proc macro cannot. Unrecognized types become
+/// `Json` and require explicit handling.
 fn classify(ty: &Type) -> Kind {
     let Type::Path(path) = ty else {
         return Kind::Json;
@@ -289,9 +289,9 @@ fn inner(segment: &syn::PathSegment) -> Option<Kind> {
 /// This becomes an operation's MCP description, its OpenAPI `summary`, and an
 /// operand's schema/CLI help text — everything an API caller sees. A doc
 /// comment can say more after a blank `///` line (grant reasoning, an
-/// internal cross-reference, why a type is shaped the way it is); that stays
-/// ordinary rustdoc for whoever reads the source, and stops there instead of
-/// leaking into what a caller sees.
+/// internal cross-reference, why a type is designed the way it is); that
+/// stays ordinary rustdoc for whoever reads the source, and stops there
+/// instead of leaking into what a caller sees.
 pub fn doc_comment(attrs: &[Attribute]) -> Option<String> {
     let mut lines = Vec::new();
     for attr in attrs {

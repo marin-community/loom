@@ -6,13 +6,13 @@
 //! stores, and restricted profiles never inherit these values. The one-shot
 //! judgement agent and watch scripts run env-stripped and get none of them.
 //!
-//! This remains a flat name/value API for existing settings, setup, GitHub,
-//! watch, and shell callers, but storage lives in `profile_env` under the
+//! This is a flat name/value API for existing settings, setup, GitHub,
+//! watch, and shell callers; storage lives in `profile_env` under the
 //! protected `default` profile. New profile-specific callers use
-//! [`crate::profile`] directly. Unlike [`crate::config`] there is no
-//! registry of known keys, because the whole point is arbitrary,
-//! deploy-specific variables. The only constraint is that a name is a valid
-//! POSIX shell identifier, since the value is exported by the launch script.
+//! [`crate::profile`] directly. Unlike [`crate::config`], keys aren't
+//! enumerated — values are arbitrary and deploy-specific. The only
+//! constraint is that a name is a valid POSIX shell identifier, since the
+//! value is exported by the launch script.
 
 use anyhow::Result;
 use sqlx::Row;
@@ -31,11 +31,11 @@ pub fn is_github_token_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// Validate an environment-variable name against the POSIX-portable shell
-/// identifier shape (`[A-Za-z_][A-Za-z0-9_]*`) — what `export NAME=…` in the
-/// launch script can carry — and reject names in loom's own
-/// [`RESERVED_PREFIXES`]. The error is a key-free reason so callers can
-/// prefix it with whatever context they like.
+/// Validate an environment-variable name as a POSIX shell identifier
+/// (`[A-Za-z_][A-Za-z0-9_]*`) — what `export NAME=…` in the launch script
+/// can carry — and reject names in loom's own [`RESERVED_PREFIXES`]. The
+/// error is a key-free reason so callers can prefix it with whatever
+/// context they like.
 pub fn validate_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() {
         return Err("name must not be empty".to_string());

@@ -25,9 +25,10 @@ use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
 // Artifacts — named, versioned documents stored in weaver.db. The GET resolves
-// the content's references against the issue ledger (via smartdoc) and returns
-// the projection alongside, so the SPA chips and `loom artifacts get` render
-// the same join. Structure in the doc, state in the DB. See docs/artifacts.md.
+// the content's references against the repo's issues (via smartdoc) and
+// returns the resolved reference map alongside, so the SPA chips and
+// `loom artifacts get` render the same join. Structure in the doc, state in
+// the DB. See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
 const MAX_ARTIFACT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -77,7 +78,7 @@ fn decode_artifact_image(content: &str) -> Option<(&'static str, Vec<u8>)> {
     (bytes.len() <= MAX_ARTIFACT_IMAGE_BYTES).then_some((mime, bytes))
 }
 
-/// The wire metadata for an artifact envelope.
+/// The JSON metadata for an artifact envelope.
 pub(super) fn artifact_meta(a: &Artifact) -> ArtifactMeta {
     ArtifactMeta {
         id: a.id,
@@ -91,14 +92,14 @@ pub(super) fn artifact_meta(a: &Artifact) -> ArtifactMeta {
     }
 }
 
-/// Resolve an artifact's content references to their live status, as the wire
-/// [`ArtifactRefs`]. Probes each `#N` against the repo's issue ledger and joins
-/// via [`smartdoc::project`]; an unresolved reference is omitted from the map.
+/// Resolve an artifact's content references to their live status, as
+/// [`ArtifactRefs`]. Probes each `#N` against the repo's issues and joins via
+/// [`smartdoc::project`]; an unresolved reference is omitted from the map.
 async fn project_artifact_refs(db: &Db, repo_root: &str, content: &str) -> ArtifactRefs {
     let doc = smartdoc::parse(content);
     // Probe each distinct reference against weaver-core. Best-effort: a probe
-    // miss (unknown issue, wrong repo, read error) just leaves that ref absent
-    // from the status map, which `project` renders as a muted, non-existent chip.
+    // miss (unknown issue, wrong repo, read error) leaves that ref absent from
+    // the status map, which `project` renders as a muted, non-existent chip.
     let mut status: HashMap<smartdoc::Ref, smartdoc::RefStatus> = HashMap::new();
     for r in smartdoc::refs(&doc) {
         if let smartdoc::Ref::Issue(n) = &r {
@@ -117,7 +118,7 @@ async fn project_artifact_refs(db: &Db, repo_root: &str, content: &str) -> Artif
             }
         }
     }
-    // Join, then shape the resolved issue refs into the wire map (keyed by id).
+    // Join, then build the map of resolved issue refs, keyed by id.
     let mut refs = ArtifactRefs::default();
     for pr in smartdoc::project(&doc, &status).refs {
         if let smartdoc::Ref::Issue(n) = pr.reference {
@@ -138,7 +139,7 @@ async fn project_artifact_refs(db: &Db, repo_root: &str, content: &str) -> Artif
 }
 
 /// Build the full [`ArtifactView`] for an artifact at a given revision (default
-/// latest): envelope, content, version list, and the projected reference map.
+/// latest): envelope, content, version list, and the resolved reference map.
 async fn artifact_view(
     db: &Db,
     repo_root: &str,
@@ -171,9 +172,9 @@ async fn artifact_view(
 /// `artifacts.raw` — an image artifact's decoded bytes for an `<img src>`.
 ///
 /// Markdown documents can use `![alt](artifact:<name>)`; the renderer maps that
-/// source to this operation's path, so the browser depends only on loom's
-/// artifact store and never on an agent-local path. `?rev=N` pins an older
-/// image revision; omitted means latest.
+/// source to this route, so the browser depends only on loom's artifact store
+/// and never on an agent-local path. `?rev=N` pins an older image revision;
+/// omitted means latest.
 ///
 /// Mounted by hand in [`super::encodings`] because `Io::Download` answers with
 /// bytes and a content type rather than a JSON envelope. Authorization is not
@@ -244,7 +245,7 @@ async fn list_operation(context: OperationContext, input: list::Input) -> ApiRes
     Ok(artifacts.iter().map(artifact_meta).collect())
 }
 
-/// `artifacts.get`. Returns the envelope, content, version list, and projected
+/// `artifacts.get`. Returns the envelope, content, version list, and resolved
 /// reference map (issue chips) via [`artifact_view`].
 async fn get_operation(context: OperationContext, input: get::Input) -> ApiResult<get::Output> {
     let st = context.state;
@@ -260,9 +261,9 @@ async fn get_operation(context: OperationContext, input: get::Input) -> ApiResul
 
 /// `artifacts.write` — unified operation for session-scoped and branch-scoped writes.
 ///
-/// `content` is an ordinary string field on the wire (see `write.rs`); the
-/// `#[operand(from_file)]` attribute is a CLI-only convenience over the same
-/// JSON body and has no effect here.
+/// `content` is an ordinary string field in the request body (see `write.rs`);
+/// the `#[operand(from_file)]` attribute is a CLI-only convenience over the
+/// same JSON body and has no effect here.
 async fn write_operation(
     context: OperationContext,
     input: write::Input,
@@ -408,9 +409,9 @@ async fn history_operation(
     Ok(versions)
 }
 
-/// Map a domain [`discussion::Thread`] to its wire [`ThreadDto`]. Duplicated
-/// from the private `thread_dto` in `web/discussion.rs`, which isn't visible
-/// to a sibling module.
+/// Map a domain [`discussion::Thread`] to its [`ThreadDto`] response.
+/// Duplicated from the private `thread_dto` in `web/discussion.rs`, which
+/// isn't visible to a sibling module.
 fn thread_dto(t: &discussion::Thread) -> ThreadDto {
     ThreadDto {
         id: t.id,

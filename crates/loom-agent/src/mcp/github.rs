@@ -4,7 +4,7 @@
 //! `permissions.github.restricted.invoke`: the security boundary here is a
 //! runtime check against the session's stored tool allowlist
 //! (`session.policy_allowed_tools`), not a compile-time grant, so a restricted
-//! session's policy — not its credential — decides which of these six shapes
+//! session's policy — not its credential — decides which of these six tools
 //! it may use. `super::dispatch::bind` assumes one tool name maps to one
 //! operation; this is six tool names gated through one, so it keeps its own
 //! schemas and dispatch loop instead.

@@ -4,8 +4,8 @@
 //! A `weaver_core::runs::Run` is one delivery attempt through
 //! `POST /api/auth/automation-token`-minted credentials, tracked for
 //! idempotent redelivery and operator observability. `runs.create` is gated
-//! to the runtime (`actor = Internal`), while the read side is an operator
-//! diagnostic surface (`actor = User`).
+//! to the runtime (`actor = Internal`); the read side (`runs.get`,
+//! `runs.list`) is for operator diagnostics (`actor = User`).
 
 use super::registry::OperationSpec;
 use super::OperationBundle;

@@ -1,8 +1,8 @@
-//! The human log viewer's HTTP surface: `diagnostics.status`, the `logs.list`
+//! The human log viewer's HTTP endpoints: `diagnostics.status`, the `logs.list`
 //! snapshot, and the `/api/logs/stream` tail. The security-critical properties
 //! are that all three require a human role and user-role messages are redacted.
-//! This suite proves the HTTP shape and auth boundary; redaction is exercised by
-//! the `loom::logs` unit tests.
+//! This suite proves the response bodies and auth boundary; redaction is
+//! exercised by the `loom::logs` unit tests.
 //!
 //! (The ring-buffer *capture* is exercised by the `loom::logs` unit tests and the
 //! e2e suite against the real binary, which is where the tracing layer is
@@ -24,7 +24,7 @@ async fn status_and_logs_are_shaped_and_human_only() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();
 
-    // Loopback-trusted (the harness connects from 127.0.0.1): reachable + shaped.
+    // Loopback-trusted (the harness connects from 127.0.0.1): reachable, with the expected fields.
     let st: Value = http
         .post(url(&ts, "/api/diagnostics/status"))
         .json(&json!({}))

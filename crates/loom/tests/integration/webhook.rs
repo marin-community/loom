@@ -166,7 +166,7 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
         .unwrap();
     // The webhook's ordinary interactive session has no Account PAT in this
     // fixture, so explicitly approve its repository for the App broker through
-    // the selected profile, just as an operator would in production.
+    // the selected profile, as an operator would in production.
     let profile_name = weaver_core::config::get_or(
         &ts.state.db,
         "github.profile",

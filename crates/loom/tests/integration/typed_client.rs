@@ -1,10 +1,10 @@
 //! The typed `weaver_api::Client` methods, round-tripped against a real server.
 //!
-//! These exercise the typed surface the Python binding wraps — `create_session`,
-//! `list_sessions`, `get_session`, and `mark` (triage) — deserializing real
-//! `SessionView`s rather than poking at raw JSON. They cover the DTO contract
-//! end-to-end: the server serializes the moved `weaver-api` structs and the
-//! client deserializes the same definitions.
+//! These exercise the typed client methods the Python binding wraps —
+//! `create_session`, `list_sessions`, `get_session`, and `mark` (triage) —
+//! deserializing real `SessionView`s rather than raw JSON. They cover the DTO
+//! contract end-to-end: the server serializes the moved `weaver-api` structs
+//! and the client deserializes the same definitions.
 
 use serial_test::serial;
 
@@ -35,7 +35,6 @@ async fn typed_create_list_get_and_mark() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    // Typed create: build a sessions::launch::Input, get a SessionView back.
     let created = client
         .invoke::<sessions::launch::Op>(&sessions::launch::Input {
             goal: (Some("typed client round-trip".to_string())).clone(),
@@ -73,8 +72,8 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(opening[0].kind, "goal");
     assert_eq!(opening[0].body, "typed client round-trip");
 
-    // Session credentials can bootstrap every resource-shaped tool from one
-    // caller-relative context, then inspect the same channel's bindings.
+    // The session credential implies its own session and branch, so `context`
+    // and the bindings lookup below can omit those ids.
     let session_token =
         loom::auth::create_session_token(&ts.state.db, Some("rjpower"), &id, &created.branch.id)
             .await
@@ -139,12 +138,11 @@ async fn typed_create_list_get_and_mark() {
         1
     );
 
-    // Typed list: the new session is the only one.
+    // The new session is the only one.
     let sessions = client.list_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, id);
 
-    // Typed get by id.
     let got = client
         .invoke::<sessions::get::Op>(&sessions::get::Input {
             session: id.to_string(),
@@ -161,8 +159,8 @@ async fn typed_create_list_get_and_mark() {
         "unmarked at first"
     );
 
-    // Typed mark (triage): stamps the watch axis as the `triage` tag, the
-    // agent's own `attention` tag untouched.
+    // Marking sets the `triage` tag; the agent's own `attention` tag stays
+    // untouched.
     let marked = client
         .mark(&id, "attention", "looks stuck", Some("typed-test"))
         .await
@@ -275,9 +273,9 @@ async fn operation_discovery_and_permission_request_round_trip() {
         })
         .await
         .unwrap_err();
-    // `permissions.requests.deny` is declared `actor = User`, so a session
-    // credential is refused by the registry itself — the operation an agent
-    // must not reach simply does not accept its grant.
+    // `permissions.requests.deny` is declared `actor = User`, so the registry
+    // itself refuses a session credential: this operation does not accept a
+    // session grant.
     assert!(error.to_string().contains("human operator"));
 
     let denied = ts
@@ -294,7 +292,8 @@ async fn operation_discovery_and_permission_request_round_trip() {
 
 /// A GitHub App installation token covers one owner, so a session holding
 /// access under two owners has no single token. Each repository is brokered on
-/// its own, and granting the second owner no longer has to mint the union.
+/// its own, so granting the second owner mints only that repository, not the
+/// union of both.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_credentials_are_brokered_per_repository_across_owners() {
@@ -316,8 +315,7 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
         .await
         .unwrap();
 
-    // A human grants the second owner. Before per-repository brokering this
-    // failed here, because validation minted the whole prospective set.
+    // A human grants the second owner.
     ts.client
         .invoke::<permission_ops::github::grant::Op>(&permission_ops::github::grant::Input {
             session: created.id.clone(),
@@ -358,8 +356,8 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
         assert!(!credential.token.is_empty(), "no token for {repository}");
     }
 
-    // The unscoped form cannot represent a set spanning owners, which is
-    // exactly why the adapters name a repository.
+    // Omitting `repository` fails once the session's repositories span more
+    // than one owner: there is no single token to return.
     let error = session
         .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
             session: created.id.clone(),

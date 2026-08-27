@@ -294,9 +294,8 @@ impl TestServer {
         // unauthenticated client deliberately instead of inheriting ambient
         // credentials through `client::default()`.
         let client = Client::new(format!("http://{addr}"));
-        // Wait for readiness and assert it. This ensures the server is ready
-        // before proceeding; a server that panics on startup will fail here with
-        // a clear error message.
+        // A server that panics on startup fails here with a clear error
+        // message.
         let mut ready = false;
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
@@ -404,7 +403,7 @@ pub fn plant_claude_transcript(home: &Path, work_dir: &str, user: &str, assistan
 /// One tag off a `SessionView` (or `BranchView`) JSON `branch.tags` array by
 /// key, or `None` when the branch carries no tag for that key. The status axes
 /// — the agent's `attention` and a watch's `triage` — are tags, so this is
-/// how a test reads a level/note/author off the wire.
+/// how a test reads a level/note/author from the JSON response.
 pub fn branch_tag<'a>(view: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
     view.get("branch")
         .and_then(|b| b.get("tags"))

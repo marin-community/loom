@@ -265,7 +265,7 @@ async fn apply_legacy_agent_patch(db: &Db, changes: &[config::Change]) -> anyhow
 // Operation registry — `settings.*`, bound onto
 // `weaver_api::operations::settings`. `settings.env.*` handlers live in
 // `web/env.rs` (the file that already owns the default profile's environment
-// facade); this bundle just registers them alongside `settings.get`/`.patch`.
+// facade); this bundle registers them alongside `settings.get`/`.patch`.
 // `preferences.*` is a separate bundle — per-operator overrides rather than
 // server-wide configuration, and human-but-not-admin where `settings.patch` is
 // admin — but its two handlers sit here, beside the settings ones they share

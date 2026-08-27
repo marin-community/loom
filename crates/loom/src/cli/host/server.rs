@@ -87,7 +87,7 @@ pub(crate) fn init_tracing() {
         .unwrap_or_else(|_| EnvFilter::new("loom=info,weaver_core=info,tower_http=warn"));
     // Registry-of-layers so the ring-buffer capture (the in-browser log viewer)
     // runs *alongside* the existing stdout output — `docker compose logs` is
-    // unchanged; the buffer just tees. The one `EnvFilter` gates both layers.
+    // unchanged; the buffer tees. The one `EnvFilter` gates both layers.
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
@@ -282,8 +282,8 @@ mod tests {
     }
     #[test]
     fn a_private_weaver_home_keeps_hand_testing_available() {
-        // The session env always carries a WEAVER_HOME — the host's. What makes
-        // an isolated home safe is that no loom lives in it yet.
+        // The session env always carries a WEAVER_HOME — the host's; an isolated
+        // one is safe only because no loom lives in it yet.
         let home = tempfile::tempdir().unwrap();
         assert!(nested_server_refusal(Some("bej3oxrv"), home.path()).is_none());
     }

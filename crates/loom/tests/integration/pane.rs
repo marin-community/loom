@@ -90,7 +90,7 @@ async fn send_runs_a_command_and_preview_reads_it() {
     let id = ws["id"].as_str().unwrap().to_string();
 
     // Submit a command whose OUTPUT (the arithmetic result) differs from the
-    // text typed — so finding it proves the line was actually executed, not just
+    // text typed — so finding it proves the line was actually executed, not
     // echoed onto the prompt.
     let sent = client
         .post(

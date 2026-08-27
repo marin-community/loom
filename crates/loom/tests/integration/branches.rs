@@ -47,8 +47,7 @@ async fn branch_issues_and_repo_board() {
     let tracking = tracking.as_array().unwrap();
     assert!(tracking.is_empty(), "ordinary launch opens no issue");
 
-    // Branch issues are claimed by the branch; routine issue operations use
-    // generated resource-grouped endpoints.
+    // Branch issues are claimed by the branch.
     let created = client
         .post(
             "/api/issues/create",
@@ -124,7 +123,7 @@ async fn branch_issues_and_repo_board() {
 }
 
 /// The cross-repo issue board (`issues.board`) and issue tags: a label set
-/// through the typed client surfaces on the issue's `tags`, including when its
+/// through the typed client shows up in the issue's `tags`, including when its
 /// free-form key contains reserved URL characters, and clearing removes it.
 /// Closed issues only appear with `all: true`.
 #[serial]
@@ -166,9 +165,8 @@ async fn cross_repo_board_and_issue_tags() {
     );
 
     // Set a free-form label through the registered operation. The key
-    // deliberately contains path/query delimiters, which are now unremarkable:
-    // the operation carries its arguments in the body, so nothing about this
-    // key touches the route.
+    // deliberately contains path/query delimiters: the operation carries its
+    // arguments in the body, so nothing about this key touches the route.
     let tag_key = "priority / now?#";
     let tagged = client
         .invoke::<tags::set::Op>(&tags::set::Input {
@@ -201,7 +199,6 @@ async fn cross_repo_board_and_issue_tags() {
         .await;
     assert!(bad.is_err(), "an empty issue-tag value is rejected");
 
-    // Clearing removes the label.
     let cleared = client
         .invoke::<tags::delete::Op>(&tags::delete::Input {
             id: issue_id,
@@ -212,8 +209,8 @@ async fn cross_repo_board_and_issue_tags() {
         .unwrap();
     assert!(cleared.tags.is_empty(), "clearing removes the label");
 
-    // Lifecycle operations take a set of ids and apply atomically. The single
-    // -id case is just the one-element set.
+    // Lifecycle operations take a set of ids and apply atomically; the
+    // single-id case is the one-element set.
     let close = |ids: Vec<i64>| {
         let input = close::Input {
             ids,
@@ -267,7 +264,7 @@ async fn cross_repo_board_and_issue_tags() {
 }
 
 /// The triage axis: `sessions.tags.set` on the `triage` key stamps the watch's
-/// mark on the session's branch, surfaces it on the SessionView's `branch.tags`,
+/// mark on the session's branch, shows it in the SessionView's `branch.tags`,
 /// and never disturbs the agent's own `attention` tag. An invalid value is
 /// rejected.
 #[serial]
@@ -348,7 +345,6 @@ async fn triage_axis_marks_a_session() {
         "triage must not stomp the agent's self-report"
     );
 
-    // An invalid value is rejected.
     let bad = client
         .post(
             "/api/sessions/tags/set",
@@ -602,7 +598,7 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
         .unwrap();
     assert_eq!(unrouted.status(), StatusCode::FORBIDDEN);
 
-    // A channel name is not an id: rejected on shape, before any Slack call.
+    // A channel name is not an id: rejected as malformed, before any Slack call.
     let malformed = http
         .post(&reply_url)
         .json(&json!({

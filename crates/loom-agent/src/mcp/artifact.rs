@@ -2,8 +2,8 @@
 //!
 //! Every tool here is a registered `artifacts.*` operation, and `tools/list` is
 //! read off [`exports`]. `delete`, `history`, `threads`, `comment`, and
-//! `resolve` route straight through `super::dispatch::call_tool`. The schema
-//! carries all the shape these tools need.
+//! `resolve` route straight through `super::dispatch::call_tool`. The
+//! generated schema is all these tools need.
 //!
 //! `list`, `get`, and `write` are hand-written because they resolve each artifact's
 //! dashboard `url` with a second REST call (`Client::branch_artifact_url`) and merge
@@ -67,7 +67,7 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 /// Capability sets are derived from the registry: every `artifacts.*` operation
-/// whose MCP projection targets this server contributes its tool to the set
+/// exposed as an MCP tool on this server contributes its tool to the set
 /// named by its grant, plus the same sets under the names they were superseded
 /// away from.
 fn capability_sets() -> &'static [CapabilitySet] {

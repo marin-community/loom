@@ -1,21 +1,20 @@
 //! The command line, built from an operation's operand list.
 //!
-//! This is the whole of Loom's clap knowledge, written once and driven by data.
-//! It used to be two functions generated into every operand struct, which meant
-//! `weaver-api` — the crate the server, the Python binding, and every embedder
-//! link to merely *describe* an operation — depended on a command-line parser.
+//! This is the whole of Loom's clap knowledge, written once and driven by
+//! data, so `weaver-api` — the crate the server, the Python binding, and
+//! every embedder link to merely *describe* an operation — never depends on
+//! a command-line parser.
 //!
-//! An [`Operand`] says what a field is called, what shape it has, whether a
+//! An [`Operand`] says what a field is called, what kind of value it holds, whether a
 //! caller must supply it, what it defaults to, and how the command line spells
 //! it. That is enough to build the parser and to read the parse back out, so
 //! nothing about the command line has to be written down twice.
 //!
 //! [`from_matches`] produces the JSON an operand struct deserializes from
 //! rather than the struct itself. Building the struct field by field needs the
-//! field's type at compile time, which is exactly what forced the generated
-//! code; going through JSON means one runtime function serves all 214
-//! operations, and a malformed value is reported by `serde` — the same place
-//! REST and MCP report it.
+//! field's type at compile time; going through JSON avoids that, so one
+//! runtime function serves all 214 operations, and a malformed value is
+//! reported by `serde` — the same place REST and MCP report it.
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use serde_json::{Map, Value};
@@ -75,10 +74,10 @@ fn arg(operand: &Operand, cli: CliSpelling) -> Arg {
     if let Some(help) = operand.help {
         arg = arg.help(help);
     }
-    // `--help` shows what omitting the flag will do — `loom channels send`
-    // never used to mention that `kind` means `message`. Only scalars, and not
-    // a bare `--flag`, whose absence already reads as false: a default that
-    // renders as `{}` or `[]` is noise rather than guidance.
+    // `--help` shows what omitting the flag will do, e.g. that `kind` defaults
+    // to `message`. Only scalars, and not a bare `--flag`, whose absence
+    // already reads as false: a default that renders as `{}` or `[]` is noise
+    // rather than guidance.
     if operand.kind != OperandKind::Bool {
         if let Some(shown) = operand
             .default

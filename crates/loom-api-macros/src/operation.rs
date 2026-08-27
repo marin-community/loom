@@ -170,10 +170,10 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
     let grant_literals = grants.iter().map(|grant| LitStr::new(grant, span));
 
-    // `Scoped` for free: every operation's resource check reduces to "which
-    // context field names the resource", and that's exactly what `scope`
-    // already says. `scoped = custom` opts out for the rare operation whose
-    // resource isn't one of its own context fields.
+    // `Scoped` derives from `scope`: every operation's resource check reduces
+    // to "which context field names the resource", which `scope` already
+    // says. `scoped = custom` opts out for the rare operation whose resource
+    // isn't one of its own context fields.
     let scope_ref = match scope.to_string().as_str() {
         _ if custom_scoped => quote!(),
         "Global" => quote!(::weaver_api::operations::ScopeRef::Global),
@@ -218,7 +218,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         quote!(Default,)
     };
 
-    // A JSON renderer for free. `render = custom` opts out so a bundle can
+    // A default JSON renderer. `render = custom` opts out so a bundle can
     // write a real one without a conflicting impl.
     let render_impl = if custom_render {
         quote!()
@@ -287,17 +287,13 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
 
 /// Give every field a caller may omit the `serde` default it already declares.
 ///
-/// `#[operand(default = ...)]` used to be honoured only by the dispatchers,
-/// which merged the declared values into the JSON before handing it to `serde`.
-/// That left two things wrong. `schemars` reads `serde` attributes, so a field
-/// with a declared default was still advertised as `required` — an MCP tool
-/// demanded arguments the operation had said were optional. And an `Input`
-/// nested inside another operation's `Input` never reached a dispatcher at all,
-/// so it could only be deserialized fully spelled out.
-///
-/// Declaring the default where `serde` can see it fixes both, and the schema
-/// gains the `default` keyword for free. The dispatchers no longer merge
-/// anything.
+/// `schemars` reads `serde` attributes, so a field is only advertised as
+/// optional if `serde` itself carries the default; a dispatcher-side merge
+/// step wouldn't reach `schemars`. It also wouldn't reach an `Input` nested
+/// inside another operation's `Input`, which never passes through a
+/// dispatcher. Declaring the default where `serde` can see it covers both,
+/// and the schema picks up the `default` keyword too. Dispatchers do not
+/// merge declared defaults themselves.
 fn serde_defaults(item: &mut ItemStruct) -> syn::Result<Vec<TokenStream>> {
     let struct_ty = item.ident.clone();
     let mut functions = Vec::new();

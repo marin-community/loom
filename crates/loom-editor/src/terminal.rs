@@ -10,7 +10,7 @@
 //!
 //! Binary frames both directions. server → client is raw PTY output bytes. The
 //! client → server hot path is opcode-prefixed (the ttyd/terminado/VS Code
-//! shape):
+//! convention):
 //!
 //! * `0x00 <bytes…>` — keystrokes, forwarded verbatim to the PTY writer.
 //! * `0x01 <cols:u16_be> <rows:u16_be>` — resize (exactly 5 bytes).
@@ -232,7 +232,9 @@ async fn bridge(socket: WebSocket, target: String) -> anyhow::Result<()> {
         }
     });
 
-    // Whichever pump finishes first, drop the other.
+    // Whichever pump finishes first, drop the other: dropping `input` closes
+    // the socket write half, which the supervisor reads as a clean detach —
+    // the child keeps running, and a refresh reconnects and repaints.
     tokio::select! {
         _ = &mut out_task => in_task.abort(),
         _ = &mut in_task => out_task.abort(),

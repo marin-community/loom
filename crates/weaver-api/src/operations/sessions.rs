@@ -1,4 +1,4 @@
-//! Session lifecycle, status projection, and normalized history.
+//! Session lifecycle, status, and normalized history.
 //!
 //! The bootstrap read operation (`self.get`) lives in this bundle, named
 //! `context` because `self` is reserved as a module name.
@@ -286,7 +286,7 @@ pub mod files {
 pub mod get {
     use super::prelude::*;
 
-    /// Inspect one session and its branch projection.
+    /// Inspect one session and its branch view.
     #[operation(id = "sessions.get", actor = SessionSelf, scope = Session, risk = Read,
                 grants = ["loom/sessions/read@v1"], cli = "sessions get")]
     pub struct Input {
@@ -773,7 +773,7 @@ pub mod preview {
     #[operation(id = "sessions.preview", actor = SessionSelf, scope = Session, risk = Read,
                 grants = ["loom/sessions/read@v1"], cli = "sessions preview")]
     pub struct Input {
-        /// Extra scrollback lines to include above the visible screen (0 = just
+        /// Extra scrollback lines to include above the visible screen (0 = only
         /// the visible pane).
         #[operand(default = 0)]
         pub lines: i64,
@@ -822,7 +822,7 @@ pub mod prompt {
         }
 
         /// Result of `sessions.prompt.create`. Mirrors the ACP task's own
-        /// acknowledgement (`queued`, `turn`), the same shape `sessions.send` returns
+        /// acknowledgement (`queued`, `turn`), matching what `sessions.send` returns
         /// for an ACP session.
         #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
         pub struct PromptResult {
@@ -1157,7 +1157,7 @@ pub mod summary {
 
         /// The fleet index: one compact row per visible session.
         ///
-        /// A reduced projection, so a caller that only needs the compact view
+        /// A reduced view, so a caller that only needs the compact view
         /// does not pay for the full one. `sessions.get` returns the whole
         /// context.
         #[operation(id = "sessions.summary.list", actor = User, scope = Global, risk = Read,

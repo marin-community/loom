@@ -6,7 +6,7 @@
 //! same resolution the rest of the CLI uses — see `weaver_api::endpoint`.
 //! "Current branch" comes from `$WEAVER_BRANCH`, which loom sets for every
 //! session it launches. Without it, or without a reachable loom, a command fails
-//! with a plain-text error instead of falling back to local state.
+//! with a plain-text error.
 //!
 //! One module per command group. This file holds what more than one of them
 //! needs: the client, the branch and channel keys they resolve against, and the

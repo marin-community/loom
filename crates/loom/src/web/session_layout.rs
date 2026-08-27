@@ -41,7 +41,7 @@ async fn mutation_response(
 }
 
 /// The `session_layout.events` operation — a fleet-global layout tail. Events
-/// carry no data; they just trigger a normal read, so reconnects or dropped
+/// carry no data; they trigger a normal read, so reconnects or dropped
 /// messages can't corrupt local selection/disclosure state.
 pub(super) async fn session_layout_events(
     State(st): State<AppState>,
@@ -166,8 +166,6 @@ async fn groups_delete_operation(
     mutation_result(&st, &username, result).await
 }
 
-/// `session_layout.groups.preference.set`. This skips `mutation_result`: a
-/// collapse toggle carries no `expected_revision` to conflict on.
 async fn groups_preference_set_operation(
     context: OperationContext,
     input: groups::preference::set::Input,

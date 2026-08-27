@@ -1,9 +1,8 @@
 //! The executable half of the operation registry.
 //!
-//! Binding a handler is what makes an operation exist on the server. There is no
-//! later parity pass and no "declared but implemented elsewhere" state: a
-//! descriptor without a [`register`] call fails startup validation, and a
-//! `register` call without a descriptor does not compile.
+//! A descriptor without a [`register`] call fails startup validation, and a
+//! `register` call without a descriptor does not compile — no operation can be
+//! declared but not implemented, or implemented but not declared.
 //!
 //! Authorization happens here, once, from typed input — actor, grants, and the
 //! resource named by [`Scoped`].
@@ -24,8 +23,8 @@ use super::{ApiResult, AppError};
 
 /// Owned server context handed to a bound operation.
 ///
-/// Owned rather than borrowed so handler futures stay `'static`, which lets the
-/// binding accept ordinary `async fn`s without higher-ranked lifetime machinery.
+/// Owned, not borrowed, so handler futures stay `'static` — the binding accepts
+/// ordinary `async fn`s without higher-ranked lifetime machinery.
 #[derive(Clone)]
 pub(super) struct OperationContext {
     pub state: AppState,
@@ -68,12 +67,12 @@ where
                 let mut input = decoded.map_err(|error| {
                     AppError::bad_request(format!("invalid arguments for {}: {error}", O::SPEC.id))
                 })?;
-                // Context is dispatcher-supplied, and over REST *this* is the
-                // dispatcher. The CLI and MCP resolve it client-side; a session
-                // calling the API directly had no way to, and was refused by its
-                // own scope check for omitting a field it is not shown.
-                // `fill_context` only fills what is empty, so an explicit value
-                // still wins — and still faces the scope check below.
+                // Context is dispatcher-supplied; over REST, this is the dispatcher.
+                // The CLI and MCP resolve it client-side. A session calling the API
+                // directly has no way to, so it is refused by its own scope check
+                // for omitting a field it is never shown. `fill_context` only fills
+                // what is empty, so an explicit value still wins — and still faces
+                // the scope check below.
                 if !<O::Input as Operands>::CONTEXT.is_empty() {
                     if let Some(values) = session_context(&context).await? {
                         input.fill_context(&values);
@@ -93,12 +92,12 @@ where
 ///
 /// [`register`] cannot serve a `Stream` or `Duplex` operation: axum needs the
 /// concrete response type, and an SSE body or a websocket upgrade is not a
-/// `Serialize`. What those operations must *not* skip is the decision — so this
-/// is the same context fill and the same [`authorize`] the JSON dispatcher runs,
-/// factored out and called by the handlers in [`super::encodings`].
+/// `Serialize`. The context fill and the [`authorize`] call are factored out
+/// here so the handlers in [`super::encodings`] run the same check the JSON
+/// dispatcher does.
 ///
-/// `input` is taken by `&mut` because context resolution is half the point: a
-/// session credential naming no session gets its own, exactly as over JSON.
+/// `input` is taken by `&mut` so context resolution can fill it: a session
+/// credential naming no session gets its own, exactly as over JSON.
 pub(super) async fn authorize_declared<O>(
     state: &AppState,
     principal: &Principal,
@@ -149,7 +148,7 @@ async fn session_context(context: &OperationContext) -> ApiResult<Option<Context
 /// The single authorization decision for a registered operation.
 ///
 /// Every transport reaches this same function with the same typed input, so an
-/// adapter cannot widen authority by choosing a different door.
+/// adapter cannot widen authority by using a different transport.
 async fn authorize(
     context: &OperationContext,
     operation: &'static OperationSpec,
@@ -173,9 +172,9 @@ async fn authorize(
 fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
     use crate::auth::Grant;
     // An operation that needs no credential is reachable by everyone, including
-    // a caller that has one. The converse is the point: `Grant::Anonymous`
-    // reaches nothing else, so forgetting to authenticate a route cannot quietly
-    // widen it — the declaration is what opens the door.
+    // a caller that has one. `Grant::Anonymous` reaches nothing else: forgetting
+    // to authenticate a route cannot widen it, since reachability is controlled
+    // by the operation's declared `ActorPolicy`, not by whether a check exists.
     if operation.actor == ActorPolicy::Anonymous {
         return true;
     }
@@ -291,8 +290,8 @@ fn by_id() -> BTreeMap<&'static str, Bound> {
 
 /// Assert that declarations and implementations are the same set.
 ///
-/// This is the invariant that makes the registry trustworthy: it is impossible
-/// to ship a descriptor that nothing serves, or to serve something undeclared.
+/// It is impossible to ship a descriptor that nothing serves, or to serve
+/// something undeclared.
 pub(super) fn assert_registry_is_complete() {
     weaver_api::validate_operation_registry().expect("operation registry is structurally invalid");
 

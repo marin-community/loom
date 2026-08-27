@@ -4,13 +4,13 @@
 //!
 //! Almost every endpoint here is a **registered operation**: it is declared
 //! once in `weaver_api::operations`, and its route, method, input schema,
-//! actor policy, CLI projection and MCP tool all fall out of that one
+//! actor policy, CLI command and MCP tool all fall out of that one
 //! declaration. The path is mechanical — `issues.list` is
 //! `POST /api/issues/list`, `sessions.shells.terminal` is
 //! `GET /api/sessions/shells/terminal` — with no separate route table to
 //! maintain.
 //!
-//! Two functions build the surface:
+//! Two functions build the router:
 //!
 //! * `operations::mount` serves every operation whose response is JSON — the
 //!   overwhelming majority — through one dispatcher. Arguments arrive as a JSON
@@ -20,8 +20,8 @@
 //!   `Set-Cookie` header, which is why they mount beside the auth routes.
 //! * `encodings::mount` serves every `io = Stream | Duplex` operation with
 //!   custom handlers — axum requires concrete SSE or websocket-upgrade response
-//!   types. Operands arrive in the query string, which is the sole place where
-//!   encoding affects the wire format.
+//!   types. Operands arrive in the query string, the only place these
+//!   operations differ from the JSON dispatcher in how they're encoded.
 //!
 //! Eighteen routes mount by hand, each with its reason written beside it below:
 //! the code-server proxy, the liveness and readiness probes, the metrics scrape,
@@ -31,11 +31,11 @@
 //! `#[operation]`, and its route is derived from its id.
 //!
 //! Response encoding is the only thing an operation's declaration varies about
-//! its transport; see `docs/ARCHITECTURE.md` for the projection table.
+//! its transport; see the response-encoding table in `docs/ARCHITECTURE.md`.
 //!
 //! ### SessionView payload
 //!
-//! The session-scoped endpoints return a `SessionView` shaped like:
+//! The session-scoped endpoints return a `SessionView`:
 //!
 //! ```json
 //! {
@@ -178,7 +178,7 @@ pub struct AppError {
     message: String,
     details: Option<Value>,
     /// Extra keys merged into the body alongside `error` (top-level, not
-    /// nested under `details`) — for callers whose wire contract is a flat
+    /// nested under `details`) — for callers whose response body is a flat
     /// object, e.g. the artifact write-conflict `{ "error", "latest" }`.
     fields: Option<Value>,
     /// For an internal error built from an `anyhow::Error`: the full cause chain
@@ -280,7 +280,7 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
             details: None,
             fields: None,
             // `{err:?}` renders anyhow's full cause chain plus the backtrace when
-            // one was captured (`RUST_BACKTRACE=1`); `to_string()` above is just
+            // one was captured (`RUST_BACKTRACE=1`); `to_string()` above is
             // the top-level message the client sees.
             source_chain: Some(format!("{err:?}")),
         }
@@ -330,11 +330,11 @@ pub(crate) type ApiResult<T> = Result<T, AppError>;
 // ---------------------------------------------------------------------------
 // View payloads
 //
-// The wire structs (`BranchView`, `SessionView`, `IssueView`, …) live in
+// The response types (`BranchView`, `SessionView`, `IssueView`, …) live in
 // `weaver-api` — the one definition the server, the CLI, and the Python binding
 // share. The async builders below gather the parts the daemon owns (open-issue
 // counts, GitHub snapshots, run history) and hand them to the `from_parts`
-// constructors. The DB access stays here; the wire shape stays there.
+// constructors. The DB access stays here; the type stays there.
 // ---------------------------------------------------------------------------
 
 /// Build a [`BranchView`] for a branch, joining its tags, the denormalized
@@ -347,7 +347,7 @@ pub(crate) async fn branch_view(db: &Db, branch: &Branch) -> ApiResult<BranchVie
     let open = weaver_core::issue::open_count_for_branch(db, &branch.repo_root, &branch.branch)
         .await
         .unwrap_or(0);
-    // Best-effort: a missing/erroring snapshot just renders as no GitHub info.
+    // Best-effort: a missing/erroring snapshot renders as no GitHub info.
     let github = github::get_status(db, &branch.id).await.ok().flatten();
     let github_pr = github::get_mapping(db, &branch.id).await.ok().flatten();
     Ok(BranchView::from_parts(
@@ -452,12 +452,12 @@ pub(crate) async fn session_view(
     })
 }
 
-/// Build the compact fleet/search projection for a session + branch.
+/// Build the compact [`SessionSummaryView`] for the fleet list and search.
 ///
 /// Unlike [`session_view`], this deliberately does not deserialize launch
 /// snapshots, MCP policy, or title-generation state. Large goal text remains
-/// available to server-side search through the source `Branch`, but crosses the
-/// wire only when a client follows with the session detail endpoint.
+/// available to server-side search through the source `Branch`, but reaches
+/// the client only when it requests the session detail endpoint.
 pub(crate) async fn session_summary_view(
     db: &Db,
     session: &Session,
@@ -548,13 +548,12 @@ pub(crate) fn author_or_manual(by: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 /// Whether `path` (the `/api`-stripped path) is an embedded-editor proxy route
-/// — `/sessions/<id>/ide` or `/sessions/<id>/ide/…` — as opposed to the small
-/// `ide-info` JSON probe, which is fine to ETag.
-/// Paths under the embedded-editor reverse proxy (`…/sessions/{id}/ide`), which
-/// must bypass the ETag middleware — buffering code-server's stream to hash it
-/// truncates assets past the 16 MB cap. The middleware sees the nest-stripped
-/// `/sessions/…` form, but we strip an optional leading `/api` too so the
-/// exclusion survives if that layer is ever hoisted to the outer router.
+/// — `/sessions/<id>/ide` or `/sessions/<id>/ide/…` — which must bypass the
+/// ETag middleware: buffering code-server's stream to hash it truncates assets
+/// past the 16 MB cap. Excludes the small `ide-info` JSON probe, which is fine
+/// to ETag. The middleware sees the nest-stripped `/sessions/…` form, but this
+/// also strips an optional leading `/api` so the exclusion survives if that
+/// layer is ever hoisted to the outer router.
 pub(super) fn is_ide_proxy_path(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     let Some(rest) = path.strip_prefix("/sessions/") else {
@@ -717,15 +716,13 @@ fn static_dir() -> PathBuf {
 
 fn registered_api_router() -> Router<AppState> {
     // Declarations and handlers must be the same set, and the moment to find
-    // out is boot — not the first request to a descriptor nothing serves. The
-    // registry this replaces had no such check, which is how it came to
-    // advertise operations that 404ed.
+    // out is boot — not the first request to a descriptor nothing serves.
     operations::assert_registry_is_complete();
     let router = operations::mount(Router::new());
     // The non-JSON half of the same registry: SSE feeds and terminal
     // websockets, mounted at their derived paths off the same declarations.
     let router = encodings::mount(router);
-    // The IDE proxy: the one hand-mounted endpoint on the authenticated surface.
+    // The IDE proxy: the one hand-mounted route among the authenticated ones.
     // It forwards an arbitrary sub-path into a container and streams back
     // whatever comes out — it has no operation declaration and will not get one.
     router
@@ -745,10 +742,11 @@ fn registered_api_router() -> Router<AppState> {
 
 /// The unauthenticated route table.
 ///
-/// Split out from [`router`] so the whole surface can be built — and therefore
-/// checked for overlapping routes — without a database. See the tests below.
+/// Split out from [`router`] so the whole route table can be built — and
+/// therefore checked for overlapping routes — without a database. See the
+/// tests below.
 fn public_api_router() -> Router<AppState> {
-    // Public surface: the liveness probe and the login flow itself. No
+    // Public routes: the liveness probe and the login flow itself. No
     // middleware — these must work for an unauthenticated caller, since they are
     // how one *becomes* authenticated.
     Router::new()
@@ -801,7 +799,7 @@ pub fn router(state: AppState) -> Router {
     let api = public_api_router()
         .merge(protected)
         // ETag/304 short-circuit for cacheable GETs — applied across the whole
-        // API surface (public + protected) before the state is sealed in.
+        // HTTP API (public + protected) before the state is sealed in.
         .layer(axum::middleware::from_fn(api_etag_middleware))
         .with_state(state.clone());
 
@@ -892,14 +890,8 @@ mod route_table_tests {
     ///
     /// axum panics at `.route()` when two handlers claim the same method and
     /// path, so *constructing* the router is the check — and it covers every
-    /// overlap, not just the ones a source-scanning ledger can see.
-    ///
-    /// This is not hypothetical. `POST /deployment/reconcile` was mounted by
-    /// hand *and* derived from the `deployment.reconcile` operation. Nothing
-    /// caught it: the surface ledger counted a hand-mounted route that equals an
-    /// operation's route as "accounted for", which is exactly backwards. The
-    /// panic happened inside each integration test's server task, so all 185 of
-    /// them failed with "cannot reach loom" and none of them said why.
+    /// overlap, including a hand-mounted route that happens to equal an
+    /// operation's derived route, which a hand-maintained route list would miss.
     #[test]
     fn the_route_table_has_no_overlapping_routes() {
         let _ = super::public_api_router();

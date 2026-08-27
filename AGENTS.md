@@ -5,11 +5,11 @@ short on purpose. Depth lives elsewhere, pull it in when you need it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (internals: module map, REST API,
 storage, status model, GitHub integration), and [README.md](README.md) (user docs).
 The in-workspace primer is registered in code; run `loom help`, `loom summary`,
-and `loom permissions show` to discover the executable workflow surface.
+and `loom permissions show` to discover what you can run.
 
 ## What Loom is
 
-One public command surface over Loom's REST API:
+One public entry point to Loom's REST API:
 
 - **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-session
   detached Tapestry runtime supervisor + agent process, the monitor, and
@@ -113,7 +113,7 @@ when you're ready to land. The rules it enforces:
   `invokeOperation` is keyed on, so an unknown operation id is a compile error
   and no call site casts its result.
   `frontend/src/types.ts` keeps only what the server does not declare: the
-  SPA's spelling of each generated name, and the shapes of fields the API
+  SPA's spelling of each generated name, and the layout of fields the API
   serves as free-form JSON. Don't invent browser-local features the `loom` CLI
   can't observe.
 - **Small SQLite app — don't flag scale.** `~/.weaver/weaver.db` holds ~hundreds

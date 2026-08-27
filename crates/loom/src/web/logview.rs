@@ -37,8 +37,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
 }
 
 /// `tasks.list`, `crates/weaver-api/src/operations/tasks/list.rs`. [`TaskView`]
-/// mirrors [`TaskRecord`] field-for-field but is a distinct wire type owned by
-/// weaver-api, so the mapping is spelled out rather than assumed.
+/// mirrors [`TaskRecord`] field-for-field but is a distinct response type owned
+/// by weaver-api, so the mapping is spelled out rather than assumed.
 fn task_view(record: TaskRecord) -> TaskView {
     TaskView {
         id: record.id,

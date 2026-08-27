@@ -188,7 +188,7 @@ pub fn bindings() -> Vec<CliBinding> {
 #[cfg(test)]
 mod tests {
     /// Every registered JSON operation must be reachable from the CLI unless it
-    /// deliberately declares no projection.
+    /// deliberately declares no CLI command.
     #[test]
     fn registered_operations_have_a_binding() {
         let bound: Vec<_> = super::bindings()
@@ -209,8 +209,8 @@ mod tests {
     /// And nothing is bound that no command can reach.
     ///
     /// A binding whose operation declares `cli = -` is never placed in the tree
-    /// — `generic_bindings` filters it out — so it costs a line here and buys
-    /// nothing.
+    /// — `generic_bindings` filters it out — so keeping it in `bindings()`
+    /// serves no purpose.
     #[test]
     fn every_binding_names_an_operation_with_a_command() {
         let stranded: Vec<_> = super::bindings()

@@ -135,8 +135,7 @@ not retry a delivery loom handled without launching.
 ## Who can trigger
 
 The people who can trigger `@loom` are exactly the people who can sign in to
-loom: the **approved users** (the `users` table). One allowlist governs both
-surfaces — being approved lets someone sign in *and* drive the trigger from an
+loom: the **approved users** (the `users` table). One allowlist governs both: being approved lets someone sign in *and* drive the trigger from an
 issue body, comment, or submitted review, including by editing a body to add the
 mention; no one else can do either. Write access to the repo is **not** by itself
 a grant, so opening a repo to loom never hands the trigger to everyone who can
@@ -320,7 +319,7 @@ The trigger is a **webhook, not a poll** — "nothing happened" always means the
 the gates above. Debugging is one question: *did the delivery arrive, and which
 gate did it hit?* Work through it in order:
 
-1. **Was the request the right shape?** It must be an issue body
+1. **Was it the right kind of event?** It must be an issue body
    (`issues/opened` or a body-changing `issues/edited`), a PR/issue
    **conversation** comment (`issue_comment/created` or
    `issue_comment/edited`), or a submitted PR review
@@ -358,7 +357,7 @@ gate did it hit?* Work through it in order:
 
 ### Reproduce without a PR or a deploy
 
-The webhook is just a signed HTTP `POST`, so you can exercise the whole handler
+The webhook is a signed HTTP `POST`, so you can exercise the whole handler
 without touching a PR or redeploying. `scripts/loom_webhook_replay.py` signs a
 synthetic `issue_comment` with the webhook secret and posts it, minting a fresh
 delivery GUID each run so it is never dropped as a duplicate:

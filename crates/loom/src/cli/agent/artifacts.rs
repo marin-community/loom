@@ -7,13 +7,6 @@ use weaver_api::operations::artifacts;
 
 use super::{branch_key, client};
 
-// - `write` reads a local file (or stdin), sniffs an image and encodes it as a
-//   data URI, then asks the server for the artifact's dashboard link.
-// - `delete` resolves the artifact first, so it can name the scope and revision
-//   it removed and say "no artifact 'x'"; `ArtifactDeleteResult` carries only
-//   `{deleted, name}`.
-// - `comment` joins its trailing words into one body, and anchoring a new thread
-//   needs the artifact's current revision, fetched first.
 #[derive(Subcommand)]
 pub enum ArtifactCmd {
     /// Write an artifact: append a new revision (creating it if absent). Reads
@@ -176,8 +169,8 @@ fn encode_image_data_uri(filename: Option<&str>, bytes: &[u8]) -> Result<Option<
     Ok(Some(format!("data:{mime};base64,{b64}")))
 }
 
-/// Read, write, and list artifacts — named, versioned documents stored in
-/// loom. Scoped to the current branch by default; `--repo` is repo-shared.
+/// Write, delete, or comment on an artifact. Scoped to the current branch by
+/// default; `--repo` targets the repo-shared one.
 async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
     let client = client();
     let key = branch_key()?;
@@ -191,11 +184,6 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             base_rev,
         } => {
             let raw = read_bytes_or_stdin(file.as_deref())?;
-            // An image becomes an `image` artifact backed by a base64 data URI;
-            // everything else is stored as text under the requested kind. A
-            // `.html`/`.htm` file promotes the default `markdown` to `html`
-            // (loom sandboxes it in an iframe); an explicit `--kind` always
-            // wins.
             let (kind, content): (String, String) =
                 match encode_image_data_uri(file.as_deref(), &raw)? {
                     Some(uri) => ("image".to_string(), uri),
@@ -226,15 +214,11 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
                     branch: key.to_string(),
                 })
                 .await?;
-            // The write already succeeded — loom is definitionally reachable at
-            // this point, so the dashboard link is always known now (unlike the
-            // direct-db days, when it depended on `$WEAVER_API`/`loom.json`
-            // happening to be present). The server resolves the link so it
-            // carries its externally-visible origin (`auth.base_url`, else the
-            // request Host) — the loopback/wildcard `$WEAVER_API` we dialed
-            // (often `http://0.0.0.0:7878`) is not a URL anyone can open. If that
-            // resolution fails, fall back to the dialed base rather than lose the
-            // rev line entirely.
+            // The server resolves the link to its externally-visible origin
+            // (`auth.base_url`, else the request Host) — the loopback/wildcard
+            // `$WEAVER_API` we dialed (often `http://0.0.0.0:7878`) is not a URL
+            // anyone can open. Fall back to the dialed base if that resolution
+            // fails, rather than lose the rev line entirely.
             let url = client
                 .branch_artifact_url(&key, &view.meta.name)
                 .await
@@ -245,8 +229,7 @@ async fn cmd_artifact(cmd: ArtifactCmd) -> Result<()> {
             println!("{url}  (rev {}, {scope})", view.meta.rev);
         }
         ArtifactCmd::Rm { name, repo } => {
-            // Fetch first (branch-scoped resolution, matching `show`) so we can
-            // report the scope/revision that got removed.
+            // Fetch first, so we can report the scope/revision that got removed.
             let a = client
                 .invoke::<artifacts::get::Op>(&artifacts::get::Input {
                     name: name.trim().to_string(),

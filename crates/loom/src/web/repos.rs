@@ -408,7 +408,8 @@ async fn handle_trigger(
         profile: Some(profile),
         // Record the thread on the tracking issue too (issues only — a PR
         // number in the issue link would read as the wrong thing), so the
-        // weaver ledger and the `github` wiring tag agree from birth.
+        // tracking issue's `github_issue` field and the `github` wiring tag
+        // agree from birth.
         github_issue: (!is_pr).then_some(number),
         ..Default::default()
     };

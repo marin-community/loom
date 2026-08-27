@@ -158,8 +158,8 @@ pub(super) async fn append_and_deliver(
     }
 
     // A session-authored message or result on its own channel is the canonical
-    // reply stream. A Slack-origin binding fans it out while the durable channel
-    // item and idempotency key remain the source of truth.
+    // reply stream. A Slack-origin binding fans it out, but the durable channel
+    // item and idempotency key are what's authoritative.
     if matches!(kind, MessageKind::Message | MessageKind::Result)
         && author.kind == SubjectKind::Session
         && channel.session_id.as_deref() == Some(author.id.as_str())
@@ -261,8 +261,6 @@ async fn deliver_to_origin_slack(
 }
 
 /// Resolve a channel and confirm the caller may reach it.
-///
-/// Whether `principal` may reach the channel its operand names.
 ///
 /// Called by `scope_allows` for every `scope = Channel` operation, so no handler
 /// can forget it. Answered before the channel is looked up, and a refusal is 403
@@ -544,7 +542,7 @@ pub(super) async fn set_channel_subscription_operation(
     // Not a duplicate of the central branch-scope check: `Scoped` only names
     // this operation's own branch, so it says nothing about which *session*
     // a caller may subscribe on behalf of. That authority question is
-    // answered here, same as before the port.
+    // answered here.
     let subject = match input
         .session
         .as_deref()

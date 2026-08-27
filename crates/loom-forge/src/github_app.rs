@@ -12,7 +12,7 @@
 //!    on is authorized when its owner is a trusted owner ([`crate::owners`]) —
 //!    the installation *is* the access allowlist, gated on the owner so a public
 //!    App can't be driven by a stranger's install (complementing the managed-repo
-//!    table from #95).
+//!    table).
 //! 3. **Exchange the JWT for an installation access token**
 //!    (`POST /app/installations/{id}/access_tokens`), **cached by exact scope
 //!    with its expiry** and refreshed once stale ([`GithubApp::installation_token`]).
@@ -587,10 +587,9 @@ impl GithubApp {
 
     // -- installation as allowlist ------------------------------------------
 
-    /// When the App is installed on `slug`, ensure that repo is in the managed
-    /// allowlist (idempotent), so the trigger's clone path accepts it — the
-    /// "installation *is* the allowlist" rule, *complementing* the
-    /// explicitly-registered repos. Callers reach this only *after* an
+    /// When the App is installed on `slug`, add that repo to the managed
+    /// allowlist if it isn't already there (idempotent), so the trigger's clone
+    /// path accepts it. Callers reach this only *after* an
     /// [approved user][crate::github_trigger::authorize] has been authorized to
     /// trigger, so the person — not the repo owner — is the trust boundary: a
     /// stranger installing a *public* App on their own repo changes nothing,
@@ -754,7 +753,7 @@ impl GithubApi for GithubApp {
 }
 
 // ---------------------------------------------------------------------------
-// REST response shapes + helpers.
+// REST response types + helpers.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -1167,7 +1166,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     }
 
     /// A token at/after its expiry is never served from cache: each request
-    /// re-mints, so an expired token is refreshed rather than reused.
+    /// re-mints it.
     #[tokio::test]
     async fn installation_token_refreshes_once_expired() {
         let mock = MockState::new(-10); // already expired (inside the skew window)
@@ -1255,10 +1254,9 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     // -- installation as the allowlist (§6.3) -------------------------------
 
     /// A repo the App is installed on is auto-registered into the managed
-    /// allowlist so the trigger may clone it — the "installation is the allowlist"
-    /// rule, complementing the explicitly-registered repos. (Callers reach this
-    /// only after an approved user is authorized, so the person is the trust
-    /// boundary; there is no owner gate here.)
+    /// allowlist so the trigger may clone it. Callers reach this only after an
+    /// approved user is authorized, so the person is the trust boundary; there
+    /// is no owner gate here.
     #[tokio::test]
     async fn installed_repo_is_auto_registered() {
         let mock = MockState::new(3600);
@@ -1286,8 +1284,8 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
 
     /// A repo the App is **not installed on** is not auto-registered — the
     /// installation lookup 404s, so the clone path never accepts it. This is the
-    /// remaining repo guard once owner-trust is gone: the person is authorized
-    /// (upstream), and the App install is what scopes which repos loom can act on.
+    /// only repo guard here: the person is authorized upstream, and the App
+    /// install decides which repos loom can act on.
     #[tokio::test]
     async fn uninstalled_repo_is_not_auto_registered() {
         let mock = MockState::new(3600);

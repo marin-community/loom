@@ -14,7 +14,7 @@ use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
-// Watches — the operator + authoring surface (server-owned state)
+// Watches — operator and authoring operations (server-owned state)
 // ---------------------------------------------------------------------------
 //
 // Every handler here has a `*_operation` counterpart registered below —
@@ -298,7 +298,7 @@ pub(super) async fn delete_watch_operation(
 
 /// Fire a round now, in the daemon (the single terminal owner), and report its
 /// outcome. `dry_run` stubs every mutating action — the iteration primitive,
-/// safe to repeat. Re-reads the closed run row to surface outcome + summary.
+/// safe to repeat. Re-reads the closed run row to return outcome + summary.
 async fn run_watch_core(st: &AppState, key: &str, dry_run: bool) -> ApiResult<WatchRunResult> {
     let o = require_watch(&st.db, key).await?;
     let reason = if dry_run { "run (dry)" } else { "run" };
@@ -319,7 +319,7 @@ async fn run_watch_core(st: &AppState, key: &str, dry_run: bool) -> ApiResult<Wa
 
 /// `watches.run`. Not exercised here — this handler fires a watch round for
 /// real when invoked, so it is wired but deliberately never called by any
-/// test or manual check in this port.
+/// test or manual check.
 pub(super) async fn run_watch_operation(
     context: OperationContext,
     input: watches_operations::run::Input,
