@@ -872,7 +872,7 @@ mod tests {
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:cc47eeda03188f47b2b0958c61ed9e829132bfef24ae41b09b9a7bb7986b1575",
+                "sha256:f4b1830a82aa1e4e38bda28f432c666cd2b059a617ff3ae575408874b178e637",
             ),
             (
                 "loom/sessions/write@v1",
@@ -880,7 +880,7 @@ mod tests {
             ),
             (
                 "mcp/session/read@v1",
-                "sha256:3bf5d560a5e7ac939dbd3358d5bf04a0b5bb0b95f5163df789a18d632a118ee3",
+                "sha256:5a088807c06cc31219544e04bee79bbd7ae57d3200fa54f2d9cce5d69e40c318",
             ),
             (
                 "mcp/session/status@v1",
@@ -900,7 +900,7 @@ mod tests {
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:a87137f2c28852fdb0ee54d257f518ef384f2eaa4cb8960cef54e7301b30f22a",
+                "sha256:0ef454860ed512f07e563baca49c8941006e76e684e42b081058587ed7210d1b",
             ),
             (
                 "loom/permissions/request@v1",
