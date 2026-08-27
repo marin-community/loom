@@ -25,3 +25,6 @@ python/weaver-loom/uv.lock
 # `loom setup`'s authored config — every credential in plaintext TOML. Never
 # commit it; `loom.toml.example` (tracked) documents the shape.
 loom.toml
+
+# Rendered from the operation registry by crates/loom/build.rs.
+crates/loom/frontend/src/api/generated.ts

@@ -91,6 +91,13 @@ impl OperationRisk {
 pub enum OperationScope {
     Session,
     Branch,
+    /// One channel, named by the operation's `channel` operand.
+    ///
+    /// Distinct from `Branch` because a channel is reachable from more than one
+    /// branch: a session subscribes to channels across its tree. `Branch` would
+    /// compare the caller's own branch, which every session-credentialed request
+    /// satisfies, and let any channel id through.
+    Channel,
     Repository,
     /// Not scoped to one resource — fleet-wide reads and administration.
     Global,
@@ -101,6 +108,7 @@ impl OperationScope {
         match self {
             Self::Session => "session",
             Self::Branch => "branch",
+            Self::Channel => "channel",
             Self::Repository => "repository",
             Self::Global => "global",
         }
@@ -408,6 +416,7 @@ pub trait Scoped {
 pub enum ScopeRef<'a> {
     Session(&'a str),
     Branch(&'a str),
+    Channel(&'a str),
     Repository(&'a str),
     Global,
 }

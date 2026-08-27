@@ -262,27 +262,26 @@ async fn deliver_to_origin_slack(
 
 /// Resolve a channel and confirm the caller may reach it.
 ///
-/// Every channel operation is addressed by channel id, and `scope = Branch` on
-/// the declaration cannot decide this one: `branch` is a context operand, so for
-/// a session credential it is always the caller's *own* branch and the scope
-/// check passes whatever channel was named. So the resource check lives here,
-/// where the channel id is, and every channel operation goes through it.
+/// Whether `principal` may reach the channel its operand names.
 ///
-/// Reachability is checked before existence, and returns 403 either way — a
-/// session that may not reach a channel learns nothing about whether it exists.
-async fn require_channel(
+/// Called by `scope_allows` for every `scope = Channel` operation, so no handler
+/// can forget it. Answered before the channel is looked up, and a refusal is 403
+/// whether or not the channel exists — a session that may not reach a channel
+/// learns nothing about whether it is there.
+pub(super) async fn session_may_reach(
     st: &AppState,
     principal: &Principal,
-    id: &str,
-) -> ApiResult<channels::ChannelAccess> {
-    if let Grant::Session { session_id, .. } = &principal.grant {
-        if !channel_belongs_to_session_tree(st, session_id, id).await {
-            return Err(AppError::new(
-                StatusCode::FORBIDDEN,
-                "credential cannot reach this channel",
-            ));
-        }
-    }
+    channel: &str,
+) -> ApiResult<bool> {
+    let id = resolve_channel_id(principal, channel)?;
+    let Grant::Session { session_id, .. } = &principal.grant else {
+        return Ok(true);
+    };
+    Ok(channel_belongs_to_session_tree(st, session_id, &id).await)
+}
+
+/// The channel row, or 404.
+async fn channel_access(st: &AppState, id: &str) -> ApiResult<channels::ChannelAccess> {
     channels::access(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("channel"))
@@ -348,7 +347,7 @@ fn validate_text(name: &str, value: &str, min: usize, max: usize) -> ApiResult<(
 /// id, the same resolution `GET /api/self` performs for `channel_id`). A
 /// credential with no session of its own (`User`/`Admin`) has no implicit
 /// channel and must name one.
-fn resolve_channel_id(principal: &Principal, channel: &str) -> ApiResult<String> {
+pub(super) fn resolve_channel_id(principal: &Principal, channel: &str) -> ApiResult<String> {
     let trimmed = channel.trim();
     if !trimmed.is_empty() && trimmed != "self" {
         return Ok(trimmed.to_string());
@@ -399,7 +398,7 @@ pub(super) async fn get_channel_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    require_channel(&st, &principal, &channel_id).await?;
+    channel_access(&st, &channel_id).await?;
     let subject = principal_subject(&principal);
     let channel = channels::get(&st.db, &channel_id, &subject)
         .await?
@@ -418,7 +417,7 @@ pub(super) async fn list_channel_messages_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    require_channel(&st, &principal, &channel_id).await?;
+    channel_access(&st, &channel_id).await?;
     if !(1..=weaver_api::CHANNEL_MESSAGE_LIMIT_MAX as i64).contains(&input.limit) {
         return Err(AppError::bad_request(format!(
             "limit must be between 1 and {}",
@@ -446,7 +445,7 @@ pub(super) async fn create_channel_message_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    let channel = require_channel(&st, &principal, &channel_id).await?;
+    let channel = channel_access(&st, &channel_id).await?;
     let author = principal_subject(&principal);
     let (inserted, message) =
         append_and_deliver(&st, &channel_id, &channel, &author, &input).await?;
@@ -503,7 +502,7 @@ pub(super) async fn archive_channel_operation(
     let st = context.state;
     let principal = context.principal;
     let id = input.channel;
-    let channel = require_channel(&st, &principal, &id).await?;
+    let channel = channel_access(&st, &id).await?;
     if channel.session_id.is_some() {
         return Err(AppError::conflict(
             "a session channel follows the session lifecycle",
@@ -539,7 +538,7 @@ pub(super) async fn set_channel_subscription_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    require_channel(&st, &principal, &channel_id).await?;
+    channel_access(&st, &channel_id).await?;
     let mode = SubscriptionMode::parse(&input.mode)
         .ok_or_else(|| AppError::bad_request("unknown channel subscription mode"))?;
     // Not a duplicate of the central branch-scope check: `Scoped` only names
@@ -588,7 +587,7 @@ pub(super) async fn set_channel_read_marker_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    require_channel(&st, &principal, &channel_id).await?;
+    channel_access(&st, &channel_id).await?;
     let subject = principal_subject(&principal);
     Ok(channels::mark_read(&st.db, &channel_id, &subject, input.seq).await?)
 }
@@ -605,7 +604,7 @@ pub(super) async fn wait_for_channel_message_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    require_channel(&st, &principal, &channel_id).await?;
+    channel_access(&st, &channel_id).await?;
     let subject = principal_subject(&principal);
     let channel = channels::get(&st.db, &channel_id, &subject)
         .await?
@@ -673,6 +672,6 @@ pub(super) async fn list_channel_bindings_operation(
     let st = context.state;
     let principal = context.principal;
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
-    let channel = require_channel(&st, &principal, &channel_id).await?;
+    let channel = channel_access(&st, &channel_id).await?;
     channel_bindings(&st, &channel_id, &channel).await
 }

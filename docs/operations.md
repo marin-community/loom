@@ -4,10 +4,9 @@ The premise: **an operation is declared once, and REST, the CLI and MCP are
 derived from that declaration.** Nothing about an operation is written down
 twice, so no two surfaces can disagree about it.
 
-This is the code flow end to end. Counts below come from
-[`crates/weaver-api/tests/surface.txt`](../crates/weaver-api/tests/surface.txt),
-the generated catalogue a test pins — treat it as the source of truth, not this
-page.
+This is the code flow end to end. For the current catalogue ask a running
+loom: `GET /api/operations` lists every declaration, and `/api/openapi.json`
+is the same thing as a schema document. Counts on this page are a snapshot.
 
 ## 1. The declaration
 
@@ -356,12 +355,12 @@ suite, not production:
 | invariant | where | what it catches |
 |---|---|---|
 | `assert_registry_is_complete` | boot | a declaration with no handler, or a handler with no declaration |
-| `surface_parity.rs` | test | a hand-mounted `.route(` that is not one of the 19 declared exceptions |
+| `surface_parity.rs` | test | a hand-mounted `.route(` that is not one of the 18 declared exceptions |
 | `every_advertised_invocation_parses` | test | a `cli =` string that names a command the tree does not build |
 | `every_generic_binding_dispatches_to_its_operation` | test | a command that parses but whose invocation is intercepted (this is the one that names all 18 unreachable commands when the dispatch fix is reverted) |
 | `every_binding_names_an_operation_with_a_command` | test | the converse — a binding for an operation with no CLI |
 | `Exportable::CHECKED` | compile | an MCP tool naming a human-only or non-JSON operation |
-| `surface.txt` golden | test | any change to the operation table, reviewed as a diff |
+| `validate_operation_registry` | boot | a declaration that contradicts itself — a grant outside the vocabulary, a context field in the advertised schema, an anonymous operation demanding a credential, a query-string operand marked required |
 | `builtin_capability_digests_are_stable` | test | a silent change to what a pinned capability set grants |
 
 ## Where the code lives

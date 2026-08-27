@@ -1,3 +1,2 @@
-# Written by `cargo run -p weaver-api --bin generate-types`, so
-# reformatting it here would only make the next regeneration a diff.
+# A build product, written by crates/loom/build.rs from the operation registry.
 src/api/generated.ts

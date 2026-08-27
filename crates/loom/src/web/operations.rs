@@ -235,6 +235,18 @@ async fn scope_allows(context: &OperationContext, scope: ScopeRef<'_>) -> ApiRes
                 .await
                 .map_err(|_| denied())
         }
+        // A channel is reachable from a whole session tree rather than from one
+        // branch, so this is the check `Branch` cannot make: `branch` is a
+        // context operand, always the caller's own, and comparing it lets any
+        // channel id through.
+        ScopeRef::Channel(channel) => {
+            match super::channels::session_may_reach(&context.state, &context.principal, channel)
+                .await?
+            {
+                true => Ok(()),
+                false => Err(denied()),
+            }
+        }
     }
 }
 

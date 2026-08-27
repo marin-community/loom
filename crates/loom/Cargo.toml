@@ -98,3 +98,8 @@ serial_test = "3"
 anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
+
+# `build.rs` renders the SPA's generated types from the operation registry, so
+# the frontend never carries a hand-maintained copy of the API's shapes.
+[build-dependencies]
+weaver-api = { path = "../weaver-api" }

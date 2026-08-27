@@ -428,17 +428,17 @@ a pre-authorization for whatever gets mounted at that path next.
 `no_grant_allows_path_is_unmounted` checks for the second failure regardless of
 how short the list is.
 
-Two resource checks live in the code that has the id to check:
+Resource access is one check, driven by `Scoped` on typed input: a session
+credential reaches only its own session tree, its own repository, its own
+tree's branches, and the channels its tree is subscribed to. `web/scope.rs`
+holds the first three; `channels::session_may_reach` holds the last.
 
-* a session credential reaches only channels in its own tree, enforced by
-  `require_channel` in `web/channels.rs`, called by every channel operation.
-  `scope = Branch` cannot state this rule: `branch` is a context operand that
-  always names the caller's own branch, so the scope check passes regardless of
-  which `channel` was requested. `every_channel_operation_checks_reachability`
-  counts the calls against the operations that need them.
-* a session credential reaches only its own session tree, its own repository,
-  and its own tree's branches, enforced in `web/scope.rs` and driven by `Scoped`
-  on typed input.
+A channel gets its own `OperationScope` rather than riding on `Branch` because
+a channel is reachable from more than one branch — a session subscribes across
+its tree. `scope = Branch` would compare `branch`, a context operand always
+naming the caller's own, which every session-credentialed request satisfies:
+any channel id would pass. Declaring `scope = Channel` is what makes the check
+run, so a new channel operation cannot forget it.
 
 One capability is narrower now: an automation credential reaches no raw path,
 only `actor = Internal` operations — `runs.create` alone. Nothing used its old

@@ -17,6 +17,7 @@ pub mod dto;
 pub mod endpoint;
 pub mod operations;
 pub mod render;
+pub mod typescript;
 
 pub use capability::{require, CapabilityError};
 pub use client::Client;

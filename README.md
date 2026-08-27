@@ -64,10 +64,11 @@ See [AGENTS.md](AGENTS.md) for the contributor build/test loop.
 The `loom` CLI, MCP adapters, and Vue SPA are REST clients; only the server owns
 sqlite, worktrees, supervisors, agents, and background services. See
 [Architecture](docs/ARCHITECTURE.md) for the module map, flows, and storage
-model. The route catalogue is generated, not prose:
-[`crates/weaver-api/tests/surface.txt`](crates/weaver-api/tests/surface.txt)
-lists every operation with its path, actor policy, risk, encoding, and CLI and
-MCP projections, and a test fails if it drifts.
+model. The route catalogue is not prose either: a running loom answers
+`GET /api/operations` and `GET /api/openapi.json` with every operation, its
+path, actor policy, risk, encoding, and CLI and MCP projections, straight from
+the declarations in
+[`crates/weaver-api/src/operations/`](crates/weaver-api/src/operations).
 
 ## Usage
 

@@ -179,6 +179,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         "Global" => quote!(::weaver_api::operations::ScopeRef::Global),
         "Session" => quote!(::weaver_api::operations::ScopeRef::Session(&self.session)),
         "Branch" => quote!(::weaver_api::operations::ScopeRef::Branch(&self.branch)),
+        "Channel" => quote!(::weaver_api::operations::ScopeRef::Channel(&self.channel)),
         "Repository" => quote!(::weaver_api::operations::ScopeRef::Repository(
             &self.repo_root
         )),

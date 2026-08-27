@@ -64,6 +64,21 @@ fn mtime(path: &Path) -> SystemTime {
 // edits don't pay for it. When npm or the frontend sources are missing (a
 // Node-less, backend-only checkout), it degrades to a placeholder page instead
 // of failing the build.
+/// Write the SPA's generated types from the operation registry.
+///
+/// Only when the text actually changes: this lands inside `frontend/src`, which
+/// the frontend build watches, so an unconditional write would rebuild rspack on
+/// every cargo build.
+fn emit_frontend_types(frontend: &Path) {
+    let path = frontend.join("src/api/generated.ts");
+    let module = weaver_api::typescript::module();
+    if std::fs::read_to_string(&path).is_ok_and(|current| current == module) {
+        return;
+    }
+    std::fs::create_dir_all(path.parent().expect("api directory")).expect("create api directory");
+    std::fs::write(&path, module).expect("write generated frontend types");
+}
+
 fn main() {
     emit_build_identity();
 
@@ -88,6 +103,10 @@ fn main() {
         .map(|s| s.success())
         .unwrap_or(false);
     let have_sources = frontend.join("src/main.ts").exists();
+
+    if have_sources {
+        emit_frontend_types(frontend);
+    }
 
     if !have_npm || !have_sources {
         std::fs::create_dir_all(dist).ok();

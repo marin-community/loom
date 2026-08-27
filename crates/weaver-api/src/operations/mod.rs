@@ -249,7 +249,79 @@ pub fn validate_operation_registry() -> Result<(), String> {
                     operation.id
                 ));
             }
+            check_operation(operation)?;
         }
+    }
+    Ok(())
+}
+
+/// The properties one declaration has to satisfy on its own.
+fn check_operation(operation: &OperationSpec) -> Result<(), String> {
+    let fail = |why: String| Err(format!("operation {}: {why}", operation.id));
+
+    for grant in operation.grants {
+        // One capability vocabulary. The design this replaces carried two
+        // (`mcp/*@v1` and `loom/*@v1`) bridged by a hand-written match.
+        if !grant.starts_with("loom/") || !grant.contains('@') {
+            return fail(format!("grant `{grant}` is not loom/<bundle>/<verb>@vN"));
+        }
+    }
+    // A grant is a property of a credential, so an operation that needs none
+    // cannot require one — a declaration saying otherwise is confused about
+    // which check protects it.
+    if operation.actor == ActorPolicy::Anonymous && !operation.grants.is_empty() {
+        return fail(format!(
+            "is anonymous but declares grants {:?}",
+            operation.grants
+        ));
+    }
+    if operation.cli.is_some_and(|cli| cli.path.is_empty()) {
+        return fail("declares an empty CLI path".to_string());
+    }
+
+    let schema = (operation.schema)();
+    // A derive that silently produced nothing would otherwise read as "takes
+    // no arguments".
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return fail(format!("has a non-object input schema: {schema}"));
+    }
+    // Context is dispatcher-supplied, so it must not appear in the schema a
+    // caller reads.
+    if let Some(properties) = schema.get("properties").and_then(Value::as_object) {
+        for field in operation.context {
+            if properties.contains_key(field.name) {
+                return fail(format!("exposes context field `{}`", field.name));
+            }
+        }
+    }
+
+    // No JSON request body: operands arrive in the query string, which axum
+    // deserializes before any default-filling runs. A required operand there
+    // 400s the caller that named nothing — including a session credential
+    // meaning "my own session".
+    let io = operation.io.as_str();
+    if matches!(io, "stream" | "duplex" | "upload" | "download") {
+        let required = schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len);
+        if required > 0 {
+            return fail(format!(
+                "is io={io} and declares required operands {:?}; a query string \
+                 cannot be relied on to carry them",
+                schema.get("required")
+            ));
+        }
+    }
+    // Everything whose response is JSON says what that JSON is, so no caller
+    // writes the response type out by hand.
+    if !matches!(operation.io.as_str(), "stream" | "duplex" | "download")
+        && (operation.output_schema)()
+            .get("type")
+            .and_then(Value::as_str)
+            == Some("null")
+    {
+        return fail("returns `()`; a caller has nothing to decode".to_string());
     }
     Ok(())
 }

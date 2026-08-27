@@ -255,38 +255,6 @@ fn no_grant_allows_path_is_unmounted() {
     );
 }
 
-/// Every channel operation checks that the caller may reach the channel.
-///
-/// This is the one resource check `Scoped` cannot state. A channel operation is
-/// addressed by channel id, but its declared `scope = Branch` names a *context*
-/// operand — filled from the caller's own branch — so for a session credential
-/// the scope check passes whatever channel was named. The real check is
-/// `require_channel` inside `web/channels.rs`, and it was missing from
-/// `channels.get` and `channels.wait`: they read the store directly, so a
-/// session token could read a sibling session's channel. The path allowlist
-/// had been making that check invisibly, until the routes it checked were
-/// deleted.
-///
-/// Counted rather than inspected per-handler: a new channel operation that takes
-/// a `channel` operand and forgets the call moves one side of this equality.
-#[test]
-fn every_channel_operation_checks_reachability() {
-    let addressed = weaver_api::operations::operations()
-        .filter(|operation| operation.id.starts_with("channels."))
-        .filter(|operation| (operation.schema)()["properties"].get("channel").is_some())
-        .count();
-    let checks = include_str!("../src/web/channels.rs")
-        .matches("require_channel(&st, &principal,")
-        .count();
-    assert_eq!(
-        checks, addressed,
-        "{addressed} channel operations are addressed by channel id but \
-         `require_channel` is called {checks} times. Every one of them must go \
-         through it — `scope = Branch` cannot decide this, because `branch` is a \
-         context operand and always names the caller's own."
-    );
-}
-
 /// Every `"/…"` literal between two markers in `web/auth.rs` names a mounted
 /// route. Scanned rather than enumerated, for the same reason the route ledger
 /// is: a hand-kept copy of the list is the thing that goes stale.
