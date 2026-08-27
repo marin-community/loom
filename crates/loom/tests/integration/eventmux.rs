@@ -1,4 +1,4 @@
-//! The multiplexed `/api/events` stream: many topics on one connection.
+//! The multiplexed `events.stream` operation: many topics on one connection.
 //!
 //! The browser caps HTTP/1.1 at 6 connections per origin, so the UI folds every
 //! live stream onto this one route. These cases pin the three properties that
@@ -18,7 +18,7 @@ use crate::fixtures::TestServer;
 
 fn events_url(ts: &TestServer, topics: &str) -> String {
     format!(
-        "http://{}/api/events?topics={}",
+        "http://{}/api/events/stream?topics={}",
         ts.addr,
         urlencoding_encode(topics)
     )
@@ -61,7 +61,7 @@ async fn read_until(
 }
 
 /// One connection carrying a session's chat topic delivers the same events the
-/// dedicated `/chat/stream` route would, each tagged with its topic so the
+/// dedicated `sessions.chat.stream` route would, each tagged with its topic so the
 /// client can route it.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -79,8 +79,8 @@ async fn multiplexed_stream_tags_frames_with_their_topic() {
 
     ts.client
         .post(
-            "/api/sessions/acp-mux/prompt",
-            json!({ "text": "say:multiplexed" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-mux", "text": "say:multiplexed" }),
         )
         .await
         .unwrap();
@@ -143,8 +143,8 @@ async fn unresolvable_topic_is_isolated_from_the_rest() {
 
     ts.client
         .post(
-            "/api/sessions/acp-live/prompt",
-            json!({ "text": "say:still-flowing" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-live", "text": "say:still-flowing" }),
         )
         .await
         .unwrap();
@@ -174,7 +174,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
     let mine = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "scoped", "agent": "shell" }),
         )
         .await
@@ -189,7 +189,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
     let theirs = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "unrelated", "agent": "shell" }),
         )
         .await
@@ -198,7 +198,7 @@ async fn session_token_cannot_subscribe_to_another_session() {
 
     let http = reqwest::Client::new();
 
-    // Its own session's topic is exactly what `/sessions/{id}/events` allows.
+    // Its own session's topic is exactly what `sessions.events.stream` allows.
     let own = http
         .get(events_url(&ts, &format!("session:{session_id}")))
         .bearer_auth(&token)

@@ -1,13 +1,18 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('session detail view', () => {
-  test('does not surface a failed background channel acknowledgement', async ({
-    page,
-    weaver,
-  }) => {
-    const session = await weaver.seedSession({ goal: 'Keep working', name: 'ack-failure' });
-    await page.route(`**/api/channels/${session.id}/read-marker`, async (route) => {
-      await route.fulfill({ status: 500, json: { error: 'read marker failed' } });
+  test('does not surface a failed background channel acknowledgement', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'Keep working',
+      name: 'ack-failure',
+    });
+    await page.route('**/api/channels/read_marker/set', async (route) => {
+      const operands = route.request().postDataJSON() as { channel?: string };
+      if (operands?.channel !== session.id) return route.fallback();
+      await route.fulfill({
+        status: 500,
+        json: { error: 'read marker failed' },
+      });
     });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}`);
@@ -247,15 +252,15 @@ test.describe('session detail view', () => {
       claimIssue: issue.id,
     });
     let requestBody: unknown;
-    await page.route(`**/api/sessions/${s.id}/github`, async (route) => {
-      if (route.request().method() !== 'PUT') return route.fallback();
+    await page.route('**/api/sessions/github/set', async (route) => {
       requestBody = route.request().postDataJSON();
       await route.fulfill({
         json: { ...s, branch: { ...s.branch, github_pr: 37 } },
       });
     });
-    await page.route(`**/api/sessions/${s.id}`, async (route) => {
-      if (!requestBody) return route.fallback();
+    await page.route('**/api/sessions/get', async (route) => {
+      const operands = route.request().postDataJSON() as { session?: string };
+      if (!requestBody || operands?.session !== s.id) return route.fallback();
       const response = await route.fetch();
       const current = (await response.json()) as typeof s;
       await route.fulfill({
@@ -289,7 +294,7 @@ test.describe('session detail view', () => {
     await form.getByLabel('PR number').fill('37');
     await form.getByRole('button', { name: 'Pin PR' }).click();
 
-    await expect.poll(() => requestBody).toEqual({ pr_number: 37 });
+    await expect.poll(() => requestBody).toEqual({ pr_number: 37, session: s.id });
     await expect(form).toBeHidden();
     await expect(prPill).toHaveAttribute('href', 'https://github.com/acme/widgets/pull/37');
     await expect(prPill).toHaveAttribute('target', '_blank');
@@ -367,7 +372,10 @@ test.describe('session detail view', () => {
   });
 
   test('scratch attachments share one bounded browse and drop target', async ({ page, weaver }) => {
-    const s = await weaver.seedSession({ goal: 'Hold my files', name: 'scratch-task' });
+    const s = await weaver.seedSession({
+      goal: 'Hold my files',
+      name: 'scratch-task',
+    });
 
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     const panel = page.getByTestId('scratch-panel');
@@ -390,14 +398,20 @@ test.describe('session detail view', () => {
       return dt;
     });
     await page.getByTestId('scratch-dropzone').dispatchEvent('drop', { dataTransfer });
-    const scratchMenuButton = panel.getByRole('button', { name: 'Scratch files, 2 attached' });
+    const scratchMenuButton = panel.getByRole('button', {
+      name: 'Scratch files, 2 attached',
+    });
     await expect(scratchMenuButton).toBeVisible();
     await scratchMenuButton.click();
     const scratchMenu = panel.getByTestId('scratch-menu');
     await expect(scratchMenu.getByText('dropped.txt')).toBeVisible();
 
     // Both landed server-side in the worktree's scratch/.
-    const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/scratch`);
+    const res = await fetch(`${weaver.baseUrl}/api/sessions/scratch/list`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: s.id }),
+    });
     const listed = ((await res.json()) as { name: string }[]).map((f) => f.name).sort();
     expect(listed).toEqual(['dropped.txt', 'notes.txt']);
 
@@ -420,7 +434,7 @@ test.describe('session detail view', () => {
     );
     for (const name of names) {
       const response = await fetch(
-        `${weaver.baseUrl}/api/sessions/${s.id}/scratch?name=${encodeURIComponent(name)}`,
+        `${weaver.baseUrl}/api/sessions/scratch/write?session=${encodeURIComponent(s.id)}&name=${encodeURIComponent(name)}`,
         { method: 'POST', body: Buffer.from('{}') },
       );
       expect(response.ok, await response.text()).toBe(true);
@@ -520,7 +534,9 @@ test.describe('session detail view', () => {
       goal: 'Keep a headless session focused on conversation',
       name: 'mobile-acp-navigation',
     });
-    await page.route(`**/api/sessions/${s.id}`, async (route) => {
+    await page.route('**/api/sessions/get', async (route) => {
+      const operands = route.request().postDataJSON() as { session?: string };
+      if (operands?.session !== s.id) return route.fallback();
       const response = await route.fetch();
       const session = (await response.json()) as Record<string, unknown>;
       await route.fulfill({ response, json: { ...session, protocol: 'acp' } });
@@ -578,12 +594,14 @@ test.describe('session detail view', () => {
       name: 'term-return',
     });
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
-    await expect(page.getByTestId('term-status')).toHaveCount(0, { timeout: 20_000 });
+    await expect(page.getByTestId('term-status')).toHaveCount(0, {
+      timeout: 20_000,
+    });
 
-    const sent = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/send`, {
+    const sent = await fetch(`${weaver.baseUrl}/api/sessions/send`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ text: 'seq 1 200', submit: true }),
+      body: JSON.stringify({ text: 'seq 1 200', submit: true, session: s.id }),
     });
     expect(sent.ok).toBe(true);
 
@@ -608,9 +626,11 @@ test.describe('session detail view', () => {
     await page.locator('[data-rail="sessions"]').click();
     await page.goBack();
     await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
-    await expect.poll(async () => {
-      const { top, max } = await sliderPosition();
-      return max - top;
-    }).toBeLessThan(10);
+    await expect
+      .poll(async () => {
+        const { top, max } = await sliderPosition();
+        return max - top;
+      })
+      .toBeLessThan(10);
   });
 });

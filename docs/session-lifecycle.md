@@ -99,12 +99,12 @@ An automation cancellation is written before teardown, and the final
 `creating -> running` promotion is conditional. If provisioning finishes after
 cancellation, cancellation wins and Loom removes the late-created session.
 
-Both actions use the same REST/CLI path for full sessions and unmatched launch
+Both actions use the same operation for full sessions and unmatched launch
 attempts:
 
 ```text
-POST   /api/sessions/{session-or-reserved-id}/archive
-DELETE /api/sessions/{session-or-reserved-id}
+POST /api/sessions/archive   { session }
+POST /api/sessions/delete    { session }
 
 loom sessions archive <session-or-reserved-id>
 loom sessions rm <session-or-reserved-id>
@@ -143,7 +143,6 @@ the invariant convergent after crashes and cancellation races. Active
 reservations protect early provisioning during a rolling deployment, while
 existing session rows protect every live agent that predates the new server.
 
-Admin inventory can opt into managed watch sessions with
-`GET /api/sessions?automation=true&archived=true&managed=true`. The default
-fleet and survey continue to exclude managed sessions so a watch never surveys
+There is no operation for listing engine-managed watch sessions directly; the
+default fleet and survey exclude them unconditionally so a watch never surveys
 its own infrastructure.

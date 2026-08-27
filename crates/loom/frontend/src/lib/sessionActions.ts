@@ -2,9 +2,8 @@ import { ref } from 'vue';
 import {
   archiveSession,
   clearSessionTag,
-  patch,
-  post,
-  put,
+  invokeOperation,
+  recoverSession,
   regenerateSessionTitle,
   removeSession,
   setSessionTitleGeneration,
@@ -55,12 +54,19 @@ export function useSessionActions(
     }
   }
 
+  // `branches.update` is the operation here. `sessions.update` also exists now
+  // and accepts the same three title operands, but this is a branch-field write
+  // whose result is discarded (the caller reloads), so there is nothing to gain
+  // by switching to the session-scoped wrapper. Its `branch` context field
+  // resolves through the same session-id fallback `require_branch` always has,
+  // so the session id works unchanged.
   const rename = (title: string, expectedTitle: string, expectedProvenance: string) =>
     act('title', async () => {
-      await patch(`/sessions/${getId()}`, {
+      await invokeOperation('branches.update', {
         title,
         expected_title: expectedTitle,
         expected_title_provenance: expectedProvenance,
+        branch: getId(),
       });
       notice.value = 'Title saved.';
       await reload();
@@ -103,12 +109,13 @@ export function useSessionActions(
 
   const setAutoArchiveDisabled = (disabled: boolean) =>
     act('auto-archive', async () => {
-      const path = `/sessions/${getId()}/tags/${AUTO_ARCHIVE_KEY}`;
       if (disabled) {
-        await put(path, {
+        // `by` is dropped: authorship is derived from the credential now.
+        await invokeOperation('sessions.tags.set', {
+          key: AUTO_ARCHIVE_KEY,
           value: AUTO_ARCHIVE_DISABLED_VALUE,
           note: 'automatic archive disabled by user',
-          by: 'manual',
+          session: getId(),
         });
         notice.value = 'Automatic archive disabled for this session.';
       } else {
@@ -120,7 +127,7 @@ export function useSessionActions(
 
   const adopt = () =>
     act('adopt', async () => {
-      await post(`/sessions/${getId()}/adopt`);
+      await invokeOperation('sessions.adopt', { session: getId() });
       notice.value = 'Session adopted — terminal session recreated.';
       await reload();
     });
@@ -143,7 +150,7 @@ export function useSessionActions(
 
   const recover = () =>
     act('recover', async () => {
-      await post(`/sessions/${getId()}/recover`);
+      await recoverSession(getId());
       notice.value = 'Session recovered — worktree rebuilt and agent resumed.';
       await reload();
     });

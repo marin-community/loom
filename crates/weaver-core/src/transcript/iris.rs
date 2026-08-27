@@ -2,7 +2,7 @@
 //! coding-agent conversation, plus its markdown renderer.
 //!
 //! Every agent (Claude Code, Codex, …) records its conversation in its own raw
-//! shape. The per-agent converters ([`super::claude`], [`super::codex`]) flatten
+//! format. The per-agent converters ([`super::claude`], [`super::codex`]) flatten
 //! those into this single [`Log`] — a list of [`Message`]s, each a role and an
 //! ordered list of [`Block`]s. Everything downstream (the markdown renderer
 //! here, anything that wants to read a captured log) speaks only iris, so it
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 /// A whole conversation, normalized. `source` names the agent it came from
 /// (`"claude"`, `"codex"`); the rest is optional context the renderer banners.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct Log {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -31,7 +31,7 @@ pub struct Log {
 /// Who a [`Message`] is from. `Context` is injected, non-conversational material
 /// (a session primer, system/permissions instructions) — kept for completeness
 /// but rendered out of the way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     User,
@@ -40,7 +40,7 @@ pub enum Role {
 }
 
 /// One message: who said it, when, and its ordered content blocks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Message {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,7 +61,7 @@ impl Message {
 /// A unit of message content. Tool input is kept as raw JSON so the renderer
 /// owns all formatting decisions (a shell command fenced as `sh`, a patch as
 /// text, anything else as pretty JSON).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Block {
     Text { text: String },
@@ -93,7 +93,7 @@ impl Log {
     }
 
     /// Render this conversation as a markdown-like log (see module-level docs of
-    /// [`super`]). Delegates to [`render_markdown`].
+    /// [`super`]).
     pub fn render_markdown(&self) -> String {
         render_markdown(self)
     }
@@ -261,7 +261,7 @@ fn fence(out: &mut String, lang: &str, body: &str) {
 }
 
 /// The `HH:MM:SS` of an ISO-8601 timestamp (`2026-06-17T18:30:00.000Z`), or the
-/// whole string when it isn't in that shape.
+/// whole string when it isn't in that format.
 fn short_time(ts: &str) -> String {
     let bytes = ts.as_bytes();
     if bytes.len() >= 19 && bytes[10] == b'T' {

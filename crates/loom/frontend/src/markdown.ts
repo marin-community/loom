@@ -11,12 +11,13 @@ import type MarkdownIt from 'markdown-it';
 // default export of the `token` module (resolved via the types' `./*` exports).
 import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from './types';
+import { operationPath } from './api';
 
 /** Where to resolve image sources: relative paths use the session's raw
  *  worktree endpoint; `artifact:<name>` uses the stored artifact's raw image
  *  endpoint. */
 export interface RenderContext {
-  /** Session id, for building `/api/sessions/{id}/raw?path=…` URLs. */
+  /** Session id, for building `/api/sessions/raw?session=…&path=…` URLs. */
   sessionId: string;
   /** Repo-relative path of the markdown file being rendered (its directory is
    *  the base for resolving relative image links). */
@@ -56,10 +57,13 @@ export function resolvePath(dir: string, rel: string): string {
   return stack.join('/');
 }
 
-/** Raw endpoint for an image artifact, optionally pinned to one revision. */
+/** Raw endpoint for an image artifact, optionally pinned to one revision. The
+ *  browser's image loader wants bytes, so this is `artifacts.raw` (`io =
+ *  Download`) with its operands in the query string. */
 export function artifactImageUrl(sessionId: string, name: string, rev?: number): string {
-  const base = `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(name)}/raw`;
-  return rev == null ? base : `${base}?rev=${rev}`;
+  const query = `branch=${encodeURIComponent(sessionId)}&name=${encodeURIComponent(name)}`;
+  const path = operationPath('artifacts.raw');
+  return rev == null ? `${path}?${query}` : `${path}?${query}&rev=${rev}`;
 }
 
 /** Map a markdown image source to a viewable URL. `artifact:<name>` resolves
@@ -77,7 +81,7 @@ export function resolveUrl(ctx: RenderContext, url: string): string {
     ? ctx.filePath.slice(0, ctx.filePath.lastIndexOf('/'))
     : '';
   const path = resolvePath(dir, url.replace(/^\.\//, ''));
-  return `/api/sessions/${ctx.sessionId}/raw?path=${encodeURIComponent(path)}`;
+  return `${operationPath('sessions.raw')}?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(path)}`;
 }
 
 // ---------------------------------------------------------------------------

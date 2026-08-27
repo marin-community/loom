@@ -11,12 +11,13 @@ use std::os::unix::fs::MetadataExt;
 use std::{process::Output, time::Duration};
 use tokio::process::Command;
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, ArtifactUpsertReq, ChangeAnchorDto, ChangeSideDto,
-    ChangeSourceDto, CreateReq, CreateReviewReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewSubjectKindDto, SubmitReviewReq, UpdateReviewCommentReq, UpdateReviewReq,
+    ArtifactTextAnchorDto, ChangeAnchorDto, ChangeSideDto, ChangeSourceDto, ReviewAnchorDto,
+    ReviewAnchorKindDto, ReviewSubjectKindDto,
 };
 
 use super::fixtures::TestServer;
+use weaver_api::operations::artifacts;
+use weaver_api::operations::{reviews, sessions};
 
 async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionView {
     let branch =
@@ -46,37 +47,46 @@ async fn insert_api_session(ts: &TestServer, id: &str) -> weaver_api::SessionVie
     )
     .await
     .unwrap();
-    ts.client.get_session(id).await.unwrap()
+    ts.client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: id.to_string(),
+        })
+        .await
+        .unwrap()
 }
 
 async fn seed_artifact(ts: &TestServer, session: &weaver_api::SessionView) {
     ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nAlpha beta gamma.\n".to_string(),
-                title: Some("Design".to_string()),
-                kind: Some("markdown".to_string()),
-                author: Some("agent".to_string()),
-                repo: false,
-                base_rev: None,
-            },
-        )
+        .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+            name: "design".to_string(),
+            content: ("# Design\n\nAlpha beta gamma.\n".to_string()).clone(),
+            title: (Some("Design".to_string())).clone(),
+            kind: (Some("markdown".to_string())).clone(),
+            base_rev: None,
+            repo: false,
+            branch: session.branch.id.to_string(),
+        })
         .await
         .unwrap();
 }
 
-fn new_review(version: &str) -> CreateReviewReq {
-    CreateReviewReq {
+fn new_review(session: &str, version: &str) -> reviews::create::Input {
+    reviews::create::Input {
+        session: session.to_string(),
         subject_kind: ReviewSubjectKindDto::Artifact,
         subject_key: "design".to_string(),
         subject_version: version.to_string(),
     }
 }
 
-fn comment(expected_revision: i64, version: &str, body: &str) -> AddReviewCommentReq {
-    AddReviewCommentReq {
+fn comment(
+    id: i64,
+    expected_revision: i64,
+    version: &str,
+    body: &str,
+) -> reviews::comments::create::Input {
+    reviews::comments::create::Input {
+        id,
         expected_revision,
         subject_version: version.to_string(),
         anchor_kind: ReviewAnchorKindDto::Text,
@@ -97,11 +107,16 @@ async fn draft_with_comment(
 ) -> weaver_api::ReviewDto {
     let draft = ts
         .client
-        .create_session_review(&session.id, &new_review("1"))
+        .invoke::<reviews::create::Op>(&new_review(&session.id, "1"))
         .await
         .unwrap();
     ts.client
-        .add_review_comment(draft.id, &comment(draft.draft_revision, "1", body))
+        .invoke::<reviews::comments::create::Op>(&comment(
+            draft.id,
+            draft.draft_revision,
+            "1",
+            body,
+        ))
         .await
         .unwrap()
 }
@@ -157,7 +172,7 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
 
     let draft = ts
         .client
-        .create_session_review(&session.id, &new_review("01"))
+        .invoke::<reviews::create::Op>(&new_review(&session.id, "01"))
         .await
         .unwrap();
     assert_eq!(draft.subject.version, "1");
@@ -165,22 +180,22 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert!(draft.subject.id.parse::<i64>().unwrap() > 0);
     let summarized = ts
         .client
-        .update_review(
-            draft.id,
-            &UpdateReviewReq {
-                expected_revision: draft.draft_revision,
-                summary: Some("Review the safety argument.".to_string()),
-                subject_version: None,
-            },
-        )
+        .invoke::<reviews::update::Op>(&reviews::update::Input {
+            id: draft.id,
+            expected_revision: draft.draft_revision,
+            summary: (Some("Review the safety argument.".to_string())).clone(),
+            subject_version: None.clone(),
+        })
         .await
         .unwrap();
     let added = ts
         .client
-        .add_review_comment(
+        .invoke::<reviews::comments::create::Op>(&comment(
             draft.id,
-            &comment(summarized.draft_revision, "01", "Explain why this is safe."),
-        )
+            summarized.draft_revision,
+            "01",
+            "Explain why this is safe.",
+        ))
         .await
         .unwrap();
     assert_eq!(added.comments[0].subject_version, "1");
@@ -198,7 +213,11 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
     assert!(
         session_client
-            .list_session_reviews(&session.id, "artifact", "design")
+            .invoke::<reviews::list::Op>(&reviews::list::Input {
+                subject_kind: "artifact".parse().unwrap(),
+                subject_key: "design".to_string(),
+                session: session.id.to_string(),
+            })
             .await
             .unwrap()
             .is_empty(),
@@ -214,33 +233,35 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let bob =
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token.clone()));
     assert!(bob
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap()
         .is_empty());
     let hidden_mutation = reqwest::Client::new()
-        .patch(format!("http://{}/api/reviews/{}", ts.addr, draft.id))
+        .post(format!("http://{}/api/reviews/update", ts.addr))
         .bearer_auth(&token)
-        .json(&UpdateReviewReq {
-            expected_revision: added.draft_revision,
-            summary: Some("not mine".to_string()),
-            subject_version: None,
-        })
+        .json(&json!({
+            "id": draft.id,
+            "expected_revision": added.draft_revision,
+            "summary": "not mine",
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(hidden_mutation.status(), StatusCode::NOT_FOUND);
 
     let stale_mutation = reqwest::Client::new()
-        .patch(format!(
-            "http://{}/api/reviews/{}/comments/{}",
-            ts.addr, draft.id, added.comments[0].id
-        ))
-        .json(&UpdateReviewCommentReq {
-            expected_revision: summarized.draft_revision,
-            body: Some("unseen overwrite".to_string()),
-            ..Default::default()
-        })
+        .post(format!("http://{}/api/reviews/comments/update", ts.addr))
+        .json(&json!({
+            "id": draft.id,
+            "comment_id": added.comments[0].id,
+            "expected_revision": summarized.draft_revision,
+            "body": "unseen overwrite",
+        }))
         .send()
         .await
         .unwrap();
@@ -252,51 +273,45 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     );
 
     ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nAlpha beta gamma, revised.\n".to_string(),
-                title: None,
-                kind: None,
-                author: Some("agent".to_string()),
-                repo: false,
-                base_rev: None,
-            },
-        )
+        .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+            name: "design".to_string(),
+            content: ("# Design\n\nAlpha beta gamma, revised.\n".to_string()).clone(),
+            title: None.clone(),
+            kind: None.clone(),
+            base_rev: None,
+            repo: false,
+            branch: session.branch.id.to_string(),
+        })
         .await
         .unwrap();
     let outdated = ts
         .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: added.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: draft.id,
+            expected_revision: added.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap_err();
     assert!(outdated.to_string().contains("outdated"));
 
     let reanchored = ts
         .client
-        .update_review_comment(
-            draft.id,
-            added.comments[0].id,
-            &UpdateReviewCommentReq {
-                expected_revision: added.draft_revision,
-                subject_version: Some("02".to_string()),
-                anchor_kind: Some(ReviewAnchorKindDto::Text),
-                anchor: Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
-                    quote: "beta gamma, revised".to_string(),
-                    prefix: "Alpha ".to_string(),
-                    suffix: ".".to_string(),
-                    block_index: Some(1),
-                })),
-                body: None,
-            },
-        )
+        .invoke::<reviews::comments::update::Op>(&reviews::comments::update::Input {
+            id: draft.id,
+            comment_id: added.comments[0].id,
+            expected_revision: added.draft_revision,
+            body: None.clone(),
+            subject_version: (Some("02".to_string())).clone(),
+            anchor_kind: (Some(ReviewAnchorKindDto::Text)),
+            anchor: (Some(ReviewAnchorDto::Text(ArtifactTextAnchorDto {
+                quote: "beta gamma, revised".to_string(),
+                prefix: "Alpha ".to_string(),
+                suffix: ".".to_string(),
+                block_index: Some(1),
+            })))
+            .clone(),
+        })
         .await
         .unwrap();
     assert_eq!(reanchored.subject.version, "2");
@@ -305,20 +320,22 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let preview = reanchored.message.clone();
     let submitted = ts
         .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: reanchored.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: draft.id,
+            expected_revision: reanchored.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap();
     assert_eq!(submitted.message, preview);
     assert_eq!(submitted.delivery_state, "queued");
     assert!(
         session_client
-            .list_session_reviews(&session.id, "artifact", "design")
+            .invoke::<reviews::list::Op>(&reviews::list::Input {
+                subject_kind: "artifact".parse().unwrap(),
+                subject_key: "design".to_string(),
+                session: session.id.to_string(),
+            })
             .await
             .unwrap()
             .iter()
@@ -327,27 +344,23 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     );
 
     let stale_retry = reqwest::Client::new()
-        .post(format!(
-            "http://{}/api/reviews/{}/submit",
-            ts.addr, draft.id
-        ))
-        .json(&SubmitReviewReq {
-            expected_revision: 0,
-            acknowledge_outdated: true,
-        })
+        .post(format!("http://{}/api/reviews/submit", ts.addr))
+        .json(&json!({
+            "id": draft.id,
+            "expected_revision": 0,
+            "acknowledge_outdated": true,
+        }))
         .send()
         .await
         .unwrap();
     assert_eq!(stale_retry.status(), StatusCode::CONFLICT);
     assert_eq!(
         ts.client
-            .submit_review(
-                draft.id,
-                &SubmitReviewReq {
-                    expected_revision: reanchored.draft_revision,
-                    acknowledge_outdated: true,
-                },
-            )
+            .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+                id: draft.id,
+                expected_revision: reanchored.draft_revision,
+                acknowledge_outdated: true,
+            })
             .await
             .unwrap()
             .message,
@@ -371,23 +384,35 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_eq!((events, deliveries), (1, 1));
 
     let visible = bob
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap();
     assert!(visible.iter().any(|review| review.id == submitted.id));
     let comment_id = submitted.comments[0].id;
     assert_eq!(
-        bob.set_review_comment_resolution(submitted.id, comment_id, true)
-            .await
-            .unwrap()
-            .status,
+        bob.invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+            id: submitted.id,
+            comment_id,
+            resolved: true,
+        })
+        .await
+        .unwrap()
+        .status,
         "resolved"
     );
     assert_eq!(
-        bob.set_review_comment_resolution(submitted.id, comment_id, false)
-            .await
-            .unwrap()
-            .status,
+        bob.invoke::<reviews::comments::resolve::Op>(&reviews::comments::resolve::Input {
+            id: submitted.id,
+            comment_id,
+            resolved: false,
+        })
+        .await
+        .unwrap()
+        .status,
         "submitted"
     );
 
@@ -408,25 +433,26 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     assert_cli_ok(&overall);
     let cli_draft = ts
         .client
-        .list_session_reviews(&session.id, "artifact", "design")
+        .invoke::<reviews::list::Op>(&reviews::list::Input {
+            subject_kind: "artifact".parse().unwrap(),
+            subject_key: "design".to_string(),
+            session: session.id.to_string(),
+        })
         .await
         .unwrap()
         .into_iter()
         .find(|review| review.status == "draft")
         .unwrap();
     ts.client
-        .write_branch_artifact(
-            &session.branch.id,
-            "design",
-            &ArtifactUpsertReq {
-                content: "# Design\n\nThird revision.\n".to_string(),
-                title: None,
-                kind: None,
-                author: Some("agent".to_string()),
-                repo: false,
-                base_rev: None,
-            },
-        )
+        .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+            name: "design".to_string(),
+            content: ("# Design\n\nThird revision.\n".to_string()).clone(),
+            title: None.clone(),
+            kind: None.clone(),
+            base_rev: None,
+            repo: false,
+            branch: session.branch.id.to_string(),
+        })
         .await
         .unwrap();
     assert_cli_ok(
@@ -480,7 +506,13 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     let index_path = ts.repo_path().join(".git/index");
     let index_before = std::fs::read(&index_path).unwrap();
     let index_stat_before = std::fs::metadata(&index_path).unwrap();
-    let changes = ts.client.changes(&session.id).await.unwrap();
+    let changes = ts
+        .client
+        .invoke::<sessions::changes::Op>(&sessions::changes::Input {
+            session: session.id.to_string(),
+        })
+        .await
+        .unwrap();
     let version = changes.version.clone().unwrap();
     let readme = changes
         .files
@@ -536,37 +568,34 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         .unwrap();
     let change_draft = ts
         .client
-        .create_session_review(
-            &session.id,
-            &CreateReviewReq {
-                subject_kind: ReviewSubjectKindDto::Changes,
-                subject_key: "changes".to_string(),
-                subject_version: version.clone(),
-            },
-        )
+        .invoke::<reviews::create::Op>(&reviews::create::Input {
+            session: session.id.to_string(),
+            subject_kind: ReviewSubjectKindDto::Changes,
+            subject_key: ("changes".to_string()).clone(),
+            subject_version: version.clone(),
+        })
         .await
         .unwrap();
     let change_draft = ts
         .client
-        .add_review_comment(
-            change_draft.id,
-            &AddReviewCommentReq {
-                expected_revision: change_draft.draft_revision,
-                subject_version: version,
-                anchor_kind: ReviewAnchorKindDto::Change,
-                anchor: ReviewAnchorDto::Change(ChangeAnchorDto {
-                    path: readme.path.clone(),
-                    side: ChangeSideDto::New,
-                    start_line: 2,
-                    end_line: 2,
-                    hunk_header: readme.hunks[0].header.clone(),
-                    context_before: vec!["hello".to_string()],
-                    selected: vec![line.text.clone()],
-                    context_after: vec!["unstaged".to_string()],
-                }),
-                body: "Explain this staged line.".to_string(),
-            },
-        )
+        .invoke::<reviews::comments::create::Op>(&reviews::comments::create::Input {
+            id: change_draft.id,
+            expected_revision: change_draft.draft_revision,
+            subject_version: version.clone(),
+            anchor_kind: ReviewAnchorKindDto::Change,
+            anchor: (ReviewAnchorDto::Change(ChangeAnchorDto {
+                path: readme.path.clone(),
+                side: ChangeSideDto::New,
+                start_line: 2,
+                end_line: 2,
+                hunk_header: readme.hunks[0].header.clone(),
+                context_before: vec!["hello".to_string()],
+                selected: vec![line.text.clone()],
+                context_after: vec!["unstaged".to_string()],
+            }))
+            .clone(),
+            body: ("Explain this staged line.".to_string()).clone(),
+        })
         .await
         .unwrap();
     std::fs::write(
@@ -576,26 +605,22 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     .unwrap();
     assert!(ts
         .client
-        .submit_review(
-            change_draft.id,
-            &SubmitReviewReq {
-                expected_revision: change_draft.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: change_draft.id,
+            expected_revision: change_draft.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap_err()
         .to_string()
         .contains("outdated"));
     let submitted = ts
         .client
-        .submit_review(
-            change_draft.id,
-            &SubmitReviewReq {
-                expected_revision: change_draft.draft_revision,
-                acknowledge_outdated: true,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: change_draft.id,
+            expected_revision: change_draft.draft_revision,
+            acknowledge_outdated: true,
+        })
         .await
         .unwrap();
     let ReviewAnchorDto::Change(anchor) = &submitted.comments[0].anchor else {
@@ -610,7 +635,7 @@ async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> V
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{session_id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": session_id }))
             .await
             .unwrap();
         let count = chat["blocks"]
@@ -635,12 +660,18 @@ async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> V
 async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     let ts = TestServer::start().await;
     super::acp::start_new(&ts, "acp-review", None, None).await;
-    let session = ts.client.get_session("acp-review").await.unwrap();
+    let session = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "acp-review".to_string(),
+        })
+        .await
+        .unwrap();
     seed_artifact(&ts, &session).await;
     ts.client
         .post(
-            "/api/sessions/acp-review/prompt",
-            json!({ "text": "wait:1200|say:first" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-review", "text": "wait:1200|say:first" }),
         )
         .await
         .unwrap();
@@ -649,13 +680,11 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     let payload = draft.message.clone();
     let submitted = ts
         .client
-        .submit_review(
-            draft.id,
-            &SubmitReviewReq {
-                expected_revision: draft.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: draft.id,
+            expected_revision: draft.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap();
     assert_eq!(submitted.delivery_state, "delivered");
@@ -688,7 +717,7 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     let chat = ts
         .client
-        .get("/api/sessions/acp-review/chat")
+        .post("/api/sessions/chat", json!({ "session": "acp-review" }))
         .await
         .unwrap();
     assert_eq!(
@@ -710,12 +739,18 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     assert_eq!(inbox, ("consumed".to_string(), 1));
 
     super::acp::start_new(&ts, "acp-review-rehome", None, None).await;
-    let original = ts.client.get_session("acp-review-rehome").await.unwrap();
+    let original = ts
+        .client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "acp-review-rehome".to_string(),
+        })
+        .await
+        .unwrap();
     seed_artifact(&ts, &original).await;
     ts.client
         .post(
-            "/api/sessions/acp-review-rehome/prompt",
-            json!({ "text": "wait:30000|say:keep-busy" }),
+            "/api/sessions/prompt/create",
+            json!({ "session": "acp-review-rehome", "text": "wait:30000|say:keep-busy" }),
         )
         .await
         .unwrap();
@@ -723,20 +758,21 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     // the subsequently submitted review in the protected inbox so a successor
     // can prove the cross-runtime rehome path.
     ts.client
-        .post("/api/sessions/acp-review-rehome/interrupt", json!({}))
+        .post(
+            "/api/sessions/interrupt",
+            json!({ "session": "acp-review-rehome" }),
+        )
         .await
         .unwrap();
     let rehomed = draft_with_comment(&ts, &original, "Rehome this immutable review.").await;
     let rehome_payload = rehomed.message.clone();
     let rehomed = ts
         .client
-        .submit_review(
-            rehomed.id,
-            &SubmitReviewReq {
-                expected_revision: rehomed.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: rehomed.id,
+            expected_revision: rehomed.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap();
     assert!(ts.state.acp.stop(&original.id));
@@ -747,10 +783,10 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
         .unwrap();
     let terminal = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("terminal review successor".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("terminal review successor".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -782,10 +818,10 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     let ts = TestServer::start().await;
     let session = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("review an artifact".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("review an artifact".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -809,13 +845,11 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     .unwrap();
     let offline = ts
         .client
-        .submit_review(
-            offline.id,
-            &SubmitReviewReq {
-                expected_revision: offline.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: offline.id,
+            expected_revision: offline.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap();
     let attempts: i64 =
@@ -835,7 +869,11 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     make_delivery_due(&ts.state.db, offline.id).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let review = ts.client.get_review(offline.id).await.unwrap();
+        let review = ts
+            .client
+            .invoke::<reviews::get::Op>(&reviews::get::Input { id: offline.id })
+            .await
+            .unwrap();
         let screen = ts.client.preview(&session.id, 1_000).await.unwrap();
         let marker_count = screen.matches(&offline.delivery_key).count();
         if review.delivery_state == "delivered" && marker_count == 1 {
@@ -853,7 +891,9 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     super::acp::start_new(&ts, "review-transport-failure", None, None).await;
     let incompatible = ts
         .client
-        .get_session("review-transport-failure")
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: "review-transport-failure".to_string(),
+        })
         .await
         .unwrap();
     seed_artifact(&ts, &incompatible).await;
@@ -866,13 +906,11 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
         draft_with_comment(&ts, &incompatible, "Exercise an actual rejected transport.").await;
     let failing = ts
         .client
-        .submit_review(
-            failing.id,
-            &SubmitReviewReq {
-                expected_revision: failing.draft_revision,
-                acknowledge_outdated: false,
-            },
-        )
+        .invoke::<reviews::submit::Op>(&reviews::submit::Input {
+            id: failing.id,
+            expected_revision: failing.draft_revision,
+            acknowledge_outdated: false,
+        })
         .await
         .unwrap();
     assert_eq!(failing.delivery_state, "retrying");
@@ -884,7 +922,7 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
         assert!(error.to_string().contains("pasting review feedback"));
         assert_eq!(
             ts.client
-                .get_review(failing.id)
+                .invoke::<reviews::get::Op>(&reviews::get::Input { id: failing.id })
                 .await
                 .unwrap()
                 .delivery_state,
@@ -893,7 +931,9 @@ async fn terminal_delivery_queues_offline_recovers_and_reports_real_failure() {
     }
     assert_eq!(
         ts.client
-            .retry_review_delivery(failing.id)
+            .invoke::<reviews::retry_delivery::Op>(&reviews::retry_delivery::Input {
+                id: failing.id
+            })
             .await
             .unwrap()
             .delivery_state,

@@ -2,13 +2,12 @@ use std::path::PathBuf;
 
 use axum::{
     body::Bytes,
-    extract::{Query, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use serde::{Deserialize, Serialize};
-use weaver_api::CreateReq;
+use weaver_api::operations::repos as ops;
+use weaver_api::{RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
 
 use crate::backend;
 use crate::git;
@@ -18,56 +17,14 @@ use crate::session::{self as session_mod, Session};
 use weaver_core::branch as branch_mod;
 
 use super::auth::public_base;
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 use crate::lifecycle::auto_archive;
+use weaver_api::operations::sessions;
 
 // ---------------------------------------------------------------------------
 // Recent repositories
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-pub(super) struct RecentReposQuery {
-    limit: Option<i64>,
-}
-
-pub(super) async fn recent_repos(
-    State(st): State<AppState>,
-    Query(q): Query<RecentReposQuery>,
-) -> ApiResult<Json<Vec<repo::RecentRepo>>> {
-    let limit = q.limit.unwrap_or(10).clamp(1, 50);
-    Ok(Json(repo::recent(&st.db, limit).await?))
-}
-
-/// `GET /api/repos` — the registered managed repos (the clone allowlist).
-pub(super) async fn list_repos(
-    State(st): State<AppState>,
-) -> ApiResult<Json<Vec<repo::ManagedRepo>>> {
-    Ok(Json(repo::list_registered(&st.db).await?))
-}
-
-/// Body for `POST /api/repos`: a repo reference — a GitHub `owner/name` slug or a
-/// clone URL — to add to the managed store / allowlist.
-#[derive(Debug, Deserialize)]
-pub(super) struct RegisterRepoReq {
-    repo: String,
-}
-
-/// `POST /api/repos` — register a repo in the managed store. The reference is
-/// parsed to a clean `owner/name` slug (traversal rejected → 400); the clone URL
-/// is the canonical GitHub HTTPS remote for a bare slug, or the URL as given.
-/// The clone itself is lazy — it happens on first use (session create),
-/// idempotently — so registering is just adding to the allowlist.
-pub(super) async fn register_repo(
-    State(st): State<AppState>,
-    Json(req): Json<RegisterRepoReq>,
-) -> ApiResult<Json<repo::ManagedRepo>> {
-    let slug = repo::parse_slug(&req.repo).map_err(AppError::bad_request)?;
-    let remote_url = repo::remote_url_for(&req.repo, &slug);
-    let path = slug.path(&repo::repos_dir());
-    let managed =
-        repo::register(&st.db, &slug.slug(), &remote_url, &path.to_string_lossy()).await?;
-    Ok(Json(managed))
-}
 
 /// `POST /api/github/webhook` — the inbound GitHub trigger (shared-loom design
 /// §6.3). **Public** (outside `require_auth`): every delivery is authenticated by
@@ -444,14 +401,15 @@ async fn handle_trigger(
         weaver_core::config::DEFAULT_GITHUB_PROFILE,
     )
     .await;
-    let mut req = CreateReq {
+    let mut req = sessions::launch::Input {
         repo: Some(slug.slug()),
         title: Some(event.issue.title.clone()),
         goal: Some(trigger_goal(&slug.slug(), is_pr, number, &event, &author)),
         profile: Some(profile),
         // Record the thread on the tracking issue too (issues only — a PR
         // number in the issue link would read as the wrong thing), so the
-        // weaver ledger and the `github` wiring tag agree from birth.
+        // tracking issue's `github_issue` field and the `github` wiring tag
+        // agree from birth.
         github_issue: (!is_pr).then_some(number),
         ..Default::default()
     };
@@ -704,28 +662,90 @@ async fn forward_trigger_to_session(
     true
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct BranchesQuery {
-    cwd: String,
+// ---------------------------------------------------------------------------
+// Operation registry — `repos.*`, bound onto `weaver_api::operations::repos`.
+// Authorization (`actor = User`, `scope = Global`) happens once, centrally,
+// in `web/operations.rs`.
+//
+// `repos.env.*` binds handlers that live in `repo_env.rs`; its
+// `bound_operations()` is folded into this bundle's, since the coordinator
+// only calls `repos::bound_operations()`.
+// ---------------------------------------------------------------------------
+
+fn repo_view(r: repo::ManagedRepo) -> RepoView {
+    RepoView {
+        slug: r.slug,
+        remote_url: r.remote_url,
+        path: r.path,
+        created_at: r.created_at,
+    }
 }
 
-#[derive(Debug, Serialize)]
-pub(super) struct BranchInfo {
-    name: String,
-    worktree: Option<String>,
-    current: bool,
+pub(super) fn bound_operations() -> Vec<Bound> {
+    let mut bound = vec![
+        register::<ops::list::Op, _, _>(list_operation),
+        register::<ops::register::Op, _, _>(register_operation),
+        register::<ops::recent::Op, _, _>(recent_operation),
+        register::<ops::branches::Op, _, _>(branches_operation),
+        register::<ops::revisions::validate::Op, _, _>(revisions_validate_operation),
+    ];
+    bound.extend(super::repo_env::bound_operations());
+    bound
 }
 
-pub(super) async fn repo_branches(
-    Query(q): Query<BranchesQuery>,
-) -> ApiResult<Json<Vec<BranchInfo>>> {
-    let cwd = PathBuf::from(&q.cwd);
+async fn list_operation(
+    context: OperationContext,
+    _input: ops::list::Input,
+) -> ApiResult<ops::list::Output> {
+    let st = context.state;
+    let repos = repo::list_registered(&st.db).await?;
+    Ok(repos.into_iter().map(repo_view).collect())
+}
+
+async fn register_operation(
+    context: OperationContext,
+    input: ops::register::Input,
+) -> ApiResult<ops::register::Output> {
+    let st = context.state;
+    let slug = repo::parse_slug(&input.repo).map_err(AppError::bad_request)?;
+    let remote_url = repo::remote_url_for(&input.repo, &slug);
+    let path = slug.path(&repo::repos_dir());
+    let managed =
+        repo::register(&st.db, &slug.slug(), &remote_url, &path.to_string_lossy()).await?;
+    Ok(repo_view(managed))
+}
+
+async fn recent_operation(
+    context: OperationContext,
+    input: ops::recent::Input,
+) -> ApiResult<ops::recent::Output> {
+    let st = context.state;
+    let limit = input.limit.unwrap_or(10).clamp(1, 50);
+    let repos = repo::recent(&st.db, limit).await?;
+    Ok(repos
+        .into_iter()
+        .map(|r| RecentRepoView {
+            repo_root: r.repo_root,
+            last_used_at: r.last_used_at,
+            active_branches: r.active_branches,
+        })
+        .collect())
+}
+
+/// `repos.branches`. Server-local: `cwd` is a filesystem path the server
+/// process can read, not a session's own scope, so this ignores `context`
+/// entirely (`scope = Global`, `actor = User`).
+async fn branches_operation(
+    _context: OperationContext,
+    input: ops::branches::Input,
+) -> ApiResult<ops::branches::Output> {
+    let cwd = PathBuf::from(&input.cwd);
     let repo_root = git::repo_root(&cwd)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     let current = git::current_branch(&repo_root).await.ok();
     let names = git::list_branches(&repo_root).await?;
-    let mut out: Vec<BranchInfo> = Vec::with_capacity(names.len());
+    let mut out: Vec<RepoBranchView> = Vec::with_capacity(names.len());
     for name in names {
         let worktree = git::worktree_for_branch(&repo_root, &name)
             .await
@@ -733,14 +753,14 @@ pub(super) async fn repo_branches(
             .flatten()
             .map(|p| p.display().to_string());
         let is_current = current.as_deref() == Some(name.as_str());
-        out.push(BranchInfo {
+        out.push(RepoBranchView {
             name,
             worktree,
             current: is_current,
         });
     }
     out.sort_by(|a, b| {
-        let rank = |b: &BranchInfo| {
+        let rank = |b: &RepoBranchView| {
             if b.current {
                 0
             } else if b.worktree.is_some() {
@@ -751,39 +771,23 @@ pub(super) async fn repo_branches(
         };
         rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
     });
-    Ok(Json(out))
+    Ok(out)
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct RevisionValidationQuery {
-    cwd: String,
-    revision: String,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct RevisionValidation {
-    valid: bool,
-    repo_root: String,
-    message: Option<String>,
-}
-
-/// Check whether a worktree fork point resolves, matching what a launch would
-/// fork from: a branch that exists on `origin` but not yet locally validates,
-/// fetching it on demand. This may refresh `origin/*` tracking refs; it never
-/// touches local branches or the working tree.
-pub(super) async fn validate_repo_revision(
-    Query(q): Query<RevisionValidationQuery>,
-) -> ApiResult<Json<RevisionValidation>> {
-    let cwd = PathBuf::from(&q.cwd);
+async fn revisions_validate_operation(
+    _context: OperationContext,
+    input: ops::revisions::validate::Input,
+) -> ApiResult<ops::revisions::validate::Output> {
+    let cwd = PathBuf::from(&input.cwd);
     let repo_root = git::repo_root(&cwd)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
-    let revision = q.revision.trim();
+    let revision = input.revision.trim();
     let valid = git::resolve_base(&repo_root, revision).await.is_some();
     let message = (!valid).then(|| git::missing_revision_message(&repo_root, revision));
-    Ok(Json(RevisionValidation {
+    Ok(RepoRevisionValidationView {
         valid,
         repo_root: repo_root.display().to_string(),
         message,
-    }))
+    })
 }

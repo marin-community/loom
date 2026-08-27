@@ -2,29 +2,18 @@
 //!
 //! Launch policy remains an immutable snapshot. These small overrides are the
 //! audited escape hatch for work that legitimately expands to another repo.
+//!
+//! Every operation here declares `actor = User`, enforced centrally — none of
+//! the handlers below re-check who is calling.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::http::StatusCode;
 use serde_json::json;
-use weaver_api::{SessionGithubAccessView, SetSessionGithubAccessReq};
+use weaver_api::operations::permissions as permission_operations;
+use weaver_api::operations::sessions as session_operations;
+use weaver_api::SessionGithubAccessView;
 
-use crate::auth::Principal;
-
+use super::operations::OperationContext;
 use super::{require_session, ApiResult, AppError, AppState};
-
-fn require_human(principal: &Principal) -> ApiResult<()> {
-    if principal.is_human() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "GitHub repository access must be granted by a human operator",
-        ))
-    }
-}
 
 /// The concrete repositories one session's App token may be scoped to. Any
 /// `owner/*` entry in the launch policy is dropped here: a pattern authorizes
@@ -55,8 +44,8 @@ pub(super) fn policy_repository_patterns(
     Ok(crate::runtime::repository_patterns(&policy))
 }
 
-/// Validate that the GitHub App can actually grant write access to one
-/// repository. Nothing is stored until this succeeds.
+/// Validate that the GitHub App can grant write access to one repository.
+/// Nothing is stored until this succeeds.
 ///
 /// Only the new repository is minted, never the session's whole prospective
 /// set: tokens are brokered per repository, so a session may hold access
@@ -89,14 +78,14 @@ pub(super) async fn validate_github_write(st: &AppState, repository: &str) -> Ap
     Ok(())
 }
 
-pub(super) async fn list_github_access(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<SessionGithubAccessView>>> {
-    require_human(&principal)?;
-    let (session, _) = require_session(&st.db, &key).await?;
-    let grants = crate::github_access::list(&st.db, &session.id)
+/// `sessions.github.access.list`.
+pub(super) async fn list_github_access_operation(
+    context: OperationContext,
+    input: session_operations::github::access::list::Input,
+) -> ApiResult<Vec<SessionGithubAccessView>> {
+    let st = &context.state;
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    Ok(crate::github_access::list(&st.db, &session.id)
         .await?
         .into_iter()
         .map(|grant| SessionGithubAccessView {
@@ -105,33 +94,31 @@ pub(super) async fn list_github_access(
             granted_by: grant.granted_by,
             granted_at: grant.granted_at,
         })
-        .collect();
-    Ok(Json(grants))
+        .collect())
 }
 
-pub(super) async fn set_github_access(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<SetSessionGithubAccessReq>,
-) -> ApiResult<Json<SessionGithubAccessView>> {
-    require_human(&principal)?;
-    let (session, branch) = require_session(&st.db, &key).await?;
-    let repository = crate::repo::parse_slug(req.repository.trim())
+/// Shared body for `permissions.github.grant` and `permissions.github.revoke`:
+/// store the requested mode for one repository and audit the change.
+async fn set_github_access_and_record(
+    st: &AppState,
+    granted_by: &str,
+    session_key: &str,
+    repository: &str,
+    mode: crate::github_access::Mode,
+) -> ApiResult<SessionGithubAccessView> {
+    let (session, branch) = require_session(&st.db, session_key).await?;
+    let repository = crate::repo::parse_slug(repository.trim())
         .map_err(AppError::bad_request)?
         .slug();
-    let mode_text = req.mode.trim().to_ascii_lowercase();
-    let mode = crate::github_access::Mode::try_from(mode_text.as_str())
-        .map_err(|_| AppError::bad_request("GitHub access mode must be 'write' or 'none'"))?;
 
     // Prove the App can grant this repository before changing durable access,
     // so an uninstalled repo fails here rather than surprising the agent on its
     // next push.
     if mode == crate::github_access::Mode::Write {
-        validate_github_write(&st, &repository).await?;
+        validate_github_write(st, &repository).await?;
     }
 
-    crate::github_access::set(&st.db, &session.id, &repository, mode, &principal.username).await?;
+    crate::github_access::set(&st.db, &session.id, &repository, mode, granted_by).await?;
     let grant = crate::github_access::list(&st.db, &session.id)
         .await?
         .into_iter()
@@ -158,24 +145,48 @@ pub(super) async fn set_github_access(
         tracing::warn!(session = %session.id, %repository, error = %error,
             "failed to record GitHub access audit event");
     }
-    Ok(Json(SessionGithubAccessView {
+    Ok(SessionGithubAccessView {
         repository: grant.repository,
         mode: grant.mode.as_str().to_string(),
         granted_by: grant.granted_by,
         granted_at: grant.granted_at,
-    }))
+    })
+}
+
+pub(super) async fn grant_github_access_operation(
+    context: OperationContext,
+    input: permission_operations::github::grant::Input,
+) -> ApiResult<permission_operations::github::grant::Output> {
+    set_github_access_and_record(
+        &context.state,
+        &context.principal.username,
+        &input.session,
+        &input.repository,
+        crate::github_access::Mode::Write,
+    )
+    .await
+}
+
+pub(super) async fn revoke_github_access_operation(
+    context: OperationContext,
+    input: permission_operations::github::revoke::Input,
+) -> ApiResult<permission_operations::github::revoke::Output> {
+    set_github_access_and_record(
+        &context.state,
+        &context.principal.username,
+        &input.session,
+        &input.repository,
+        crate::github_access::Mode::None,
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use axum::extract::{Path, State};
-    use axum::{Extension, Json};
-
-    use super::{effective_repositories, require_human, set_github_access};
+    use super::{effective_repositories, grant_github_access_operation, OperationContext};
     use crate::auth::{AuthVia, Grant, Principal};
-    use weaver_api::SetSessionGithubAccessReq;
 
     fn principal(grant: Grant) -> Principal {
         Principal {
@@ -187,16 +198,21 @@ mod tests {
         }
     }
 
+    /// `actor = User` on each operation ensures only humans can reach this code.
     #[test]
     fn only_humans_can_change_github_access() {
-        assert!(require_human(&principal(Grant::Admin)).is_ok());
-        assert!(require_human(&principal(Grant::User)).is_ok());
-        assert!(require_human(&principal(Grant::Session {
-            session_id: "session".to_string(),
-            branch_id: "branch".to_string(),
-            capabilities: None,
-        }))
-        .is_err());
+        for id in [
+            "permissions.github.grant",
+            "permissions.github.revoke",
+            "sessions.github.access.list",
+        ] {
+            let spec = weaver_api::operation(id).expect(id);
+            assert_eq!(
+                spec.actor,
+                weaver_api::ActorPolicy::User,
+                "{id} must stay human-only"
+            );
+        }
     }
 
     #[tokio::test]
@@ -301,14 +317,12 @@ mod tests {
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };
 
-        let Json(view) = set_github_access(
-            State(state),
-            Path("grant".to_string()),
-            Extension(principal(Grant::Admin)),
-            Json(SetSessionGithubAccessReq {
+        let view = grant_github_access_operation(
+            OperationContext::new(state, principal(Grant::Admin)),
+            weaver_api::operations::permissions::github::grant::Input {
                 repository: "marin-community/loom".to_string(),
-                mode: "write".to_string(),
-            }),
+                session: "grant".to_string(),
+            },
         )
         .await
         .unwrap();

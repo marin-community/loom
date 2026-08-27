@@ -7,16 +7,16 @@ the workflow owns task semantics, stale-write checks, and prose policy.
 
 The stock `github_comment` profile uses Claude over ACP with no Loom prelude,
 no repository environment or setup script, no Claude user/project/local
-settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP surface.
-The profile selects that reviewed surface as `mcp/github/comment@v1`; Loom expands
+settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP tool.
+The profile selects that reviewed tool as `mcp/github/comment@v1`; Loom expands
 the set into exact tool permissions when it stamps the session and launches the
 corresponding built-in adapter from its registry. Profile data cannot provide an
 adapter command. New adapter families belong in `crates/loom-agent/src/mcp/` and must
 be registered by Loom before a profile can select one.
 The MCP bridge calls a session-scoped Loom endpoint; Loom calls GitHub through
 its App client against the session's fixed repository and linked issue/PR
-number. The agent receives the fixed GitHub tool rather than a general GitHub
-shell surface, and Loom enforces the configured Claude permission rules. Loom
+number. The agent receives the fixed GitHub tool rather than general shell
+access to GitHub, and Loom enforces the configured Claude permission rules. Loom
 uses the configured GitHub App's short-lived installation token for the fixed
 repository. The stock policy lives in
 `crates/loom-policy/profiles/github_comment/profile.json`, not in a schema migration. Loom
@@ -86,7 +86,7 @@ request=$(jq -n \
 curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer $loom_token" \
   -H 'Content-Type: application/json' \
-  -d "$request" "$LOOM_URL/api/runs"
+  -d "$request" "$LOOM_URL/api/runs/create"
 ```
 
 GitHub caller keys accept up to 128 ASCII letters, digits, `.`, `_`, `:`, and
@@ -115,7 +115,7 @@ while executing a fixed GitHub tool.
    profile show github_comment` and `loom federation ls`.
 4. Run a synthetic issue through the direct API. Verify the prompt appears as
    the first turn without `WEAVER.md`, a duplicate body-hash key returns the
-   original run, the fixed tool surface is visible, and only the requested
+   original run, the fixed tool is visible, and only the requested
    GitHub mutation occurs.
 5. Move callers to the OIDC exchange without changing their idempotency keys or
    stale-write preconditions, then roll the workflow revision out in controlled

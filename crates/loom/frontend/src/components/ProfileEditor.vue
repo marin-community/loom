@@ -110,7 +110,8 @@ function setEnvironment() {
   if (!environment.value || !name || (envKind.value === 'gcp_secret' && !envValue.value)) return;
   const proposal = {
     name,
-    ...(envKind.value === 'literal' ? { value: envValue.value } : { secret_ref: envValue.value }),
+    value: envKind.value === 'literal' ? envValue.value : null,
+    secret_ref: envKind.value === 'gcp_secret' ? envValue.value : null,
   };
   environment.value.set = [
     ...environment.value.set.filter((entry) => entry.name !== name),

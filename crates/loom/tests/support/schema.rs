@@ -1,18 +1,11 @@
 //! A migrated-schema template, shared by every suite that boots a server on a
-//! throwaway `WEAVER_HOME`. Pulled in with `#[path]` like `support/tapestry.rs`
-//! — separate integration-test targets can't share code any other way.
+//! throwaway `WEAVER_HOME`. Pulled in with `#[path]` because separate
+//! integration-test targets cannot share code any other way.
 //!
-//! `loom::db::connect` on an empty file replays the whole ordered migration set
-//! (weaver-core's stream, then loom's), each migration in its own transaction.
-//! That costs ~250ms, and these suites are `#[serial]`, so it is ~250ms of dead
-//! wall-clock in front of *every* test before it does any work of its own.
-//!
-//! The migration run is deterministic, so run it once per test process and hand
-//! each test a byte-identical copy of the result. What a test connects to is
-//! still the real migrated schema — it is literally the output of the real
-//! runner — and the from-scratch migrate path keeps its own coverage in the
-//! `weaver-core` and `loom-store` unit tests (plus the one run this template
-//! itself performs).
+//! `loom::db::connect` on an empty file replays the whole ordered migration set,
+//! each in its own transaction — ~250ms of dead wall-clock in front of every
+//! `#[serial]` test. Since the run is deterministic, it runs once per test
+//! process and each test gets a byte-identical copy of the result.
 
 use std::sync::OnceLock;
 
@@ -34,9 +27,9 @@ pub fn seed_migrated_db() {
 fn template() -> &'static [u8] {
     static TEMPLATE: OnceLock<Vec<u8>> = OnceLock::new();
     TEMPLATE.get_or_init(|| {
-        // Build on a dedicated thread with its own runtime: callers run inside a
-        // `#[tokio::test]` runtime that is torn down at the end of the test, and
-        // the template must outlive whichever test happened to be first.
+        // A dedicated thread with its own runtime: the caller's `#[tokio::test]`
+        // runtime is torn down at the end of the test, but the template must
+        // outlive whichever test happened to be first.
         std::thread::spawn(|| {
             let dir = tempfile::tempdir().expect("schema template directory");
             let path = dir.path().join("weaver.db");

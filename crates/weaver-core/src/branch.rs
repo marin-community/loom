@@ -188,7 +188,7 @@ const BRANCH_COLUMNS: &str =
      created_at, updated_at";
 
 fn select_branches(suffix: &str) -> String {
-    // Keep the projection stable across rolling upgrades. An older process can
+    // Keep the column list stable across rolling upgrades. An older process can
     // still be draining while a replacement adds a column; SQLite may recompile
     // `SELECT *` after sqlx captured the old row metadata and panic while
     // materializing the wider row.
@@ -220,8 +220,18 @@ pub async fn list(db: &Db) -> Result<Vec<Branch>> {
     Ok(rows)
 }
 
-/// Look up a branch by id, exact `repo:branch` spec, or unambiguous id prefix.
+/// Look up a branch by id, exact `repo:branch` spec, exact name, or id prefix.
+///
+/// A name or prefix can match several branches — branch names are unique per
+/// repository, not globally — and the newest wins. Authorization compares the
+/// resolved row rather than the key, so a key that resolves widely still only
+/// reaches what the caller may reach.
 pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
+    // An empty key names nothing. Left to the prefix arm below it would become
+    // `id LIKE '%'` and resolve to the newest branch in the database.
+    if key.is_empty() {
+        return Ok(None);
+    }
     if let Some(b) = get(db, key).await? {
         return Ok(Some(b));
     }
@@ -230,13 +240,29 @@ pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<Branch>> {
             return Ok(Some(b));
         }
     }
-    let query = select_branches("WHERE branch = ? OR id LIKE ? ORDER BY created_at DESC");
+    let query =
+        select_branches(r"WHERE branch = ? OR id LIKE ? ESCAPE '\' ORDER BY created_at DESC");
     let matches = sqlx::query_as::<_, Branch>(&query)
         .bind(key)
-        .bind(format!("{key}%"))
+        .bind(format!("{}%", like_prefix(key)))
         .fetch_all(db)
         .await?;
     Ok(matches.into_iter().next())
+}
+
+/// Quote a caller's string so `LIKE` reads it literally.
+///
+/// `_` matches any one character and `%` any run of them, so an unquoted key
+/// matched by wildcard as well as by prefix: `a_c` matched the id `abc`.
+fn like_prefix(key: &str) -> String {
+    let mut quoted = String::with_capacity(key.len());
+    for ch in key.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
+    }
+    quoted
 }
 
 /// Create a new branch row.
@@ -277,9 +303,9 @@ pub async fn upsert(db: &Db, repo_root: &str, branch: &str, base_branch: &str) -
 
 /// Write the branch's goal: append a `goal` artifact revision (the source of
 /// truth) authored by `author` (`"user"` | `"agent"`), then refresh the
-/// denormalized `branches.goal` cache. The funnel every goal *setter* goes
-/// through; code that writes the goal artifact directly instead refreshes the
-/// cache via [`sync_goal_cache`].
+/// denormalized `branches.goal` cache. Every goal setter should go through
+/// this function; code that writes the goal artifact directly instead
+/// refreshes the cache via [`sync_goal_cache`].
 pub async fn set_goal(db: &Db, id: &str, goal: &str, author: &str) -> Result<()> {
     let Some(branch) = get(db, id).await? else {
         return Ok(());

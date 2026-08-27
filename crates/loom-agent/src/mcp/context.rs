@@ -1,35 +1,39 @@
-//! Current caller context as a small, typed REST projection.
+//! Current caller context: the ids and links a session needs to address
+//! itself.
+//!
+//! One tool, `sessions.context`, named in [`exports`].
 
-use anyhow::{bail, Result};
+use std::sync::OnceLock;
+
 use serde_json::Value;
+use weaver_api::operations::sessions;
 
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
 
 const SERVER_NAME: &str = "loom_context";
-const TOOL_NAMES: [&str; 1] = ["get"];
-const TOOLS: &[&str] = &TOOL_NAMES;
-const CAPABILITY_SETS: &[CapabilitySet] = &[
-    CapabilitySet {
-        name: "loom/context/read@v1",
-        group: "context",
-        version: "v1",
-        description: "Resolve this session's canonical Loom resource identifiers and links.",
-        tools: TOOLS,
-    },
-    CapabilitySet {
-        name: "mcp/context/read@v1",
-        group: "context",
-        version: "v1",
-        description: "Resolve this session's canonical Loom resource identifiers and links.",
-        tools: TOOLS,
-    },
-];
+
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| vec![export::<sessions::context::Op>("get")])
+}
+
+// `sessions.context` claims `loom/sessions/read@v1`, the same grant
+// `loom_session`'s read tools claim, but it is served by a different process
+// and `expand_tool_set` resolves a set name to the first adapter that
+// recognizes it. So this adapter names its own set, and only its tools are
+// derived. `mcp/context/read@v1` is the name that set carried before the
+// `loom/` rename.
+const SET_NAME: &str = "loom/context/read@v1";
+const SUPERSEDED: &[(&str, &str)] = &[("mcp/context/read@v1", SET_NAME)];
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "context",
     server_name: SERVER_NAME,
-    description: "Current session, branch, repository, channel, and resource links.",
-    capability_sets: || CAPABILITY_SETS,
+    description: "Canonical identifiers and links for the calling session.",
+    capability_sets,
+    exports,
+    superseded: &[("mcp/context/read@v1", SET_NAME)],
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -37,12 +41,33 @@ pub(super) const ADAPTER: Adapter = Adapter {
     serve: serve_boxed,
 };
 
+fn capability_sets() -> &'static [CapabilitySet] {
+    static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
+    SETS.get_or_init(|| {
+        let mut sets = super::dispatch::capability_sets(exports(), "context", describe_capability);
+        for set in &mut sets {
+            set.name = SET_NAME;
+        }
+        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
+        sets
+    })
+}
+
+fn describe_capability(grant: &str) -> &'static str {
+    match grant {
+        "loom/sessions/read@v1" => {
+            "Resolve this session's canonical Loom resource identifiers and links."
+        }
+        _ => "Caller context operations.",
+    }
+}
+
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
 }
 
 fn server_config() -> Value {
@@ -50,26 +75,15 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    weaver_api::mcp_tools_ordered(SERVER_NAME, &TOOL_NAMES)
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
-    Box::pin(async move { call_tool(&name, arguments).await })
-}
-
-async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if name != "get" {
-        bail!("unknown context tool '{name}'");
-    }
-    if !super::runtime_tool_allowed(name) {
-        bail!("context tool '{name}' is not allowed by this session");
-    }
-    if !arguments.as_object().is_some_and(|value| value.is_empty()) {
-        bail!("context get accepts no arguments");
-    }
-    let value = super::runtime_client("context")?.self_context().await?;
-    super::structured_result("resolved current Loom context", &value)
+    Box::pin(async move {
+        super::dispatch::call_adapter_tool("context", SERVER_NAME, exports(), &name, arguments)
+            .await
+    })
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -81,15 +95,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn context_surface_is_one_read_only_tool() {
-        assert_eq!(tools().as_array().unwrap().len(), 1);
-        assert_eq!(
-            expand_tool_set("mcp/context/read@v1").unwrap(),
-            vec!["mcp__loom_context__get"]
-        );
-        assert_eq!(
-            expand_tool_set("loom/context/read@v1").unwrap(),
-            vec!["mcp__loom_context__get"]
-        );
+    fn the_single_tool_is_the_context_operation() {
+        let names: Vec<_> = exports().iter().map(|export| export.tool).collect();
+        assert_eq!(names, ["get"]);
+        assert_eq!(exports()[0].operation.id, "sessions.context");
+    }
+
+    #[test]
+    fn permission_rules_only_recognize_exported_tools() {
+        assert!(is_permission_rule("mcp__loom_context__get"));
+        assert!(!is_permission_rule("mcp__loom_context__bogus"));
     }
 }

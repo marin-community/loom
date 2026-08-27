@@ -1,8 +1,8 @@
 # Loom
 
-A lightweight session orchestrator and communication surface for coding agents.
+A lightweight session orchestrator and communication layer for coding agents.
 
-Loom has one public command surface:
+Loom is one binary:
 
 - **`loom`** — the **orchestrator**. It runs the REST + SSE server, hosts a
   Vue dashboard, creates worktrees, launches agents under managed runtime
@@ -48,21 +48,27 @@ loom open           # open the web UI (http://127.0.0.1:7878)
 
 Run `loom help` for registered resource groups, `loom <group> --help` for
 syntax, `loom help --json` for machine-readable discovery, and inspect the
-running server's `/api/operations` or `/api/openapi.json` for its live surface.
-Each routine operation is one executable registration: descriptor, typed
-input/output, authority boundary, and implementation. Registration mounts the
-canonical `POST /api/<group>/<operation>` route; discovery, typed clients, and
-MCP enumerate that same entry. Argument constraints generate MCP tool
-descriptions and JSON Schema. Custom adapters remain available for streaming,
-PTY, file/stdin, interactive, and genuinely specialized bulk behavior.
+running server's `/api/operations` or `/api/openapi.json` for its live catalogue.
+Every operation is declared exactly once, and its id is its path on disk:
+`issues.tags.set` lives in `crates/weaver-api/src/operations/issues/tags/set.rs`
+and nowhere else. The REST route, the JSON Schema, the MCP tool, the clap command,
+and the authority boundary are all derived from that one declaration — a route is
+computed from the id rather than written down, so the two cannot disagree.
+Streams and terminal websockets are registered the same way; `io = Stream` /
+`io = Duplex` names the response encoding, which is the only thing that differs
+about them.
 See [AGENTS.md](AGENTS.md) for the contributor build/test loop.
 
 ## Architecture
 
 The `loom` CLI, MCP adapters, and Vue SPA are REST clients; only the server owns
 sqlite, worktrees, supervisors, agents, and background services. See
-[Architecture](docs/ARCHITECTURE.md) for the module map, flows, storage model,
-and route catalogue.
+[Architecture](docs/ARCHITECTURE.md) for the module map, flows, and storage
+model. The route catalogue is not prose either: a running loom answers
+`GET /api/operations` and `GET /api/openapi.json` with every operation, its
+path, actor policy, risk, encoding, and the CLI command and MCP tool it
+produces, straight from the declarations in
+[`crates/weaver-api/src/operations/`](crates/weaver-api/src/operations).
 
 ## Usage
 
@@ -82,7 +88,7 @@ The task becomes the branch goal and opening prompt; Loom derives the
 `weaver/<slug>` branch name and forks from a freshly fetched default branch.
 Use `--repo` for another checkout or managed GitHub repository, `--base` to pin
 a parent branch, and `--claim` or `--issue` to seed the task from existing work.
-Run `loom sessions launch --help` for the complete launch surface.
+Run `loom sessions launch --help` for the complete set of launch flags.
 
 Profiles are reusable templates, not live session configuration. Omitted
 selectors inherit from the selected template and agent defaults. The resolver
@@ -128,7 +134,7 @@ Interventions. Group rows show the unqualified task label and cross-group views
 compose `Group / Task`.
 
 A session opens on Conversation (or Agent for a terminal-backed runtime), with
-one Review surface for Artifacts and Changes. Details owns launch metadata,
+one Review pane for Artifacts and Changes. Details owns launch metadata,
 associations, Scratch, lifecycle actions, profile-first handoff, and the
 advanced editor escape hatch. Review comments remain private drafts until one
 Submit review action delivers coherent feedback. The Backlog pane supports
@@ -148,7 +154,7 @@ resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
 running inside, which is how an agent links a PR back to the work behind it.
 
-Channels are the default coordination surface. Every session is created with a
+Channels are the default coordination mechanism. Every session is created with a
 same-id channel whose opening goal records its charter. Messages are append-only,
 read markers are per participant, and delivery is recorded per server-owned
 binding. A Slack-origin session binds its own channel to that thread, so one
@@ -199,7 +205,7 @@ The **lifecycle** (`session.status`) is mechanical and orchestrator-owned:
 `created`, `running`, `orphaned`, `done`, `error`, or `archived`.
 ACP turn boundaries and terminal-agent hooks feed one promotion path; supervisor
 loss marks a recoverable session orphaned. Runtime permission requests remain in
-the ACP Conversation surface rather than becoming guessed lifecycle state.
+the ACP Conversation tab rather than becoming guessed lifecycle state.
 
 The **attention** axis is the agent's own signal of whether it needs you:
 `ok` (going fine, or blocked on something external like a CI run or PR review),
@@ -208,10 +214,7 @@ needs help). Agents set it with
 `loom status set --tag <level> --message "<message>"`, which records both the
 level and a one-line current-state message; omitting `--message` changes the
 level and keeps the last message. `loom status get` reads the current value. The
-dashboard shows both and lets you filter for sessions that need a human. It
-replaces the old guessed working/waiting/idle indicator, which was often wrong —
-e.g. it read "idle" while the agent was actually waiting on a background
-workflow.
+dashboard shows both and lets you filter for sessions that need a human.
 
 ## Adoption
 
@@ -406,7 +409,7 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   export LOOM_TOKEN=loom_xxxxxxxx
   curl -H "Authorization: Bearer $LOOM_TOKEN" \
        -H 'content-type: application/json' \
-       "$WEAVER_API/api/sessions" -d '{"cwd":"/srv/repo","goal":"..."}'
+       "$WEAVER_API/api/sessions/launch" -d '{"cwd":"/srv/repo","goal":"..."}'
   ```
 
 - **Federated workflow tokens** for GitHub Actions and Google workloads. Loom
@@ -437,10 +440,10 @@ Settings or use the operator CLI:
 
 ```sh
 loom settings list
-loom profile ls
+loom profiles ls
 loom profile show default
 loom profile show ops --effective
-loom mcp ls
+loom mcps get
 loom mcp show mcp/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
 loom mcp add /engineering/search/docs --label "Docs search" \

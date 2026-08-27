@@ -1,10 +1,10 @@
 //! The managed repo store over the REST API: launch a session with
 //! `{repo: "owner/name"}` and loom clones the repo into the managed store and
 //! forks the worktree from that clone — no `cwd`. It works whether the repo was
-//! registered up front (`POST /api/repos`) or is being named for the first time,
-//! which is what lets `loom launch --repo owner/name` reach a repo this machine
-//! has never checked out. Plus the security gate that survives: traversal
-//! identifiers are rejected.
+//! registered up front (`repos.register`) or is being named for the first time,
+//! so `loom launch --repo owner/name` can reach a repo this machine has never
+//! checked out. Plus the security gate that survives: traversal identifiers
+//! are rejected.
 //!
 //! The clone source is a *local bare repo* (named by a `file://` URL), so these
 //! tests never touch the network.
@@ -71,14 +71,14 @@ async fn register_then_launch_clones_into_managed_store() {
 
     // Register the repo via the URL form — slug derives to `acme/widgets`.
     let reg = client
-        .post("/api/repos", json!({ "repo": remote_url }))
+        .post("/api/repos/register", json!({ "repo": remote_url }))
         .await
         .unwrap();
     assert_eq!(reg["slug"], "acme/widgets");
     assert_eq!(reg["remote_url"], remote_url);
 
     // It shows up in the allowlist listing.
-    let list = client.get("/api/repos").await.unwrap();
+    let list = client.post("/api/repos/list", json!({})).await.unwrap();
     let list = list.as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["slug"], "acme/widgets");
@@ -86,7 +86,7 @@ async fn register_then_launch_clones_into_managed_store() {
     // Launch by slug, with no cwd: loom clones the repo and uses it as the root.
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "managed clone", "repo": "acme/widgets", "agent": "shell" }),
         )
         .await
@@ -118,16 +118,19 @@ async fn register_then_launch_clones_into_managed_store() {
     // A second launch against the same slug reuses the clone (idempotent fetch).
     let ws2 = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "managed clone two", "repo": "acme/widgets", "agent": "shell" }),
         )
         .await
         .unwrap();
     let id2 = ws2["id"].as_str().unwrap().to_string();
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
     client
-        .delete(&format!("/api/sessions/{id2}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id2 }))
         .await
         .unwrap();
 }
@@ -150,17 +153,17 @@ async fn launching_into_an_unregistered_repo_registers_and_clones_it() {
 
     // Nothing is registered yet.
     assert!(client
-        .get("/api/repos")
+        .post("/api/repos/list", json!({}))
         .await
         .unwrap()
         .as_array()
         .unwrap()
         .is_empty());
 
-    // Launch straight at it — no POST /api/repos first.
+    // Launch straight at it — no repos.register first.
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "first sight", "repo": remote_url, "agent": "shell" }),
         )
         .await
@@ -180,23 +183,26 @@ async fn launching_into_an_unregistered_repo_registers_and_clones_it() {
         .exists());
 
     // And the launch registered it, so it is a known repo from now on.
-    let list = client.get("/api/repos").await.unwrap();
+    let list = client.post("/api/repos/list", json!({})).await.unwrap();
     let list = list.as_array().unwrap();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0]["slug"], "acme/widgets");
     assert_eq!(list[0]["remote_url"], remote_url);
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// Security: a traversal identifier is rejected with a 400 before any clone is
 /// attempted, on both the create and the register path.
 ///
-/// Note what is *not* asserted here: an unregistered repo. Naming a repo on an
+/// This does not assert an unregistered repo: naming a repo on an
 /// authenticated create is the grant that registers it (see the test above) — the
 /// `repos` allowlist gates the *unauthenticated* GitHub webhook, which resolves
 /// its own clone through `repo::resolve_clone` before it reaches the shared
-/// create path. That gate is proven in `repo::tests::resolve_clone_enforces_allowlist_then_clones`.
+/// create path.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_rejects_traversal_identifiers() {
@@ -206,7 +212,10 @@ async fn create_rejects_traversal_identifiers() {
     // Traversal / malformed identifiers — rejected by the strict slug parse.
     for bad in ["../etc", "/etc/passwd", "a/b/c", "owner/.."] {
         let err = client
-            .post("/api/sessions", json!({ "repo": bad, "agent": "shell" }))
+            .post(
+                "/api/sessions/launch",
+                json!({ "repo": bad, "agent": "shell" }),
+            )
             .await
             .unwrap_err()
             .to_string();
@@ -218,7 +227,7 @@ async fn create_rejects_traversal_identifiers() {
 
     // Registration itself rejects a traversal identifier.
     let err = client
-        .post("/api/repos", json!({ "repo": "../escape" }))
+        .post("/api/repos/register", json!({ "repo": "../escape" }))
         .await
         .unwrap_err()
         .to_string();

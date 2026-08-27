@@ -1,0 +1,2 @@
+# A build product, written by crates/loom/build.rs from the operation registry.
+src/api/generated.ts

@@ -256,8 +256,7 @@ impl LogBuffer {
     }
 }
 
-/// The process-global log buffer, created on first access. Both the tracing layer
-/// and the HTTP handlers resolve the same instance through this.
+/// The process-global log buffer, created on first access.
 pub fn buffer() -> &'static Arc<LogBuffer> {
     static BUFFER: OnceLock<Arc<LogBuffer>> = OnceLock::new();
     BUFFER.get_or_init(|| Arc::new(LogBuffer::new()))
@@ -428,7 +427,7 @@ mod tests {
         // a unique marker (other tests may share the buffer).
         let subscriber = tracing_subscriber::registry().with(layer());
         tracing::subscriber::with_default(subscriber, || {
-            let span = tracing::info_span!("http", method = "GET", path = "/api/tasks");
+            let span = tracing::info_span!("http", method = "GET", path = "/api/tasks/list");
             let _g = span.enter();
             tracing::warn!("mark-9f3c authentication required");
         });

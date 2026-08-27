@@ -60,9 +60,8 @@ fn kill_supervisors_in(sock_dir: &Path) {
 }
 
 /// Seed the command-less `shell` custom agent the suites launch no-op sessions
-/// with. `shell` is no longer a builtin; a custom agent with no `launch` command
-/// execs a bare login shell (hookless → `running` at once), which is exactly the
-/// cheap session the tests want.
+/// with. A custom agent with no `launch` command execs a bare login shell
+/// (hookless → `running` at once), which is exactly the cheap session the tests want.
 pub async fn seed_shell_agent(db: &loom::db::Db) {
     loom::custom_agents::set(
         db,
@@ -111,12 +110,70 @@ pub struct TestServer {
     pub state: AppState,
     repo: TempDir,
     _home: TempDir,
+    /// Fails the test loudly on a deadlock instead of hanging the suite.
+    _watchdog: Watchdog,
 }
 
 enum GithubFixture {
     Production,
     Gateway(std::sync::Arc<dyn loom::github_trigger::GithubApi>),
     ConfiguredApp,
+}
+
+/// Per-test timeout.
+///
+/// libtest has no such thing: a test that deadlocks blocks the whole suite
+/// until CI kills the job, and the output names no test at all. Every test here
+/// boots a `TestServer`, so hanging the watchdog off its lifetime covers all of
+/// them without touching a single test body.
+///
+/// On expiry the process aborts — a test thread cannot be unwound from
+/// outside — after printing the test's name, which libtest sets as the thread
+/// name. Override the budget with `LOOM_TEST_TIMEOUT_SECS=0` to disable it when
+/// stepping through a test under a debugger.
+struct Watchdog {
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Watchdog {
+    fn start() -> Self {
+        let seconds = std::env::var("LOOM_TEST_TIMEOUT_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(120);
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if seconds == 0 {
+            return Self { done };
+        }
+        let test = std::thread::current()
+            .name()
+            .unwrap_or("<unnamed test>")
+            .to_string();
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(seconds);
+            while std::time::Instant::now() < deadline {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            eprintln!(
+                "\n\n=== TEST TIMEOUT ===\n\
+                 `{test}` exceeded {seconds}s and is presumed deadlocked.\n\
+                 Aborting so the suite reports this test rather than hanging.\n\
+                 Raise or disable the budget with LOOM_TEST_TIMEOUT_SECS.\n"
+            );
+            std::process::abort();
+        });
+        Self { done }
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Drop for TestServer {
@@ -157,6 +214,8 @@ impl TestServer {
     }
 
     async fn start_inner(github: GithubFixture, initialize_repo: bool) -> Self {
+        // Armed before any I/O, so a hang during setup is caught too.
+        let watchdog = Watchdog::start();
         // Isolate weaver state in a temp home (its own db) for the lifetime of
         // the test; that home also scopes the `tapestry` socket dir. Point loom
         // at the sibling supervisor binary.
@@ -167,8 +226,8 @@ impl TestServer {
         // Never let the outer loom session's scoped bearer leak into this
         // isolated server or CLI subprocesses spawned by a test.
         std::env::remove_var("LOOM_TOKEN");
-        // `seed_owner` no longer defaults to a real login — the suite's requests
-        // ride loopback trust, which needs a seeded owner to resolve to.
+        // The suite's requests ride loopback trust, which needs a seeded owner to
+        // resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
         let repo = tempfile::tempdir().unwrap();
@@ -215,10 +274,9 @@ impl TestServer {
         )
         .await
         .unwrap();
-        // The suites launch cheap no-op sessions with `"agent": "shell"`. `shell`
-        // is no longer a builtin, so seed it as a command-less custom agent: it
-        // execs a bare login shell and is hookless (so it comes up `running`
-        // immediately, never stuck `launching`).
+        // The suites launch cheap no-op sessions with `"agent": "shell"`. Seed it
+        // as a command-less custom agent: it execs a bare login shell and is
+        // hookless (so it comes up `running` immediately, never stuck `launching`).
         seed_shell_agent(&state.db).await;
         // Keep a handle to the editor manager and a full state clone before
         // `state` moves into serve, so a test can register a stub upstream on the
@@ -236,18 +294,28 @@ impl TestServer {
         // unauthenticated client deliberately instead of inheriting ambient
         // credentials through `client::default()`.
         let client = Client::new(format!("http://{addr}"));
+        // A server that panics on startup fails here with a clear error
+        // message.
+        let mut ready = false;
         for _ in 0..60 {
             if client.get("/api/health").await.is_ok() {
+                ready = true;
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+        assert!(
+            ready,
+            "the test server never answered /api/health on {addr} — it panicked while \
+             starting. Its panic was printed above, from a task named `tokio-rt-worker`."
+        );
 
         Self {
             client,
             addr,
             ide,
             state: state_clone,
+            _watchdog: watchdog,
             repo,
             _home: home,
         }
@@ -335,7 +403,7 @@ pub fn plant_claude_transcript(home: &Path, work_dir: &str, user: &str, assistan
 /// One tag off a `SessionView` (or `BranchView`) JSON `branch.tags` array by
 /// key, or `None` when the branch carries no tag for that key. The status axes
 /// — the agent's `attention` and a watch's `triage` — are tags, so this is
-/// how a test reads a level/note/author off the wire.
+/// how a test reads a level/note/author from the JSON response.
 pub fn branch_tag<'a>(view: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
     view.get("branch")
         .and_then(|b| b.get("tags"))
@@ -366,7 +434,7 @@ pub type TermWs =
 /// Connect a terminal WebSocket to a session. No `Origin` header is sent, so the
 /// server's same-origin check takes the missing-Origin (non-browser) path.
 pub async fn connect_terminal(addr: &SocketAddr, id: &str) -> TermWs {
-    let url = format!("ws://{addr}/api/sessions/{id}/terminal");
+    let url = format!("ws://{addr}/api/sessions/terminal?session={id}");
     let (ws, _resp) = tokio_tungstenite::connect_async(url)
         .await
         .expect("terminal websocket should connect");

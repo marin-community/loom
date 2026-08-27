@@ -18,42 +18,44 @@ use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
 };
 
-pub(crate) mod artifact;
+// All six tools gate through one registered operation via a runtime
+// session-policy check, not a compile-time grant, so this adapter keeps its
+// own schemas and dispatch loop instead of `dispatch::bind`. See the module
+// doc on `github` for the full reasoning.
+pub mod github;
+
 pub(crate) mod channel;
 pub(crate) mod context;
-pub mod github;
-pub(crate) mod history;
 pub(crate) mod issue;
-pub(crate) mod messaging;
 pub(crate) mod permission;
+
+// These stay hand-written rather than bound via `dispatch::bind` — see each
+// module's own doc comment for exactly which tool and why (a response
+// enrichment the plain operation does not carry, or an operation that has no
+// registry entry under this adapter's own server name).
+pub(crate) mod artifact;
+pub(crate) mod history;
+pub(crate) mod messaging;
 pub(crate) mod session;
+
+pub(crate) mod dispatch;
 
 type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
-pub(crate) async fn call_registered_tool(
-    adapter: &str,
-    server: &str,
-    name: &str,
-    input: Value,
-) -> Result<Value> {
-    let operation = weaver_api::operation_for_mcp(server, name)
-        .with_context(|| format!("unknown {adapter} tool '{name}'"))?;
-    if !runtime_tool_allowed(name) {
-        bail!("{adapter} tool '{name}' is not allowed by this session");
-    }
-    input
-        .as_object()
-        .with_context(|| format!("{adapter} tool arguments must be an object"))?;
-    runtime_client(adapter)?
-        .invoke_value(operation.id, input)
-        .await
-}
 
 pub(crate) struct Adapter {
     name: &'static str,
     server_name: &'static str,
     description: &'static str,
     capability_sets: fn() -> &'static [CapabilitySet],
+    /// The tools this adapter exports and the operation each one is.
+    exports: fn() -> &'static [dispatch::Export],
+    /// Old set names this adapter answers for, as `(old, current)`. The one
+    /// place a superseded name is written: it marks the old name deprecated in
+    /// the registry view and resolves it to the current set's grants. `old` may
+    /// be a name this adapter still publishes, one it renamed away from, or one
+    /// nothing publishes any more.
+    superseded: &'static [(&'static str, &'static str)],
     expand_tool_set: fn(&str) -> Option<Vec<String>>,
     is_permission_rule: fn(&str) -> bool,
     server_config: fn() -> Value,
@@ -72,46 +74,6 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
-pub(crate) fn builtin_permission_rule(
-    server_name: &str,
-    tool_names: &[&str],
-    tool: &str,
-) -> Option<String> {
-    tool_names
-        .contains(&tool)
-        .then(|| format!("mcp__{server_name}__{tool}"))
-}
-
-pub(crate) fn is_builtin_permission_rule(
-    server_name: &str,
-    tool_names: &[&str],
-    rule: &str,
-) -> bool {
-    tool_names
-        .iter()
-        .any(|tool| builtin_permission_rule(server_name, tool_names, tool).as_deref() == Some(rule))
-}
-
-pub(crate) fn expand_builtin_tool_set(
-    server_name: &str,
-    tool_names: &[&str],
-    capability_sets: &[CapabilitySet],
-    name: &str,
-) -> Option<Vec<String>> {
-    capability_sets
-        .iter()
-        .find(|set| set.name == name)
-        .map(|set| {
-            set.tools
-                .iter()
-                .map(|tool| {
-                    builtin_permission_rule(server_name, tool_names, tool)
-                        .expect("capability set references a registered tool")
-                })
-                .collect()
-        })
-}
-
 pub(crate) fn builtin_server_config(adapter: &str) -> Value {
     json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", adapter] })
 }
@@ -125,20 +87,6 @@ pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Opt
                 .with_context(|| format!("{key} must be a non-empty string"))?,
         )),
         None => Ok(None),
-    }
-}
-
-pub(crate) fn required_string_argument<'a>(arguments: &'a Value, key: &str) -> Result<&'a str> {
-    string_argument(arguments, key)?.with_context(|| format!("{key} must be a non-empty string"))
-}
-
-pub(crate) async fn resolve_session_argument(
-    client: &weaver_api::Client,
-    arguments: &Value,
-) -> Result<String> {
-    match string_argument(arguments, "session")? {
-        Some(session) if session != "self" => Ok(session.to_string()),
-        _ => Ok(client.self_context().await?.session_id),
     }
 }
 
@@ -331,18 +279,78 @@ pub fn registry() -> McpRegistryView {
     }
 }
 
+/// The set that supersedes `name`, if some adapter declares one.
 fn canonical_capability_successor(name: &str) -> Option<&'static str> {
-    match name {
-        "mcp/github/comment@v1" => Some("loom/github/comment@v1"),
-        "mcp/context/read@v1" => Some("loom/context/read@v1"),
-        "mcp/channel/read@v1" => Some("loom/channels/read@v1"),
-        "mcp/channel/write@v1" => Some("loom/channels/write@v1"),
-        "mcp/artifact/read@v1" => Some("loom/artifacts/read@v1"),
-        "mcp/artifact/write@v1" => Some("loom/artifacts/write@v1"),
-        "mcp/session/read@v1" | "mcp/history/self@v1" => Some("loom/sessions/read@v1"),
-        "mcp/session/status@v1" | "mcp/messaging/status@v1" => Some("loom/sessions/write@v1"),
-        _ => None,
+    adapters().find_map(|adapter| {
+        adapter
+            .superseded
+            .iter()
+            .find(|(before, _)| *before == name)
+            .map(|(_, after)| *after)
+    })
+}
+
+/// The registry grants a capability set confers.
+///
+/// A set is a name for some of an adapter's exports, so the grants it carries
+/// are the grants those operations declare. Superseded `mcp/*@v1` names need
+/// no translation table of their own: they name sets like any other, and a set
+/// resolves to grants the same way whatever it is called.
+fn capability_set_grants(name: &str) -> Vec<&'static str> {
+    let name = canonical_capability_successor(name).unwrap_or(name);
+    let mut grants = Vec::new();
+    for adapter in adapters() {
+        let Some(set) = (adapter.capability_sets)()
+            .iter()
+            .find(|set| set.name == name)
+        else {
+            continue;
+        };
+        let exports = (adapter.exports)();
+        for tool in set.tools {
+            let Some(export) = exports.iter().find(|export| export.tool == *tool) else {
+                // A hand-written tool that is not a registered operation — the
+                // restricted GitHub tools, whose boundary is the session's own
+                // allow-list rather than a grant.
+                continue;
+            };
+            for grant in export.operation.grants {
+                if !grants.contains(grant) {
+                    grants.push(grant);
+                }
+            }
+        }
+        break;
     }
+    grants
+}
+
+/// Every registry grant a session holding `sets` may exercise.
+///
+/// An unrestricted session reaches everything an agent may call; a restricted
+/// one reaches the base three plus whatever its selected sets confer.
+pub fn session_capabilities<'a>(
+    restricted: bool,
+    sets: impl IntoIterator<Item = &'a str>,
+) -> Vec<String> {
+    if !restricted {
+        return weaver_api::all_session_capabilities();
+    }
+    let mut capabilities = std::collections::BTreeSet::from([
+        "loom/sessions/read@v1".to_string(),
+        "loom/permissions/read@v1".to_string(),
+        "loom/permissions/request@v1".to_string(),
+    ]);
+    for set in sets {
+        let grants = capability_set_grants(set);
+        if grants.is_empty() && set.starts_with("loom/") {
+            // A policy naming a grant directly rather than a set that confers it.
+            capabilities.insert(set.to_string());
+            continue;
+        }
+        capabilities.extend(grants.into_iter().map(str::to_string));
+    }
+    capabilities.into_iter().collect()
 }
 
 fn selected_for_groups(set: &McpCapabilitySetView, groups: &[String]) -> bool {
@@ -558,7 +566,7 @@ pub fn runtime_tools(tools: Value) -> Value {
     )
 }
 
-/// Build the scoped REST client shared by Loom's resource-shaped adapters.
+/// Build the scoped REST client shared by Loom's resource adapters.
 pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
     let token = weaver_api::endpoint::token_from_env()
         .with_context(|| format!("{adapter} MCP is missing its session-scoped LOOM_TOKEN"))?;
@@ -566,7 +574,7 @@ pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
 }
 
 /// MCP results expose the typed value directly while retaining a compact text
-/// projection for clients that do not consume `structuredContent` yet.
+/// summary for clients that do not consume `structuredContent` yet.
 pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Result<Value> {
     let value = serde_json::to_value(value)?;
     let structured = if value.is_object() {
@@ -582,7 +590,7 @@ pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Resul
 }
 
 /// Shared JSON-RPC stdio loop for the resource adapters. Domain modules own
-/// only their schemas and REST projection; framing stays consistent.
+/// only their schemas and REST calls; framing stays consistent.
 pub(crate) async fn serve_stdio(
     server_name: &'static str,
     tools: fn() -> Value,
@@ -687,7 +695,7 @@ pub(crate) fn server_configs_for_snapshot(
     servers
 }
 
-/// Convert Loom's trusted server map to ACP v1's provider-neutral stdio shape.
+/// Convert Loom's trusted server map to ACP v1's provider-neutral stdio config.
 pub fn acp_server_configs(
     allowed_rules: &[String],
     snapshot: Option<&weaver_api::McpPolicySnapshot>,
@@ -799,99 +807,104 @@ mod tests {
     }
 
     #[test]
+    /// The digests pin what each capability advertises to an agent: they move
+    /// when a tool's schema changes, so a session holding e.g.
+    /// `loom/artifacts/write@v1` can tell that `write`'s tool definition
+    /// changed under it. Re-pin only with a reason, and check whether tool
+    /// *membership* moved too.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
                 "loom/github/comment@v1",
-                "sha256:acfda8c46064c15a88906ab939379235510067d389173db04b92fff8c63c7775",
+                "sha256:5566e4a295797b020dc93d4849168deca8470a43dd5186c0e0579902d5a99da4",
             ),
             (
                 "mcp/github/comment@v1",
-                "sha256:d18ed893185adb2817f65ee452a570d20342eafbd91a3e8f98450a0814755e78",
+                "sha256:a3e83e7c3a3bc69cdabda0540b5fc31c0398ca24d41f310a225ba1e1117af1de",
             ),
             (
                 "loom/context/read@v1",
-                "sha256:33214f2c5f8893bfd265f9ed95543de8e11bab2011b0a017891a1d19db573f33",
+                "sha256:43b519dcce558f12d6d10afc0a9121fadecd888a61a19c93147ec07644893dc9",
             ),
             (
                 "mcp/context/read@v1",
-                "sha256:6679d0abe8870e5b5c5e47467497335deaefe9e2770f1e90cb76ea126914a21a",
+                "sha256:0a4807a5a163ebdbd66d52ca088150853ed3e005cc88e94ea7e58e4bfd7927ee",
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:c934b7ca47ad7f722d21c51cb0151c399794d591e367090fdc2e66514a7c0f87",
+                "sha256:d90f7358facdecea9a10fd2cff6f75ccec35a76b5d0dcb08e62ca0a71b35fa2b",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:08137846e0c8432ab6d1559216a27392497b932b64164742b0958ae782dbef59",
+                "sha256:95e0a083ba39bffb11d7157e3b8e11aab347e66b524f9cd86ac4db83cad65973",
             ),
             (
                 "mcp/channel/read@v1",
-                "sha256:7c3a3677b592f456f4e5d452d630db436e59eeeca495cdc7e92dfdd99be16a5c",
+                "sha256:4895ffaa5ba9f2f7d45b4ee66501d8c20f1770f861cf81fc4463c9686050725c",
             ),
             (
                 "mcp/channel/write@v1",
-                "sha256:6bd1bbafa1e2faa027f0c91f7422c57ea2d522b3953eec92b15996a294789a2f",
+                "sha256:8a018f5a160e9c06d94fcc24e0b5e732ef805076d859304acf5f05e7ccaaf10c",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:172f77e14a2b524a74929e17de05366970e1898a57959d7e2db9b4c7f77fd5f3",
+                "sha256:2a5902dfa1a0e095c325d378cb99db76a916adf9bb485575d435afa8998c0279",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:0ee20dc115eb64e24521bc09415b47caa6e650498b0a3fb2bf438a16a2fc68f9",
+                "sha256:eb99a64c4ed0e1c0c6e9dd8205f7491c06871349c857563a78f1de83fc2cd5ab",
             ),
             (
                 "mcp/artifact/read@v1",
-                "sha256:9c40da46bf5e05e9e9c5c95a47c35aff74c23e730ddba869a05aea3e51b1e6de",
+                "sha256:1ee173fad1b1b4474e0f12715dfc65107d60bdd1a7452f3da1b3ae0c0374eb05",
             ),
             (
                 "mcp/artifact/write@v1",
-                "sha256:62dc5764fb10efcc4012695a5da78db2c2c85849d9341378aea770a2f7df0925",
+                "sha256:6c1bba5084c89410121584af895eb0bebe686ed0d6ee6d47ed578014fc504d9a",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:8c5dc52c5f8de69572d0875c833e7b61da79e066e934538d45933a1dfe24c45a",
+                "sha256:8584e4af702fa12f19a66987f59d140ca1878ad409fdc7b68e11d0041a70f2c9",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:f9985ad6e2102a394b0ab5c9f25dd9b77de4278b6f9eaa207672ba27033a5898",
+                "sha256:302b931d0d3eb704983d5b5be6849dfc30628e0e6b212978746a53fc75af2a5f",
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:42ddd7ec1bef2eb902673af4874c0915fcbc1f05aa8ad6b3d12297df929bdb7f",
+                "sha256:f4b1830a82aa1e4e38bda28f432c666cd2b059a617ff3ae575408874b178e637",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:95e5c8dd47258cca69044c02d68d112ead60ae79f1af1e5ea5d9c70ea85eb63f",
+                "sha256:2f26b50b697d9ae0e7a02c577ab5e5f90ead070016e59c78b228b7440442d589",
             ),
             (
                 "mcp/session/read@v1",
-                "sha256:c9afb64abcc069a94410f0a402163b754e99917bb521d319169f97f0bdea09b7",
+                "sha256:5a088807c06cc31219544e04bee79bbd7ae57d3200fa54f2d9cce5d69e40c318",
             ),
             (
                 "mcp/session/status@v1",
-                "sha256:a9a46f1877397102cc8fbaddb51cfd327d2a4d202a59a2872ce624ed2bb850ac",
+                "sha256:e9a555691d74aedd50894e7e1726ddbe0f778eb0b1b955a1b45f0d3f2b028067",
             ),
             (
                 "mcp/history/self@v1",
-                "sha256:74c0cfd56c67e911f8278d214d4be2e7e146bf7f21929ced385c83a7c59db761",
+                "sha256:57c6f4d3e48b93266ddf1ecd5c2ee60f68dd0c268a0682dba93a84fa4f57c0f4",
             ),
             (
                 "mcp/messaging/status@v1",
-                "sha256:972a36c8e9b973352faf4c8d636b418a28c83f6ce42bc654a44546b24c03368d",
+                "sha256:1b133a74973b3b4b24efbae183cf55c59fb8d7e2010d044f3d955a0e663252cf",
             ),
             (
                 "mcp/slack/message@v1",
-                "sha256:e138ce624d742cb814a5239cc0711bc58618bb6cffeeeb8eeb15abebb63b3e83",
+                "sha256:e141c4a828f3d5bab35526b8cfcf54e61fcb89eeb3f99f65590a1e90ca707e3a",
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:1e90e579bc0778b5d309eb1bb3a4731b49159a4837ed059722613c180e842968",
+                "sha256:0ef454860ed512f07e563baca49c8941006e76e684e42b081058587ed7210d1b",
             ),
             (
                 "loom/permissions/request@v1",
-                "sha256:bb5d2bf3efa472d30668c5cce2001ea5e7f222c39e0f6199754182e296e6ef20",
+                "sha256:465e7053731ceb1b047001d79751825f83518a6fb60cdc65ec2dd0502acdc83d",
             ),
         ]
         .into_iter()
@@ -907,9 +920,24 @@ mod tests {
             }
         }
         assert_eq!(actual.len(), expected.len());
-        for (name, digest) in expected {
-            assert_eq!(actual.get(name).map(String::as_str), Some(digest), "{name}");
-        }
+        // Report every drift at once, not just the first failure, so a re-pin
+        // is a deliberate decision informed by everything that changed.
+        let drift: Vec<String> = expected
+            .iter()
+            .filter(|(name, digest)| actual.get(**name).map(String::as_str) != Some(**digest))
+            .map(|(name, digest)| {
+                format!(
+                    "  {name}\n    was {digest}\n    now {}",
+                    actual.get(*name).map(String::as_str).unwrap_or("(absent)")
+                )
+            })
+            .collect();
+        assert!(
+            drift.is_empty(),
+            "{} capability set(s) changed what they advertise to agents:\n{}",
+            drift.len(),
+            drift.join("\n")
+        );
     }
 
     #[tokio::test]

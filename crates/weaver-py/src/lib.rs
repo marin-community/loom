@@ -1,22 +1,20 @@
 //! `weaver_py` — a Pythonic, synchronous wrapper over [`weaver_api`].
 //!
-//! This is the out-of-process seam from the watch design: a scripted
-//! watch (or an agent iterating on one, or a human at a REPL) drives the
-//! loom fleet through the same typed REST surface the `loom` CLI uses, never
-//! touching the terminal runtime directly. The loom daemon stays the single owner of the live
-//! runtime.
+//! An out-of-process consumer — a scripted watch, an agent iterating on one,
+//! or a human at a REPL — drives the loom fleet through the same typed HTTP
+//! API the `loom` CLI uses, without touching the terminal runtime directly.
+//! The loom daemon stays the single owner of the live runtime.
 //!
-//! Two design points worth stating:
+//! Two things a caller should know:
 //!
 //! - **Synchronous API.** `weaver_api::Client` is async; rather than push
 //!   `async`/`await` into Python (pyo3-asyncio), each method drives a private
 //!   single-thread tokio runtime to completion with `block_on`. Python callers
 //!   see plain blocking methods.
-//! - **Capability enforcement lives below the glue.** Every mutating method
-//!   calls [`weaver_api::require`] — the pure, workspace-tested gate — *before*
-//!   it issues a request, so a `Client` built without `nudge` cannot nudge even
-//!   if the server would allow it. Read methods need only the implicit
-//!   `observe`.
+//! - **Capability enforcement happens before each request.** Every mutating
+//!   method calls [`weaver_api::require`] before it issues a request, so a
+//!   `Client` built without `nudge` cannot nudge even if the server would
+//!   allow it. Read methods need only the implicit `observe`.
 //!
 //! DTOs cross into Python as plain dicts via `serde_json` → `pythonize`, so a
 //! script reads `s["id"]`, `s["branch"]["description"]`, and the branch's
@@ -32,6 +30,7 @@ use serde::Serialize;
 
 use weaver_api::capability::{require, CapabilityError};
 use weaver_api::{Client as ApiClient, SendReq};
+use weaver_api::operations::sessions;
 
 pyo3::create_exception!(
     weaver_py,
@@ -152,7 +151,8 @@ impl Client {
 
     // -- Reads (observe) --------------------------------------------------
 
-    /// Active non-automation sessions, as a list of dicts (`GET /api/sessions`).
+    /// Every visible non-archived session, automation included, as a list of
+    /// dicts (`sessions.list`).
     fn sessions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let views = py
             .detach(|| self.rt.block_on(self.inner.list_sessions()))
@@ -161,16 +161,18 @@ impl Client {
     }
 
     /// One session by key — id, branch id, branch name, or `repo:branch`
-    /// (`GET /api/sessions/{key}`).
+    /// (`sessions.get`).
     fn session(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let view = py
-            .detach(|| self.rt.block_on(self.inner.get_session(key)))
+            .detach(|| self.rt.block_on(self.inner.invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: key.to_string(),
+        })))
             .map_err(api_err)?;
         to_py(py, &view)
     }
 
     /// The session's terminal as plain text, with `lines` of scrollback above
-    /// the visible screen (`GET /api/sessions/{key}/preview`).
+    /// the visible screen (`sessions.preview`).
     #[pyo3(signature = (key, lines=0))]
     fn preview(&self, py: Python<'_>, key: &str, lines: usize) -> PyResult<String> {
         py.detach(|| self.rt.block_on(self.inner.preview(key, lines)))
@@ -178,10 +180,12 @@ impl Client {
     }
 
     /// Typed, bounded worktree changes relative to the session's local base
-    /// (`GET /api/sessions/{key}/changes`).
+    /// (`sessions.changes`).
     fn changes(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let value = py
-            .detach(|| self.rt.block_on(self.inner.changes(key)))
+            .detach(|| self.rt.block_on(self.inner.invoke::<sessions::changes::Op>(&sessions::changes::Input {
+            session: key.to_string(),
+        })))
             .map_err(api_err)?;
         to_py(py, &value)
     }
@@ -294,9 +298,9 @@ impl Client {
 
     /// The persistent watch session, created-or-reused across rounds.
     ///
-    /// Not yet available: the warm-session lifecycle is T12 of the watch
-    /// plan and has no `weaver-api` backing today. It raises rather than faking
-    /// a session so a program never silently no-ops.
+    /// Not yet available: the warm-session lifecycle has no `weaver-api`
+    /// backing today. It raises rather than faking a session so a program
+    /// never silently no-ops.
     fn warm_session(&self) -> PyResult<Py<PyAny>> {
         Err(PyNotImplementedError::new_err(
             "warm_session() arrives with the warm-session lifecycle (watch plan T12); \

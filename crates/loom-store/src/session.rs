@@ -42,16 +42,15 @@ pub struct Session {
     pub parent_branch_id: Option<String>,
     /// The watch id that owns this session when it is engine-managed
     /// infrastructure — a *warm session* a watcher keeps for its across-round
-    /// memory. `None` for an ordinary fleet session. A managed session is hidden
-    /// from the fleet listing ([`list_visible`]) and the survey scope, and its
-    /// restart adoption is governed by `watch.adopt_warm` rather than
-    /// `server.auto_adopt`.
+    /// memory. `None` for an ordinary fleet session. Hidden from the fleet
+    /// listing ([`list_visible`]) and the survey scope; restart adoption follows
+    /// `watch.adopt_warm`, not `server.auto_adopt`.
     pub managed_by: Option<String>,
     /// The principal (username) that launched this session — attribution for the
-    /// shared team board. `None` for engine-created sessions (warm watch
-    /// sessions) and rows that predate the column. Stamped once at creation from
-    /// the resolving [`crate::auth::Principal`]; a tracking/UX field, never a
-    /// security boundary.
+    /// shared team board. `None` for engine-created sessions and rows that
+    /// predate the column. Stamped once at creation from the resolving
+    /// principal, never re-derived; a tracking/UX field, never a security
+    /// boundary.
     pub created_by: Option<String>,
     /// Historical input retained so the layout migration can map explicit
     /// `parked` rows into a normal `Later` group. API reads are derived from
@@ -83,12 +82,11 @@ pub struct Session {
     /// The session's current ACP mode id (gating posture), or `None` until the
     /// agent reports one.
     pub current_mode: Option<String>,
-    /// The durable prompt queue: a paragraph-appended user message accumulated
-    /// while a turn is in flight, dispatched as one prompt at the next turn
-    /// boundary. Canonically the empty string when nothing is queued — the column
-    /// is `NOT NULL DEFAULT ''`, so the queue-clearing writes store `''`, never
-    /// NULL (an `Option` only because a legacy row may still hold NULL; treat
-    /// `None` and `Some("")` identically). See [`take_pending_prompt`].
+    /// The durable prompt queue: paragraph-appended while a turn is in flight,
+    /// dispatched as one prompt at the next turn boundary. Canonically `''` when
+    /// empty — the column is `NOT NULL DEFAULT ''`; `Option` only because a
+    /// legacy row may hold NULL (treat `None` and `Some("")` identically). See
+    /// [`take_pending_prompt`].
     pub pending_prompt: Option<String>,
     /// How this session came to exist: `"user"` (hand-launched), `"agent"`
     /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
@@ -165,10 +163,10 @@ const SESSION_COLUMNS: &str = "\
     parent_session_id, automation_run_id, mutation_revision";
 
 fn select_sessions(suffix: &str) -> String {
-    // The HTTP listener closes before long-lived streams finish draining during
-    // a rolling restart. Keep each process generation's row shape independent
-    // while a replacement adds columns: SQLite can recompile `SELECT *` after
-    // sqlx captured its metadata and otherwise panic on the widened row.
+    // Explicit columns, not `SELECT *`: sqlx caches the query's column layout
+    // at prepare time, and a rolling restart can widen the table via ALTER
+    // while an older generation's connection is still open, panicking on the
+    // wildcard.
     format!("SELECT {SESSION_COLUMNS} FROM sessions {suffix}")
 }
 
@@ -178,11 +176,8 @@ fn select_sessions(suffix: &str) -> String {
 /// `attention` axis — the branch's `attention` tag, see
 /// [`weaver_core::tags::ATTENTION_KEY`].
 ///
-/// `running` replaces the old inferred `working`/`waiting`/`idle` trio: those
-/// guessed at the agent's state from hooks and screen stillness and were
-/// frequently wrong (e.g. an agent waiting on a background workflow looked
-/// "idle"). Liveness is all the orchestrator can know for sure; the agent
-/// reports the rest via `loom status`.
+/// Liveness is all the orchestrator can know for sure; the agent reports the
+/// rest via `loom status`.
 pub const STATUSES: &[&str] = &[
     "created", "running", "orphaned", "done", "error", "archived",
 ];
@@ -223,8 +218,8 @@ pub struct NewSession {
 }
 
 /// Resolved profile/security metadata stamped with a new session. Keeping this
-/// separate preserves the compact `NewSession` fixture surface while real
-/// runtime launches use [`insert_with_policy`].
+/// separate keeps `NewSession` small for test fixtures; real runtime launches
+/// use [`insert_with_policy`].
 pub struct SessionLaunchPolicy {
     pub profile: String,
     pub launch_mode: String,
@@ -670,8 +665,8 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
 }
 
 /// The **fleet** sessions only — ordinary work, with engine-managed (warm) watch
-/// sessions excluded. Rows from the removed concierge experiment stay hidden so
-/// upgrading does not suddenly surface its infrastructure session as user work.
+/// sessions excluded. Legacy `concierge` rows stay hidden too, so upgrading
+/// doesn't surface them as user work.
 pub async fn list_visible(db: &Db) -> Result<Vec<Session>> {
     let query = select_sessions(
         "WHERE managed_by IS NULL AND agent_kind != 'concierge'
@@ -692,8 +687,7 @@ pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
 }
 
 /// The owned (warm) session for a watch, if one exists and is not
-/// terminal. Lets the engine reuse the same warm session across rounds rather
-/// than spawning a duplicate.
+/// terminal. Lets the engine reuse the same warm session across rounds.
 pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session>> {
     let query = select_sessions(
         "WHERE managed_by = ? AND status NOT IN ('done', 'error', 'archived')
@@ -1048,9 +1042,8 @@ pub async fn set_acp(db: &Db, id: &str, acp_session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Advance the persisted relay spool cursor to `seq` — the highest frame seq loom
-/// has durably journaled a block boundary for. [`crate::acp`] subscribes from
-/// this on (re)attach.
+/// Advance the persisted relay spool cursor to `seq`. See
+/// [`Session::acp_ack_seq`].
 pub async fn set_ack_seq(db: &Db, id: &str, seq: i64) -> Result<()> {
     sqlx::query("UPDATE sessions SET acp_ack_seq = ? WHERE id = ?")
         .bind(seq)
@@ -1060,9 +1053,8 @@ pub async fn set_ack_seq(db: &Db, id: &str, seq: i64) -> Result<()> {
     Ok(())
 }
 
-/// Persist (or clear, with `None`) the outstanding client->agent request state —
-/// the in-flight prompt id + turn — so a replayed turn-end response is recognized
-/// after a loom restart. `inflight` is the JSON body or `None` to clear.
+/// Persist (or clear, with `None`) the outstanding client->agent request state.
+/// See [`Session::acp_inflight`].
 pub async fn set_inflight(db: &Db, id: &str, inflight: Option<&str>) -> Result<()> {
     sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
         .bind(inflight)
@@ -1085,7 +1077,7 @@ pub async fn set_current_mode(db: &Db, id: &str, mode_id: &str) -> Result<()> {
 
 /// Store the latest complete provider-owned ACP composer metadata. It remains
 /// available after the live task or loom process disappears, and is replaced
-/// atomically whenever the adapter advertises a refreshed control surface.
+/// atomically whenever the adapter advertises refreshed composer controls.
 pub async fn set_acp_metadata(db: &Db, id: &str, metadata: &str) -> Result<()> {
     sqlx::query(
         "INSERT INTO session_acp_metadata (session_id, metadata, updated_at)
@@ -1288,7 +1280,7 @@ pub async fn rollback_handoff_claim(
     Ok(Some(next_generation))
 }
 
-/// Record an honest provider-less error after the source cannot be restored.
+/// Record a provider-less error after the source cannot be restored.
 pub async fn fail_handoff_claim(
     db: &Db,
     id: &str,
@@ -1380,9 +1372,8 @@ pub async fn prepare_handoff(
     Ok(changed)
 }
 
-/// Append `text` to the durable prompt queue as a new paragraph (the queue holds
-/// sends that arrived while a turn was in flight; it dispatches as one prompt at
-/// the next turn boundary). Returns the full queued text after the append.
+/// Append `text` to the durable prompt queue as a new paragraph. Returns the
+/// full queued text after the append.
 pub async fn append_pending_prompt(db: &Db, id: &str, text: &str) -> Result<String> {
     let existing: Option<String> =
         sqlx::query_scalar("SELECT pending_prompt FROM sessions WHERE id = ?")
@@ -1419,11 +1410,10 @@ pub async fn read_pending_prompt(db: &Db, id: &str) -> Result<String> {
 /// the prompt stays visibly queued instead of becoming eligible for replay at
 /// every later turn boundary.
 pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
-    // Take the writer lock before reading. A deferred transaction can read while
-    // another writer holds WAL's reserved lock, then fail its read -> write
-    // upgrade immediately with SQLITE_BUSY instead of honoring busy_timeout.
-    // Stop-and-send reaches this just after persisting its cancellation boundary,
-    // so that race used to leak "database is locked" to the composer.
+    // Take the writer lock before reading: a deferred transaction can read while
+    // another writer holds WAL's reserved lock, then fail the read -> write
+    // upgrade with SQLITE_BUSY instead of honoring busy_timeout — hit when
+    // stop-and-send lands right after its cancellation write.
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let pending: Option<String> =
         sqlx::query_scalar::<_, Option<String>>("SELECT pending_prompt FROM sessions WHERE id = ?")
@@ -1438,10 +1428,8 @@ pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
     };
 
     let result = sqlx::query(
-        // Clear to '' (the canonical empty), never NULL: the column is
-        // `NOT NULL DEFAULT ''` on long-lived databases, so writing NULL here
-        // fails the consume, the queue can never drain, and the conversation
-        // wedges. See the module note on `pending_prompt`.
+        // Clear to '' rather than NULL: the column is `NOT NULL DEFAULT ''`,
+        // and a NULL here fails the next consume and wedges the queue.
         "UPDATE sessions SET pending_prompt = ''
          WHERE id = ? AND pending_prompt = ?",
     )
@@ -1553,9 +1541,9 @@ mod tests {
             .unwrap();
         replacement.close().await;
 
-        // Explicit projections keep the old binary's row shape stable. With
-        // `SELECT *`, sqlx 0.8 captures the old metadata and then panics when
-        // SQLite recompiles the statement to expose the newly added column.
+        // Selecting explicit columns keeps the old binary's column layout
+        // stable; sqlx 0.8 panics if `SELECT *` gets recompiled to expose the
+        // added column.
         assert_eq!(
             branch_mod::get(&db, &branch.id)
                 .await
@@ -1691,10 +1679,10 @@ mod tests {
         let focused = crate::session_layout::create_group(
             &db,
             "test",
-            &weaver_api::CreateSessionGroupReq {
+            &weaver_api::operations::session_layout::groups::create::Input {
                 space_id: "space-user".to_string(),
                 name: "Focused".to_string(),
-                expected_revision: initial.revision,
+                expected_revision: Some(initial.revision),
             },
         )
         .await
@@ -1709,11 +1697,11 @@ mod tests {
         crate::session_layout::move_sessions(
             &db,
             "test",
-            &weaver_api::MoveSessionsReq {
+            &weaver_api::operations::session_layout::r#move::Input {
                 session_ids: vec!["parent".to_string()],
                 destination_group_id: focused_id.clone(),
                 before_session_id: None,
-                expected_revision: focused.revision,
+                expected_revision: Some(focused.revision),
             },
         )
         .await
@@ -1754,11 +1742,11 @@ mod tests {
             revision = crate::session_layout::set_default(
                 &db,
                 "test",
-                &weaver_api::SetSessionPlacementDefaultReq {
+                &weaver_api::operations::session_layout::defaults::set::Input {
                     selector_kind: kind,
                     selector_value: value.to_string(),
                     group_id: group_id.to_string(),
-                    expected_revision: revision,
+                    expected_revision: Some(revision),
                 },
             )
             .await
@@ -1814,7 +1802,7 @@ mod tests {
                     .await
                     .unwrap()
                     .revision;
-                crate::session_layout::delete_default(&db, "test", kind, value, revision)
+                crate::session_layout::delete_default(&db, "test", kind, value, Some(revision))
                     .await
                     .unwrap();
             }
@@ -1935,8 +1923,7 @@ mod tests {
 
         // The driver that is attached right now may detach the session.
         let first = claim_acp_driver(&db, "driver-epoch").await.unwrap();
-        // Its replacement claims the slot before subscribing, which is what
-        // evicts the first driver from the relay.
+        // Claiming the slot before subscribing evicts the first driver from the relay.
         let second = claim_acp_driver(&db, "driver-epoch").await.unwrap();
         assert!(second > first, "each claim takes a fresh epoch");
 
@@ -2153,12 +2140,9 @@ mod tests {
         assert_eq!(session.mutation_revision, 3);
     }
 
-    /// Regression: the queue clears to `''`, never NULL. `sessions.pending_prompt`
-    /// is `NOT NULL DEFAULT ''` (the shape long-lived databases carry), so a
-    /// clearing write of NULL raises `NOT NULL constraint failed` — which used to
-    /// make the queued prompt unconsumable and wedge the whole conversation. The
-    /// in-memory schema now matches that shape, so this exercises the real
-    /// constraint that shipped unguarded.
+    /// Regression guard: `pending_prompt` is `NOT NULL DEFAULT ''`, so a
+    /// clearing write must store `''`, never NULL, or the constraint fails and
+    /// the queue can never drain.
     #[tokio::test]
     async fn draining_the_queue_clears_to_empty_not_null() {
         let db = crate::db::connect_in_memory().await.unwrap();
@@ -2179,7 +2163,6 @@ mod tests {
             .await
             .unwrap();
 
-        // take: the wedge path — this UPDATE used to write NULL and fail here.
         let taken = take_pending_prompt(&db, "drain").await.unwrap();
         assert_eq!(taken.as_deref(), Some("queued text"));
         let row = get(&db, "drain").await.unwrap().unwrap();

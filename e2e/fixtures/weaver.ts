@@ -1,25 +1,15 @@
-import { test as base, expect } from "@playwright/test";
-import { type ChildProcess, execFileSync, spawn } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
-import { join, resolve } from "path";
+import { test as base, expect } from '@playwright/test';
+import { type ChildProcess, execFileSync, spawn } from 'child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join, resolve } from 'path';
 
 // Repo layout: this file lives at <weaver>/e2e/fixtures/weaver.ts
-const WEAVER_ROOT = join(__dirname, "..", "..");
-const CARGO_TARGET_DIR = resolve(
-  WEAVER_ROOT,
-  process.env.CARGO_TARGET_DIR ?? "target",
-);
-const LOOM_BINARY = join(CARGO_TARGET_DIR, "debug", "loom");
-const FRONTEND_DIR = join(WEAVER_ROOT, "crates", "loom", "frontend");
-const DIST_INDEX = join(
-  WEAVER_ROOT,
-  "crates",
-  "loom",
-  "static",
-  "dist",
-  "index.html",
-);
+const WEAVER_ROOT = join(__dirname, '..', '..');
+const CARGO_TARGET_DIR = resolve(WEAVER_ROOT, process.env.CARGO_TARGET_DIR ?? 'target');
+const LOOM_BINARY = join(CARGO_TARGET_DIR, 'debug', 'loom');
+const FRONTEND_DIR = join(WEAVER_ROOT, 'crates', 'loom', 'frontend');
+const DIST_INDEX = join(WEAVER_ROOT, 'crates', 'loom', 'static', 'dist', 'index.html');
 
 /** One (key, value) annotation on a branch. The well-known loud keys are
  *  `attention` (the agent) and `triage` (a watch / `manual`); any other
@@ -54,7 +44,8 @@ export interface Branch {
   github: { pr_number: number; pr_url: string; pr_state: string } | null;
 }
 
-/** A session as returned by `/api/sessions[/...]`. */
+/** A session as returned by the `sessions.*` operations (`sessions.get`,
+ *  `sessions.list`, `sessions.launch`, …). */
 export interface Session {
   id: string;
   status: string;
@@ -92,8 +83,8 @@ export interface SeedOpts {
   claimIssue?: number;
 }
 
-/** A watch as returned by `/api/watches` (the fields the e2e tests
- *  read; the full DTO has more). */
+/** A watch as returned by `watches.list`/`watches.get` (the fields the e2e
+ *  tests read; the full DTO has more). */
 export interface Watch {
   id: string;
   name: string;
@@ -103,7 +94,7 @@ export interface Watch {
   last_outcome: string | null;
 }
 
-/** An issue as returned by `/api/issues` (the fields the e2e tests read). */
+/** An issue as returned by `issues.board` (the fields the e2e tests read). */
 export interface Issue {
   id: number;
   repo_root: string;
@@ -142,11 +133,7 @@ export interface WeaverFixture {
   seedIssue(session: Session, title: string, body?: string): Promise<Issue>;
   /** Create an *unclaimed* backlog issue via `POST /api/issues/backlog/create`
    *  — the kind the Issues pane offers a Launch button for. */
-  seedBacklogIssue(
-    repoRoot: string,
-    title: string,
-    body?: string,
-  ): Promise<Issue>;
+  seedBacklogIssue(repoRoot: string, title: string, body?: string): Promise<Issue>;
   /** Plant a normalized iris conversation log for a session so the Conversation
    *  tab has something to render. Points `session.log_dir` at a temp folder and
    *  writes the log where the endpoint's capture fallback reads it
@@ -165,20 +152,16 @@ export interface WeaverFixture {
   ): Promise<void>;
   /** Remove an artifact via `loom artifacts delete` — drops it and its whole
    *  history. `--repo` targets the repo-shared row when a branch copy shadows it. */
-  removeArtifact(
-    session: Session,
-    name: string,
-    opts?: { repo?: boolean },
-  ): Promise<void>;
-  /** Set (upsert) a free-form label on an issue via `PUT …/issues/{id}/tags/{key}`. */
+  removeArtifact(session: Session, name: string, opts?: { repo?: boolean }): Promise<void>;
+  /** Set (upsert) a free-form label on an issue via `issues.tags.set`. */
   tagIssue(id: number, key: string, value: string): Promise<Issue>;
-  /** GET /api/issues (cross-repo board). */
+  /** `issues.board` (cross-repo board). */
   listIssues(all?: boolean): Promise<Issue[]>;
-  /** GET /api/sessions/{id}. */
+  /** `sessions.get`. */
   getSession(id: string): Promise<Session>;
-  /** GET /api/sessions. */
+  /** `sessions.list`. */
   listSessions(): Promise<Session[]>;
-  /** POST /api/sessions/{id}/archive — tear the session down (branch kept), so a
+  /** `sessions.archive` — tear the session down (branch kept), so a
    *  test can set up the archived state it wants to act on. */
   archiveSession(id: string): Promise<void>;
   /** Mark a seeded session as engine-managed infrastructure in the worker's
@@ -188,29 +171,29 @@ export interface WeaverFixture {
    *  filters can be exercised without a second browser login flow. */
   setCreator(id: string, username: string): Promise<void>;
   /** Flip a session's status by writing a hook event row via `loom hook`. */
-  hook(session: Session, event: "working" | "waiting" | "idle"): Promise<void>;
+  hook(session: Session, event: 'working' | 'waiting' | 'idle'): Promise<void>;
   /** Declare the agent's status (level + message) via `loom status`. It
    *  writes the branch's `attention` tag (clearing it on `ok`) and the
    *  current-state message, appends a typed channel item, and records a `tag`
    *  event the monitor re-broadcasts. */
   setStatus(
     session: Session,
-    level: "ok" | "attention" | "blocked",
+    level: 'ok' | 'attention' | 'blocked',
     message?: string,
   ): Promise<void>;
-  /** Set (upsert) one tag on a session's branch via `PUT …/tags/{key}`. */
+  /** Set (upsert) one tag on a session's branch via `sessions.tags.set`. */
   setTag(
     session: Session,
     key: string,
     value: string,
     opts?: { note?: string; by?: string },
   ): Promise<void>;
-  /** Clear one tag via `DELETE …/tags/{key}`. */
+  /** Clear one tag via `sessions.tags.delete`. */
   clearTag(session: Session, key: string): Promise<void>;
   /** Stamp a watch's `triage` mark — sugar over `setTag(triage, …)`. */
   mark(
     session: Session,
-    level: "attention" | "blocked",
+    level: 'attention' | 'blocked',
     opts?: { note?: string; by?: string },
   ): Promise<void>;
 }
@@ -225,9 +208,9 @@ export function ensureBuilt() {
   // into static/dist via build.rs). `rerun-if-changed` makes it a fast no-op when
   // nothing changed, but it rebuilds a stale bundle after a backend *or* frontend
   // edit — so the suite never tests an out-of-date or placeholder UI.
-  execFileSync("cargo", ["build"], {
+  execFileSync('cargo', ['build'], {
     cwd: WEAVER_ROOT,
-    stdio: "inherit",
+    stdio: 'inherit',
     env: process.env,
   });
   if (!existsSync(LOOM_BINARY)) {
@@ -236,9 +219,9 @@ export function ensureBuilt() {
   if (!existsSync(DIST_INDEX)) {
     // build.rs writes a placeholder when Node is unavailable; build the SPA
     // directly so the UI under test is the real one.
-    execFileSync("npx", ["rspack", "build"], {
+    execFileSync('npx', ['rspack', 'build'], {
       cwd: FRONTEND_DIR,
-      stdio: "inherit",
+      stdio: 'inherit',
       env: process.env,
     });
   }
@@ -247,25 +230,22 @@ export function ensureBuilt() {
 /** Create a throwaway git repo with a single commit on `main`. */
 function makeRepo(dir: string) {
   mkdirSync(dir, { recursive: true });
-  const git = (args: string[]) =>
-    execFileSync("git", args, { cwd: dir, stdio: "pipe" });
-  git(["init", "-b", "main"]);
-  git(["config", "user.name", "Loom E2E"]);
-  git(["config", "user.email", "e2e@weaver.test"]);
-  writeFileSync(join(dir, "README.md"), "# weaver e2e fixture repo\n");
-  git(["add", "-A"]);
-  git(["commit", "-m", "initial commit"]);
+  const git = (args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  git(['init', '-b', 'main']);
+  git(['config', 'user.name', 'Loom E2E']);
+  git(['config', 'user.email', 'e2e@weaver.test']);
+  writeFileSync(join(dir, 'README.md'), '# weaver e2e fixture repo\n');
+  git(['add', '-A']);
+  git(['commit', '-m', 'initial commit']);
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
   const res = await fetch(url, {
-    headers: { "content-type": "application/json" },
+    headers: { 'content-type': 'application/json' },
     ...init,
   });
   if (!res.ok) {
-    throw new Error(
-      `${init?.method ?? "GET"} ${url} → ${res.status}: ${await res.text()}`,
-    );
+    throw new Error(`${init?.method ?? 'GET'} ${url} → ${res.status}: ${await res.text()}`);
   }
   const text = await res.text();
   return text ? JSON.parse(text) : null;
@@ -277,13 +257,15 @@ async function fetchJson(url: string, init?: RequestInit): Promise<unknown> {
  *  count-based assertions. */
 async function deleteAllSessions(baseUrl: string) {
   try {
-    const all = (await fetchJson(
-      `${baseUrl}/api/sessions?archived=true&automation=true&managed=true`,
-    )) as Session[];
+    const all = (await fetchJson(`${baseUrl}/api/sessions/list`, {
+      method: 'POST',
+      body: JSON.stringify({ history: true, automation: true, managed: true }),
+    })) as Session[];
     for (const s of all) {
       try {
-        await fetch(`${baseUrl}/api/sessions/${s.id}?keep_branch=false`, {
-          method: "DELETE",
+        await fetchJson(`${baseUrl}/api/sessions/delete`, {
+          method: 'POST',
+          body: JSON.stringify({ session: s.id, keep_branch: false }),
         });
       } catch {
         /* best effort */
@@ -299,8 +281,8 @@ function quoteSqlite(value: string) {
 }
 
 function runPrivateSql(dbPath: string, sql: string) {
-  execFileSync("sqlite3", [dbPath, `PRAGMA busy_timeout=5000; ${sql}`], {
-    stdio: "pipe",
+  execFileSync('sqlite3', [dbPath, `PRAGMA busy_timeout=5000; ${sql}`], {
+    stdio: 'pipe',
   });
 }
 
@@ -309,17 +291,23 @@ function runPrivateSql(dbPath: string, sql: string) {
  *  clear that audit table directly between tests to keep run-only failures
  *  from leaking into later count assertions. */
 function deleteAllAutomationRuns(dbPath: string) {
-  runPrivateSql(dbPath, "DELETE FROM automation_runs;");
+  runPrivateSql(dbPath, 'DELETE FROM automation_runs;');
 }
 
 /** Delete every watch on a server, best-effort — watches aren't tied
  *  to a session, so the per-test wipe clears them explicitly. */
 async function deleteAllWatches(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/watches`)) as { id: string }[];
+    const all = (await fetchJson(`${baseUrl}/api/watches/list`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })) as { id: string }[];
     for (const o of all) {
       try {
-        await fetch(`${baseUrl}/api/watches/${o.id}`, { method: "DELETE" });
+        await fetchJson(`${baseUrl}/api/watches/delete`, {
+          method: 'POST',
+          body: JSON.stringify({ key: o.id }),
+        });
       } catch {
         /* best effort */
       }
@@ -334,14 +322,17 @@ async function deleteAllWatches(baseUrl: string) {
  *  per-test wipe keeps count-based assertions order-independent. */
 async function deleteAllIssues(baseUrl: string) {
   try {
-    const all = (await fetchJson(`${baseUrl}/api/issues?all=true`)) as {
+    const all = (await fetchJson(`${baseUrl}/api/issues/board`, {
+      method: 'POST',
+      body: JSON.stringify({ all: true }),
+    })) as {
       id: number;
     }[];
     for (const i of all) {
       try {
         await fetchJson(`${baseUrl}/api/issues/delete`, {
-          method: "POST",
-          body: JSON.stringify({ id: i.id }),
+          method: 'POST',
+          body: JSON.stringify({ ids: [i.id] }),
         });
       } catch {
         /* best effort */
@@ -373,10 +364,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
   // parallel safely — see playwright.config.ts.
   server: [
     async ({}, use, workerInfo) => {
-      const tmpDir = mkdtempSync(join(tmpdir(), "weaver-e2e-"));
-      const weaverHome = join(tmpDir, "home");
-      const dbPath = join(tmpDir, "db.sqlite");
-      const repoPath = join(tmpDir, "repo");
+      const tmpDir = mkdtempSync(join(tmpdir(), 'weaver-e2e-'));
+      const weaverHome = join(tmpDir, 'home');
+      const dbPath = join(tmpDir, 'db.sqlite');
+      const repoPath = join(tmpDir, 'repo');
       mkdirSync(weaverHome, { recursive: true });
       makeRepo(repoPath);
 
@@ -392,14 +383,14 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         ...process.env,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,
-        WEAVER_TAPESTRY_DIR: join(weaverHome, "sock"),
-        WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, "debug", "tapestry"),
-        LOOM_RUNNER: "local",
-        RUST_LOG: "loom=warn,weaver_core=warn",
+        WEAVER_TAPESTRY_DIR: join(weaverHome, 'sock'),
+        WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, 'debug', 'tapestry'),
+        LOOM_RUNNER: 'local',
+        RUST_LOG: 'loom=warn,weaver_core=warn',
         // Seed an operator: loom refuses to boot with no owner configured, and
         // loopback trust authenticates every test request as this primary user
         // (so the page is signed in without an OAuth round-trip).
-        LOOM_OWNER_GITHUB: "loom-e2e-owner",
+        LOOM_OWNER_GITHUB: 'loom-e2e-owner',
       };
       // A suite launched from inside a real Loom session inherits that
       // session's scoped bearer. It belongs to another database and explicit
@@ -407,23 +398,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       delete childEnv.LOOM_TOKEN;
 
       // Bind to a random free port (0) and parse the actual port from stdout.
-      const server: ChildProcess = spawn(
-        LOOM_BINARY,
-        ["server", "run", "--addr", "127.0.0.1:0"],
-        {
-          env: childEnv,
-          stdio: ["ignore", "pipe", "pipe"],
-        },
-      );
+      const server: ChildProcess = spawn(LOOM_BINARY, ['server', 'run', '--addr', '127.0.0.1:0'], {
+        env: childEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
-      let baseUrl = "";
-      let serverLog = "";
+      let baseUrl = '';
+      let serverLog = '';
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(
-          () =>
-            reject(
-              new Error(`loom did not start in 20s. Output:\n${serverLog}`),
-            ),
+          () => reject(new Error(`loom did not start in 20s. Output:\n${serverLog}`)),
           20_000,
         );
         const onData = (chunk: Buffer) => {
@@ -435,20 +419,16 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
             resolve();
           }
         };
-        server.stdout!.on("data", onData);
-        server.stderr!.on("data", onData);
-        server.on("error", (err) => {
+        server.stdout!.on('data', onData);
+        server.stderr!.on('data', onData);
+        server.on('error', (err) => {
           clearTimeout(timer);
           reject(err);
         });
-        server.on("exit", (code) => {
+        server.on('exit', (code) => {
           if (!baseUrl) {
             clearTimeout(timer);
-            reject(
-              new Error(
-                `loom exited with code ${code} before listening:\n${serverLog}`,
-              ),
-            );
+            reject(new Error(`loom exited with code ${code} before listening:\n${serverLog}`));
           }
         });
       });
@@ -467,8 +447,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         }
         await new Promise((r) => setTimeout(r, 100));
       }
-      if (!healthy)
-        throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
+      if (!healthy) throw new Error(`loom /api/health never returned ok:\n${serverLog}`);
 
       // Pin the Loom CLI subprocesses (setStatus, seedConversation, the
       // artifact helpers) at THIS server. `childEnv` spreads `process.env`, so
@@ -481,15 +460,15 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // agent (execs a bare login shell, hookless → `running` immediately). This
       // gives every test its cheap, deterministic no-op agent and must exist
       // before the `agent.default` patch below validates against it.
-      await fetchJson(`${baseUrl}/api/agents/custom`, {
-        method: "POST",
-        body: JSON.stringify({ name: "shell", label: "Shell" }),
+      await fetchJson(`${baseUrl}/api/agents/custom/create`, {
+        method: 'POST',
+        body: JSON.stringify({ name: 'shell', label: 'Shell' }),
       });
 
       // UI-created sessions should use a plain shell, never the real claude CLI.
-      await fetchJson(`${baseUrl}/api/settings`, {
-        method: "PATCH",
-        body: JSON.stringify({ "agent.default": "shell" }),
+      await fetchJson(`${baseUrl}/api/settings/patch`, {
+        method: 'POST',
+        body: JSON.stringify({ changes: { 'agent.default': 'shell' } }),
       });
 
       await use({ baseUrl, repoPath, childEnv });
@@ -508,18 +487,18 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           }
         };
         const force = setTimeout(() => {
-          server.kill("SIGKILL");
+          server.kill('SIGKILL');
           finish();
         }, 5_000);
-        server.on("exit", () => {
+        server.on('exit', () => {
           clearTimeout(force);
           finish();
         });
-        server.kill("SIGTERM");
+        server.kill('SIGTERM');
       });
       rmSync(tmpDir, { recursive: true, force: true });
     },
-    { scope: "worker" },
+    { scope: 'worker' },
   ],
 
   // Per-test handle on the worker's server. The server is reused; this fixture
@@ -534,13 +513,13 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       repoPath,
 
       async seedSession(opts) {
-        return (await fetchJson(`${baseUrl}/api/sessions`, {
-          method: "POST",
+        return (await fetchJson(`${baseUrl}/api/sessions/launch`, {
+          method: 'POST',
           body: JSON.stringify({
             goal: opts.goal,
             title: opts.title ?? opts.name,
             cwd: repoPath,
-            agent: "shell",
+            agent: 'shell',
             name: opts.name,
             base: opts.base,
             parent_branch: opts.parent,
@@ -550,36 +529,37 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       },
 
       async seedWatch(opts) {
-        return (await fetchJson(`${baseUrl}/api/watches`, {
-          method: "POST",
+        return (await fetchJson(`${baseUrl}/api/watches/create`, {
+          method: 'POST',
           body: JSON.stringify({
             name: opts.name,
             trigger: opts.trigger ?? {},
             scope: opts.scope ?? {},
-            program: opts.program ?? "builtin:status",
+            program: opts.program ?? 'builtin:status',
             params: opts.params ?? {},
-            capabilities: opts.capabilities ?? ["observe", "mark", "escalate"],
+            capabilities: opts.capabilities ?? ['observe', 'mark', 'escalate'],
           }),
         })) as Watch;
       },
 
       async seedIssue(session, title, body) {
         return (await fetchJson(`${baseUrl}/api/issues/create`, {
-          method: "POST",
+          method: 'POST',
           body: JSON.stringify({
             branch: session.branch.id,
-            request: { title, body: body ?? "" },
+            title,
+            body: body ?? '',
           }),
         })) as Issue;
       },
 
       async seedBacklogIssue(repoRoot, title, body) {
         return (await fetchJson(`${baseUrl}/api/issues/backlog/create`, {
-          method: "POST",
+          method: 'POST',
           body: JSON.stringify({
             repo_root: repoRoot,
             title,
-            body: body ?? "",
+            body: body ?? '',
           }),
         })) as Issue;
       },
@@ -591,68 +571,76 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         // this worker's WEAVER_HOME (reaped in worker teardown, so no stray
         // /tmp/weaver-conv-* dirs leak across runs) and drop the log there,
         // slugging the branch the same way the server does.
-        const logRoot = mkdtempSync(join(childEnv.WEAVER_HOME!, "conv-"));
-        await fetchJson(`${baseUrl}/api/settings`, {
-          method: "PATCH",
-          body: JSON.stringify({ "session.log_dir": logRoot }),
+        const logRoot = mkdtempSync(join(childEnv.WEAVER_HOME!, 'conv-'));
+        await fetchJson(`${baseUrl}/api/settings/patch`, {
+          method: 'POST',
+          body: JSON.stringify({ changes: { 'session.log_dir': logRoot } }),
         });
-        const slug = session.branch.branch.replace(/[^A-Za-z0-9._-]/g, "-");
+        const slug = session.branch.branch.replace(/[^A-Za-z0-9._-]/g, '-');
         mkdirSync(join(logRoot, slug), { recursive: true });
-        writeFileSync(join(logRoot, slug, "chat.json"), JSON.stringify(log));
+        writeFileSync(join(logRoot, slug, 'chat.json'), JSON.stringify(log));
       },
 
       async writeArtifact(session, name, content, opts) {
         // `loom artifacts write <name> -` reads content from stdin and appends
         // a revision to the branch resolved from $WEAVER_BRANCH (`--repo` makes
         // it repo-shared). The first write creates the envelope.
-        const args = ["artifacts", "write", name, "-"];
-        if (opts?.title) args.push("--title", opts.title);
-        if (opts?.kind) args.push("--kind", opts.kind);
-        if (opts?.repo) args.push("--repo");
+        const args = ['artifacts', 'write', name, '-'];
+        if (opts?.title) args.push('--title', opts.title);
+        if (opts?.kind) args.push('--kind', opts.kind);
+        if (opts?.repo) args.push('--repo');
         execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
           input: content,
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
       },
 
       async removeArtifact(session, name, opts) {
-        const args = ["artifacts", "delete", name];
-        if (opts?.repo) args.push("--repo");
+        const args = ['artifacts', 'delete', name];
+        if (opts?.repo) args.push('--repo');
         execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
-          stdio: ["pipe", "pipe", "pipe"],
+          stdio: ['pipe', 'pipe', 'pipe'],
         });
       },
 
       async tagIssue(id, key, value) {
         return (await fetchJson(`${baseUrl}/api/issues/tags/set`, {
-          method: "POST",
-          body: JSON.stringify({ id, key, request: { value } }),
+          method: 'POST',
+          body: JSON.stringify({ id, key, value }),
         })) as Issue;
       },
 
       async listIssues(all = false) {
-        return (await fetchJson(
-          `${baseUrl}/api/issues${all ? "?all=true" : ""}`,
-        )) as Issue[];
+        return (await fetchJson(`${baseUrl}/api/issues/board`, {
+          method: 'POST',
+          body: JSON.stringify({ all }),
+        })) as Issue[];
       },
 
       async getSession(id) {
-        return (await fetchJson(`${baseUrl}/api/sessions/${id}`)) as Session;
+        return (await fetchJson(`${baseUrl}/api/sessions/get`, {
+          method: 'POST',
+          body: JSON.stringify({ session: id }),
+        })) as Session;
       },
 
       async listSessions() {
-        return (await fetchJson(`${baseUrl}/api/sessions`)) as Session[];
+        return (await fetchJson(`${baseUrl}/api/sessions/list`, {
+          method: 'POST',
+          body: JSON.stringify({}),
+        })) as Session[];
       },
 
       async archiveSession(id) {
-        await fetchJson(`${baseUrl}/api/sessions/${id}/archive`, {
-          method: "POST",
+        await fetchJson(`${baseUrl}/api/sessions/archive`, {
+          method: 'POST',
+          body: JSON.stringify({ session: id }),
         });
       },
 
-      async setManaged(id, managedBy = "watch-e2e") {
+      async setManaged(id, managedBy = 'watch-e2e') {
         runPrivateSql(
           childEnv.WEAVER_DB!,
           `UPDATE sessions SET managed_by = ${quoteSqlite(managedBy)} WHERE id = ${quoteSqlite(id)};`,
@@ -669,9 +657,9 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       async hook(session, event) {
         // `loom hook` writes an `events` row keyed on the branch resolved
         // from $WEAVER_BRANCH; the loom monitor consumes it on its next tick.
-        execFileSync(LOOM_BINARY, ["hook", "--event", event], {
+        execFileSync(LOOM_BINARY, ['hook', '--event', event], {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
-          stdio: "pipe",
+          stdio: 'pipe',
         });
       },
 
@@ -679,36 +667,37 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         // `loom status set` writes the branch's `attention` tag (clearing it
         // on `ok`) and current-state message, appending a typed channel item and
         // recording a `tag` event.
-        const args = [
-          "status",
-          "set",
-          "--tag",
-          level,
-          ...(message ? ["--message", message] : []),
-        ];
+        const args = ['status', 'set', '--tag', level, ...(message ? ['--message', message] : [])];
         execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
-          stdio: "pipe",
+          stdio: 'pipe',
         });
       },
 
       async setTag(session, key, value, opts) {
-        await fetchJson(`${baseUrl}/api/sessions/${session.id}/tags/${key}`, {
-          method: "PUT",
-          body: JSON.stringify({ value, note: opts?.note, by: opts?.by }),
+        await fetchJson(`${baseUrl}/api/sessions/tags/set`, {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            value,
+            note: opts?.note,
+            by: opts?.by,
+            session: session.id,
+          }),
         });
       },
 
       async clearTag(session, key) {
-        await fetchJson(`${baseUrl}/api/sessions/${session.id}/tags/${key}`, {
-          method: "DELETE",
+        await fetchJson(`${baseUrl}/api/sessions/tags/delete`, {
+          method: 'POST',
+          body: JSON.stringify({ key, session: session.id }),
         });
       },
 
       async mark(session, level, opts) {
-        await fixture.setTag(session, "triage", level, {
+        await fixture.setTag(session, 'triage', level, {
           note: opts?.note,
-          by: opts?.by ?? "manual",
+          by: opts?.by ?? 'manual',
         });
       },
     };

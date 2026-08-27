@@ -131,7 +131,7 @@ test.describe('issues pane', () => {
     const second = await weaver.seedBacklogIssue(weaver.repoPath, 'bulk close second');
     let issueRefreshes = 0;
     page.on('request', (request) => {
-      if (request.method() === 'GET' && new URL(request.url()).pathname === '/api/issues') {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/issues/board') {
         issueRefreshes++;
       }
     });
@@ -184,8 +184,8 @@ test.describe('issues pane', () => {
   test('shows structured atomic failure details and changes nothing', async ({ page, weaver }) => {
     const open = await weaver.seedBacklogIssue(weaver.repoPath, 'must stay open');
     const closed = await weaver.seedBacklogIssue(weaver.repoPath, 'already closed');
-    const response = await page.request.patch(`${weaver.baseUrl}/api/issues/${closed.id}`, {
-      data: { status: 'closed' },
+    const response = await page.request.post(`${weaver.baseUrl}/api/issues/update`, {
+      data: { id: closed.id, status: 'closed' },
     });
     expect(response.ok()).toBe(true);
 

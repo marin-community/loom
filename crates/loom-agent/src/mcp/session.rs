@@ -1,28 +1,46 @@
-//! Session lifecycle and normalized history projected from Loom's REST API.
+//! Session lifecycle and normalized history, served by the generic registry
+//! dispatcher.
+//!
+//! `get`, `summary`, `status_get`, `history`, and `search` route straight
+//! through `super::dispatch::call_tool`; a caller-omitted session resolves via
+//! the same `#[operand(context)]` fill every other bundle uses.
+//!
+//! `status_set` (and its legacy alias `status`) stay hand-written: setting the
+//! branch's status also posts a channel message, and callers expect that
+//! message back alongside the updated branch — `sessions.status.set`'s own
+//! response carries only the branch.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
+use std::sync::OnceLock;
+
+use weaver_api::operations::sessions;
+
+use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
+use weaver_api::operations::{branches, channels};
 
 const SERVER_NAME: &str = "loom_session";
-const TOOL_NAMES: [&str; 7] = [
-    "get",
-    "summary",
-    "status_get",
-    "status_set",
-    "status",
-    "history",
-    "search",
-];
-const CANONICAL_TOOL_NAMES: [&str; 6] = [
-    "get",
-    "summary",
-    "status_get",
-    "status_set",
-    "history",
-    "search",
-];
+
+/// The tools this server exports, in the order it advertises them.
+///
+/// `status` is a legacy alias for `status_set`, kept for sessions pinned to
+/// `mcp/session/status@v1`.
+fn exports() -> &'static [Export] {
+    static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<sessions::get::Op>("get"),
+            export::<sessions::summary::get::Op>("summary"),
+            export::<sessions::status::get::Op>("status_get"),
+            export::<sessions::status::set::Op>("status_set"),
+            export::<sessions::status::set::Op>("status"),
+            export::<sessions::history::list::Op>("history"),
+            export::<sessions::history::search::Op>("search"),
+        ]
+    })
+}
 const READ_TOOLS: &[&str] = &["get", "summary", "status_get", "history", "search"];
 const WRITE_TOOLS: &[&str] = &["status_set"];
 const LEGACY_READ_TOOLS: &[&str] = &["get", "history", "search"];
@@ -42,8 +60,8 @@ const CAPABILITY_SETS: &[CapabilitySet] = &[
         description: "Update this session's durable status projection and status stream.",
         tools: WRITE_TOOLS,
     },
-    // Existing pinned sessions keep their exact identities during the CLI/MCP
-    // migration. New profile resolution receives the canonical Loom bundles.
+    // Existing pinned sessions keep their exact identities. New profiles use
+    // the canonical Loom sets.
     CapabilitySet {
         name: "mcp/session/read@v1",
         group: "session",
@@ -65,6 +83,11 @@ pub(super) const ADAPTER: Adapter = Adapter {
     server_name: SERVER_NAME,
     description: "Session lifecycle, status projection, and normalized history.",
     capability_sets: || CAPABILITY_SETS,
+    exports,
+    superseded: &[
+        ("mcp/session/read@v1", "loom/sessions/read@v1"),
+        ("mcp/session/status@v1", "loom/sessions/write@v1"),
+    ],
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -73,11 +96,11 @@ pub(super) const ADAPTER: Adapter = Adapter {
 };
 
 fn is_permission_rule(rule: &str) -> bool {
-    super::is_builtin_permission_rule(SERVER_NAME, &TOOL_NAMES, rule)
+    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
 }
 
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::expand_builtin_tool_set(SERVER_NAME, &TOOL_NAMES, CAPABILITY_SETS, name)
+    super::dispatch::expand_tool_set(SERVER_NAME, CAPABILITY_SETS, name)
 }
 
 fn server_config() -> Value {
@@ -85,49 +108,7 @@ fn server_config() -> Value {
 }
 
 fn tools() -> Value {
-    let mut tools = weaver_api::mcp_tools_ordered(SERVER_NAME, &CANONICAL_TOOL_NAMES)
-        .as_array()
-        .expect("generated session MCP catalogue is an array")
-        .clone();
-    let mut legacy_status = tools
-        .iter()
-        .find(|tool| tool["name"] == "status_set")
-        .expect("status_set is a registered session operation")
-        .clone();
-    legacy_status["name"] = json!("status");
-    tools.insert(4, legacy_status);
-    Value::Array(tools)
-}
-
-fn history_args(arguments: &Value) -> Result<(Option<&str>, Option<usize>, Vec<String>)> {
-    let before = super::string_argument(arguments, "before")?;
-    let limit = arguments
-        .get("limit")
-        .map(|value| {
-            let limit = value.as_u64().context("limit must be a positive integer")?;
-            let limit = usize::try_from(limit).context("limit is too large")?;
-            (limit > 0 && limit <= crate::history::MAX_LIMIT)
-                .then_some(limit)
-                .context("limit is outside the supported range")
-        })
-        .transpose()?;
-    let kinds = arguments
-        .get("kinds")
-        .map(|value| {
-            value
-                .as_array()
-                .context("kinds must be an array")?
-                .iter()
-                .map(|kind| {
-                    kind.as_str()
-                        .context("every kind must be a string")
-                        .map(str::to_string)
-                })
-                .collect::<Result<Vec<_>>>()
-        })
-        .transpose()?
-        .unwrap_or_default();
-    Ok((before, limit, kinds))
+    super::dispatch::tools(exports())
 }
 
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
@@ -136,86 +117,53 @@ fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
 }
 
 async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
-    if !TOOL_NAMES.contains(&name) {
+    if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown session tool '{name}'");
     }
+    let client = super::runtime_client("session")?;
+    match name {
+        "status_set" | "status" => set_status(&client, name, arguments).await,
+        _ => super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await,
+    }
+}
+
+/// Applies the status update, then folds in the channel message it posted
+/// (which `sessions.status.set`'s own response omits).
+async fn set_status(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
     if !super::runtime_tool_allowed(name) {
         bail!("session tool '{name}' is not allowed by this session");
     }
-    arguments
-        .as_object()
-        .context("session tool arguments must be an object")?;
-    let client = super::runtime_client("session")?;
-    match name {
-        "get" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let session = client.get_session(&id).await?;
-            super::structured_result(&format!("session {id}"), &session)
-        }
-        "summary" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let summary = client.session_summary(&id).await?;
-            super::structured_result(&format!("session {id} summary"), &summary)
-        }
-        "status_get" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let session = client.get_session(&id).await?;
-            let attention = session
-                .branch
-                .tags
-                .iter()
-                .find(|tag| tag.key == weaver_core::tags::ATTENTION_KEY)
-                .map(|tag| tag.value.as_str())
-                .unwrap_or("ok");
-            let value = json!({
-                "session_id": session.id,
-                "attention": attention,
-                "message": session.branch.description,
-            });
-            super::structured_result(&format!("session {id} status"), &value)
-        }
-        "status_set" | "status" => {
-            let level =
-                super::string_argument(&arguments, "level")?.context("status requires level")?;
-            if !matches!(level, "ok" | "attention" | "blocked") {
-                bail!("level must be 'ok', 'attention', or 'blocked'");
-            }
-            let message = arguments
-                .get("message")
-                .and_then(Value::as_str)
-                .context("status requires string message")?;
-            if message.len() > 4096 {
-                bail!("status message must be at most 4096 bytes");
-            }
-            let context = client.self_context().await?;
-            let branch = client
-                .set_branch_status(&context.branch_id, level, message)
-                .await?;
-            let channel = client.get_channel(&context.channel_id).await?;
-            let value = json!({ "branch": branch, "status_message": channel.last_message });
-            super::structured_result(&format!("status updated to {level}"), &value)
-        }
-        "history" | "search" => {
-            let id = super::resolve_session_argument(&client, &arguments).await?;
-            let (before, limit, kinds) = history_args(&arguments)?;
-            let page = if name == "history" {
-                client
-                    .get_session_history(&id, before, limit, &kinds)
-                    .await?
-            } else {
-                let query =
-                    super::string_argument(&arguments, "q")?.context("search requires q")?;
-                client
-                    .search_session_history(&id, query, before, limit, &kinds)
-                    .await?
-            };
-            super::structured_result(
-                &format!("{} normalized history record(s)", page.records.len()),
-                &page,
-            )
-        }
-        _ => unreachable!(),
+    let level = super::string_argument(&arguments, "level")?.context("status requires level")?;
+    if !matches!(level, "ok" | "attention" | "blocked") {
+        bail!("level must be 'ok', 'attention', or 'blocked'");
     }
+    let message = arguments
+        .get("message")
+        .and_then(Value::as_str)
+        .context("status requires string message")?;
+    if message.len() > 4096 {
+        bail!("status message must be at most 4096 bytes");
+    }
+    let context = client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
+        .await?;
+    let branch = client
+        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+            level: level.to_string(),
+            message: (!message.is_empty()).then(|| message.to_string()),
+            branch: context.branch_id.to_string(),
+        })
+        .await?;
+    let channel = client
+        .invoke::<channels::get::Op>(&channels::get::Input {
+            channel: context.channel_id.to_string(),
+            branch: String::new(),
+        })
+        .await?;
+    let value = json!({ "branch": branch, "status_message": channel.last_message });
+    super::structured_result(&format!("status updated to {level}"), &value)
 }
 
 fn serve_boxed() -> ServeFuture {
@@ -223,20 +171,4 @@ fn serve_boxed() -> ServeFuture {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_tools_consolidate_status_and_history() {
-        let surface = tools();
-        let names = surface
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(names, TOOL_NAMES);
-        assert_eq!(expand_tool_set("loom/sessions/read@v1").unwrap().len(), 5);
-        assert_eq!(expand_tool_set("mcp/session/read@v1").unwrap().len(), 3);
-    }
-}
+mod tests {}

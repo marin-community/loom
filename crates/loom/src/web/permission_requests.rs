@@ -1,16 +1,8 @@
 //! Human approval workflow for session-scoped external access expansions.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Extension, Json,
-};
 use serde_json::json;
 use weaver_api::operations::permissions as permission_operations;
-use weaver_api::{
-    CreateChannelMessageReq, DecidePermissionRequestReq, EffectivePermissionsView,
-    PermissionRequestView,
-};
+use weaver_api::{EffectivePermissionsView, PermissionRequestView};
 use weaver_core::{branch as branch_mod, tags};
 
 use crate::{
@@ -19,22 +11,38 @@ use crate::{
     permission_requests,
 };
 
+use super::operations::{register, Bound, OperationContext};
 use super::{
     channels::{append_and_deliver, record_channel_message_event},
-    effective_repositories, policy_repository_patterns, register_operation, require_session,
-    validate_github_write, ApiResult, AppError, AppState, OperationContext, RegisteredOperation,
+    effective_repositories, github_token_operation, grant_github_access_operation,
+    policy_repository_patterns, require_session, restricted_github_invoke_operation,
+    revoke_github_access_operation, validate_github_write, ApiResult, AppError, AppState,
 };
+use weaver_api::operations::channels;
 
-pub(super) fn registered_operations() -> Vec<RegisteredOperation> {
+pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
-        register_operation::<permission_operations::EffectiveGet, _, _>(
+        register::<permission_operations::explain::Op, _, _>(explain_operation),
+        register::<permission_operations::effective::get::Op, _, _>(
             effective_permissions_operation,
         ),
-        register_operation::<permission_operations::RequestsList, _, _>(
+        register::<permission_operations::requests::list::Op, _, _>(
             list_permission_requests_operation,
         ),
-        register_operation::<permission_operations::RequestsCreate, _, _>(
+        register::<permission_operations::requests::create::Op, _, _>(
             create_permission_request_operation,
+        ),
+        register::<permission_operations::requests::approve::Op, _, _>(
+            approve_permission_request_operation,
+        ),
+        register::<permission_operations::requests::deny::Op, _, _>(
+            deny_permission_request_operation,
+        ),
+        register::<permission_operations::github::token::Op, _, _>(github_token_operation),
+        register::<permission_operations::github::grant::Op, _, _>(grant_github_access_operation),
+        register::<permission_operations::github::revoke::Op, _, _>(revoke_github_access_operation),
+        register::<permission_operations::github::restricted::invoke::Op, _, _>(
+            restricted_github_invoke_operation,
         ),
     ]
 }
@@ -53,17 +61,6 @@ fn view(request: permission_requests::PermissionRequest) -> PermissionRequestVie
         decided_by: request.decided_by,
         decided_at: request.decided_at,
         decision_reason: request.decision_reason,
-    }
-}
-
-fn require_human(principal: &Principal) -> ApiResult<()> {
-    if principal.is_human() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "a human operator must decide access requests; use `loom permissions request`",
-        ))
     }
 }
 
@@ -86,9 +83,18 @@ fn validate_state(state: Option<&str>) -> ApiResult<Option<&str>> {
     }
 }
 
+pub(super) async fn explain_operation(
+    _context: OperationContext,
+    input: permission_operations::explain::Input,
+) -> ApiResult<permission_operations::explain::Output> {
+    weaver_api::operation(&input.operation)
+        .map(weaver_api::OperationView::from)
+        .ok_or_else(|| AppError::not_found("operation"))
+}
+
 pub(super) async fn effective_permissions_operation(
     context: OperationContext,
-    input: permission_operations::SessionInput,
+    input: permission_operations::effective::get::Input,
 ) -> ApiResult<EffectivePermissionsView> {
     let st = context.state;
     let key = input.session;
@@ -113,7 +119,7 @@ pub(super) async fn effective_permissions_operation(
         .filter(|operation| {
             operation.actor == weaver_api::ActorPolicy::SessionSelf
                 && operation
-                    .capabilities
+                    .grants
                     .iter()
                     .all(|required| capabilities.iter().any(|value| value == required))
         })
@@ -131,7 +137,7 @@ pub(super) async fn effective_permissions_operation(
 
 pub(super) async fn list_permission_requests_operation(
     context: OperationContext,
-    input: permission_operations::ListRequestsInput,
+    input: permission_operations::requests::list::Input,
 ) -> ApiResult<Vec<PermissionRequestView>> {
     let st = context.state;
     let key = input.session;
@@ -219,23 +225,19 @@ async fn apply_policy_grant(
 
 pub(super) async fn create_permission_request_operation(
     context: OperationContext,
-    input: permission_operations::CreateRequestInput,
+    input: permission_operations::requests::create::Input,
 ) -> ApiResult<PermissionRequestView> {
     let st = context.state;
     let principal = context.principal;
     let key = input.session;
-    let req = input.request;
     let (session, branch) = require_session(&st.db, &key).await?;
-    if req.kind.trim() != permission_requests::GITHUB_REPOSITORY_KIND {
-        return Err(AppError::bad_request("kind must be 'github_repository'"));
-    }
-    if req.mode.trim() != "write" {
+    if input.mode.trim() != "write" {
         return Err(AppError::bad_request("mode must be 'write'"));
     }
-    let repository = crate::repo::parse_slug(req.repository.trim())
+    let repository = crate::repo::parse_slug(input.repository.trim())
         .map_err(AppError::bad_request)?
         .slug();
-    let reason = req.reason.trim();
+    let reason = input.reason.trim();
     if reason.is_empty() {
         return Err(AppError::bad_request("reason is required"));
     }
@@ -269,11 +271,10 @@ pub(super) async fn create_permission_request_operation(
     .await?;
 
     // An `owner/*` entry on the launch policy is a standing human decision for
-    // that owner, so a matching request is applied now instead of parking the
-    // session on a human who may not be at a terminal. The App installation is
-    // still validated, and the grant is still recorded and revocable. If the
-    // App cannot actually grant it, fall through to the human path — a person
-    // can install the App and then approve.
+    // that owner, so a matching request is granted immediately rather than
+    // waiting on a human. The GitHub App installation is still validated, and
+    // the grant is still recorded and revocable. If the App cannot grant it,
+    // fall through to human approval — installing the App later unblocks it.
     let patterns = policy_repository_patterns(&session)
         .map_err(|error| AppError::internal("could not resolve GitHub access", error))?;
     if let Some(pattern) = patterns
@@ -341,34 +342,39 @@ pub(super) async fn create_permission_request_operation(
     Ok(view(request))
 }
 
-pub(super) async fn decide_permission_request(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<DecidePermissionRequestReq>,
-) -> ApiResult<Json<PermissionRequestView>> {
-    require_human(&principal)?;
-    let request = permission_requests::get(&st.db, &id)
+/// Shared body for `permissions.requests.approve` and `permissions.requests.deny`.
+///
+/// Both operations resolve to the same durable transition — a pending request
+/// moving to a terminal state — differing only in which storage call runs and
+/// how the notification reads. Which humans may reach this at all is decided
+/// centrally from `actor = User` on each declaration; nothing here re-checks
+/// who the caller is.
+async fn apply_permission_decision(
+    st: &AppState,
+    principal: &Principal,
+    id: &str,
+    decision: &'static str,
+    reason: &str,
+) -> ApiResult<PermissionRequestView> {
+    let request = permission_requests::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("permission request"))?;
     if request.state != permission_requests::PermissionRequestState::Pending {
         return Err(AppError::conflict("permission request is already resolved"));
     }
     let (session, branch) = require_session(&st.db, &request.session_id).await?;
-    let decision = req.decision.trim().to_ascii_lowercase();
-    let reason = req.reason.trim();
-    let changed = match decision.as_str() {
+    let changed = match decision {
         "approve" => {
-            validate_github_write(&st, &request.repository).await?;
-            permission_requests::approve_github(&st.db, &id, &principal.username, reason).await?
+            validate_github_write(st, &request.repository).await?;
+            permission_requests::approve_github(&st.db, id, &principal.username, reason).await?
         }
-        "deny" => permission_requests::deny(&st.db, &id, &principal.username, reason).await?,
-        _ => return Err(AppError::bad_request("decision must be approve or deny")),
+        "deny" => permission_requests::deny(&st.db, id, &principal.username, reason).await?,
+        _ => unreachable!("decision is fixed by the calling operation"),
     };
     if !changed {
         return Err(AppError::conflict("permission request is already resolved"));
     }
-    let decided = permission_requests::get(&st.db, &id)
+    let decided = permission_requests::get(&st.db, id)
         .await?
         .ok_or_else(|| AppError::not_found("permission request"))?;
     let body = if decision == "approve" {
@@ -386,7 +392,7 @@ pub(super) async fn decide_permission_request(
     };
     if let Some(channel) = crate::channels::access(&st.db, &session.id).await? {
         let author = Subject::new(SubjectKind::User, &principal.username);
-        let message = CreateChannelMessageReq {
+        let message = channels::messages::create::Input {
             kind: "system".to_string(),
             urgency: "normal".to_string(),
             body,
@@ -397,40 +403,48 @@ pub(super) async fn decide_permission_request(
             }),
             reply_to: None,
             idempotency_key: Some(format!("permission-decision:{}", decided.id)),
+            // The channel and branch are passed to `append_and_deliver` directly.
+            ..Default::default()
         };
         let (inserted, message) =
-            append_and_deliver(&st, &session.id, &channel, &author, &message).await?;
-        record_channel_message_event(&st, &session.id, &author, &message, inserted).await;
+            append_and_deliver(st, &session.id, &channel, &author, &message).await?;
+        record_channel_message_event(st, &session.id, &author, &message, inserted).await;
     }
-    record_decision_event(&st, &branch.id, &decided, &decision, &principal.username).await?;
-    Ok(Json(view(decided)))
+    record_decision_event(st, &branch.id, &decided, decision, &principal.username).await?;
+    Ok(view(decided))
+}
+
+pub(super) async fn approve_permission_request_operation(
+    context: OperationContext,
+    input: permission_operations::requests::approve::Input,
+) -> ApiResult<permission_operations::requests::approve::Output> {
+    apply_permission_decision(
+        &context.state,
+        &context.principal,
+        &input.request,
+        "approve",
+        input.reason.trim(),
+    )
+    .await
+}
+
+pub(super) async fn deny_permission_request_operation(
+    context: OperationContext,
+    input: permission_operations::requests::deny::Input,
+) -> ApiResult<permission_operations::requests::deny::Output> {
+    apply_permission_decision(
+        &context.state,
+        &context.principal,
+        &input.request,
+        "deny",
+        input.reason.trim(),
+    )
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{AuthVia, Grant};
-
-    fn principal(grant: Grant) -> Principal {
-        Principal {
-            username: "alice".to_string(),
-            github_login: None,
-            via: AuthVia::Token,
-            grant,
-            automation_context: None,
-        }
-    }
-
-    #[test]
-    fn only_humans_can_decide_requests() {
-        assert!(require_human(&principal(Grant::User)).is_ok());
-        assert!(require_human(&principal(Grant::Session {
-            session_id: "s".to_string(),
-            branch_id: "b".to_string(),
-            capabilities: None,
-        }))
-        .is_err());
-    }
 
     #[test]
     fn state_filter_is_closed() {

@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use serial_test::serial;
 
 use super::fixtures::TestServer;
+use weaver_api::operations::diagnostics;
 
 fn url(ts: &TestServer, path: &str) -> String {
     format!("http://{}{}", ts.addr, path)
@@ -70,11 +71,20 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
     seed_operational_state(&ts).await;
     let http = reqwest::Client::new();
 
-    let typed = ts.client.diagnostics().await.unwrap();
+    let typed = ts
+        .client
+        .invoke::<diagnostics::get::Op>(&diagnostics::get::Input {})
+        .await
+        .unwrap();
     assert_eq!(typed.profiles[0].active, 1);
     assert_eq!(typed.automation_runs.recent_failures.len(), 1);
 
-    let response = http.get(url(&ts, "/api/diagnostics")).send().await.unwrap();
+    let response = http
+        .post(url(&ts, "/api/diagnostics/get"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let diagnostics: Value = response.json().await.unwrap();
     let orphan = diagnostics["sessions"]
@@ -141,15 +151,24 @@ async fn diagnostics_are_correct_redacted_and_human_only() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 
-    let unauthenticated = http.get(url(&ts, "/api/diagnostics")).send().await.unwrap();
+    let unauthenticated = http
+        .post(url(&ts, "/api/diagnostics/get"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
     let scoped = http
-        .get(url(&ts, "/api/diagnostics"))
+        .post(url(&ts, "/api/diagnostics/get"))
         .bearer_auth(session_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -162,7 +181,10 @@ async fn health_readiness_and_metrics_are_public_and_label_safe() {
     let ts = TestServer::start().await;
     seed_operational_state(&ts).await;
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();

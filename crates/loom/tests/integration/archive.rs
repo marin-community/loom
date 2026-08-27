@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use loom::backend;
 
 use crate::fixtures::{branch_tag, plant_claude_transcript, HomeGuard, TestServer};
+use weaver_api::operations::branches;
 
 /// Archiving captures the agent's conversation log: it locates the Claude Code
 /// transcript for the worktree (under `~/.claude/projects/<munged-cwd>/`),
@@ -30,7 +31,7 @@ async fn archive_captures_the_conversation_log() {
 
     let sess = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "log me", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -40,9 +41,9 @@ async fn archive_captures_the_conversation_log() {
 
     // Set the capture sink via the settings API.
     client
-        .patch(
-            "/api/settings",
-            json!({ "session.log_dir": logs.path().to_string_lossy() }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "session.log_dir": logs.path().to_string_lossy() } }),
         )
         .await
         .unwrap();
@@ -56,7 +57,7 @@ async fn archive_captures_the_conversation_log() {
     );
 
     let res = client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(res["archived"], true);
@@ -90,7 +91,7 @@ async fn archive_survives_request_disconnect() {
     let created = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "archive after disconnect", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -101,9 +102,12 @@ async fn archive_survives_request_disconnect() {
     // A raw connection lets the test close the transport without waiting for a
     // response, matching a browser navigation or reverse-proxy disconnect.
     let mut connection = tokio::net::TcpStream::connect(ts.addr).await.unwrap();
+    let body = json!({ "session": id }).to_string();
     let request = format!(
-        "POST /api/sessions/{id}/archive HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
-        ts.addr
+        "POST /api/sessions/archive HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        ts.addr,
+        body.len(),
+        body
     );
     connection.write_all(request.as_bytes()).await.unwrap();
     connection.flush().await.unwrap();
@@ -152,7 +156,7 @@ async fn archive_keeps_branch_and_history() {
 
     let arch = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "archive me",
                 "cwd": ts.cwd(),
@@ -178,18 +182,18 @@ async fn archive_keeps_branch_and_history() {
     // `manual`) doubles as branch history we expect to survive the archive. The
     // message (description) is a separate branch field, patched alongside.
     client
-        .put(
-            &format!("/api/sessions/{arch_id}/tags/attention"),
-            json!({ "value": "attention", "by": "manual" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "attention", "value": "attention", "by": "manual", "session": arch_id }),
         )
         .await
         .unwrap();
     // A watch's typed loud mark (a non-well-known key on the ladder): archiving
     // must clear it too — loudness is value-driven, not a fixed key set.
     client
-        .put(
-            &format!("/api/sessions/{arch_id}/tags/review"),
-            json!({ "value": "attention", "by": "status-check" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "review", "value": "attention", "by": "status-check", "session": arch_id }),
         )
         .await
         .unwrap();
@@ -197,31 +201,31 @@ async fn archive_keeps_branch_and_history() {
     // lifecycle signal a torn-down workstream shouldn't carry: archiving clears
     // it too.
     client
-        .put(
-            &format!("/api/sessions/{arch_id}/tags/idle"),
-            json!({ "value": "idle", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "idle", "value": "idle", "by": "agent", "session": arch_id }),
         )
         .await
         .unwrap();
     // The per-session opt-out gates automatic retention only. An explicit
     // operator Archive must still tear the session down.
     client
-        .put(
-            &format!("/api/sessions/{arch_id}/tags/auto-archive"),
-            json!({ "value": "disabled", "by": "manual" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "auto-archive", "value": "disabled", "by": "manual", "session": arch_id }),
         )
         .await
         .unwrap();
     client
-        .patch(
-            &format!("/api/sessions/{arch_id}"),
-            json!({ "description": "Waiting for input" }),
+        .post(
+            "/api/sessions/update",
+            json!({ "description": "Waiting for input", "session": arch_id }),
         )
         .await
         .unwrap();
 
     let res = client
-        .post(&format!("/api/sessions/{arch_id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": arch_id }))
         .await
         .unwrap();
     assert_eq!(res["archived"], true);
@@ -236,12 +240,12 @@ async fn archive_keeps_branch_and_history() {
 
     // The session row persists, now terminal/`archived`.
     let view = client
-        .get(&format!("/api/sessions/{arch_id}"))
+        .post("/api/sessions/get", json!({ "session": arch_id }))
         .await
         .unwrap();
     assert_eq!(view["status"], "archived");
     let channel = client
-        .get(&format!("/api/channels/{arch_id}"))
+        .post("/api/channels/get", json!({ "channel": arch_id }))
         .await
         .unwrap();
     assert_eq!(channel["state"], "archived");
@@ -274,11 +278,17 @@ async fn archive_keeps_branch_and_history() {
         "archive must not delete the branch"
     );
     // The branch event history survives the archive (unlike delete). The typed
-    // client uses the branch-owned endpoint; the old session log remains an
-    // exact compatibility alias.
-    let branch_log = client.branch_log(&arch_id).await.unwrap();
+    // client uses the branch-owned operation; `sessions.events.list` wraps the
+    // same handler keyed by session and must remain an exact compatibility
+    // alias.
+    let branch_log = client
+        .invoke::<branches::events::list::Op>(&branches::events::list::Input {
+            branch: arch_id.to_string(),
+        })
+        .await
+        .unwrap();
     let session_log = client
-        .get(&format!("/api/sessions/{arch_id}/log"))
+        .post("/api/sessions/events/list", json!({ "session": arch_id }))
         .await
         .unwrap();
     assert!(
@@ -290,12 +300,12 @@ async fn archive_keeps_branch_and_history() {
     assert_eq!(
         serde_json::to_value(&branch_log).unwrap(),
         session_log,
-        "the legacy session route must remain a compatibility alias"
+        "sessions.events.list must remain a compatibility alias for branches.events.list"
     );
 
     // An archived session can still be fully removed afterwards.
     client
-        .delete(&format!("/api/sessions/{arch_id}"))
+        .post("/api/sessions/delete", json!({ "session": arch_id }))
         .await
         .unwrap();
 }

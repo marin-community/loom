@@ -10,15 +10,18 @@
 //! open, then `UPDATE`d in place with its outcome when resolved (keyed by the
 //! upstream request id inside the payload).
 //!
-//! `payload` is opaque JSON here; its shape is keyed by `kind` (see the block
+//! `payload` is opaque JSON here; its layout is keyed by `kind` (see the block
 //! kinds documented on [`crate::acp`]). This module only stores and reads it.
 
 use anyhow::Result;
-use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::db::{now_iso, Db};
+
+/// A block is journaled as the type `sessions.chat` serves; re-exported so
+/// the journal's writers and readers name the row type through this module.
+pub use weaver_api::ChatBlockView;
 
 pub const HANDOFF_PROMPT_VERSION: i64 = 2;
 
@@ -314,17 +317,6 @@ fn prefix_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// One journaled block as the `/chat` routes expose it. `payload` is passed
-/// through as JSON — the client renders it by `kind`.
-#[derive(Debug, Clone, Serialize)]
-pub struct ChatBlockView {
-    pub turn: i64,
-    pub seq: i64,
-    pub kind: String,
-    pub payload: Value,
-    pub created_at: String,
-}
-
 /// The upstream id a block of `kind` is addressed by, mirrored into the indexed
 /// `ref_id` column at insert time. Replay idempotency asks about a block by this
 /// id rather than by `(turn, seq)`: a tool call's position is not stable across a
@@ -497,7 +489,7 @@ impl From<ChatBlockRow> for ChatBlockView {
 }
 
 /// Whether `(turn, seq)` names a journaled block. Lets a paged reader tell a
-/// cursor this session never issued from one that has simply run off the end.
+/// cursor this session never issued from one that has run off the end.
 pub async fn block_exists(db: &Db, session_id: &str, turn: i64, seq: i64) -> Result<bool> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(
@@ -772,7 +764,7 @@ pub async fn reset_usage(db: &Db, session_id: &str) -> Result<()> {
 
 /// Render the last `last_n` journal blocks as compact plain text — the ACP
 /// analogue of the terminal `preview` screen (`[who] text` lines for prose, a
-/// one-liner for the machine's apparatus). CLI convenience only.
+/// one-liner for everything else). CLI convenience only.
 pub fn preview_text(blocks: &[ChatBlockView], last_n: usize) -> String {
     let start = blocks.len().saturating_sub(last_n);
     let mut out = String::new();

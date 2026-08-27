@@ -26,7 +26,7 @@ const route = useRoute();
 
 // The Issues pane — the cross-repo Loom issue board, sibling to the session
 // list and the watch panel. API-first: every row is an `IssueView` from
-// `GET /api/issues`, every control a REST call. Issues are repo-scoped data, so
+// `issues.board`, every control a REST call. Issues are repo-scoped data, so
 // the whole fleet's issues land here and a repo chip / filter disambiguates when
 // more than one repo is in play.
 //
@@ -345,7 +345,7 @@ const sessionsByBranch = computed(() => {
 // An issue is automation-claimed when the session *currently* working its
 // branch (`claimed_branch`) is automation-class. Archived sessions never own
 // work, including historical rows whose claims predate archive cleanup. Mirrors
-// the server's own default-hide rule (`GET /api/issues`).
+// the server's own default-hide rule (`issues.board`).
 function isAutomationClaimed(i: Issue): boolean {
   if (!i.claimed_branch) return false;
   const held = sessionsByBranch.value.get(`${i.repo_root}\0${i.claimed_branch}`) ?? [];
@@ -422,7 +422,7 @@ async function setStatus(i: Issue, status: 'open' | 'closed') {
 
 async function unclaim(i: Issue) {
   await withBusy(i.id, async () =>
-    replaceIssue((await patchIssue(i.id, { claimed_branch: null })) as Issue),
+    replaceIssue((await patchIssue(i.id, { unclaim: true })) as Issue),
   );
 }
 

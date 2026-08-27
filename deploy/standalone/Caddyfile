@@ -25,8 +25,8 @@
 	#
 	#   * WebSocket terminal — it transparently proxies Upgrade requests (it
 	#     detects `Connection: Upgrade` and streams both directions), so the
-	#     xterm.js terminal at /api/sessions/{id}/terminal works with no extra
-	#     config.
+	#     xterm.js terminal at /api/sessions/terminal?session={id} works with no
+	#     extra config.
 	#   * Origin/host checks — Caddy preserves the inbound Host header upstream by
 	#     default AND adds X-Forwarded-For / -Proto / -Host. loom's terminal
 	#     handshake requires both: it accepts the WS Origin when it matches the

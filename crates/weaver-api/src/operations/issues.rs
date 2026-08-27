@@ -1,467 +1,362 @@
-//! Typed API contracts and user-facing projections for repository work items.
+//! Repository work items.
+//!
+//! Adding `issues.archive` means adding it here and its handler in
+//! `crates/loom/src/web/issues.rs` — the registry derives its clap variant,
+//! client wrapper, MCP schema, and capability set.
 
-use serde::{Deserialize, Serialize};
+use super::registry::OperationSpec;
+use super::OperationBundle;
 
-use crate::{
-    CreateIssueReq, CreateRepoIssueReq, DeleteIssueResult, IssueActionsReq, IssueActionsResult,
-    IssueView, TagReq,
-};
+pub(super) use super::prelude;
+pub mod actions {
+    //! The general bulk form: one action applied atomically to a set of work items.
+    //!
+    //! `IssueAction` is an internally-tagged union. Deriving the schema from the
+    //! real type prevents invalid field combinations at compile time, making this
+    //! operation register like any other in the registry.
 
-use super::*;
+    use super::prelude::*;
 
-const READ: &[&str] = &["loom/issues/read@v1"];
-const WRITE: &[&str] = &["loom/issues/write@v1"];
+    /// Apply one action atomically to a set of work items.
+    #[operation(id = "issues.actions", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues actions", render = custom, default = custom)]
+    pub struct Input {
+        /// The work items to act on. Either every id succeeds or none does.
+        #[operand(long = "id")]
+        #[schemars(inner(range(min = 1)))]
+        pub ids: Vec<i64>,
+        /// The action to apply — `close`, `reopen`, `delete`, `tag`, or `untag`.
+        /// On the command line this takes a JSON object, because a tagged union is
+        /// not a flag.
+        #[operand(json)]
+        pub action: IssueAction,
+        #[operand(context)]
+        pub repo_root: String,
+    }
 
-const fn id_arg() -> ArgumentSpec {
-    ArgumentSpec::integer("id")
-        .minimum(1)
-        .description("A Loom work-item id.")
-        .required()
-}
-
-static LIST_ARGS: &[ArgumentSpec] = &[ArgumentSpec::boolean("all").default_boolean(false)];
-static ID_ARGS: &[ArgumentSpec] = &[id_arg()];
-static ADD_ARGS: &[ArgumentSpec] = &[
-    ArgumentSpec::string("title").minimum(1).required(),
-    ArgumentSpec::string("body"),
-];
-static TAG_SET_ARGS: &[ArgumentSpec] = &[
-    id_arg(),
-    ArgumentSpec::string("key").minimum(1).required(),
-    ArgumentSpec::string("value").minimum(1).required(),
-    ArgumentSpec::string("note"),
-];
-static TAG_DELETE_ARGS: &[ArgumentSpec] =
-    &[id_arg(), ArgumentSpec::string("key").minimum(1).required()];
-
-pub static LIST_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.list",
-    "issues",
-    "List current-session and repository work items.",
-    SessionSelf,
-    Read,
-    "GET",
-    "/api/repos/issues",
-    Some("loom issues list"),
-    described_mcp(
-        "loom_issue",
-        "list",
-        "List work items in this session's repository."
-    ),
-    READ,
-    LIST_ARGS
-);
-
-pub static GET_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.get",
-    "issues",
-    "Inspect one work item and its owner status.",
-    SessionSelf,
-    Read,
-    "GET",
-    "/api/issues/{issue}",
-    Some("loom issues get <issue>"),
-    described_mcp(
-        "loom_issue",
-        "get",
-        "Inspect one work item in this session's repository."
-    ),
-    READ,
-    ID_ARGS
-);
-
-pub static CREATE_SPEC: OperationSpec = registered_branch_operation!(
-    "issues.create",
-    "issues",
-    "Create a session-owned work item.",
-    SessionSelf,
-    Write,
-    "POST",
-    "/api/branches/{branch}/issues",
-    Some("loom issues add <title>"),
-    described_mcp(
-        "loom_issue",
-        "add",
-        "Create a work item claimed by this session's branch."
-    ),
-    WRITE,
-    ADD_ARGS
-);
-
-pub static BACKLOG_CREATE_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.backlog.create",
-    "issues",
-    "Create an unclaimed repository backlog item.",
-    SessionSelf,
-    Write,
-    "POST",
-    "/api/repos/issues",
-    Some("loom issues add --repo <title>"),
-    None,
-    WRITE
-);
-
-pub static CLOSE_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.close",
-    "issues",
-    "Close one work item.",
-    SessionSelf,
-    Write,
-    "POST",
-    "/api/issues/{issue}/close",
-    Some("loom issues close <issue...>"),
-    described_mcp("loom_issue", "close", "Close one repository work item."),
-    WRITE,
-    ID_ARGS
-);
-
-pub static REOPEN_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.reopen",
-    "issues",
-    "Reopen one work item.",
-    SessionSelf,
-    Write,
-    "POST",
-    "/api/issues/{issue}/reopen",
-    Some("loom issues reopen <issue...>"),
-    described_mcp("loom_issue", "reopen", "Reopen one repository work item."),
-    WRITE,
-    ID_ARGS
-);
-
-pub static DELETE_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.delete",
-    "issues",
-    "Permanently delete one work item.",
-    SessionSelf,
-    Destructive,
-    "DELETE",
-    "/api/issues/{issue}",
-    Some("loom issues delete <issue...>"),
-    described_mcp(
-        "loom_issue",
-        "delete",
-        "Permanently delete one repository work item."
-    ),
-    WRITE,
-    ID_ARGS
-);
-
-pub static TAG_SET_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.tags.set",
-    "issues",
-    "Set one free-form work-item tag.",
-    SessionSelf,
-    Write,
-    "PUT",
-    "/api/issues/{issue}/tags/{key}",
-    Some("loom issues tag set <issue...> --key <key> --value <value>"),
-    described_mcp(
-        "loom_issue",
-        "tag_set",
-        "Set one free-form tag on a repository work item."
-    ),
-    WRITE,
-    TAG_SET_ARGS
-);
-
-pub static TAG_DELETE_SPEC: OperationSpec = registered_repository_operation!(
-    "issues.tags.delete",
-    "issues",
-    "Remove one free-form work-item tag.",
-    SessionSelf,
-    Write,
-    "DELETE",
-    "/api/issues/{issue}/tags/{key}",
-    Some("loom issues tag delete <issue...> --key <key>"),
-    described_mcp(
-        "loom_issue",
-        "tag_delete",
-        "Remove one free-form tag from a repository work item."
-    ),
-    WRITE,
-    TAG_DELETE_ARGS
-);
-
-/// Specialized atomic bulk API used by multi-ID CLI commands. Scalar MCP
-/// operations bind to the routine operations above.
-pub static ACTIONS_SPEC: OperationSpec = repository_operation!(
-    "issues.actions",
-    "issues",
-    "Atomically apply one action to multiple work items.",
-    SessionSelf,
-    Write,
-    "POST",
-    "/api/issues/actions",
-    None,
-    None,
-    WRITE
-);
-
-static OPERATIONS: &[OperationSpec] = &[
-    LIST_SPEC,
-    GET_SPEC,
-    CREATE_SPEC,
-    BACKLOG_CREATE_SPEC,
-    CLOSE_SPEC,
-    REOPEN_SPEC,
-    DELETE_SPEC,
-    TAG_SET_SPEC,
-    TAG_DELETE_SPEC,
-    ACTIONS_SPEC,
-];
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ListInput {
-    pub repo_root: String,
-    pub scope: ListScope,
-    pub all: bool,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ListScope {
-    Repo,
-    Backlog,
-}
-
-impl ListScope {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Repo => "repo",
-            Self::Backlog => "backlog",
+    impl Default for Input {
+        fn default() -> Self {
+            Self {
+                ids: Vec::new(),
+                action: IssueAction::Close,
+                repo_root: String::new(),
+            }
         }
     }
+
+    pub type Output = IssueActionsResult;
 }
 
-impl std::str::FromStr for ListScope {
-    type Err = String;
+pub mod backlog {
+    //! Unclaimed repository backlog items.
+    pub(super) use super::prelude;
+    pub mod create {
+        use super::prelude::*;
 
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "repo" | "" => Ok(Self::Repo),
-            "backlog" => Ok(Self::Backlog),
-            other => Err(format!(
-                "invalid scope '{other}' (expected 'repo' or 'backlog')"
-            )),
+        /// Create an unclaimed repository backlog item.
+        #[operation(id = "issues.backlog.create", actor = SessionSelf, scope = Repository,
+                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues backlog add", render = custom)]
+        pub struct Input {
+            /// One-line summary of the work.
+            #[operand(positional)]
+            #[schemars(length(min = 1))]
+            pub title: String,
+            /// Optional detail.
+            #[operand(default = String::new())]
+            pub body: String,
+            /// Link the item to an existing GitHub issue number.
+            pub github_issue: Option<i64>,
+            /// Tags to apply in the same transaction as the insert.
+            ///
+            /// Atomic on purpose: the create-issue form stages tags before the item
+            /// exists, and applying them afterwards would leave a window where the board
+            /// shows an untagged item — or, if the second call fails, keeps it untagged.
+            #[operand(json, default = Vec::new())]
+            pub tags: Vec<IssueTagInput>,
+            #[operand(context)]
+            pub repo_root: String,
+            /// The branch that filed this item, for provenance.
+            ///
+            /// The branch *name*, not its id — this is compared against `branch.branch`
+            /// when the CLI decides whether an item was delegated by the current branch.
+            #[operand(context = "branch_name")]
+            pub source_branch: Option<String>,
         }
+
+        pub type Output = IssueView;
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IdInput {
-    pub id: i64,
+pub mod board {
+    use super::prelude::*;
+
+    /// Every work item across every repository — the dashboard's board.
+    ///
+    /// Separate from `issues.list` rather than one operation with an optional
+    /// parameter, because a scope that changes with input cannot be authorized.
+    #[operation(id = "issues.board", actor = SessionSelf, scope = Global, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues board")]
+    pub struct Input {
+        /// Include closed work items.
+        #[operand(default = false)]
+        pub all: bool,
+        /// Include items claimed by an automation-class session's branch. Defaults
+        /// to `false` — the board shows the work of the interactive fleet, not the
+        /// trackers its machinery opens for itself.
+        #[operand(default = false)]
+        pub automation: bool,
+    }
+
+    pub type Output = Vec<IssueView>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateInput {
-    pub branch: String,
-    pub request: CreateIssueReq,
+pub mod close {
+    use super::prelude::*;
+
+    /// Close one or more work items atomically.
+    #[operation(id = "issues.close", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues close",
+                render = custom)]
+    pub struct Input {
+        /// One or more Loom work-item ids. Applied atomically: either every id
+        /// succeeds or none does.
+        #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
+        pub ids: Vec<i64>,
+        #[operand(context)]
+        pub repo_root: String,
+    }
+
+    pub type Output = IssueActionsResult;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetTagInput {
-    pub id: i64,
-    pub key: String,
-    pub request: TagReq,
+pub mod create {
+    use super::prelude::*;
+
+    /// Create a work item claimed by this session's branch.
+    #[operation(id = "issues.create", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues add",
+                render = custom)]
+    pub struct Input {
+        /// One-line summary of the work.
+        #[operand(positional)]
+        #[schemars(length(min = 1))]
+        pub title: String,
+        /// Optional detail.
+        #[operand(default = String::new())]
+        pub body: String,
+        /// Link the item to an existing GitHub issue number.
+        pub github_issue: Option<i64>,
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = IssueView;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeleteTagInput {
-    pub id: i64,
-    pub key: String,
+pub mod delete {
+    use super::prelude::*;
+
+    /// Permanently delete one or more work items atomically.
+    #[operation(id = "issues.delete", actor = SessionSelf, scope = Repository, risk = Destructive,
+                grants = ["loom/issues/write@v1"], cli = "issues delete", cli_alias = "rm", render = custom)]
+    pub struct Input {
+        /// One or more Loom work-item ids. Applied atomically: either every id
+        /// succeeds or none does.
+        #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
+        pub ids: Vec<i64>,
+        #[operand(context)]
+        pub repo_root: String,
+    }
+
+    pub type Output = IssueActionsResult;
 }
 
-typed_api_operation!(
-    List,
-    LIST_SPEC,
-    ListInput,
-    Vec<IssueView>,
-    |input: &ListInput| {
-        let repo_root = encode_path_segment(&input.repo_root);
-        Ok(OperationRequest::new(
-            &LIST_SPEC,
-            format!(
-                "/api/repos/issues?repo_root={repo_root}&scope={}&all={}",
-                input.scope.as_str(),
-                input.all
-            ),
-        ))
+pub mod get {
+    use super::prelude::*;
+
+    /// Inspect one work item and the status of the branch working it.
+    #[operation(id = "issues.get", actor = SessionSelf, scope = Repository, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues get", cli_alias = "show", render = custom)]
+    pub struct Input {
+        /// A Loom work-item id.
+        #[operand(positional)]
+        #[schemars(range(min = 1))]
+        pub id: i64,
+        #[operand(context)]
+        pub repo_root: String,
     }
-);
 
-typed_api_operation!(Get, GET_SPEC, IdInput, IssueView, |input: &IdInput| {
-    Ok(OperationRequest::new(
-        &GET_SPEC,
-        format!("/api/issues/{}", input.id),
-    ))
-});
+    pub type Output = IssueView;
+}
 
-typed_api_operation!(
-    Create,
-    CREATE_SPEC,
-    CreateInput,
-    IssueView,
-    |input: &CreateInput| {
-        Ok(OperationRequest::new(
-            &CREATE_SPEC,
-            format!(
-                "/api/branches/{}/issues",
-                encode_path_segment(&input.branch)
-            ),
-        ))
+pub mod list {
+    //! `issues.list` — the reference example for every operation in the registry.
+    //!
+    //! Read top to bottom, this is the whole contract: who may call it, what it
+    //! accepts, what it returns, and how it prints. REST, the CLI, and MCP are all
+    //! generated from what is here; none of them adds arguments of its own.
+
+    use super::prelude::*;
+
+    /// List current-session and repository work items.
+    #[operation(id = "issues.list", actor = SessionSelf, scope = Repository, risk = Read,
+                grants = ["loom/issues/read@v1"], cli = "issues list", cli_alias = "ls", view = View, render = custom)]
+    pub struct Input {
+        #[operand(context)]
+        pub repo_root: String,
+        /// Include closed work items.
+        #[operand(default = false)]
+        pub all: bool,
+        /// List only unclaimed backlog items — those no branch has picked up.
+        #[operand(default = false)]
+        pub backlog: bool,
     }
-);
 
-typed_api_operation!(
-    CreateBacklog,
-    BACKLOG_CREATE_SPEC,
-    CreateRepoIssueReq,
-    IssueView,
-    |_input: &CreateRepoIssueReq| {
-        Ok(OperationRequest::new(
-            &BACKLOG_CREATE_SPEC,
-            "/api/repos/issues",
-        ))
+    pub type Output = Vec<IssueView>;
+
+    /// Presentation flags: client-only, choosing how the result prints — not
+    /// carried on `Input`.
+    #[derive(Debug, Clone, Default, Deserialize, View)]
+    pub struct View {
+        /// Show every work item in the repository, uncapped.
+        pub repo: bool,
+        /// Show only the items claimed by this branch.
+        pub mine: bool,
     }
-);
+}
 
-typed_api_operation!(Close, CLOSE_SPEC, IdInput, IssueView, |input: &IdInput| {
-    Ok(OperationRequest::new(
-        &CLOSE_SPEC,
-        format!("/api/issues/{}/close", input.id),
-    ))
-});
+pub mod reopen {
+    use super::prelude::*;
 
-typed_api_operation!(
-    Reopen,
-    REOPEN_SPEC,
-    IdInput,
-    IssueView,
-    |input: &IdInput| {
-        Ok(OperationRequest::new(
-            &REOPEN_SPEC,
-            format!("/api/issues/{}/reopen", input.id),
-        ))
+    /// Reopen one or more closed work items atomically.
+    #[operation(id = "issues.reopen", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues reopen", render = custom)]
+    pub struct Input {
+        /// One or more Loom work-item ids. Applied atomically: either every id
+        /// succeeds or none does.
+        #[operand(positional)]
+        #[schemars(inner(range(min = 1)))]
+        pub ids: Vec<i64>,
+        #[operand(context)]
+        pub repo_root: String,
     }
-);
 
-typed_api_operation!(
-    Delete,
-    DELETE_SPEC,
-    IdInput,
-    DeleteIssueResult,
-    |input: &IdInput| {
-        Ok(OperationRequest::new(
-            &DELETE_SPEC,
-            format!("/api/issues/{}", input.id),
-        ))
+    pub type Output = IssueActionsResult;
+}
+
+pub mod tags {
+    //! Free-form `(key, value)` annotations on work items.
+    pub(super) use super::prelude;
+    pub mod delete {
+        use super::prelude::*;
+
+        /// Remove one free-form tag from a work item.
+        #[operation(id = "issues.tags.delete", actor = SessionSelf, scope = Repository,
+                    risk = Write, grants = ["loom/issues/write@v1"], cli = "issues tag delete",
+                    cli_alias = "rm", render = custom)]
+        pub struct Input {
+            /// A Loom work-item id.
+            #[operand(positional)]
+            #[schemars(range(min = 1))]
+            pub id: i64,
+            /// The tag key to remove.
+            #[operand(positional)]
+            #[schemars(length(min = 1))]
+            pub key: String,
+            #[operand(context)]
+            pub repo_root: String,
+        }
+
+        pub type Output = IssueView;
     }
-);
 
-typed_api_operation!(
-    SetTag,
-    TAG_SET_SPEC,
-    SetTagInput,
-    IssueView,
-    |input: &SetTagInput| {
-        Ok(OperationRequest::new(
-            &TAG_SET_SPEC,
-            format!(
-                "/api/issues/{}/tags/{}",
-                input.id,
-                encode_path_segment(&input.key)
-            ),
-        ))
+    pub mod set {
+        use super::prelude::*;
+
+        /// Set one free-form tag on a work item.
+        #[operation(id = "issues.tags.set", actor = SessionSelf, scope = Repository, risk = Write,
+                    grants = ["loom/issues/write@v1"], cli = "issues tag set", render = custom)]
+        pub struct Input {
+            /// A Loom work-item id.
+            #[operand(positional)]
+            #[schemars(range(min = 1))]
+            pub id: i64,
+            /// The tag key.
+            #[operand(positional)]
+            #[schemars(length(min = 1))]
+            pub key: String,
+            /// The tag value. Use `issues tag delete` to clear a tag.
+            #[operand(positional)]
+            #[schemars(length(min = 1))]
+            pub value: String,
+            /// One-line reason accompanying the tag.
+            #[operand(default = String::new())]
+            pub note: String,
+            #[operand(context)]
+            pub repo_root: String,
+        }
+
+        pub type Output = IssueView;
     }
-);
+}
 
-typed_api_operation!(
-    DeleteTag,
-    TAG_DELETE_SPEC,
-    DeleteTagInput,
-    IssueView,
-    |input: &DeleteTagInput| {
-        Ok(OperationRequest::new(
-            &TAG_DELETE_SPEC,
-            format!(
-                "/api/issues/{}/tags/{}",
-                input.id,
-                encode_path_segment(&input.key)
-            ),
-        ))
+pub mod update {
+    use super::prelude::*;
+
+    /// Edit a work item's own fields.
+    ///
+    /// Claiming is not here: a claim is made by launching a session against an
+    /// item, so the only claim change this expresses is `unclaim: bool`, which
+    /// returns the item to the backlog and cannot represent any other transition.
+    #[operation(id = "issues.update", actor = SessionSelf, scope = Repository, risk = Write,
+                grants = ["loom/issues/write@v1"], cli = "issues update")]
+    pub struct Input {
+        /// A Loom work-item id.
+        #[operand(positional)]
+        #[schemars(range(min = 1))]
+        pub id: i64,
+        /// Replace the one-line summary.
+        #[schemars(length(min = 1))]
+        pub title: Option<String>,
+        /// Replace the detail body.
+        pub body: Option<String>,
+        /// `open` or `closed`.
+        #[schemars(extend("enum" = ::serde_json::json!(["open", "closed", null])))]
+        pub status: Option<String>,
+        /// GitHub issue mapping as `owner/name#number`. An empty string clears the
+        /// mapping; omitting the field leaves it unchanged.
+        pub github: Option<String>,
+        /// Return the item to the unclaimed backlog.
+        #[operand(default = false)]
+        pub unclaim: bool,
+        #[operand(context)]
+        pub repo_root: String,
     }
-);
 
-typed_api_operation!(
-    Actions,
-    ACTIONS_SPEC,
-    IssueActionsReq,
-    IssueActionsResult,
-    |_input: &IssueActionsReq| { Ok(OperationRequest::new(&ACTIONS_SPEC, "/api/issues/actions",)) }
-);
+    pub type Output = IssueView;
+}
+
+static OPERATIONS: &[&OperationSpec] = &[
+    list::SPEC,
+    board::SPEC,
+    get::SPEC,
+    create::SPEC,
+    update::SPEC,
+    backlog::create::SPEC,
+    close::SPEC,
+    reopen::SPEC,
+    delete::SPEC,
+    tags::set::SPEC,
+    tags::delete::SPEC,
+    actions::SPEC,
+];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {
         name: "issues",
         label: "Work items",
         operations: OPERATIONS,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_requests_preserve_exact_rest_encoding() {
-        let request = List::authorization_request(&ListInput {
-            repo_root: "/tmp/a repo".to_string(),
-            scope: ListScope::Repo,
-            all: true,
-        })
-        .unwrap();
-        assert_eq!(request.method, "GET");
-        assert_eq!(
-            request.path,
-            "/api/repos/issues?repo_root=%2Ftmp%2Fa%20repo&scope=repo&all=true"
-        );
-
-        let request = Get::authorization_request(&IdInput { id: 42 }).unwrap();
-        assert_eq!(request.path, "/api/issues/42");
-
-        let request = SetTag::authorization_request(&SetTagInput {
-            id: 42,
-            key: "review/state".to_string(),
-            request: TagReq {
-                value: "ready".to_string(),
-                note: String::new(),
-                by: Some("agent".to_string()),
-            },
-        })
-        .unwrap();
-        assert_eq!(request.method, "PUT");
-        assert_eq!(request.path, "/api/issues/42/tags/review%2Fstate");
-    }
-
-    #[test]
-    fn semantic_issue_authorization_projections_have_distinct_routes() {
-        assert_eq!(Close::SPEC.path, "/api/issues/{issue}/close");
-        assert_eq!(Reopen::SPEC.path, "/api/issues/{issue}/reopen");
-        assert_eq!(Delete::SPEC.method, "DELETE");
-        assert_eq!(SetTag::SPEC.method, "PUT");
-        assert!(Actions::SPEC.mcp.is_none());
-        assert_eq!(
-            super::operation_for_request("POST", "/api/issues/42/close")
-                .unwrap()
-                .id,
-            "issues.close"
-        );
-        assert_eq!(
-            super::operation_for_request("POST", "/api/issues/actions")
-                .unwrap()
-                .id,
-            "issues.actions"
-        );
     }
 }

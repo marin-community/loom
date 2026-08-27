@@ -1,18 +1,16 @@
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
+use axum::http::StatusCode;
+use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
-    CloneProfileReq, EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileEnvView,
-    ProfileReq, ProfileView, PutProfileEnvReq,
+    EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileDeleteResult,
+    ProfileEnvView, ProfileView,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
-pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
+pub(super) fn input(req: profiles_operations::update::Input, name: String) -> ProfileInput {
     ProfileInput {
         name,
         description: req.description,
@@ -34,6 +32,64 @@ pub(super) fn input(req: ProfileReq, name: String) -> ProfileInput {
         github_repositories: req.github_repositories,
         allowed_tools: req.runtime_permissions,
         mcp_access: req.mcp_access,
+    }
+}
+
+/// Build profile input from `profiles.create`'s typed fields.
+fn profile_input_from_create(
+    input: profiles_operations::create::Input,
+    name: String,
+) -> ProfileInput {
+    ProfileInput {
+        name,
+        description: input.description,
+        agent_kind: input.agent_kind,
+        model: input.model,
+        effort: input.effort,
+        protocol: input.protocol,
+        mode: input.mode,
+        class: input.class,
+        strict: input.strict,
+        env_clear: input.env_clear,
+        ambient_allowlist: input.ambient_allowlist,
+        idle_archive_secs: input.idle_archive_secs,
+        max_concurrent: input.max_concurrent,
+        turn_budget: input.turn_budget,
+        prelude: input.prelude,
+        instructions: input.instructions,
+        restricted: input.restricted,
+        github_repositories: input.github_repositories,
+        allowed_tools: input.runtime_permissions,
+        mcp_access: input.mcp_access,
+    }
+}
+
+/// The twin of [`input`], from `profiles.update`'s own typed fields.
+fn profile_input_from_update(
+    input: profiles_operations::update::Input,
+    name: String,
+) -> ProfileInput {
+    ProfileInput {
+        name,
+        description: input.description,
+        agent_kind: input.agent_kind,
+        model: input.model,
+        effort: input.effort,
+        protocol: input.protocol,
+        mode: input.mode,
+        class: input.class,
+        strict: input.strict,
+        env_clear: input.env_clear,
+        ambient_allowlist: input.ambient_allowlist,
+        idle_archive_secs: input.idle_archive_secs,
+        max_concurrent: input.max_concurrent,
+        turn_budget: input.turn_budget,
+        prelude: input.prelude,
+        instructions: input.instructions,
+        restricted: input.restricted,
+        github_repositories: input.github_repositories,
+        allowed_tools: input.runtime_permissions,
+        mcp_access: input.mcp_access,
     }
 }
 
@@ -89,22 +145,28 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
     })
 }
 
-pub(super) async fn list_profiles(State(st): State<AppState>) -> ApiResult<Json<Vec<ProfileView>>> {
+pub(super) async fn list_profiles_operation(
+    context: OperationContext,
+    _input: profiles_operations::list::Input,
+) -> ApiResult<Vec<ProfileView>> {
+    let st = &context.state;
     let mut views = Vec::new();
     for item in profile::list(&st.db).await? {
-        views.push(view(&st, item).await?);
+        views.push(view(st, item).await?);
     }
-    Ok(Json(views))
+    Ok(views)
 }
 
-pub(super) async fn get_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<ProfileView>> {
-    let item = profile::get(&st.db, &name)
+pub(super) async fn get_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::get::Input,
+) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let name = &input.name;
+    let item = profile::get(&st.db, name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    Ok(Json(view(&st, item).await?))
+    view(st, item).await
 }
 
 async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileView> {
@@ -136,30 +198,32 @@ async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileVi
     })
 }
 
-pub(super) async fn effective_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<EffectiveProfileView>> {
-    let item = profile::get(&st.db, &name)
+pub(super) async fn effective_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::effective::Input,
+) -> ApiResult<EffectiveProfileView> {
+    let st = &context.state;
+    let name = &input.name;
+    let item = profile::get(&st.db, name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    Ok(Json(effective(&st, item).await?))
+    effective(st, item).await
 }
 
-pub(super) async fn create_profile(
-    State(st): State<AppState>,
-    Json(req): Json<ProfileReq>,
-) -> ApiResult<(StatusCode, Json<ProfileView>)> {
-    let name = req.name.trim().to_string();
+pub(super) async fn create_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::create::Input,
+) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let name = input.name.trim().to_string();
+    let profile_input = profile_input_from_create(input, name.clone());
     let _permit = st.launch_gate.acquire_profile(&name).await;
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
-    match profile::create(&st.db, &input(req, name.clone()))
+    match profile::create(&st.db, &profile_input)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?
     {
-        profile::CreateProfileOutcome::Created(item) => {
-            Ok((StatusCode::CREATED, Json(view(&st, item).await?)))
-        }
+        profile::CreateProfileOutcome::Created(item) => view(st, item).await,
         profile::CreateProfileOutcome::Exists(_) => Err(AppError::new(
             StatusCode::CONFLICT,
             format!("profile '{name}' already exists"),
@@ -167,21 +231,24 @@ pub(super) async fn create_profile(
     }
 }
 
-pub(super) async fn put_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-    Json(req): Json<ProfileReq>,
-) -> ApiResult<Json<ProfileView>> {
+pub(super) async fn update_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::update::Input,
+) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let name = input.name.clone();
+    let expected_revision = input.expected_revision;
+    let profile_input = profile_input_from_update(input, name.clone());
     let _permit = st.launch_gate.acquire_profile(&name).await;
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
-    if let Some(expected) = req.expected_revision {
-        return match profile::update_expected(&st.db, &input(req, name.clone()), expected)
+    if let Some(expected) = expected_revision {
+        return match profile::update_expected(&st.db, &profile_input, expected)
             .await
             .map_err(|error| AppError::bad_request(error.to_string()))?
         {
-            profile::UpdateProfileOutcome::Updated(item) => Ok(Json(view(&st, item).await?)),
+            profile::UpdateProfileOutcome::Updated(item) => view(st, item).await,
             profile::UpdateProfileOutcome::Stale(current) => {
-                let current = view(&st, current).await?;
+                let current = view(st, current).await?;
                 Err(AppError::conflict(format!(
                     "profile '{name}' changed from revision {expected} to revision {}",
                     current.revision
@@ -191,18 +258,19 @@ pub(super) async fn put_profile(
             profile::UpdateProfileOutcome::Missing => Err(AppError::not_found("profile")),
         };
     }
-    let item = profile::upsert(&st.db, &input(req, name))
+    let item = profile::upsert(&st.db, &profile_input)
         .await
         .map_err(|e| AppError::bad_request(e.to_string()))?;
-    Ok(Json(view(&st, item).await?))
+    view(st, item).await
 }
 
-pub(super) async fn clone_profile(
-    State(st): State<AppState>,
-    Path(source_name): Path<String>,
-    Json(req): Json<CloneProfileReq>,
-) -> ApiResult<(StatusCode, Json<ProfileView>)> {
-    let target_name = req.name.trim().to_string();
+pub(super) async fn clone_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::clone::Input,
+) -> ApiResult<ProfileView> {
+    let source_name = input.source;
+    let st = &context.state;
+    let target_name = input.name.trim().to_string();
     let _permits = st
         .launch_gate
         .acquire_profiles([source_name.as_str(), target_name.as_str()])
@@ -213,13 +281,13 @@ pub(super) async fn clone_profile(
     let source = profile::get(&st.db, &source_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    if source.revision != req.expected_profile_revision {
-        let current = view(&st, source).await?;
+    if source.revision != input.expected_profile_revision {
+        let current = view(st, source).await?;
         let fresh = super::launches::resolve_launch(
-            &st,
+            st,
             &LaunchSelection {
                 profile: source_name.clone(),
-                overrides: req.overrides.clone(),
+                overrides: input.overrides.clone(),
             },
             &crate::launch::ResolveOptions {
                 ignore_capacity: true,
@@ -229,7 +297,7 @@ pub(super) async fn clone_profile(
         .await?;
         return Err(AppError::conflict(format!(
             "profile '{source_name}' changed from revision {} to revision {}",
-            req.expected_profile_revision, current.revision
+            input.expected_profile_revision, current.revision
         ))
         .with_fields(serde_json::json!({
             "profile": current,
@@ -248,10 +316,10 @@ pub(super) async fn clone_profile(
     // round-trips environment values, custom MCP source, or another redacted
     // policy representation.
     let resolved = match super::launches::resolve_launch(
-        &st,
+        st,
         &LaunchSelection {
             profile: source_name.clone(),
-            overrides: req.overrides.clone(),
+            overrides: input.overrides.clone(),
         },
         &crate::launch::ResolveOptions {
             ignore_capacity: true,
@@ -268,7 +336,7 @@ pub(super) async fn clone_profile(
             )));
         }
     };
-    if resolved.view.resolver_revision != req.expected_resolver_revision {
+    if resolved.view.resolver_revision != input.expected_resolver_revision {
         return Err(AppError::conflict(
             "profile resolver changed after preview; review the fresh resolution",
         )
@@ -280,9 +348,9 @@ pub(super) async fn clone_profile(
                 .with_fields(serde_json::json!({ "preview": resolved.view })),
         );
     }
-    let has_template = req.template.is_some();
-    let mut cloned = match req.template {
-        Some(template) => input(template, target_name.clone()),
+    let has_template = input.template.is_some();
+    let mut cloned = match input.template {
+        Some(template) => self::input(template, target_name.clone()),
         None => source
             .as_input()
             .map_err(|error| AppError::bad_request(error.to_string()))?,
@@ -304,32 +372,30 @@ pub(super) async fn clone_profile(
     let prepared = profile::prepare_input(&st.db, &cloned)
         .await
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let environment = req
+    let environment = input
         .environment
         .unwrap_or_else(|| weaver_api::CloneProfileEnvironmentReq {
-            inherit: req.copy_environment,
+            inherit: input.copy_environment,
             ..Default::default()
         });
     match profile::create_clone_prepared(
         &st.db,
         &source_name,
-        req.expected_profile_revision,
+        input.expected_profile_revision,
         prepared,
         &environment,
     )
     .await
     .map_err(|error| AppError::bad_request(error.to_string()))?
     {
-        profile::CloneProfileOutcome::Created(item) => {
-            Ok((StatusCode::CREATED, Json(view(&st, item).await?)))
-        }
+        profile::CloneProfileOutcome::Created(item) => view(st, item).await,
         profile::CloneProfileOutcome::Stale(current) => {
-            let current = view(&st, current).await?;
+            let current = view(st, current).await?;
             let fresh = super::launches::resolve_launch(
-                &st,
+                st,
                 &LaunchSelection {
                     profile: source_name.clone(),
-                    overrides: req.overrides,
+                    overrides: input.overrides,
                 },
                 &crate::launch::ResolveOptions {
                     ignore_capacity: true,
@@ -339,7 +405,7 @@ pub(super) async fn clone_profile(
             .await?;
             Err(AppError::conflict(format!(
                 "profile '{source_name}' changed from revision {} to revision {}",
-                req.expected_profile_revision, current.revision
+                input.expected_profile_revision, current.revision
             ))
             .with_fields(serde_json::json!({
                 "profile": current,
@@ -352,25 +418,34 @@ pub(super) async fn clone_profile(
     }
 }
 
-pub(super) async fn delete_profile(
-    State(st): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
+pub(super) async fn delete_profile_operation(
+    context: OperationContext,
+    input: profiles_operations::delete::Input,
+) -> ApiResult<ProfileDeleteResult> {
+    let st = &context.state;
+    let name = input.name;
     let _permit = st.launch_gate.acquire_profile(&name).await;
     match profile::remove(&st.db, &name).await {
-        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(true) => Ok(ProfileDeleteResult {
+            deleted: true,
+            name,
+        }),
         Ok(false) => Err(AppError::not_found("profile")),
         Err(e) => Err(AppError::bad_request(e.to_string())),
     }
 }
 
-pub(super) async fn put_profile_env(
-    State(st): State<AppState>,
-    Path((profile_name, name)): Path<(String, String)>,
-    Json(req): Json<PutProfileEnvReq>,
-) -> ApiResult<Json<ProfileView>> {
+pub(super) async fn set_profile_env_operation(
+    context: OperationContext,
+    input: profiles_operations::env::set::Input,
+) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let profile_name = input.profile;
+    let name = input.name;
+    let value = input.value;
+    let secret_ref = input.secret_ref;
     let _permit = st.launch_gate.acquire_profile(&profile_name).await;
-    match (req.value.as_deref(), req.secret_ref.as_deref()) {
+    match (value.as_deref(), secret_ref.as_deref()) {
         (Some(value), None) => profile::env_set(&st.db, &profile_name, &name, value).await,
         (None, Some(secret_ref)) => {
             profile::env_set_secret(&st.db, &profile_name, &name, secret_ref).await
@@ -383,13 +458,16 @@ pub(super) async fn put_profile_env(
     let item = profile::get(&st.db, &profile_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    Ok(Json(view(&st, item).await?))
+    view(st, item).await
 }
 
-pub(super) async fn delete_profile_env(
-    State(st): State<AppState>,
-    Path((profile_name, name)): Path<(String, String)>,
-) -> ApiResult<Json<ProfileView>> {
+pub(super) async fn delete_profile_env_operation(
+    context: OperationContext,
+    input: profiles_operations::env::delete::Input,
+) -> ApiResult<ProfileView> {
+    let st = &context.state;
+    let profile_name = input.profile;
+    let name = input.name;
     let _permit = st.launch_gate.acquire_profile(&profile_name).await;
     profile::get(&st.db, &profile_name)
         .await?
@@ -398,5 +476,24 @@ pub(super) async fn delete_profile_env(
     let item = profile::get(&st.db, &profile_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
-    Ok(Json(view(&st, item).await?))
+    view(st, item).await
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `profiles.*`, bound onto
+// `weaver_api::operations::profiles`.
+// ---------------------------------------------------------------------------
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<profiles_operations::list::Op, _, _>(list_profiles_operation),
+        register::<profiles_operations::get::Op, _, _>(get_profile_operation),
+        register::<profiles_operations::effective::Op, _, _>(effective_profile_operation),
+        register::<profiles_operations::create::Op, _, _>(create_profile_operation),
+        register::<profiles_operations::update::Op, _, _>(update_profile_operation),
+        register::<profiles_operations::delete::Op, _, _>(delete_profile_operation),
+        register::<profiles_operations::clone::Op, _, _>(clone_profile_operation),
+        register::<profiles_operations::env::set::Op, _, _>(set_profile_env_operation),
+        register::<profiles_operations::env::delete::Op, _, _>(delete_profile_env_operation),
+    ]
 }

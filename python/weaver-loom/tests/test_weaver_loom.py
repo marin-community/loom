@@ -109,10 +109,10 @@ class StubClient(Client):
 
 
 def test_changes_uses_the_canonical_typed_changes_route():
-    client = StubClient(replies={"/sessions/s1/changes": {"files": []}})
+    client = StubClient(replies={"/sessions/changes": {"files": []}})
 
     assert client.changes("s1") == {"files": []}
-    assert client.requests == [("GET", "/sessions/s1/changes", None)]
+    assert client.requests == [("POST", "/sessions/changes", {"session": "s1"})]
 
 
 def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
@@ -120,7 +120,7 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
         "repo": "marin-community/marin",
         "goal": "investigate the alert",
     }
-    client = StubClient(capabilities=["launch"], replies={"/runs": {"id": "r1"}})
+    client = StubClient(capabilities=["launch"], replies={"/runs/create": {"id": "r1"}})
 
     assert client.run("ops", "alert-1842", session_request, source="ops") == {
         "id": "r1"
@@ -128,7 +128,7 @@ def test_profile_scoped_run_is_capability_gated_and_preserves_idempotency():
     assert client.requests == [
         (
             "POST",
-            "/runs",
+            "/runs/create",
             {
                 "profile": "ops",
                 "idempotency_key": "alert-1842",
@@ -243,7 +243,7 @@ def make_round(scope=None, sessions=None, capabilities=None, **config):
     client = StubClient(
         capabilities=capabilities or [],
         profile=config.get("profile", ""),
-        replies={"/sessions?automation=false": sessions or []},
+        replies={"/sessions/list": sessions or []},
     )
     return Round(
         config={"name": "t", "scope": scope or {}, **config},
@@ -262,7 +262,7 @@ def test_sessions_skips_terminal_and_counts_surveyed():
     )
     assert [s["id"] for s in rnd.sessions()] == ["live"]
     assert rnd.surveyed == 1
-    assert rnd.client.requests == [("GET", "/sessions?automation=false", None)]
+    assert rnd.client.requests == [("POST", "/sessions/list", {})]
 
 
 def test_scope_attention_filter_matches_exact_and_negated():
@@ -297,7 +297,7 @@ def branch_session(id, branch_id, **kw):
 
 def trigger_round(trigger, sessions, scope=None):
     client = StubClient(
-        capabilities=[], replies={"/sessions?automation=false": sessions}
+        capabilities=[], replies={"/sessions/list": sessions}
     )
     return Round(
         config={"name": "t", "scope": scope or {}, "trigger": trigger}, client=client
@@ -400,7 +400,7 @@ def test_observe_is_implicit_and_writes_are_gated():
         with pytest.raises(CapabilityDenied):
             call()
     # The gate fires before any request leaves the process.
-    assert c.requests == [("GET", "/sessions?automation=false", None)]
+    assert c.requests == [("POST", "/sessions/list", {})]
 
 
 def test_capabilities_constant_matches_the_ladder():
@@ -423,41 +423,72 @@ def test_mark_sets_a_loud_level_with_attribution():
     c.mark("s1", "blocked", "stuck", by="watch")
     assert c.requests == [
         (
-            "PUT",
-            "/sessions/s1/tags/triage",
-            {"value": "blocked", "note": "stuck", "by": "watch"},
+            "POST",
+            "/sessions/tags/set",
+            {"session": "s1", "key": "triage", "value": "blocked", "note": "stuck", "by": "watch"},
         )
     ]
 
 
-def test_mark_ok_clears_via_delete_with_by_query():
+def test_mark_ok_clears_via_delete_with_by_attribution():
     c = StubClient(capabilities=["mark"])
     c.mark("s1", "ok", by="watch")
     c.mark("s1", "")
     assert c.requests == [
-        ("DELETE", "/sessions/s1/tags/triage?by=watch", None),
-        ("DELETE", "/sessions/s1/tags/triage", None),
+        ("POST", "/sessions/tags/delete", {"session": "s1", "key": "triage", "by": "watch"}),
+        ("POST", "/sessions/tags/delete", {"session": "s1", "key": "triage"}),
     ]
 
 
-def test_set_tags_replaces_one_authors_set_with_exact_clears():
-    c = StubClient(capabilities=["mark"])
-    c.set_tags(
+def test_set_tags_sets_the_desired_tags_and_drops_stale_and_cleared_ones():
+    c = StubClient(
+        capabilities=["mark"],
+        replies={
+            "/sessions/tags/list": {
+                "tags": [
+                    {"key": "idle", "value": "idle", "set_by": "agent"},
+                    {"key": "stale", "value": "attention", "set_by": "watch"},
+                    {"key": "human-review", "value": "attention", "set_by": "watch"},
+                ]
+            },
+            "/sessions/get": {"id": "s1"},
+        },
+    )
+    result = c.set_tags(
         "s1",
-        [{"key": "review", "value": "attention", "note": "ready"}],
+        [{"key": "human-review", "value": "attention", "note": "ready"}],
         by="watch",
         clear=[{"key": "idle", "value": "idle"}],
     )
+    # `stale` (still authored by "watch", dropped from the desired set) is
+    # cleared; `human-review` (also "watch"-authored, still desired) is left
+    # for the plain `set` below to upsert rather than being cleared first.
     assert c.requests == [
+        ("POST", "/sessions/tags/list", {"session": "s1"}),
+        ("POST", "/sessions/tags/delete", {"session": "s1", "key": "stale", "by": "watch"}),
         (
-            "PUT",
-            "/sessions/s1/tags",
+            "POST",
+            "/sessions/tags/set",
             {
-                "tags": [{"key": "review", "value": "attention", "note": "ready"}],
-                "clear": [{"key": "idle", "value": "idle"}],
+                "session": "s1",
+                "key": "human-review",
+                "value": "attention",
+                "note": "ready",
                 "by": "watch",
             },
-        )
+        ),
+        ("POST", "/sessions/tags/delete", {"session": "s1", "key": "idle", "by": "watch"}),
+        ("POST", "/sessions/get", {"session": "s1"}),
+    ]
+    assert result == {"id": "s1"}
+
+
+def test_set_tags_defaults_the_author_to_manual():
+    c = StubClient(capabilities=["mark"], replies={"/sessions/tags/list": {"tags": []}})
+    c.set_tags("s1", [])
+    assert c.requests == [
+        ("POST", "/sessions/tags/list", {"session": "s1"}),
+        ("POST", "/sessions/get", {"session": "s1"}),
     ]
 
 
@@ -466,8 +497,8 @@ def test_nudge_carries_by_for_the_audit_event():
     c.nudge("s1", "hello", by="watch")
     c.nudge("s1", "staged", submit=False)
     assert c.requests == [
-        ("POST", "/sessions/s1/send", {"text": "hello", "submit": True, "by": "watch"}),
-        ("POST", "/sessions/s1/send", {"text": "staged", "submit": False}),
+        ("POST", "/sessions/send", {"session": "s1", "text": "hello", "submit": True, "by": "watch"}),
+        ("POST", "/sessions/send", {"session": "s1", "text": "staged", "submit": False}),
     ]
 
 
@@ -475,18 +506,18 @@ def test_agent_returns_output_or_none():
     c = StubClient(
         capabilities=["judge"],
         profile="watch",
-        replies={"/agent/oneshot": {"output": "blocked: judged"}},
+        replies={"/agents/oneshot": {"output": "blocked: judged"}},
     )
     assert c.agent("look", model="haiku", effort="low") == "blocked: judged"
     assert c.requests[-1] == (
         "POST",
-        "/agent/oneshot",
+        "/agents/oneshot",
         {"prompt": "look", "model": "haiku", "effort": "low", "profile": "watch"},
     )
     assert c.agent("look", runtime="codex") == "blocked: judged"
     assert c.requests[-1] == (
         "POST",
-        "/agent/oneshot",
+        "/agents/oneshot",
         {
             "prompt": "look",
             "model": "",
@@ -496,7 +527,7 @@ def test_agent_returns_output_or_none():
         },
     )
     # A degraded daemon reply ({output: null}) reads as None, not an error.
-    absent = StubClient(capabilities=["judge"], replies={"/agent/oneshot": {"output": None}})
+    absent = StubClient(capabilities=["judge"], replies={"/agents/oneshot": {"output": None}})
     assert absent.agent("look") is None
 
 

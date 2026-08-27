@@ -1,5 +1,5 @@
-//! Custom agents over HTTP: the `/api/agents/custom` CRUD surface, how the
-//! definitions merge into `/api/agents`, and launching a session with one.
+//! Custom agents over HTTP: the `agents.custom.*` CRUD operations, how the
+//! definitions merge into `agents.list`, and launching a session with one.
 
 use std::path::Path;
 
@@ -8,7 +8,7 @@ use serial_test::serial;
 
 use crate::fixtures::TestServer;
 
-/// Find an agent by kind in the `/api/agents` picker list.
+/// Find an agent by kind in the `agents.list` picker list.
 fn find<'a>(agents: &'a serde_json::Value, kind: &str) -> Option<&'a serde_json::Value> {
     agents
         .as_array()
@@ -23,14 +23,13 @@ async fn agents_list_merges_builtins_and_custom() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    let res = client.get("/api/agents").await.unwrap();
+    let res = client.post("/api/agents/list", json!({})).await.unwrap();
     let agents = &res["agents"];
     // Builtins are present and flagged as such.
     let claude = find(agents, "claude").expect("claude is builtin");
     assert_eq!(claude["builtin"], true);
     assert!(find(agents, "codex").is_some(), "codex is builtin");
-    // The old builtin "shell" agent is gone; the test fixture seeds it as a
-    // custom agent instead, so it shows up as non-builtin.
+    // The fixture seeds "shell" as a custom agent, so it shows up as non-builtin.
     let shell = find(agents, "shell").expect("fixture seeds a custom shell agent");
     assert_eq!(shell["builtin"], false);
     // The full custom definitions ride alongside the picker list.
@@ -47,7 +46,7 @@ async fn custom_agent_crud_and_validation() {
     // Create one. The reply is the refreshed custom list.
     let res = client
         .post(
-            "/api/agents/custom",
+            "/api/agents/custom/create",
             json!({
                 "name": "aider",
                 "label": "Aider",
@@ -65,7 +64,7 @@ async fn custom_agent_crud_and_validation() {
     assert_eq!(aider["launch"], "aider --message");
 
     // It now appears in the merged picker list as a non-builtin.
-    let list = client.get("/api/agents").await.unwrap();
+    let list = client.post("/api/agents/list", json!({})).await.unwrap();
     let picked = find(&list["agents"], "aider").expect("custom agent in picker");
     assert_eq!(picked["builtin"], false);
     assert_eq!(picked["label"], "Aider");
@@ -74,7 +73,7 @@ async fn custom_agent_crud_and_validation() {
     assert!(
         client
             .post(
-                "/api/agents/custom",
+                "/api/agents/custom/create",
                 json!({ "name": "claude", "label": "X", "launch": "x" })
             )
             .await
@@ -85,7 +84,7 @@ async fn custom_agent_crud_and_validation() {
     assert!(
         client
             .post(
-                "/api/agents/custom",
+                "/api/agents/custom/create",
                 json!({ "name": "has space", "label": "X", "launch": "x" })
             )
             .await
@@ -96,7 +95,7 @@ async fn custom_agent_crud_and_validation() {
     // shell — but it still needs a label).
     assert!(
         client
-            .post("/api/agents/custom", json!({ "name": "empty" }))
+            .post("/api/agents/custom/create", json!({ "name": "empty" }))
             .await
             .is_err(),
         "a label-less agent must be rejected"
@@ -105,7 +104,7 @@ async fn custom_agent_crud_and_validation() {
     assert!(
         client
             .post(
-                "/api/agents/custom",
+                "/api/agents/custom/create",
                 json!({ "name": "aider", "label": "Dup", "launch": "x" })
             )
             .await
@@ -113,11 +112,12 @@ async fn custom_agent_crud_and_validation() {
         "a duplicate name must be rejected"
     );
 
-    // Update it in place (the name is immutable, taken from the path).
+    // Update it in place (the name is immutable).
     let res = client
-        .put(
-            "/api/agents/custom/aider",
+        .post(
+            "/api/agents/custom/update",
             json!({
+                "name": "aider",
                 "label": "Aider v2",
                 "setup": "",
                 "launch": "aider",
@@ -139,9 +139,9 @@ async fn custom_agent_crud_and_validation() {
     // Updating an unknown (or builtin) name is a 404.
     assert!(
         client
-            .put(
-                "/api/agents/custom/claude",
-                json!({ "label": "X", "launch": "x" })
+            .post(
+                "/api/agents/custom/update",
+                json!({ "name": "claude", "label": "X", "launch": "x" })
             )
             .await
             .is_err(),
@@ -149,7 +149,10 @@ async fn custom_agent_crud_and_validation() {
     );
 
     // Delete it; it leaves the list. Deleting again is a no-op.
-    let res = client.delete("/api/agents/custom/aider").await.unwrap();
+    let res = client
+        .post("/api/agents/custom/delete", json!({ "name": "aider" }))
+        .await
+        .unwrap();
     assert!(
         !res["custom"]
             .as_array()
@@ -159,7 +162,10 @@ async fn custom_agent_crud_and_validation() {
         "aider is gone after delete"
     );
     assert!(
-        client.delete("/api/agents/custom/aider").await.is_ok(),
+        client
+            .post("/api/agents/custom/delete", json!({ "name": "aider" }))
+            .await
+            .is_ok(),
         "deleting an absent agent is a no-op"
     );
 }
@@ -174,7 +180,7 @@ async fn launch_a_session_with_a_custom_agent() {
     // launch script runs cleanly and the session comes up.
     client
         .post(
-            "/api/agents/custom",
+            "/api/agents/custom/create",
             json!({ "name": "noop", "label": "Noop", "launch": "true", "reports_status": false }),
         )
         .await
@@ -182,7 +188,7 @@ async fn launch_a_session_with_a_custom_agent() {
 
     let session = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "hi", "cwd": ts.cwd(), "agent": "noop" }),
         )
         .await
@@ -196,7 +202,7 @@ async fn launch_a_session_with_a_custom_agent() {
         assert!(
             client
                 .post(
-                    "/api/sessions",
+                    "/api/sessions/launch",
                     json!({ "goal": "hi", "cwd": ts.cwd(), "agent": agent }),
                 )
                 .await
@@ -212,7 +218,7 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
     let ts = TestServer::start().await;
     ts.client
         .post(
-            "/api/agents/custom",
+            "/api/agents/custom/create",
             json!({
                 "name": "snapshot-agent",
                 "label": "Snapshot agent",
@@ -229,7 +235,7 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
     let preview = ts
         .client
         .post(
-            "/api/session-launches/resolve",
+            "/api/sessions/launches/resolve",
             json!({ "selection": selection }),
         )
         .await
@@ -237,7 +243,7 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
 
     let repo = ts.repo_path().canonicalize().unwrap();
     let permit = ts.state.launch_gate.acquire(&repo).await;
-    let create_url = format!("http://{}/api/sessions", ts.addr);
+    let create_url = format!("http://{}/api/sessions/launch", ts.addr);
     let cwd = ts.cwd();
     let profile_revision = preview["profile_revision"].as_i64().unwrap();
     let resolver_revision = preview["resolver_revision"].as_str().unwrap().to_string();
@@ -261,11 +267,12 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
         "launch should retain its resolved snapshot while waiting for the repo"
     );
 
-    let update_url = format!("http://{}/api/agents/custom/snapshot-agent", ts.addr);
+    let update_url = format!("http://{}/api/agents/custom/update", ts.addr);
     let updating = tokio::spawn(async move {
         reqwest::Client::new()
-            .put(update_url)
+            .post(update_url)
             .json(&json!({
+                "name": "snapshot-agent",
                 "label": "Snapshot agent",
                 "launch": "printf new > resolved-agent.txt",
                 "reports_status": false
@@ -308,10 +315,10 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
     }
     assert_eq!(executed.as_deref(), Some("old"));
     ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": session["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }

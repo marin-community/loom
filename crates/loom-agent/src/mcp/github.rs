@@ -1,5 +1,14 @@
 //! Built-in MCP adapter for restricted GitHub sessions.
 //!
+//! All six tools call one registered operation,
+//! `permissions.github.restricted.invoke`: the security boundary here is a
+//! runtime check against the session's stored tool allowlist
+//! (`session.policy_allowed_tools`), not a compile-time grant, so a restricted
+//! session's policy — not its credential — decides which of these six tools
+//! it may use. `super::dispatch::bind` assumes one tool name maps to one
+//! operation; this is six tool names gated through one, so it keeps its own
+//! schemas and dispatch loop instead.
+//!
 //! Claude sees these fixed tools instead of `Bash`. The bridge carries only the
 //! session-scoped Loom token and forwards each call to Loom's REST API; the
 //! GitHub credential remains in Loom's profile/user-token store and never enters
@@ -9,28 +18,36 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+use weaver_api::operations::permissions::github::restricted::{self, invoke};
+
 use super::{Adapter, CapabilitySet, ServeFuture};
 
 const SERVER_NAME: &str = "loom_github";
 const COMMENT_TOOL_SET: &str = "mcp/github/comment";
 const COMMENT_TOOL_SET_V1: &str = "mcp/github/comment@v1";
 const LOOM_COMMENT_TOOL_SET_V1: &str = "loom/github/comment@v1";
-pub const BODY_MAX_BYTES: usize = 65_536;
-pub const TITLE_MAX_BYTES: usize = 256;
 const GITHUB_TOOL_NAMES: [&str; 6] = [
-    "issue_view",
-    "issue_comment",
-    "issue_edit",
-    "pr_view",
-    "pr_comment",
-    "pr_edit",
+    restricted::TOOLS[0].name,
+    restricted::TOOLS[1].name,
+    restricted::TOOLS[2].name,
+    restricted::TOOLS[3].name,
+    restricted::TOOLS[4].name,
+    restricted::TOOLS[5].name,
 ];
+
+/// Six tool names gated through one operation, so there is no name-to-operation
+/// pair to export.
+fn no_exports() -> &'static [super::dispatch::Export] {
+    &[]
+}
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "github",
     server_name: SERVER_NAME,
     description: "Repository-scoped GitHub issue and pull-request operations.",
     capability_sets,
+    exports: no_exports,
+    superseded: &[("mcp/github/comment@v1", "loom/github/comment@v1")],
     expand_tool_set,
     is_permission_rule,
     server_config,
@@ -97,63 +114,18 @@ fn serve_boxed() -> ServeFuture {
 }
 
 fn tools() -> Value {
-    let number = json!({ "type": "integer", "minimum": 1 });
-    let body = json!({ "type": "string", "maxLength": BODY_MAX_BYTES });
-    let title = json!({ "type": "string", "minLength": 1, "maxLength": TITLE_MAX_BYTES });
-    json!([
-        {
-            "name": GITHUB_TOOL_NAMES[0],
-            "description": "Read one issue in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number }, "required": ["number"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[1],
-            "description": "Post a comment on one issue in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[2],
-            "description": "Replace an issue body and optionally its title in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body, "title": title },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[3],
-            "description": "Read one pull request in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number }, "required": ["number"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[4],
-            "description": "Post a comment on one pull request in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body },
-                "required": ["number", "body"]
-            }
-        },
-        {
-            "name": GITHUB_TOOL_NAMES[5],
-            "description": "Replace a pull-request body and optionally its title in the GitHub repository fixed to this session.",
-            "inputSchema": {
-                "type": "object", "additionalProperties": false,
-                "properties": { "number": number, "body": body, "title": title },
-                "required": ["number", "body"]
-            }
-        }
-    ])
+    Value::Array(
+        restricted::TOOLS
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.summary,
+                    "inputSchema": (tool.schema)(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn result(id: &Value, value: Value) -> Value {
@@ -176,22 +148,18 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     }
     let session_id =
         std::env::var("LOOM_SESSION_ID").context("restricted MCP is missing LOOM_SESSION_ID")?;
-    let path = format!(
-        "/api/sessions/{}/restricted-github/{}",
-        percent_encoding::utf8_percent_encode(&session_id, percent_encoding::NON_ALPHANUMERIC),
-        percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC),
-    );
     let token = weaver_api::endpoint::token_from_env()
         .context("restricted MCP is missing its session-scoped LOOM_TOKEN")?;
-    let value = weaver_api::Client::new(weaver_api::endpoint::base_url())
+    // The session and the tool are operands, not path segments, so neither is
+    // percent-encoded: they travel in the JSON body.
+    let view = weaver_api::Client::new(weaver_api::endpoint::base_url())
         .with_token(Some(token))
-        .post(
-            &path,
-            serde_json::to_value(weaver_api::RestrictedGithubToolReq { arguments })?,
-        )
+        .invoke::<invoke::Op>(&invoke::Input {
+            tool: name.to_string(),
+            arguments,
+            session: session_id,
+        })
         .await?;
-    let view: weaver_api::RestrictedGithubToolView =
-        serde_json::from_value(value).context("decoding restricted GitHub tool response")?;
     Ok(json!({
         "content": [{ "type": "text", "text": view.text }],
         "isError": false

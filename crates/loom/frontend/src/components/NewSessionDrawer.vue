@@ -4,11 +4,10 @@ import { useRouter } from 'vue-router';
 import {
   ApiError,
   cloneProfile,
-  get,
+  invokeOperation,
   listAgents,
   listProfiles,
   listRepos,
-  post,
   registerRepo,
   resolveSessionLaunch,
   validateRepoRevision,
@@ -293,7 +292,7 @@ async function loadBranches() {
   branchesError.value = '';
   if (!path) return;
   try {
-    const res = (await get(`/repos/branches?cwd=${encodeURIComponent(path)}`)) as RepoBranch[];
+    const res = await invokeOperation('repos.branches', { cwd: path });
     if (reqId === branchesReqId) branches.value = res;
   } catch (e) {
     if (reqId === branchesReqId) branchesError.value = (e as Error).message;
@@ -427,7 +426,7 @@ async function refreshLaunchData() {
   resolving.value = false;
   try {
     const [recent, managed, metadata, templates] = await Promise.all([
-      get('/repos/recent').catch(() => recentRepos.value) as Promise<RecentRepo[]>,
+      invokeOperation('repos.recent', {}).catch(() => recentRepos.value),
       listRepos().catch(() => managedRepos.value),
       listAgents(),
       listProfiles(),
@@ -534,7 +533,7 @@ async function saveAsNewProfile() {
   const submittedGeneration = resolveRequest;
   let saved: Profile;
   try {
-    saved = await cloneProfile(preview.selection.profile, {
+    saved = await cloneProfile(preview.selection.profile ?? '', {
       name: target,
       expected_profile_revision: preview.profile_revision,
       expected_resolver_revision: preview.resolver_revision,
@@ -649,7 +648,9 @@ async function create() {
         })),
       );
     }
-    const session = (await post('/sessions', body)) as Session;
+    // `title` is left out when the form has only a goal (see
+    // `createBlockReason` — title OR goal): `sessions.launch` derives it.
+    const session = await invokeOperation('sessions.launch', body);
     resetForm();
     emit('created');
     emit('close');

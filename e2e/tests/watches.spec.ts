@@ -4,10 +4,7 @@ import { test, expect } from '../fixtures/weaver';
 // left (active dot, name, program, outcome), and the selected watch's
 // activity log, script source, and config live in the right pane.
 test.describe('watch panel', () => {
-  test('users can inspect watches without mutation controls', async ({
-    page,
-    weaver,
-  }) => {
+  test('users can inspect watches without mutation controls', async ({ page, weaver }) => {
     await weaver.seedWatch({ name: 'status-check' });
     await page.route('**/api/auth/me', async (route) => {
       await route.fulfill({
@@ -43,10 +40,7 @@ test.describe('watch panel', () => {
     await expect(page.getByTestId('watch-row')).toHaveCount(0);
   });
 
-  test('lists a watch and auto-selects it into the detail pane', async ({
-    page,
-    weaver,
-  }) => {
+  test('lists a watch and auto-selects it into the detail pane', async ({ page, weaver }) => {
     await weaver.seedWatch({
       name: 'status-check',
       trigger: { cron: '0 * * * *' },
@@ -132,7 +126,13 @@ test.describe('watch panel', () => {
     await expect(row.getByTestId('watch-active-dot')).toHaveAttribute('data-active', 'true');
 
     // It really persisted, with the ticked grant on top of the implicit observe.
-    const all = (await (await fetch(`${weaver.baseUrl}/api/watches`)).json()) as {
+    const all = (await (
+      await fetch(`${weaver.baseUrl}/api/watches/list`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+    ).json()) as {
       name: string;
       capabilities: string[];
     }[];
@@ -189,8 +189,8 @@ test.describe('watch panel', () => {
   test('keeps routine history behind a signal-first digest', async ({ page, weaver }) => {
     const watch = await weaver.seedWatch({ name: 'digest-me' });
     for (let index = 0; index < 3; index += 1) {
-      const response = await page.request.post(`${weaver.baseUrl}/api/watches/${watch.id}/run`, {
-        data: { dry_run: true },
+      const response = await page.request.post(`${weaver.baseUrl}/api/watches/run`, {
+        data: { key: watch.id, dry_run: true },
       });
       expect(response.ok()).toBe(true);
     }
@@ -205,7 +205,10 @@ test.describe('watch panel', () => {
   });
 
   test('edits the prompt and capabilities under the Config tab', async ({ page, weaver }) => {
-    const o = await weaver.seedWatch({ name: 'editable', params: { prompt: 'original' } });
+    const o = await weaver.seedWatch({
+      name: 'editable',
+      params: { prompt: 'original' },
+    });
 
     await page.goto(`${weaver.baseUrl}/watches/${o.id}`);
     await page.getByTestId('watch-tab-config').click();
@@ -219,7 +222,11 @@ test.describe('watch panel', () => {
     await expect(page.getByTestId('watch-prompt')).toContainText('revised judgement');
 
     const fresh = (await (
-      await fetch(`${weaver.baseUrl}/api/watches/${o.id}`)
+      await fetch(`${weaver.baseUrl}/api/watches/get`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ key: o.id }),
+      })
     ).json()) as { params: { prompt?: string }; capabilities: string[] };
     expect(fresh.params.prompt).toBe('revised judgement');
     expect(fresh.capabilities).toContain('interrupt');
@@ -235,7 +242,10 @@ test.describe('watch panel', () => {
 
     // A warm watch that has not run yet shows the pending note (the engine
     // creates its persistent session on the next round).
-    const warm = await weaver.seedWatch({ name: 'warm-runner', params: { warm: true } });
+    const warm = await weaver.seedWatch({
+      name: 'warm-runner',
+      params: { warm: true },
+    });
     await page.goto(`${weaver.baseUrl}/watches/${warm.id}`);
     await page.getByTestId('watch-tab-config').click();
     await expect(page.getByTestId('watch-warm-pending')).toBeVisible();
@@ -245,7 +255,10 @@ test.describe('watch panel', () => {
   test('deletes a custom watch; builtin watches offer no delete', async ({ page, weaver }) => {
     // A builtin watch (the daemon-seeded shape: named after its program) can
     // only be disabled — the Config tab shows no delete button.
-    const builtin = await weaver.seedWatch({ name: 'status', program: 'builtin:status' });
+    const builtin = await weaver.seedWatch({
+      name: 'status',
+      program: 'builtin:status',
+    });
     await page.goto(`${weaver.baseUrl}/watches/${builtin.id}`);
     await page.getByTestId('watch-tab-config').click();
     await expect(page.getByTestId('watch-edit')).toBeVisible();

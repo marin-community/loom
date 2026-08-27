@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import AgentTerminal from '../components/AgentTerminal.vue';
-import { restartShell } from '../api';
+import { operationPath, restartShell } from '../api';
 
 // The operator scratch shell: one persistent login shell running beside the
 // Loom server, attached over the same terminal bridge agent sessions use. In a
@@ -58,7 +58,7 @@ async function restart() {
     <p v-if="error" class="mb-3 text-sm text-block">{{ error }}</p>
 
     <div class="min-h-0 flex-1">
-      <AgentTerminal :key="epoch" ws-path="/api/shell/terminal" class="h-full" />
+      <AgentTerminal :key="epoch" :ws-path="operationPath('shell.terminal')" class="h-full" />
     </div>
   </div>
 </template>

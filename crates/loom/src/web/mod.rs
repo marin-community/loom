@@ -1,37 +1,41 @@
 //! axum REST API + SSE. The Vue SPA is the primary consumer.
 //!
-//! Endpoint layout (post phase-4 rename):
+//! ## The router is derived from declarations
 //!
-//! * `/api/sessions` — list + create active sessions (each session is one
-//!   terminal + one agent attached to a branch).
-//! * `/api/sessions/{id}` — GET / PATCH / DELETE a single session, plus the
-//!   action subroutes `/archive`, `/adopt`, `/recover` (rebuild an archived
-//!   session or restart a failed live ACP runtime), `/tags` (PUT to atomically
-//!   replace one author's tag set), `/tags/{key}` (PUT to set a tag, DELETE to
-//!   clear it), `/log`, `/events`, and `/terminal` (a WebSocket bridged to the
-//!   session's terminal via a PTY — see `crate::terminal`).
-//!   Interacting with the agent (keystrokes, keys, TUIs) happens entirely over
-//!   `/terminal`.
-//! * `/api/branches` — list every tracked branch (with or without an active
-//!   session). `/api/branches/{id}` — GET / PATCH (goal / title / description).
-//! * `/api/branches/{id}/issues` — list issues claimed by a branch.
-//! * `/api/issues/<operation>` — generated JSON operation routes such as
-//!   `/list`, `/get`, `/create`, `/close`, and `/tags/set`.
-//! * `/api/issues/{id}` — the specialized partial-update route for an issue.
-//! * `/api/issues/actions` — validate and atomically mutate a set of issues for
-//!   multi-item CLI and UI requests.
-//! * `/api/health` + `/api/health/live` are process-level liveness;
-//!   `/api/ready` checks the database and migration streams; `/metrics` exposes
-//!   bounded-label OpenMetrics; `/api/diagnostics` is the human-readable inventory.
-//! * `/api/repos/recent`, `/api/repos/branches`, `/api/settings` — unchanged.
+//! Almost every endpoint here is a **registered operation**: it is declared
+//! once in `weaver_api::operations`, and its route, method, input schema,
+//! actor policy, CLI command and MCP tool all fall out of that one
+//! declaration. The path is mechanical — `issues.list` is
+//! `POST /api/issues/list`, `sessions.shells.terminal` is
+//! `GET /api/sessions/shells/terminal` — with no separate route table to
+//! maintain.
 //!
-//! The `/api/hook` endpoint that used to exist is gone — agent hooks now go
-//! through `loom hook --event …` which writes an `events` row consumed by
-//! the monitor loop.
+//! Two functions build the router:
+//!
+//! * `operations::mount` serves every operation whose response is JSON — the
+//!   overwhelming majority — through one dispatcher. Arguments arrive as a JSON
+//!   body matching the operation's `Input`; operands are fields, not URL
+//!   parameters or query strings. The three `io = Session` operations route
+//!   through the same dispatcher: their body is JSON, differing only in the
+//!   `Set-Cookie` header, which is why they mount beside the auth routes.
+//! * `encodings::mount` serves every `io = Stream | Duplex` operation with
+//!   custom handlers — axum requires concrete SSE or websocket-upgrade response
+//!   types. Operands arrive in the query string, the only place these
+//!   operations differ from the JSON dispatcher in how they're encoded.
+//!
+//! Eighteen routes mount by hand, each with its reason written beside it below:
+//! the code-server proxy, the liveness and readiness probes, the metrics scrape,
+//! the GitHub webhook, the browser OAuth redirects, the three `io = Session`
+//! operations, and the four registry-discovery endpoints. Nothing else belongs
+//! here — an endpoint that carries a JSON contract and a Loom principal is an
+//! `#[operation]`, and its route is derived from its id.
+//!
+//! Response encoding is the only thing an operation's declaration varies about
+//! its transport; see the response-encoding table in `docs/ARCHITECTURE.md`.
 //!
 //! ### SessionView payload
 //!
-//! The session-scoped endpoints return a `SessionView` shaped like:
+//! The session-scoped endpoints return a `SessionView`:
 //!
 //! ```json
 //! {
@@ -64,10 +68,10 @@
 //! }
 //! ```
 //!
-//! A branch's status axes — the agent's self-reported `attention` and an
-//! watch's `triage` — are **tags**: well-known keys under `tags`, set
-//! through `PUT /api/sessions/{id}/tags/{key}` and cleared through `DELETE`.
-//! Absence is the calm state; there is no stored `ok` tag.
+//! A branch's status axes — the agent's self-reported `attention` and a
+//! watch's `triage` — are **tags**: well-known keys under `tags`, set through
+//! `sessions.tags.set` and cleared through `sessions.tags.delete`. Absence is
+//! the calm state; there is no stored `ok` tag.
 
 mod agents;
 mod artifacts;
@@ -79,6 +83,7 @@ mod channels;
 mod deployment;
 mod diagnostics;
 mod discussion;
+mod encodings;
 mod env;
 mod eventmux;
 mod github_access;
@@ -93,6 +98,7 @@ mod repo_env;
 mod repos;
 mod restricted_github;
 mod reviews;
+mod scope;
 mod scratch;
 mod self_context;
 mod session_layout;
@@ -101,37 +107,17 @@ pub(crate) mod sessions;
 mod settings;
 mod watches;
 
-use agents::*;
 use artifacts::*;
 use auth::*;
 use automation::*;
-use branches::*;
-use changes::*;
 use channels::*;
-use deployment::*;
 use diagnostics::*;
-use discussion::*;
-use env::*;
-use eventmux::*;
 use github_access::*;
 use issues::*;
-use launches::*;
-use logview::*;
-use mcps::*;
 use operations::*;
-use permission_requests::*;
-use profiles::*;
-use repo_env::*;
 use repos::*;
 use restricted_github::*;
-use reviews::*;
-use scratch::*;
-use self_context::*;
-use session_layout::*;
-use session_summary::*;
-use sessions::*;
-use settings::*;
-use watches::*;
+pub(crate) use scope::{require_branch_access, require_repo_access, require_session_access};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -143,7 +129,7 @@ use axum::{
     http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -192,7 +178,7 @@ pub struct AppError {
     message: String,
     details: Option<Value>,
     /// Extra keys merged into the body alongside `error` (top-level, not
-    /// nested under `details`) — for callers whose wire contract is a flat
+    /// nested under `details`) — for callers whose response body is a flat
     /// object, e.g. the artifact write-conflict `{ "error", "latest" }`.
     fields: Option<Value>,
     /// For an internal error built from an `anyhow::Error`: the full cause chain
@@ -294,7 +280,7 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
             details: None,
             fields: None,
             // `{err:?}` renders anyhow's full cause chain plus the backtrace when
-            // one was captured (`RUST_BACKTRACE=1`); `to_string()` above is just
+            // one was captured (`RUST_BACKTRACE=1`); `to_string()` above is
             // the top-level message the client sees.
             source_chain: Some(format!("{err:?}")),
         }
@@ -341,19 +327,14 @@ fn provision_error(error: crate::provision::ProvisionError) -> AppError {
 
 pub(crate) type ApiResult<T> = Result<T, AppError>;
 
-/// JSON base64 expands a valid 50 MiB Scratch batch by roughly one third.
-/// Keep this route envelope above that encoded payload while retaining the
-/// smaller protected-router default for unrelated endpoints.
-const MAX_SESSION_CREATE_BODY_BYTES: usize = 72 * 1024 * 1024;
-
 // ---------------------------------------------------------------------------
 // View payloads
 //
-// The wire structs (`BranchView`, `SessionView`, `IssueView`, …) live in
+// The response types (`BranchView`, `SessionView`, `IssueView`, …) live in
 // `weaver-api` — the one definition the server, the CLI, and the Python binding
 // share. The async builders below gather the parts the daemon owns (open-issue
 // counts, GitHub snapshots, run history) and hand them to the `from_parts`
-// constructors. The DB access stays here; the wire shape stays there.
+// constructors. The DB access stays here; the type stays there.
 // ---------------------------------------------------------------------------
 
 /// Build a [`BranchView`] for a branch, joining its tags, the denormalized
@@ -366,7 +347,7 @@ pub(crate) async fn branch_view(db: &Db, branch: &Branch) -> ApiResult<BranchVie
     let open = weaver_core::issue::open_count_for_branch(db, &branch.repo_root, &branch.branch)
         .await
         .unwrap_or(0);
-    // Best-effort: a missing/erroring snapshot just renders as no GitHub info.
+    // Best-effort: a missing/erroring snapshot renders as no GitHub info.
     let github = github::get_status(db, &branch.id).await.ok().flatten();
     let github_pr = github::get_mapping(db, &branch.id).await.ok().flatten();
     Ok(BranchView::from_parts(
@@ -471,12 +452,12 @@ pub(crate) async fn session_view(
     })
 }
 
-/// Build the compact fleet/search projection for a session + branch.
+/// Build the compact [`SessionSummaryView`] for the fleet list and search.
 ///
 /// Unlike [`session_view`], this deliberately does not deserialize launch
 /// snapshots, MCP policy, or title-generation state. Large goal text remains
-/// available to server-side search through the source `Branch`, but crosses the
-/// wire only when a client follows with the session detail endpoint.
+/// available to server-side search through the source `Branch`, but reaches
+/// the client only when it requests the session detail endpoint.
 pub(crate) async fn session_summary_view(
     db: &Db,
     session: &Session,
@@ -567,14 +548,13 @@ pub(crate) fn author_or_manual(by: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 /// Whether `path` (the `/api`-stripped path) is an embedded-editor proxy route
-/// — `/sessions/<id>/ide` or `/sessions/<id>/ide/…` — as opposed to the small
-/// `ide-info` JSON probe, which is fine to ETag.
-/// Paths under the embedded-editor reverse proxy (`…/sessions/{id}/ide`), which
-/// must bypass the ETag middleware — buffering code-server's stream to hash it
-/// truncates assets past the 16 MB cap. The middleware sees the nest-stripped
-/// `/sessions/…` form, but we strip an optional leading `/api` too so the
-/// exclusion survives if that layer is ever hoisted to the outer router.
-fn is_ide_proxy_path(path: &str) -> bool {
+/// — `/sessions/<id>/ide` or `/sessions/<id>/ide/…` — which must bypass the
+/// ETag middleware: buffering code-server's stream to hash it truncates assets
+/// past the 16 MB cap. Excludes the small `ide-info` JSON probe, which is fine
+/// to ETag. The middleware sees the nest-stripped `/sessions/…` form, but this
+/// also strips an optional leading `/api` so the exclusion survives if that
+/// layer is ever hoisted to the outer router.
+pub(super) fn is_ide_proxy_path(path: &str) -> bool {
     let path = path.strip_prefix("/api").unwrap_or(path);
     let Some(rest) = path.strip_prefix("/sessions/") else {
         return false;
@@ -735,423 +715,80 @@ fn static_dir() -> PathBuf {
 }
 
 fn registered_api_router() -> Router<AppState> {
-    let router = mount_registered_operations(Router::new());
-    let router = mount_session_api(router);
-    let router = mount_channel_api(router);
-    let router = mount_artifact_api(router);
-    let router = mount_issue_api(router);
-    mount_permission_api(router)
-}
-
-fn mount_session_api(router: Router<AppState>) -> Router<AppState> {
+    // Declarations and handlers must be the same set, and the moment to find
+    // out is boot — not the first request to a descriptor nothing serves.
+    operations::assert_registry_is_complete();
+    let router = operations::mount(Router::new());
+    // The non-JSON half of the same registry: SSE feeds and terminal
+    // websockets, mounted at their derived paths off the same declarations.
+    let router = encodings::mount(router);
+    // The IDE proxy: the one hand-mounted route among the authenticated ones.
+    // It forwards an arbitrary sub-path into a container and streams back
+    // whatever comes out — it has no operation declaration and will not get one.
     router
-        .route("/session-layout", get(get_session_layout))
-        .route("/session-layout/events", get(session_layout_events))
-        .route("/session-layout/spaces", post(create_session_space))
-        .route(
-            "/session-layout/spaces/{id}",
-            axum::routing::patch(update_session_space).delete(delete_session_space),
-        )
-        .route("/session-layout/groups", post(create_session_group))
-        .route(
-            "/session-layout/groups/{id}",
-            axum::routing::patch(update_session_group).delete(delete_session_group),
-        )
-        .route(
-            "/session-layout/groups/{id}/preference",
-            axum::routing::put(set_session_group_preference),
-        )
-        .route("/session-layout/reorder", post(reorder_session_layout))
-        .route("/session-layout/moves", post(move_session_layout))
-        .route("/session-layout/restores", post(restore_session_layout))
-        .route(
-            "/session-layout/defaults",
-            axum::routing::put(set_session_placement_default),
-        )
-        .route(
-            "/session-layout/defaults/{kind}/{value}",
-            delete(delete_session_placement_default),
-        )
-        .route(
-            "/sessions",
-            get(list_sessions)
-                .post(create_session)
-                .layer(DefaultBodyLimit::max(MAX_SESSION_CREATE_BODY_BYTES)),
-        )
-        .route("/self", get(get_self_context))
-        .route("/session-launches/resolve", post(resolve_session_launch))
-        .route("/scratch/limits", get(scratch_limits))
-        .route("/sessions/summary", get(list_session_summaries))
-        .route("/sessions/search", get(search_sessions))
-        .route(
-            "/sessions/{id}",
-            get(get_session).patch(patch_session).delete(delete_session),
-        )
-        .route("/sessions/{id}/url", get(session_url_route))
-        .route("/sessions/{id}/summary", get(get_session_summary))
-        .route(
-            "/sessions/{id}/title/regenerate",
-            post(regenerate_session_title),
-        )
-        .route(
-            "/sessions/{id}/title-generation",
-            axum::routing::put(set_session_title_generation),
-        )
-        .route(
-            "/sessions/{id}/resumption-cue",
-            get(get_resumption_cue).post(ensure_resumption_cue),
-        )
-        .route("/sessions/{id}/archive", post(archive_session))
-        .route("/sessions/{id}/adopt", post(adopt_session))
-        .route(
-            "/sessions/{id}/handoff/resolve",
-            post(resolve_session_handoff),
-        )
-        .route("/sessions/{id}/handoff", post(handoff_session))
-        .route("/sessions/{id}/recover", post(recover_session))
-        .route(
-            "/sessions/{id}/github",
-            post(refresh_github_session)
-                .put(set_github_session)
-                .delete(clear_github_session),
-        )
-        .route(
-            "/sessions/{id}/github/labels",
-            post(add_github_session_labels),
-        )
-        .route("/sessions/{id}/raw", get(raw_session))
-        .route("/sessions/{id}/ide-info", get(crate::ide::info))
         .route("/sessions/{id}/ide", axum::routing::any(crate::ide::proxy))
         .route("/sessions/{id}/ide/", axum::routing::any(crate::ide::proxy))
         .route(
             "/sessions/{id}/ide/{*rest}",
             axum::routing::any(crate::ide::proxy),
         )
-        .route(
-            "/sessions/{id}/scratch",
-            get(list_scratch)
-                .post(upload_scratch)
-                .delete(delete_scratch),
-        )
-        .route("/sessions/{id}/log", get(branch_events))
-        .route("/sessions/{id}/conversation", get(conversation_session))
-        .route(
-            "/sessions/{id}/conversation/blocks/{message}/{block}",
-            get(conversation_block),
-        )
-        .route("/sessions/{id}/history", get(session_history))
-        .route("/sessions/{id}/history/search", get(search_session_history))
-        .route("/sessions/{id}/files", get(list_session_files))
-        .route("/sessions/{id}/changes", get(get_session_changes))
-        .route("/sessions/{id}/events", get(events_sse))
-        .route("/sessions/{id}/terminal", get(crate::terminal::terminal_ws))
-        .route("/sessions/{id}/shells", get(list_session_shells))
-        .route(
-            "/sessions/{id}/shell/{idx}",
-            axum::routing::delete(delete_session_shell),
-        )
-        .route(
-            "/sessions/{id}/shell/{idx}/terminal",
-            get(crate::terminal::session_shell_ws),
-        )
-        .route("/sessions/{id}/send", post(send_session))
-        .route("/sessions/{id}/interrupt", post(interrupt_session))
-        .route("/sessions/{id}/preview", get(preview_session))
-        .route("/sessions/{id}/chat", get(get_session_chat))
-        .route("/sessions/{id}/chat/stream", get(chat_stream))
-        .route(
-            "/sessions/{id}/prompt",
-            post(prompt_session).delete(retract_queued_prompt),
-        )
-        .route("/sessions/{id}/mode", axum::routing::put(set_mode))
-        .route(
-            "/sessions/{id}/config/{config_id}",
-            axum::routing::put(set_config_option),
-        )
-        .route(
-            "/sessions/{id}/tags/{key}",
-            axum::routing::put(set_session_tag).delete(clear_session_tag),
-        )
-        .route("/sessions/{id}/tags", axum::routing::put(set_session_tags))
-        .route("/branches", get(list_branches))
-        .route("/branches/{id}", get(get_branch).patch(patch_branch))
-        .route("/branches/{id}/status", post(set_branch_status))
-        .route("/branches/{id}/slack/reply", post(slack_reply))
-        .route(
-            "/branches/{id}/events",
-            get(branch_events).post(create_branch_event),
-        )
-        .route(
-            "/branches/{id}/tags/{key}",
-            axum::routing::put(set_branch_tag).delete(clear_branch_tag),
-        )
-}
-
-fn mount_channel_api(router: Router<AppState>) -> Router<AppState> {
-    router
-        .route("/channels", get(list_channels).post(create_channel))
-        .route("/channels/{id}", get(get_channel).delete(archive_channel))
-        .route("/channels/{id}/bindings", get(list_channel_bindings))
-        .route(
-            "/channels/{id}/messages",
-            get(list_channel_messages).post(create_channel_message),
-        )
-        .route(
-            "/channels/{id}/subscription",
-            axum::routing::put(set_channel_subscription),
-        )
-        .route(
-            "/channels/{id}/read-marker",
-            axum::routing::put(set_channel_read_marker),
-        )
-}
-
-fn mount_artifact_api(router: Router<AppState>) -> Router<AppState> {
-    router
-        .route("/sessions/{id}/artifacts", get(list_artifacts))
-        .route(
-            "/sessions/{id}/reviews",
-            get(list_session_reviews).post(create_session_review),
-        )
-        .route(
-            "/sessions/{id}/artifacts/{name}",
-            get(get_artifact)
-                .put(write_artifact)
-                .delete(delete_artifact),
-        )
-        .route(
-            "/sessions/{id}/artifacts/{name}/raw",
-            get(raw_artifact_image),
-        )
-        .route(
-            "/sessions/{id}/artifacts/{name}/threads",
-            get(list_threads).post(create_thread),
-        )
-        .route(
-            "/sessions/{id}/artifacts/{name}/threads/{tid}/comments",
-            post(add_comment),
-        )
-        .route(
-            "/sessions/{id}/artifacts/{name}/threads/{tid}/resolve",
-            post(resolve_thread),
-        )
-        .route("/branches/{id}/artifacts", get(list_branch_artifacts))
-        .route(
-            "/branches/{id}/artifacts/{name}",
-            get(get_branch_artifact)
-                .put(write_branch_artifact)
-                .delete(delete_branch_artifact),
-        )
-        .route(
-            "/branches/{id}/artifacts/{name}/url",
-            get(branch_artifact_url_route),
-        )
-        .route(
-            "/branches/{id}/artifacts/{name}/threads",
-            get(list_branch_threads).post(create_branch_thread),
-        )
-        .route(
-            "/branches/{id}/artifacts/{name}/threads/{tid}/comments",
-            post(add_branch_thread_comment),
-        )
-        .route(
-            "/branches/{id}/artifacts/{name}/threads/{tid}/resolve",
-            post(resolve_branch_thread),
-        )
-        .route(
-            "/reviews/{id}",
-            get(get_review).patch(update_review).delete(discard_review),
-        )
-        .route("/reviews/{id}/comments", post(add_review_comment))
-        .route(
-            "/reviews/{id}/comments/{comment_id}",
-            axum::routing::patch(update_review_comment).delete(delete_review_comment),
-        )
-        .route(
-            "/reviews/{id}/comments/{comment_id}/resolve",
-            post(resolve_review_comment),
-        )
-        .route(
-            "/reviews/{id}/retarget-current",
-            post(retarget_review_to_current),
-        )
-        .route("/reviews/{id}/submit", post(submit_review))
-        .route("/reviews/{id}/retry-delivery", post(retry_review_delivery))
-}
-
-fn mount_issue_api(router: Router<AppState>) -> Router<AppState> {
-    router
-        .route("/branches/{id}/issues", get(list_branch_issues))
-        .route("/issues", get(list_all_issues))
-        .route("/issues/actions", post(issue_actions))
-        .route("/issues/{id}", axum::routing::patch(patch_issue))
-}
-
-fn mount_permission_api(router: Router<AppState>) -> Router<AppState> {
-    router
+        // Registry discovery. Operations describing operations would be
+        // circular, so these four stay routes.
         .route("/meta", get(api_meta))
         .route("/operations", get(list_operations))
         .route("/operations/{id}", get(get_operation))
         .route("/openapi.json", get(openapi))
-        .route(
-            "/sessions/{id}/restricted-github/{tool}",
-            post(restricted_github_tool),
-        )
-        .route("/sessions/{id}/github/token", post(github_token))
-        .route(
-            "/sessions/{id}/github/access",
-            get(list_github_access).put(set_github_access),
-        )
-        .route(
-            "/permission-requests/{id}/decision",
-            post(decide_permission_request),
-        )
-        .route(
-            "/sessions/{id}/permissions/{request_id}",
-            post(answer_permission),
-        )
 }
 
-pub fn router(state: AppState) -> Router {
-    // Public surface: the liveness probe and the login flow itself. No
+/// The unauthenticated route table.
+///
+/// Split out from [`router`] so the whole route table can be built — and
+/// therefore checked for overlapping routes — without a database. See the
+/// tests below.
+fn public_api_router() -> Router<AppState> {
+    // Public routes: the liveness probe and the login flow itself. No
     // middleware — these must work for an unauthenticated caller, since they are
     // how one *becomes* authenticated.
-    let public = Router::new()
+    Router::new()
         // `/health` remains the compatibility liveness probe. `/health/live`
         // names it explicitly; readiness checks DB + migration state.
         .route("/health", get(liveness))
         .route("/health/live", get(liveness))
         .route("/ready", get(readiness))
         .route("/health/ready", get(readiness))
-        .route("/auth/me", get(auth_me))
+        // The three `io = Session` operations. They are declared, authorized and
+        // dispatched like any other; they mount here because their response must
+        // carry a `Set-Cookie`, which the generic dispatcher cannot emit. The
+        // path is the one their id derives, so this is the same route either way.
         .route("/auth/login", post(auth_login))
         .route("/auth/logout", post(auth_logout))
+        .route("/auth/federate", post(federate))
+        // Browser OAuth: a 303 and a cookie, never a JSON body.
         .route("/auth/github/login", get(github_login))
         .route("/auth/github/callback", get(github_callback))
-        .route("/auth/federate", post(federate))
         // The inbound GitHub webhook. Deliberately OUTSIDE `require_auth`: it is
         // authenticated cryptographically by the HMAC signature it carries, not
         // by a loom principal. The handler is the untrusted-input boundary.
-        .route("/github/webhook", post(github_webhook));
+        .route("/github/webhook", post(github_webhook))
+}
 
-    // Everything else requires an authenticated principal — a bearer token, a
+/// The authenticated route table: every registered operation plus the
+/// hand-written routes that are not operations yet.
+///
+/// Takes no state for the same reason [`public_api_router`] does not — building
+/// it is how route overlaps are detected, and that must not need a database.
+fn protected_api_router() -> Router<AppState> {
+    // Every endpoint here requires an authenticated principal — a bearer token, a
     // session cookie, or a trusted-loopback request — gated by `require_auth`.
-    let protected = registered_api_router()
-        // Every live stream the browser wants, folded onto one connection so a
-        // tab spends 1 of its 6 per-origin sockets instead of 3. The per-stream
-        // routes below remain the single-stream API.
-        .route("/events", get(events_mux))
-        // Misc
-        .route("/agents", get(list_agents))
-        // Operator-defined custom agents (create + edit/remove by name). The
-        // static `/custom` segment is registered before the `{name}` capture.
-        .route("/agents/custom", post(create_custom_agent))
-        .route(
-            "/agents/custom/{name}",
-            axum::routing::put(update_custom_agent).delete(delete_custom_agent),
-        )
-        // The managed repo store + clone allowlist (register/list).
-        .route("/repos", get(list_repos).post(register_repo))
-        .route("/repos/recent", get(recent_repos))
-        .route("/repos/branches", get(repo_branches))
-        .route("/repos/revisions/validate", get(validate_repo_revision))
-        // Per-repo environment variables (write-only values), layered into a
-        // non-restricted session's terminal above its selected profile.
-        .route("/repos/env", get(get_repo_env))
-        .route(
-            "/repos/env/{name}",
-            axum::routing::put(put_repo_env).delete(delete_repo_env),
-        )
-        .route("/settings", get(get_settings).patch(patch_settings))
-        .route(
-            "/preferences",
-            get(get_preferences).patch(patch_preferences),
-        )
-        .route("/deployment/reconcile", post(reconcile_deployment))
-        .route("/mcps", get(list_mcps))
-        .route(
-            "/mcps/custom",
-            get(list_custom_mcps).post(create_custom_mcp),
-        )
-        .route(
-            "/mcps/custom/{*identity}",
-            get(get_custom_mcp)
-                .put(put_custom_mcp)
-                .delete(delete_custom_mcp),
-        )
-        .route("/profiles", get(list_profiles).post(create_profile))
-        .route("/profiles/{name}/effective", get(effective_profile))
-        .route("/profiles/{name}/clone", post(clone_profile))
-        .route(
-            "/profiles/{name}",
-            get(get_profile).put(put_profile).delete(delete_profile),
-        )
-        .route(
-            "/profiles/{profile}/env/{name}",
-            axum::routing::put(put_profile_env).delete(delete_profile_env),
-        )
-        .route("/slack/status", get(slack_status))
-        // Readable compatibility facade for the default profile's environment.
-        .route("/env", get(get_env))
-        .route(
-            "/env/{name}",
-            axum::routing::put(put_env).delete(delete_env),
-        )
-        // The operator scratch shell — a single persistent login shell in the
-        // container, for one-time setup like `gcloud auth login`.
-        .route("/shell/terminal", get(crate::terminal::shell_ws))
-        .route("/shell/restart", post(restart_shell))
-        // Server logs + background tasks (Settings → Diagnostics) — snapshot +
-        // live SSE tail + build status + the detached trigger-task list. These
-        // are available to human users for self-service debugging.
-        .route("/logs", get(logs_snapshot))
-        .route("/logs/stream", get(logs_stream))
-        .route("/status", get(server_status))
-        .route("/tasks", get(tasks_snapshot))
-        .route("/diagnostics", get(diagnostics))
-        // Watches — periodic / triggered watch programs over the fleet.
-        .route("/watches", get(list_watches).post(create_watch))
-        // The static segment wins over the `{id}` capture below, so a program
-        // named "programs" can't shadow this listing.
-        .route("/watches/programs", get(list_programs))
-        .route(
-            "/watches/{id}",
-            get(get_watch).patch(patch_watch).delete(delete_watch),
-        )
-        .route("/watches/{id}/run", post(run_watch))
-        .route("/watches/{id}/runs", get(watch_runs))
-        // The one-shot headless agent — the judgement primitive watch
-        // programs (and any script) call through the daemon.
-        .route("/agent/oneshot", post(agent_oneshot))
-        // Authentication management: API tokens, the caller's password, the
-        // approved-user allowlist, and the GitHub OAuth app config.
-        .route("/auth/tokens", get(list_tokens).post(create_token))
-        .route("/auth/tokens/{id}", delete(revoke_token))
-        .route("/auth/automation-token", post(mint_automation_token))
-        .route(
-            "/auth/federations",
-            get(list_federations).post(add_federation),
-        )
-        .route("/auth/federations/{id}", delete(remove_federation))
-        .route("/runs", get(list_runs).post(create_run))
-        .route("/runs/{id}", get(get_run))
-        .route("/auth/password", post(set_own_password))
-        .route(
-            "/auth/github-token",
-            get(get_github_token)
-                .put(set_github_token)
-                .delete(delete_github_token),
-        )
-        .route("/auth/users", get(list_users).post(add_user))
-        .route(
-            "/auth/users/{username}/role",
-            axum::routing::put(set_user_role),
-        )
-        .route("/auth/users/{username}", delete(remove_user))
-        .route(
-            "/auth/github/config",
-            get(get_github_config).put(put_github_config),
-        )
+    //
+    // There is nothing to add to this function. Adding an endpoint means
+    // declaring an operation in `weaver-api` and binding it with
+    // `register::<O>(handler)`; the route follows from the id.
+    registered_api_router()
+}
+
+pub fn router(state: AppState) -> Router {
+    let protected = protected_api_router()
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -1159,10 +796,10 @@ pub fn router(state: AppState) -> Router {
         // Scratch uploads can carry images / logs; lift the default 2 MB cap.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
 
-    let api = public
+    let api = public_api_router()
         .merge(protected)
         // ETag/304 short-circuit for cacheable GETs — applied across the whole
-        // API surface (public + protected) before the state is sealed in.
+        // HTTP API (public + protected) before the state is sealed in.
         .layer(axum::middleware::from_fn(api_etag_middleware))
         .with_state(state.clone());
 
@@ -1244,5 +881,22 @@ mod tests {
         assert!(!is_ide_proxy_path("/sessions/abc"));
         assert!(!is_ide_proxy_path("/sessions"));
         assert!(!is_ide_proxy_path("/repos/issues"));
+    }
+}
+
+#[cfg(test)]
+mod route_table_tests {
+    /// The whole route table builds.
+    ///
+    /// axum panics at `.route()` when two handlers claim the same method and
+    /// path, so *constructing* the router is the check — and it covers every
+    /// overlap, including a hand-mounted route that happens to equal an
+    /// operation's derived route, which a hand-maintained route list would miss.
+    #[test]
+    fn the_route_table_has_no_overlapping_routes() {
+        let _ = super::public_api_router();
+        let _ = super::protected_api_router();
+        // The merge is where a public route can collide with a protected one.
+        let _ = super::public_api_router().merge(super::protected_api_router());
     }
 }

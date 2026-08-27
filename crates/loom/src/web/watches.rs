@@ -1,26 +1,40 @@
 use std::path::PathBuf;
 
-use axum::{
-    extract::{Path, Query, State},
-    Json,
-};
-use serde::Deserialize;
 use serde_json::{json, Value};
-use weaver_api::{
-    AgentOneshotReq, CreateWatchReq, PatchWatchReq, ProgramView, RunWatchReq, WatchRunView,
-    WatchView,
-};
+use weaver_api::operations::agents as agents_operations;
+use weaver_api::operations::watches as watches_operations;
+use weaver_api::{ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchView};
 use weaver_core::watch::{self as watch_store, Watch};
 
 use crate::agent;
 use crate::db::Db;
 use crate::watch as ov_engine;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 // ---------------------------------------------------------------------------
-// Watches — the operator + authoring surface (server-owned state)
+// Watches — operator and authoring operations (server-owned state)
 // ---------------------------------------------------------------------------
+//
+// Every handler here has a `*_operation` counterpart registered below —
+// including `agent_oneshot` (`POST /agent/oneshot`), which is `agents.oneshot`
+// instead of a `watches.*` id, since it is a general one-shot ACP primitive
+// that watch programs happen to be the first caller of, not watch-specific
+// state.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<watches_operations::list::Op, _, _>(list_watches_operation),
+        register::<watches_operations::get::Op, _, _>(get_watch_operation),
+        register::<watches_operations::programs::Op, _, _>(programs_operation),
+        register::<watches_operations::create::Op, _, _>(create_watch_operation),
+        register::<watches_operations::update::Op, _, _>(update_watch_operation),
+        register::<watches_operations::delete::Op, _, _>(delete_watch_operation),
+        register::<watches_operations::run::Op, _, _>(run_watch_operation),
+        register::<watches_operations::runs::Op, _, _>(watch_runs_operation),
+        register::<agents_operations::oneshot::Op, _, _>(agent_oneshot_operation),
+    ]
+}
 
 /// Build an [`WatchView`] for a watch, joining the most recent
 /// round's outcome from the run history.
@@ -31,12 +45,6 @@ async fn watch_view(db: &Db, o: &Watch) -> ApiResult<WatchView> {
         .next()
         .map(|r| r.outcome);
     Ok(WatchView::from_parts(o, last_outcome))
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct RunsQuery {
-    /// How many recent rounds to return; defaults to 50.
-    limit: Option<i64>,
 }
 
 /// Reject a capability set that isn't a subset of the known ladder, naming the
@@ -79,10 +87,15 @@ fn validate_program(program: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// `GET /api/watches/programs` — the builtin program registry: what the
-/// create form offers and the panel's read-only script viewer renders.
-pub(super) async fn list_programs() -> Json<Vec<ProgramView>> {
-    Json(crate::builtins::BUILTINS.iter().map(|b| b.view()).collect())
+fn program_views() -> Vec<ProgramView> {
+    crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
+}
+
+pub(super) async fn programs_operation(
+    _context: OperationContext,
+    _input: watches_operations::programs::Input,
+) -> ApiResult<Vec<ProgramView>> {
+    Ok(program_views())
 }
 
 /// Resolve a watch (by id or name) or 404.
@@ -92,18 +105,25 @@ async fn require_watch(db: &Db, key: &str) -> ApiResult<Watch> {
         .ok_or_else(|| AppError::not_found("watch"))
 }
 
-pub(super) async fn list_watches(State(st): State<AppState>) -> ApiResult<Json<Vec<WatchView>>> {
+async fn list_watches_core(st: &AppState) -> ApiResult<Vec<WatchView>> {
     let mut out = Vec::new();
     for o in watch_store::list(&st.db).await? {
         out.push(watch_view(&st.db, &o).await?);
     }
-    Ok(Json(out))
+    Ok(out)
 }
 
-pub(super) async fn create_watch(
-    State(st): State<AppState>,
-    Json(req): Json<CreateWatchReq>,
-) -> ApiResult<Json<WatchView>> {
+pub(super) async fn list_watches_operation(
+    context: OperationContext,
+    _input: watches_operations::list::Input,
+) -> ApiResult<Vec<WatchView>> {
+    list_watches_core(&context.state).await
+}
+
+async fn create_watch_core(
+    st: &AppState,
+    req: watches_operations::create::Input,
+) -> ApiResult<WatchView> {
     let name = req.name.trim().to_string();
     if name.is_empty() {
         return Err(AppError::bad_request("name must not be empty"));
@@ -138,7 +158,7 @@ pub(super) async fn create_watch(
         None => {
             let params_value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
             let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
-            reconcile_trigger(&st, &program, &params_value, &fallback).await
+            reconcile_trigger(st, &program, &params_value, &fallback).await
         }
     };
 
@@ -157,7 +177,14 @@ pub(super) async fn create_watch(
     };
     let o = watch_store::create(&st.db, &new).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch created");
-    Ok(Json(watch_view(&st.db, &o).await?))
+    watch_view(&st.db, &o).await
+}
+
+pub(super) async fn create_watch_operation(
+    context: OperationContext,
+    input: watches_operations::create::Input,
+) -> ApiResult<WatchView> {
+    create_watch_core(&context.state, input).await
 }
 
 /// The program's default trigger (a builtin's suggested manifest), used as the
@@ -181,20 +208,24 @@ async fn reconcile_trigger(st: &AppState, program: &str, params: &Value, fallbac
     }
 }
 
-pub(super) async fn get_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<WatchView>> {
-    let o = require_watch(&st.db, &key).await?;
-    Ok(Json(watch_view(&st.db, &o).await?))
+async fn get_watch_core(st: &AppState, key: &str) -> ApiResult<WatchView> {
+    let o = require_watch(&st.db, key).await?;
+    watch_view(&st.db, &o).await
 }
 
-pub(super) async fn patch_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<PatchWatchReq>,
-) -> ApiResult<Json<WatchView>> {
-    let o = require_watch(&st.db, &key).await?;
+pub(super) async fn get_watch_operation(
+    context: OperationContext,
+    input: watches_operations::get::Input,
+) -> ApiResult<WatchView> {
+    get_watch_core(&context.state, &input.key).await
+}
+
+async fn patch_watch_core(
+    st: &AppState,
+    req: watches_operations::update::Input,
+) -> ApiResult<WatchView> {
+    let key = req.key.as_str();
+    let o = require_watch(&st.db, key).await?;
 
     if let Some(program) = &req.program {
         validate_program(program)?;
@@ -218,7 +249,7 @@ pub(super) async fn patch_watch(
                 let params = req.params.clone().unwrap_or_else(|| o.params());
                 let fallback =
                     program_default_trigger(program).unwrap_or_else(|| o.trigger_spec.clone());
-                Some(reconcile_trigger(&st, program, &params, &fallback).await)
+                Some(reconcile_trigger(st, program, &params, &fallback).await)
             }
             None => None,
         },
@@ -238,30 +269,40 @@ pub(super) async fn patch_watch(
         watch_store::update(&st.db, &o.id, &patch).await?;
     }
     let o = require_watch(&st.db, &o.id).await?;
-    Ok(Json(watch_view(&st.db, &o).await?))
+    watch_view(&st.db, &o).await
 }
 
-pub(super) async fn delete_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-) -> ApiResult<Json<Value>> {
-    let o = require_watch(&st.db, &key).await?;
+pub(super) async fn update_watch_operation(
+    context: OperationContext,
+    input: watches_operations::update::Input,
+) -> ApiResult<WatchView> {
+    patch_watch_core(&context.state, input).await
+}
+
+async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteResult> {
+    let o = require_watch(&st.db, key).await?;
     watch_store::delete(&st.db, &o.id).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch deleted");
-    Ok(Json(json!({ "deleted": true })))
+    Ok(WatchDeleteResult {
+        deleted: true,
+        id: o.id,
+    })
+}
+
+pub(super) async fn delete_watch_operation(
+    context: OperationContext,
+    input: watches_operations::delete::Input,
+) -> ApiResult<WatchDeleteResult> {
+    delete_watch_core(&context.state, &input.key).await
 }
 
 /// Fire a round now, in the daemon (the single terminal owner), and report its
 /// outcome. `dry_run` stubs every mutating action — the iteration primitive,
-/// safe to repeat. Re-reads the closed run row to surface outcome + summary.
-pub(super) async fn run_watch(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Json(req): Json<RunWatchReq>,
-) -> ApiResult<Json<Value>> {
-    let o = require_watch(&st.db, &key).await?;
-    let reason = if req.dry_run { "run (dry)" } else { "run" };
-    let run_id = ov_engine::fire_now(&st, &o.id, req.dry_run, reason).await?;
+/// safe to repeat. Re-reads the closed run row to return outcome + summary.
+async fn run_watch_core(st: &AppState, key: &str, dry_run: bool) -> ApiResult<WatchRunResult> {
+    let o = require_watch(&st.db, key).await?;
+    let reason = if dry_run { "run (dry)" } else { "run" };
+    let run_id = ov_engine::fire_now(st, &o.id, dry_run, reason).await?;
     let run = watch_store::recent_runs(&st.db, &o.id, 50)
         .await?
         .into_iter()
@@ -269,35 +310,49 @@ pub(super) async fn run_watch(
     let (outcome, summary) = run
         .map(|r| (r.outcome, r.summary))
         .unwrap_or_else(|| (String::new(), String::new()));
-    Ok(Json(json!({
-        "run_id": run_id,
-        "outcome": outcome,
-        "summary": summary,
-    })))
+    Ok(WatchRunResult {
+        run_id,
+        outcome,
+        summary,
+    })
 }
 
-/// Run a one-shot ACP prompt and return `{output}` — the judgement primitive
+/// `watches.run`. Not exercised here — this handler fires a watch round for
+/// real when invoked, so it is wired but deliberately never called by any
+/// test or manual check.
+pub(super) async fn run_watch_operation(
+    context: OperationContext,
+    input: watches_operations::run::Input,
+) -> ApiResult<WatchRunResult> {
+    run_watch_core(&context.state, &input.key, input.dry_run).await
+}
+
+/// Run a one-shot ACP prompt and return its text — the judgement primitive
 /// watch programs call. Best-effort by contract: an absent or failing runtime
-/// returns `{output: null}` rather than an error, so callers degrade to their
-/// deterministic fallback.
-pub(super) async fn agent_oneshot(
-    State(st): State<AppState>,
-    Json(req): Json<AgentOneshotReq>,
-) -> ApiResult<Json<Value>> {
-    if req.prompt.trim().is_empty() {
+/// returns `None` rather than an error, so callers degrade to their
+/// deterministic fallback. Used by `agents.oneshot` and watch execution.
+async fn agent_oneshot_core(
+    st: &AppState,
+    prompt: &str,
+    profile_name: &str,
+    agent_name: &str,
+    model: &str,
+    effort: &str,
+) -> ApiResult<Option<String>> {
+    if prompt.trim().is_empty() {
         return Err(AppError::bad_request("prompt must be non-empty"));
     }
     let budget = ov_engine::get_int(&st.db, "watch.default_timeout_secs", 600)
         .await
         .max(1) as u64;
-    let profile = if req.profile.trim().is_empty() {
+    let profile = if profile_name.trim().is_empty() {
         None
     } else {
         Some(
-            crate::profile::get(&st.db, req.profile.trim())
+            crate::profile::get(&st.db, profile_name.trim())
                 .await?
                 .ok_or_else(|| {
-                    AppError::bad_request(format!("unknown profile '{}'", req.profile.trim()))
+                    AppError::bad_request(format!("unknown profile '{}'", profile_name.trim()))
                 })?,
         )
     };
@@ -309,7 +364,7 @@ pub(super) async fn agent_oneshot(
             )));
         }
     }
-    let runtime = req.agent.trim();
+    let runtime = agent_name.trim();
     let runtime = profile
         .as_ref()
         .map(|profile| profile.agent_kind.as_str())
@@ -320,17 +375,32 @@ pub(super) async fn agent_oneshot(
                 runtime
             }
         });
-    let output = agent::AgentManager::new(&st.db, &st.acp)
+    Ok(agent::AgentManager::new(&st.db, &st.acp)
         .run_oneshot(
             runtime,
-            &req.prompt,
-            &req.model,
-            &req.effort,
+            prompt,
+            model,
+            effort,
             profile.as_ref(),
             std::time::Duration::from_secs(budget),
         )
-        .await;
-    Ok(Json(json!({ "output": output })))
+        .await)
+}
+
+async fn agent_oneshot_operation(
+    context: OperationContext,
+    input: agents_operations::oneshot::Input,
+) -> ApiResult<agents_operations::oneshot::Output> {
+    let output = agent_oneshot_core(
+        &context.state,
+        &input.prompt,
+        &input.profile,
+        &input.agent,
+        &input.model,
+        &input.effort,
+    )
+    .await?;
+    Ok(agents_operations::oneshot::Output { output })
 }
 
 async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
@@ -346,15 +416,22 @@ async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
     Ok(())
 }
 
-pub(super) async fn watch_runs(
-    State(st): State<AppState>,
-    Path(key): Path<String>,
-    Query(q): Query<RunsQuery>,
-) -> ApiResult<Json<Vec<WatchRunView>>> {
-    let o = require_watch(&st.db, &key).await?;
-    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
+async fn watch_runs_core(
+    st: &AppState,
+    key: &str,
+    limit: Option<i64>,
+) -> ApiResult<Vec<WatchRunView>> {
+    let o = require_watch(&st.db, key).await?;
+    let limit = limit.unwrap_or(50).clamp(1, 1000);
     let runs = watch_store::recent_runs(&st.db, &o.id, limit).await?;
-    Ok(Json(runs.into_iter().map(WatchRunView::from).collect()))
+    Ok(runs.into_iter().map(WatchRunView::from).collect())
+}
+
+pub(super) async fn watch_runs_operation(
+    context: OperationContext,
+    input: watches_operations::runs::Input,
+) -> ApiResult<Vec<WatchRunView>> {
+    watch_runs_core(&context.state, &input.key, input.limit).await
 }
 
 /// Serialize an optional structured-JSON field into the text column the model

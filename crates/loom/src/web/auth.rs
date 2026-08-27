@@ -1,24 +1,28 @@
 use std::net::{IpAddr, SocketAddr};
 
 use axum::{
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{ConnectInfo, Query, Request, State},
     http::{header, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Extension, Json,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::json;
-use sqlx::Row;
+use weaver_api::operations::auth::{
+    automation_token, federations, github_config, github_token, me, set_password, tokens, users,
+};
 use weaver_api::{
-    AddUserReq, AuthMethods, CreateTokenReq, CreatedTokenView, GithubConfigView, LoginReq, MeView,
-    SetGithubConfigReq, SetPasswordReq, SetUserRoleReq, TokenView, UserRole, UserView,
+    AuthMethods, AutomationTokenView, CreatedTokenView, FederationReq, FederationView,
+    GithubConfigView, GithubTokenStatusView, LoginReq, MeView, RemoveFederationResult,
+    RemoveUserResult, RevokeTokenResult, TokenView, UserRole, UserView,
 };
 
 use crate::auth::{self, Grant, Principal};
 use crate::config;
 use crate::user_token;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
 // ===========================================================================
@@ -27,7 +31,7 @@ use super::{ApiResult, AppError, AppState};
 // Three credentials resolve to one `auth::Principal`: an `Authorization: Bearer`
 // API token, a login session cookie, or a trusted-loopback request. The
 // `require_auth` middleware enforces this on every route except the public login
-// surface (`/auth/me`, `/auth/login`, `/auth/logout`, `/auth/github/*`), the
+// routes (`/auth/me`, `/auth/login`, `/auth/logout`, `/auth/github/*`), the
 // cryptographically authenticated federation/webhook routes, and
 // health/readiness probes. The root `/metrics` route is outside this nested API
 // middleware entirely. The crypto and storage live in `crate::auth`; this is
@@ -63,7 +67,11 @@ pub(super) async fn is_session_descendant(st: &AppState, ancestor: &str, candida
     .unwrap_or(false)
 }
 
-async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id: &str) -> bool {
+pub(super) async fn branch_belongs_to_session_tree(
+    st: &AppState,
+    ancestor: &str,
+    branch_id: &str,
+) -> bool {
     sqlx::query_scalar::<_, bool>(
         "WITH RECURSIVE tree(id, branch_id) AS (
            SELECT id, branch_id FROM sessions WHERE id = ?
@@ -80,166 +88,66 @@ async fn branch_belongs_to_session_tree(st: &AppState, ancestor: &str, branch_id
     .unwrap_or(false)
 }
 
-async fn issue_belongs_to_session(st: &AppState, branch_id: &str, issue_id: &str) -> bool {
-    let Ok(issue_id) = issue_id.parse::<i64>() else {
-        return false;
-    };
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-           SELECT 1 FROM issues i JOIN branches b ON b.id = ?
-           WHERE i.id = ? AND i.repo_root = b.repo_root
-         )",
-    )
-    .bind(branch_id)
-    .bind(issue_id)
-    .fetch_one(&st.db)
-    .await
-    .unwrap_or(false)
-}
-
-async fn channel_belongs_to_session_tree(st: &AppState, ancestor: &str, channel_id: &str) -> bool {
-    let row = sqlx::query(
-        "SELECT c.session_id,
-                EXISTS(
-                  SELECT 1 FROM channel_subscriptions sub
-                  WHERE sub.channel_id = c.id
-                    AND sub.subject_kind = 'session'
-                    AND sub.subject_id = ?
-                ) AS subscribed
-         FROM channels c WHERE c.id = ?",
-    )
-    .bind(ancestor)
-    .bind(channel_id)
-    .fetch_optional(&st.db)
-    .await;
-    let Ok(Some(row)) = row else {
-        return false;
-    };
-    if row.get::<bool, _>("subscribed") {
-        return true;
-    }
-    match row.get::<Option<String>, _>("session_id") {
-        Some(session_id) => is_session_descendant(st, ancestor, &session_id).await,
-        None => false,
-    }
-}
-
-async fn automation_owns_session(st: &AppState, subject: &str, session_id: &str) -> bool {
-    sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM sessions
-         WHERE id = ? AND creator_kind = 'automation' AND creator_subject = ?)",
-    )
-    .bind(session_id)
-    .bind(subject)
-    .fetch_one(&st.db)
-    .await
-    .unwrap_or(false)
-}
-
 /// Whether `principal`'s grant permits `method raw_path`. The router runs this
-/// over every request; the multiplexed `/api/events` stream re-runs it per topic
-/// against the route that topic stands in for, so folding streams onto one
-/// connection cannot widen what a scoped credential can read.
+/// over every request.
+///
+/// Almost every request is a registered operation, and an operation's authority
+/// is complete without help from here: `actor` decides who may call it, and
+/// `authorize()` at the dispatcher decides the grants and the resource its
+/// `Scoped` input names. So this function's whole job is the *handful* of
+/// authenticated routes that are not operations.
+///
+/// The IDE proxy is a raw byte proxy into a container; it is never going to be
+/// an operation, and has no typed input, so it needs a resource check here
+/// against the session id in the path.
 pub(super) async fn grant_allows(
     st: &AppState,
     principal: &Principal,
     method: &axum::http::Method,
     raw_path: &str,
 ) -> bool {
+    if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
+        return operation_grant_allows(principal, operation);
+    }
     if principal.is_admin() {
         return true;
     }
-    if let Some(registration) = super::operations::bound_operation_for_request(method, raw_path) {
-        return operation_grant_allows(principal, registration.operation);
-    }
-    if let Some(operation) = weaver_api::operation_for_request(method.as_str(), raw_path) {
-        if !operation_grant_allows(principal, operation) {
-            return false;
-        }
-    }
     let path = raw_path.strip_prefix("/api").unwrap_or(raw_path);
-    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
-    // The multiplexed stream carries no authority of its own: it is a container
-    // whose every topic is re-checked here against the single-stream route it
-    // stands in for. Reaching the route grants nothing; the topic list does.
-    if *method == axum::http::Method::GET && path == "/events" {
-        return true;
-    }
+    // The registry describing itself. Readable by anything holding a
+    // credential: an agent discovers which operations exist through it, and
+    // it reports only what `/api/operations` would report to any caller.
+    let discovery = *method == axum::http::Method::GET
+        && (matches!(path, "/meta" | "/operations" | "/openapi.json")
+            || path.starts_with("/operations/"));
     match &principal.grant {
+        Grant::Anonymous => false,
         Grant::Admin => true,
-        Grant::User => user_grant_allows(method, path),
-        Grant::Automation { subject, .. } => {
-            if path == "/runs" || path.starts_with("/runs/") {
+        Grant::User => discovery || super::is_ide_proxy_path(path),
+        // An automation credential exists to report runs (`runs.create`,
+        // `actor = Internal`); it reaches no raw path at all.
+        Grant::Automation { .. } => false,
+        Grant::Session { session_id, .. } => {
+            if discovery {
                 return true;
             }
-            if *method == axum::http::Method::GET && segments.first() == Some(&"sessions") {
-                if let Some(session_id) = segments.get(1) {
-                    return automation_owns_session(st, subject, session_id).await;
-                }
-            }
-            false
-        }
-        Grant::Session {
-            session_id,
-            branch_id,
-            ..
-        } => {
-            if *method == axum::http::Method::GET
-                && matches!(path, "/meta" | "/operations" | "/openapi.json")
-            {
-                return true;
-            }
-            if *method == axum::http::Method::GET && path.starts_with("/operations/") {
-                return true;
-            }
-            if *method == axum::http::Method::GET && path == "/self" {
-                return true;
-            }
-            if *method == axum::http::Method::POST && path == "/sessions" {
-                return true;
-            }
-            // `loom session launch` performs this read-only canonical preflight
-            // before POSTing `/sessions`. Session principals already have the
-            // right to delegate a child launch; letting them resolve the exact
-            // template snapshot does not grant another read or write surface.
-            if *method == axum::http::Method::POST && path == "/session-launches/resolve" {
-                return true;
-            }
-            if path == "/channels" {
-                return matches!(*method, axum::http::Method::GET | axum::http::Method::POST);
-            }
-            if segments.first() == Some(&"channels") && segments.len() >= 2 {
-                return channel_belongs_to_session_tree(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"sessions") && segments.len() >= 2 {
-                return is_session_descendant(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"branches") && segments.len() >= 2 {
-                return branch_belongs_to_session_tree(st, session_id, segments[1]).await;
-            }
-            if segments.first() == Some(&"issues") && segments.len() >= 2 {
-                if segments[1] == "actions" && *method == axum::http::Method::POST {
-                    return true;
-                }
-                return issue_belongs_to_session(st, branch_id, segments[1]).await;
-            }
-            *method == axum::http::Method::GET
-                && matches!(
-                    path,
-                    "/sessions"
-                        | "/branches"
-                        | "/issues"
-                        | "/agents"
-                        | "/repos"
-                        | "/repos/recent"
-                        | "/repos/branches"
-                        | "/settings"
-                        | "/profiles"
-                )
-                || (path == "/repos/issues"
-                    && matches!(*method, axum::http::Method::GET | axum::http::Method::POST))
+            let Some(target) = ide_proxy_session(path) else {
+                return false;
+            };
+            is_session_descendant(st, session_id, target).await
         }
     }
+}
+
+/// The session id an IDE-proxy path addresses, if it is one.
+///
+/// [`super::is_ide_proxy_path`] answers the same question without the id, and
+/// this deliberately parses the same paths: one accepting a path the other
+/// rejects (or parses differently) would be a hole.
+fn ide_proxy_session(path: &str) -> Option<&str> {
+    let path = path.strip_prefix("/api").unwrap_or(path);
+    let rest = path.strip_prefix("/sessions/")?;
+    let (id, after) = rest.split_once('/')?;
+    (after == "ide" || after.starts_with("ide/")).then_some(id)
 }
 
 /// Enforce the operation registry at the API boundary. CLI and MCP adapters
@@ -248,52 +156,29 @@ pub(super) fn operation_grant_allows(
     principal: &Principal,
     operation: &weaver_api::OperationSpec,
 ) -> bool {
+    if operation.actor == weaver_api::ActorPolicy::Anonymous {
+        return true;
+    }
     match &principal.grant {
-        Grant::Admin => true,
+        Grant::Anonymous => false,
+        Grant::Admin => operation.actor != weaver_api::ActorPolicy::SessionOnly,
         Grant::User => matches!(
             operation.actor,
             weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == weaver_api::ActorPolicy::Internal,
         Grant::Session { capabilities, .. } => {
-            operation.actor == weaver_api::ActorPolicy::SessionSelf
-                && capabilities.as_ref().is_none_or(|granted| {
-                    operation
-                        .capabilities
-                        .iter()
-                        .all(|required| granted.iter().any(|value| value == required))
-                })
+            matches!(
+                operation.actor,
+                weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::SessionOnly
+            ) && capabilities.as_ref().is_none_or(|granted| {
+                operation
+                    .grants
+                    .iter()
+                    .all(|required| granted.iter().any(|value| value == required))
+            })
         }
     }
-}
-
-fn user_grant_allows(method: &axum::http::Method, path: &str) -> bool {
-    if path == "/auth/users"
-        || path.starts_with("/auth/users/")
-        || path == "/auth/github/config"
-        || path == "/auth/automation-token"
-        || path == "/auth/federations"
-        || path.starts_with("/auth/federations/")
-        || path == "/deployment/reconcile"
-        || path == "/shell/terminal"
-        || path == "/shell/restart"
-    {
-        return false;
-    }
-    if matches!(*method, axum::http::Method::GET | axum::http::Method::HEAD) {
-        return true;
-    }
-    !(path == "/settings"
-        || path == "/env"
-        || path.starts_with("/env/")
-        || path == "/profiles"
-        || path.starts_with("/profiles/")
-        || path == "/agents/custom"
-        || path.starts_with("/agents/custom/")
-        || path == "/mcps/custom"
-        || path.starts_with("/mcps/custom/")
-        || path == "/watches"
-        || path.starts_with("/watches/"))
 }
 
 /// Pull the token out of an `Authorization: Bearer <token>` header.
@@ -374,7 +259,18 @@ pub(super) async fn require_auth(
             req.extensions_mut().insert(principal);
             next.run(req).await
         }
-        None => unauthorized("authentication required").into_response(),
+        // No credential. An operation declared `actor = Anonymous` is still
+        // reachable.
+        None => {
+            let anonymous_target =
+                weaver_api::operation_for_request(req.method().as_str(), req.uri().path())
+                    .is_some_and(|operation| operation.actor == weaver_api::ActorPolicy::Anonymous);
+            if !anonymous_target {
+                return unauthorized("authentication required").into_response();
+            }
+            req.extensions_mut().insert(Principal::anonymous());
+            next.run(req).await
+        }
     }
 }
 
@@ -422,11 +318,11 @@ async fn cookie_secure(st: &AppState) -> bool {
     config::get_bool(&st.db, "auth.cookie_secure", config::DEFAULT_COOKIE_SECURE).await
 }
 
-/// [`external_base`], falling back to the address we are bound to when the
-/// request carries no Host — for building a link to hand out (a webhook reply, a
-/// PR back-link, `loom session url`, an artifact URL), where there is no "no
-/// origin" answer and the bound address is the best guess available. A wildcard
-/// host is mapped to loopback (see [`dialable_host`]) so the link resolves.
+/// [`external_base`], falling back to our bound address when the request
+/// carries no Host. Used for links we hand out (a webhook reply, a PR
+/// back-link, `loom session url`, an artifact URL) where no origin is
+/// available. A wildcard host is mapped to loopback (see [`dialable_host`])
+/// so the link resolves.
 pub(crate) async fn public_base(st: &AppState, headers: &HeaderMap) -> String {
     let base = external_base(st, headers)
         .await
@@ -473,35 +369,6 @@ async fn auth_methods(st: &AppState) -> AuthMethods {
         password: true,
         github: auth::github_oauth(&st.db).await.is_some(),
     }
-}
-
-/// `GET /api/auth/me` — who the caller is + which sign-in methods to offer.
-/// Public: an unauthenticated caller gets `authenticated: false`, not a 401.
-pub(super) async fn auth_me(
-    State(st): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Json<MeView> {
-    let principal = resolve_principal(&st, &headers, peer.ip()).await;
-    let methods = auth_methods(&st).await;
-    Json(match principal {
-        Some(p) => MeView {
-            authenticated: true,
-            role: p.user_role().map(user_role_view),
-            username: Some(p.username),
-            github_login: p.github_login,
-            via: Some(p.via.as_str().to_string()),
-            methods,
-        },
-        None => MeView {
-            authenticated: false,
-            role: None,
-            username: None,
-            github_login: None,
-            via: None,
-            methods,
-        },
-    })
 }
 
 /// `POST /api/auth/login` — username/password. Sets the session cookie.
@@ -620,111 +487,13 @@ fn token_view(info: auth::TokenInfo) -> TokenView {
     }
 }
 
-/// `GET /api/auth/tokens` — the user-managed API tokens.
-pub(super) async fn list_tokens(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<Vec<TokenView>>> {
-    let tokens = auth::list_tokens(&st.db, &principal.username).await?;
-    Ok(Json(tokens.into_iter().map(token_view).collect()))
-}
-
-/// `POST /api/auth/tokens` — mint a token, returning the plaintext once.
-pub(super) async fn create_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<CreateTokenReq>,
-) -> ApiResult<Json<CreatedTokenView>> {
-    let name = body.name.trim();
-    if name.is_empty() {
-        return Err(AppError::bad_request("a token name is required"));
-    }
-    if body
-        .expires_in_days
-        .is_some_and(|days| days > 0 && weaver_core::db::iso_in_days(days).is_none())
-    {
-        return Err(AppError::bad_request(
-            "token expiry is outside the supported range",
-        ));
-    }
-    let (token, info) =
-        auth::create_token(&st.db, &principal.username, name, body.expires_in_days).await?;
-    tracing::info!(username = %principal.username, id = %info.id, name = %info.name, "api token created");
-    Ok(Json(CreatedTokenView {
-        token,
-        info: token_view(info),
-    }))
-}
-
-/// `DELETE /api/auth/tokens/{id}` — revoke a token.
-pub(super) async fn revoke_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    if auth::revoke_token(&st.db, &principal.username, &id).await? {
-        tracing::info!(username = %principal.username, id = %id, "api token revoked");
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::not_found("token"))
-    }
-}
-
 // -- Account + users ---------------------------------------------------------
-
-/// `POST /api/auth/password` — set/change the caller's own password.
-pub(super) async fn set_own_password(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<SetPasswordReq>,
-) -> ApiResult<StatusCode> {
-    if body.new_password.len() < 8 {
-        return Err(AppError::bad_request(
-            "password must be at least 8 characters",
-        ));
-    }
-    auth::set_password(&st.db, &principal.username, Some(&body.new_password)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 // -- Per-user GitHub token ---------------------------------------------------
 // Loom stores the caller's fine-grained PAT and injects it only into ordinary
 // interactive sessions they launch. It is the sole direct credential source;
 // sessions without one use their profile-approved GitHub App credential.
 // Self-service and write-only: no endpoint ever returns the token value.
-
-#[derive(Debug, Deserialize)]
-pub(super) struct SetGithubTokenReq {
-    token: String,
-}
-
-pub(super) async fn get_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<user_token::TokenStatus>> {
-    Ok(Json(user_token::status(&st.db, &principal.username).await?))
-}
-
-pub(super) async fn set_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(body): Json<SetGithubTokenReq>,
-) -> ApiResult<Json<user_token::TokenStatus>> {
-    let token = body.token.trim();
-    if token.is_empty() {
-        return Err(AppError::bad_request("a token is required"));
-    }
-    user_token::set(&st.db, &principal.username, token).await?;
-    Ok(Json(user_token::status(&st.db, &principal.username).await?))
-}
-
-pub(super) async fn delete_github_token(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<StatusCode> {
-    user_token::remove(&st.db, &principal.username).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 fn user_view(u: auth::User) -> UserView {
     let has_password = u.has_password();
@@ -751,91 +520,6 @@ fn user_role_input(role: UserRole) -> auth::UserRole {
     }
 }
 
-/// `GET /api/auth/users` — the approved-operator allowlist.
-pub(super) async fn list_users(State(st): State<AppState>) -> ApiResult<Json<Vec<UserView>>> {
-    let users = auth::list_users(&st.db).await?;
-    Ok(Json(users.into_iter().map(user_view).collect()))
-}
-
-/// `POST /api/auth/users` — approve a new operator.
-pub(super) async fn add_user(
-    State(st): State<AppState>,
-    Json(body): Json<AddUserReq>,
-) -> ApiResult<Json<UserView>> {
-    let username = body.username.trim();
-    if username.is_empty() {
-        return Err(AppError::bad_request("a username is required"));
-    }
-    let github = body
-        .github_login
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let password = body.password.as_deref().filter(|s| !s.is_empty());
-    if github.is_none() && password.is_none() {
-        return Err(AppError::bad_request(
-            "set a GitHub login or a password so the user can sign in",
-        ));
-    }
-    if let Some(p) = password {
-        if p.len() < 8 {
-            return Err(AppError::bad_request(
-                "password must be at least 8 characters",
-            ));
-        }
-    }
-    auth::add_user(
-        &st.db,
-        username,
-        github,
-        password,
-        user_role_input(body.role),
-    )
-    .await
-    .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
-    tracing::info!(username, "operator added");
-    let user = auth::get_user(&st.db, username)
-        .await?
-        .ok_or_else(|| AppError::not_found("user"))?;
-    Ok(Json(user_view(user)))
-}
-
-/// `PUT /api/auth/users/{username}/role` — update one human role. Existing
-/// cookies and personal tokens observe the change on their next request.
-pub(super) async fn set_user_role(
-    State(st): State<AppState>,
-    Path(username): Path<String>,
-    Json(body): Json<SetUserRoleReq>,
-) -> ApiResult<Json<UserView>> {
-    auth::set_user_role(&st.db, &username, user_role_input(body.role))
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    tracing::info!(username, role = ?body.role, "user role updated");
-    let user = auth::get_user(&st.db, &username)
-        .await?
-        .ok_or_else(|| AppError::not_found("user"))?;
-    Ok(Json(user_view(user)))
-}
-
-/// `DELETE /api/auth/users/{username}` — remove an approved operator.
-pub(super) async fn remove_user(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(username): Path<String>,
-) -> ApiResult<StatusCode> {
-    if username == principal.username {
-        return Err(AppError::bad_request("you cannot remove yourself"));
-    }
-    match auth::remove_user(&st.db, &username).await {
-        Ok(true) => {
-            tracing::info!(username = %username, "operator removed");
-            Ok(StatusCode::NO_CONTENT)
-        }
-        Ok(false) => Err(AppError::not_found("user")),
-        Err(e) => Err(AppError::bad_request(e.to_string())),
-    }
-}
-
 // -- GitHub App / sign-in config ---------------------------------------------
 // One GitHub App backs loom: its OAuth client powers sign-in (`configured` /
 // `client_id`), and the same App's id + private key power the `@loom` trigger
@@ -844,7 +528,7 @@ pub(super) async fn remove_user(
 async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
     // Both the OAuth client id and the App identity are resolved env-or-settings
     // (via `auth`/`github_app`), so an env-configured deploy reports its live
-    // values instead of blanks read from an empty settings table.
+    // values even when the settings table is empty.
     let app_id = crate::github_app::app_id(&st.db)
         .await
         .map(|id| id.to_string())
@@ -861,36 +545,426 @@ async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
     })
 }
 
-/// `GET /api/auth/github/config` — the GitHub sign-in setup (secret withheld).
-pub(super) async fn get_github_config(
-    State(st): State<AppState>,
-) -> ApiResult<Json<GithubConfigView>> {
-    Ok(Json(github_config_view(&st).await?))
+// ===========================================================================
+// Operation registry bindings
+//
+// `auth.login`, `auth.logout`, and `auth.federate` are declared in
+// `weaver_api::operations::auth` but are deliberately NOT bound here — see the
+// doc comment on each below. Every other operation in the bundle is bound.
+// ===========================================================================
+
+/// `auth.me` — who the caller is, and which sign-in methods to offer.
+///
+/// Declared `actor = Anonymous`, so an unauthenticated caller arrives with a
+/// synthesized anonymous principal instead of a 401, and gets
+/// `authenticated: false`. The login screen reads that flag to decide whether
+/// to prompt for sign-in.
+async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView> {
+    let methods = auth_methods(&context.state).await;
+    let p = context.principal;
+    if matches!(p.grant, Grant::Anonymous) {
+        return Ok(MeView {
+            authenticated: false,
+            role: None,
+            username: None,
+            github_login: None,
+            via: None,
+            methods,
+        });
+    }
+    Ok(MeView {
+        authenticated: true,
+        role: p.user_role().map(user_role_view),
+        username: Some(p.username),
+        github_login: p.github_login,
+        via: Some(p.via.as_str().to_string()),
+        methods,
+    })
 }
 
-/// `PUT /api/auth/github/config` — set the sign-in OAuth client id (and,
+/// `auth.automation_token` — mint a short-lived automation credential for
+/// another subject. `actor = Admin` on the descriptor is the admin check;
+/// nothing in the handler body checks it again.
+async fn automation_token_op(
+    context: OperationContext,
+    input: automation_token::Input,
+) -> ApiResult<AutomationTokenView> {
+    crate::automation::mint(
+        &context.state.db,
+        &input.subject,
+        input.profiles,
+        input.ttl_secs,
+        None,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+/// `auth.set_password` — set/change the caller's own password. There is no
+/// `username` in the input at all: the operation can only ever touch
+/// `context.principal`'s own account, an ownership guarantee enforced by
+/// construction rather than a runtime check.
+async fn set_password_op(
+    context: OperationContext,
+    input: set_password::Input,
+) -> ApiResult<UserView> {
+    if input.new_password.len() < 8 {
+        return Err(AppError::bad_request(
+            "password must be at least 8 characters",
+        ));
+    }
+    auth::set_password(
+        &context.state.db,
+        &context.principal.username,
+        Some(&input.new_password),
+    )
+    .await?;
+    let user = auth::get_user(&context.state.db, &context.principal.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.tokens.list` — the caller's own personal tokens (metadata only).
+/// Scoped to `context.principal.username` by construction.
+async fn list_tokens_op(
+    context: OperationContext,
+    _input: tokens::list::Input,
+) -> ApiResult<Vec<TokenView>> {
+    let tokens = auth::list_tokens(&context.state.db, &context.principal.username).await?;
+    Ok(tokens.into_iter().map(token_view).collect())
+}
+
+/// `auth.tokens.create` — mint a personal token owned by the caller. The
+/// plaintext is returned exactly once, here; nothing else ever hands it back.
+async fn create_token_op(
+    context: OperationContext,
+    input: tokens::create::Input,
+) -> ApiResult<CreatedTokenView> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err(AppError::bad_request("a token name is required"));
+    }
+    if input
+        .expires_in_days
+        .is_some_and(|days| days > 0 && weaver_core::db::iso_in_days(days).is_none())
+    {
+        return Err(AppError::bad_request(
+            "token expiry is outside the supported range",
+        ));
+    }
+    let (token, info) = auth::create_token(
+        &context.state.db,
+        &context.principal.username,
+        name,
+        input.expires_in_days,
+    )
+    .await?;
+    tracing::info!(username = %context.principal.username, id = %info.id, name = %info.name, "api token created");
+    Ok(CreatedTokenView {
+        token,
+        info: token_view(info),
+    })
+}
+
+/// `auth.tokens.revoke` — revoke one of the caller's own tokens.
+/// `auth::revoke_token`'s query is `WHERE id = ? AND username = ?`: a caller
+/// cannot name another user's token id and revoke it, because no row matches.
+/// The ownership check lives in the query itself, not a separate `if`.
+async fn revoke_token_op(
+    context: OperationContext,
+    input: tokens::revoke::Input,
+) -> ApiResult<RevokeTokenResult> {
+    if auth::revoke_token(&context.state.db, &context.principal.username, &input.id).await? {
+        tracing::info!(username = %context.principal.username, id = %input.id, "api token revoked");
+        Ok(RevokeTokenResult {
+            revoked: true,
+            id: input.id,
+        })
+    } else {
+        Err(AppError::not_found("token"))
+    }
+}
+
+/// `auth.federations.list` — the registered workload-identity mappings.
+async fn list_federations_op(
+    context: OperationContext,
+    _input: federations::list::Input,
+) -> ApiResult<Vec<FederationView>> {
+    Ok(crate::automation::federation_list(&context.state.db).await?)
+}
+
+/// Best-effort name when the caller omits one, derived from the identity
+/// fields below. `crate::automation::federation_add` upserts on `name` and
+/// requires it to pass `crate::profile::validate_name` (starts with a letter;
+/// then letters, digits, `-`, `_`; at most 64 bytes), so the chosen identity
+/// field is slugified into that format before use.
+fn derive_federation_name(input: &federations::create::Input) -> String {
+    let seed = match input.provider.trim().to_ascii_lowercase().as_str() {
+        "google" => input
+            .service_account
+            .as_deref()
+            .or(input.subject.as_deref()),
+        _ => input
+            .repository_id
+            .as_deref()
+            .or(input.workflow_ref.as_deref()),
+    }
+    .unwrap_or(input.service_tag.as_str());
+    let slug: String = seed
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    let mut name = format!("{}-{slug}", input.provider.trim().to_ascii_lowercase());
+    name.truncate(64);
+    if !name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        name = format!("f-{name}");
+        name.truncate(64);
+    }
+    name
+}
+
+/// `auth.federations.create` — register or reconcile a workload-identity
+/// mapping.
+async fn create_federation_op(
+    context: OperationContext,
+    input: federations::create::Input,
+) -> ApiResult<FederationView> {
+    let name = match input.name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => derive_federation_name(&input),
+    };
+    let req = FederationReq {
+        name,
+        provider: input.provider,
+        issuer: input.issuer,
+        audience: input.audience,
+        subject: input.subject,
+        service_account: input.service_account,
+        service_tag: input.service_tag,
+        repository_id: input.repository_id,
+        workflow_ref: input.workflow_ref,
+        event_name: input.event_name,
+        ref_pattern: input.ref_pattern,
+        profiles: input.profiles,
+    };
+    crate::automation::federation_add(&context.state.db, &req)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+/// `auth.federations.remove` — remove a workload-identity mapping.
+async fn remove_federation_op(
+    context: OperationContext,
+    input: federations::remove::Input,
+) -> ApiResult<RemoveFederationResult> {
+    if crate::automation::federation_remove(&context.state.db, &input.id).await? {
+        Ok(RemoveFederationResult {
+            removed: true,
+            id: input.id,
+        })
+    } else {
+        Err(AppError::not_found("federation mapping"))
+    }
+}
+
+/// `auth.users.list` — the approved-operator allowlist.
+async fn list_users_op(
+    context: OperationContext,
+    _input: users::list::Input,
+) -> ApiResult<Vec<UserView>> {
+    let users = auth::list_users(&context.state.db).await?;
+    Ok(users.into_iter().map(user_view).collect())
+}
+
+/// `auth.users.create` — approve a new operator.
+async fn add_user_op(
+    context: OperationContext,
+    input: users::create::Input,
+) -> ApiResult<UserView> {
+    let username = input.username.trim();
+    if username.is_empty() {
+        return Err(AppError::bad_request("a username is required"));
+    }
+    let github = input
+        .github_login
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let password = input.password.as_deref().filter(|s| !s.is_empty());
+    if github.is_none() && password.is_none() {
+        return Err(AppError::bad_request(
+            "set a GitHub login or a password so the user can sign in",
+        ));
+    }
+    if let Some(p) = password {
+        if p.len() < 8 {
+            return Err(AppError::bad_request(
+                "password must be at least 8 characters",
+            ));
+        }
+    }
+    auth::add_user(
+        &context.state.db,
+        username,
+        github,
+        password,
+        user_role_input(input.role),
+    )
+    .await
+    .map_err(|e| AppError::bad_request(format!("could not add user: {e}")))?;
+    tracing::info!(username, "operator added");
+    let user = auth::get_user(&context.state.db, username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.users.set_role` — change an operator's role. Admin-only via
+/// `actor = Admin`; any admin may change any user's role, including their
+/// own. The "don't demote the last administrator" business rule lives inside
+/// `auth::set_user_role`.
+async fn set_user_role_op(
+    context: OperationContext,
+    input: users::set_role::Input,
+) -> ApiResult<UserView> {
+    auth::set_user_role(
+        &context.state.db,
+        &input.username,
+        user_role_input(input.role),
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
+    tracing::info!(username = %input.username, role = ?input.role, "user role updated");
+    let user = auth::get_user(&context.state.db, &input.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
+/// `auth.users.remove` — remove an approved operator. The "you cannot remove
+/// yourself" check guards business state — self-removal could strand the
+/// last admin — which `authorize()` has no way to express, so the handler
+/// checks it directly.
+async fn remove_user_op(
+    context: OperationContext,
+    input: users::remove::Input,
+) -> ApiResult<RemoveUserResult> {
+    if input.username == context.principal.username {
+        return Err(AppError::bad_request("you cannot remove yourself"));
+    }
+    match auth::remove_user(&context.state.db, &input.username).await {
+        Ok(true) => {
+            tracing::info!(username = %input.username, "operator removed");
+            Ok(RemoveUserResult {
+                removed: true,
+                username: input.username,
+            })
+        }
+        Ok(false) => Err(AppError::not_found("user")),
+        Err(e) => Err(AppError::bad_request(e.to_string())),
+    }
+}
+
+fn token_status_view(status: user_token::TokenStatus) -> GithubTokenStatusView {
+    GithubTokenStatusView {
+        set: status.set,
+        updated_at: status.updated_at,
+    }
+}
+
+/// `auth.github_token.get` — whether the caller has a personal GitHub token
+/// on file. Scoped to `context.principal.username`; the value itself is
+/// never returned by this or any other operation.
+async fn get_github_token_op(
+    context: OperationContext,
+    _input: github_token::get::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_token.set` — set the caller's own personal GitHub token.
+async fn set_github_token_op(
+    context: OperationContext,
+    input: github_token::set::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    let token = input.token.trim();
+    if token.is_empty() {
+        return Err(AppError::bad_request("a token is required"));
+    }
+    user_token::set(&context.state.db, &context.principal.username, token).await?;
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_token.remove` — clear the caller's own personal GitHub token.
+async fn remove_github_token_op(
+    context: OperationContext,
+    _input: github_token::remove::Input,
+) -> ApiResult<GithubTokenStatusView> {
+    user_token::remove(&context.state.db, &context.principal.username).await?;
+    let status = user_token::status(&context.state.db, &context.principal.username).await?;
+    Ok(token_status_view(status))
+}
+
+/// `auth.github_config.get` — the GitHub sign-in / App setup (secret
+/// withheld).
+async fn get_github_config_op(
+    context: OperationContext,
+    _input: github_config::get::Input,
+) -> ApiResult<GithubConfigView> {
+    github_config_view(&context.state).await
+}
+
+/// `auth.github_config.set` — set the GitHub sign-in OAuth client id (and,
 /// optionally, its secret).
-pub(super) async fn put_github_config(
-    State(st): State<AppState>,
-    Json(body): Json<SetGithubConfigReq>,
-) -> ApiResult<Json<GithubConfigView>> {
+async fn set_github_config_op(
+    context: OperationContext,
+    input: github_config::set::Input,
+) -> ApiResult<GithubConfigView> {
     let mut changes: Vec<config::Change> = vec![(
         auth::GH_CLIENT_ID_KEY.to_string(),
-        Some(body.client_id.trim().to_string()),
+        Some(input.client_id.trim().to_string()),
     )];
-    // The secret is write-only: a value sets it, an empty string clears it, and
-    // omitting the field leaves the stored secret untouched.
-    let secret_provided = body.client_secret.is_some();
-    if let Some(secret) = body.client_secret {
+    let secret_provided = input.client_secret.is_some();
+    if let Some(secret) = input.client_secret {
         let secret = secret.trim().to_string();
         changes.push((
             auth::GH_CLIENT_SECRET_KEY.to_string(),
             (!secret.is_empty()).then_some(secret),
         ));
     }
-    config::apply(&st.db, &changes).await?;
+    config::apply(&context.state.db, &changes).await?;
     tracing::info!(secret_provided, "github oauth config updated");
-    Ok(Json(github_config_view(&st).await?))
+    github_config_view(&context.state).await
+}
+
+/// The `auth` bundle's operation bindings; see the module comment above for
+/// the `auth.login`/`auth.logout`/`auth.federate` exclusions.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<me::Op, _, _>(me_op),
+        register::<automation_token::Op, _, _>(automation_token_op),
+        register::<set_password::Op, _, _>(set_password_op),
+        register::<tokens::list::Op, _, _>(list_tokens_op),
+        register::<tokens::create::Op, _, _>(create_token_op),
+        register::<tokens::revoke::Op, _, _>(revoke_token_op),
+        register::<federations::list::Op, _, _>(list_federations_op),
+        register::<federations::create::Op, _, _>(create_federation_op),
+        register::<federations::remove::Op, _, _>(remove_federation_op),
+        register::<users::list::Op, _, _>(list_users_op),
+        register::<users::create::Op, _, _>(add_user_op),
+        register::<users::set_role::Op, _, _>(set_user_role_op),
+        register::<users::remove::Op, _, _>(remove_user_op),
+        register::<github_token::get::Op, _, _>(get_github_token_op),
+        register::<github_token::set::Op, _, _>(set_github_token_op),
+        register::<github_token::remove::Op, _, _>(remove_github_token_op),
+        register::<github_config::get::Op, _, _>(get_github_config_op),
+        register::<github_config::set::Op, _, _>(set_github_config_op),
+    ]
 }
 
 #[cfg(test)]
@@ -900,8 +974,6 @@ mod tests {
 
     #[test]
     fn wildcard_hosts_map_to_loopback() {
-        // A wildcard bind is "every interface", not a dialable address — the
-        // link we hand out must point somewhere a browser can actually open.
         assert_eq!(
             dialable_host("http://0.0.0.0:7878"),
             "http://127.0.0.1:7878"
@@ -911,8 +983,6 @@ mod tests {
 
     #[test]
     fn real_origins_pass_through_untouched() {
-        // A configured `auth.base_url` or a real browser's Host never carries a
-        // wildcard, so the common cases are left exactly as-is.
         assert_eq!(
             dialable_host("https://loom.example.com"),
             "https://loom.example.com"

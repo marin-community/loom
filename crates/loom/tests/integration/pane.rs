@@ -27,7 +27,7 @@ impl SendMode {
     }
 }
 
-/// Send `text` and poll `GET /preview` until the captured screen contains
+/// Send `text` and poll `sessions.preview` until the captured screen contains
 /// `marker`, **re-sending** between polls. The launch script `exec`s the shell
 /// only after the supervisor socket is already up, and shell startup flushes any
 /// input typed during that window — so a command sent right after create can be
@@ -37,8 +37,8 @@ impl SendMode {
 /// With [`SendMode::Submit`] the marker is the command's *output*, which appears only
 /// once the shell has executed it. With [`SendMode::Stage`] nothing executes, so the
 /// marker is the staged text itself — its appearance on the prompt line is the
-/// proof the input reached the PTY, and the point at which a caller can
-/// meaningfully assert the command has *not* run.
+/// proof the input reached the PTY, and the point past which a caller can
+/// assert the command has *not* run.
 async fn send_until(ts: &TestServer, id: &str, send: SendMode, text: &str, marker: &str) -> String {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
@@ -47,7 +47,7 @@ async fn send_until(ts: &TestServer, id: &str, send: SendMode, text: &str, marke
         loop {
             let res = ts
                 .client
-                .get(&format!("/api/sessions/{id}/preview"))
+                .post("/api/sessions/preview", json!({ "session": id }))
                 .await
                 .unwrap();
             let screen = res["screen"].as_str().unwrap_or("").to_string();
@@ -66,8 +66,8 @@ async fn send_until(ts: &TestServer, id: &str, send: SendMode, text: &str, marke
         let _ = ts
             .client
             .post(
-                &format!("/api/sessions/{id}/send"),
-                json!({ "text": text, "submit": send.submits() }),
+                "/api/sessions/send",
+                json!({ "session": id, "text": text, "submit": send.submits() }),
             )
             .await;
     }
@@ -82,7 +82,7 @@ async fn send_runs_a_command_and_preview_reads_it() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -90,12 +90,12 @@ async fn send_runs_a_command_and_preview_reads_it() {
     let id = ws["id"].as_str().unwrap().to_string();
 
     // Submit a command whose OUTPUT (the arithmetic result) differs from the
-    // text typed — so finding it proves the line was actually executed, not just
+    // text typed — so finding it proves the line was actually executed, not
     // echoed onto the prompt.
     let sent = client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo PANE_$((6 * 7))" }),
+            "/api/sessions/send",
+            json!({ "session": id, "text": "echo PANE_$((6 * 7))" }),
         )
         .await
         .unwrap();
@@ -111,7 +111,10 @@ async fn send_runs_a_command_and_preview_reads_it() {
     .await;
     assert!(screen.contains("PANE_42"), "command output missing");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// `send` with `submit:false` stages input without running it.
@@ -123,7 +126,7 @@ async fn send_without_submit_does_not_execute() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -132,8 +135,8 @@ async fn send_without_submit_does_not_execute() {
 
     let sent = client
         .post(
-            &format!("/api/sessions/{id}/send"),
-            json!({ "text": "echo STAGED_$((1 + 1))", "submit": false }),
+            "/api/sessions/send",
+            json!({ "session": id, "text": "echo STAGED_$((1 + 1))", "submit": false }),
         )
         .await
         .unwrap();
@@ -149,7 +152,10 @@ async fn send_without_submit_does_not_execute() {
         "unsubmitted input should not have executed; screen:\n{screen}"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// `interrupt` injects an Escape and reports success.
@@ -161,7 +167,7 @@ async fn interrupt_sends_a_break() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -169,12 +175,15 @@ async fn interrupt_sends_a_break() {
     let id = ws["id"].as_str().unwrap().to_string();
 
     let res = client
-        .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+        .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
     assert_eq!(res["interrupted"], true);
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 /// All three pane endpoints 409 when the session has no live terminal.
@@ -186,7 +195,7 @@ async fn pane_endpoints_reject_a_dead_session() {
 
     let ws = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "pane test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -201,8 +210,8 @@ async fn pane_endpoints_reject_a_dead_session() {
     assert!(
         client
             .post(
-                &format!("/api/sessions/{id}/send"),
-                json!({ "text": "echo hi" })
+                "/api/sessions/send",
+                json!({ "session": id, "text": "echo hi" })
             )
             .await
             .is_err(),
@@ -210,18 +219,21 @@ async fn pane_endpoints_reject_a_dead_session() {
     );
     assert!(
         client
-            .post(&format!("/api/sessions/{id}/interrupt"), json!({}))
+            .post("/api/sessions/interrupt", json!({ "session": id }))
             .await
             .is_err(),
         "interrupt should fail without a live terminal"
     );
     assert!(
         client
-            .get(&format!("/api/sessions/{id}/preview"))
+            .post("/api/sessions/preview", json!({ "session": id }))
             .await
             .is_err(),
         "preview should fail without a live terminal"
     );
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }

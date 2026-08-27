@@ -70,18 +70,17 @@ use wire::{
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
 };
 
-/// Persisting the relay cursor for every streaming delta turns a restart replay
-/// into thousands of SQLite writes. A short periodic flush keeps the possible
-/// duplicate replay bounded while allowing catch-up to run at spool speed.
+/// Persisting the relay cursor on every streaming delta would turn a restart
+/// replay into thousands of SQLite writes; this bounds the duplicate replay
+/// while letting catch-up run at spool speed.
 const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
-/// How often a live ACP session restamps `last_activity_at`. Frames arrive far
-/// faster than idleness is measured, so the stamp is throttled to keep a chatty
-/// adapter from turning every delta into a write.
+/// How often a live ACP session restamps `last_activity_at`, throttled so a
+/// chatty adapter doesn't turn every delta into a write.
 const ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
-// Public surface
+// Public API
 // ---------------------------------------------------------------------------
 
 /// How to open the ACP session at [`start`]: a fresh `session/new`, or a
@@ -120,10 +119,10 @@ pub struct AcpLaunch {
     /// `default`, `plan`), applied via `session/set_mode` after setup. `None`
     /// leaves the adapter's default mode.
     pub mode: Option<String>,
-    /// Resolved launch selectors that must also be reflected in the adapter's
-    /// live config controls. Some adapters pass these through to the underlying
-    /// runtime before constructing their ACP `configOptions`, so the model can
-    /// be correct while the advertised picker is still on its own default.
+    /// Resolved launch selector to reconcile with the adapter's live config
+    /// controls. Some adapters pass this to the underlying runtime before
+    /// constructing their ACP `configOptions`, so the model can be correct
+    /// while the advertised picker still shows its own default.
     pub initial_model: Option<String>,
     /// The matching reasoning-effort selector, when the launch pinned one.
     pub initial_effort: Option<String>,
@@ -166,10 +165,9 @@ pub enum AcpPromptEffort<'a> {
 
 /// Open and configure a disposable ACP session without sending a prompt.
 ///
-/// This exercises the runtime-owned model, effort, and mode controls before a
-/// durable Loom session is provisioned. Provider entitlements are not reliably
-/// discoverable from static metadata, so the adapter handshake is the source of
-/// truth. The detached relay is always removed before returning.
+/// Validates the model/effort/mode selectors against the real adapter
+/// handshake, since entitlements aren't reliably known from static metadata.
+/// The detached relay is always removed before returning.
 pub async fn validate_launch(
     db: &Db,
     transient_sessions: &crate::backend::TransientSessionRegistry,
@@ -221,10 +219,9 @@ pub async fn validate_launch(
 }
 
 /// Run one isolated prompt through an ordinary ACP adapter launch. Model and
-/// effort are selected through the adapter's live `configOptions`; this path
-/// never knows or invokes a provider CLI. The relay and provider session are
-/// transient and always torn down, so the prompt does not remain in the real
-/// session that will subsequently take over.
+/// effort are selected through the adapter's live `configOptions`, never a
+/// provider CLI. The relay and provider session are transient and always torn
+/// down, so nothing here leaks into the session that follows.
 pub async fn prompt_once(
     db: &Db,
     transient_sessions: &crate::backend::TransientSessionRegistry,
@@ -246,10 +243,9 @@ pub async fn prompt_once(
         crate::backend::TRANSIENT_SESSION_PREFIX,
         rand::random::<u64>()
     );
-    // The relay is detached like a normal work session, but deliberately has
-    // no database row. Keep the periodic supervisor reconciler from mistaking
-    // this in-flight prompt for crash debris; dropping the lease after cleanup
-    // makes a relay left by a process crash reclaimable on restart.
+    // No database row, so the lease keeps the periodic reconciler from
+    // treating this in-flight prompt as crash debris; dropping it after
+    // cleanup makes a crashed relay reclaimable on restart.
     let _relay_lease = transient_sessions.lease(&relay_name);
     let env: Vec<(&str, &str)> = launch
         .env
@@ -671,7 +667,7 @@ pub struct PromptAck {
     pub turn: Option<i64>,
 }
 
-/// The outcome of answering a permission request over REST.
+/// The outcome of answering a permission request over the HTTP API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermAnswer {
     /// Answered — the JSON-RPC response was sent and the block resolved.
@@ -690,10 +686,9 @@ pub struct SseEvent {
     pub data: Value,
 }
 
-/// Agent-owned controls for the conversation composer. These are deliberately
-/// kept as ACP-shaped JSON: command inputs and session config options are an
-/// extensible protocol surface, and loom forwards fields it does not yet render
-/// instead of narrowing the wire contract and making adapters stale again.
+/// Agent-owned controls for the conversation composer, kept as ACP-shaped
+/// JSON: command inputs and config options are open-ended, so loom forwards
+/// fields it doesn't render instead of dropping them.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AcpMetadata {
@@ -705,8 +700,8 @@ pub struct AcpMetadata {
     pub steering_supported: bool,
 }
 
-/// A live session's control surface, held in the [`AcpRegistry`]: send commands
-/// to its task and subscribe to its SSE stream.
+/// A live session's handle, held in the [`AcpRegistry`]: send commands to its
+/// task and subscribe to its SSE stream.
 #[derive(Clone)]
 pub struct AcpHandle {
     cmd_tx: mpsc::Sender<Command>,
@@ -787,9 +782,9 @@ impl AcpHandle {
     }
 
     /// Notice immutable submitted feedback in the protected conversation inbox.
-    /// Start it immediately unless Stop has paused automatic work or another
-    /// protected review already owns the live turn. The editable prompt lane is
-    /// never read or modified here.
+    /// Starts it immediately unless Stop has paused automatic work or another
+    /// protected review already owns the live turn. Never touches the
+    /// editable prompt lane.
     pub async fn notify_pending(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -859,9 +854,9 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
     /// Change an ACP session configuration option (`model`, reasoning effort,
-    /// mode, or another adapter-defined value). The task waits for the agent's
-    /// full refreshed option set before acknowledging the REST write and returns
-    /// that authoritative state to the caller.
+    /// mode, or another adapter-defined value). Waits for the agent's full
+    /// refreshed option set before acknowledging, and returns that
+    /// authoritative state to the caller.
     pub async fn set_config_option(&self, config_id: String, value: Value) -> Result<AcpMetadata> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -877,9 +872,9 @@ impl AcpHandle {
     }
 
     /// Atomically snapshot and quiesce an idle task for provider replacement.
-    /// The command is ordered with prompts on the same channel; acknowledgement
-    /// arrives only after the task has removed its registry slot and will accept
-    /// no more work. The returned journal cannot race a later completed turn.
+    /// Ordered with prompts on the same channel; the reply arrives only after
+    /// the task has removed its registry slot and will accept no more work, so
+    /// the returned journal cannot race a later completed turn.
     pub async fn prepare_handoff(&self) -> Result<Vec<ChatBlockView>> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -1017,9 +1012,9 @@ impl AcpRegistry {
     }
 
     /// Register a probe in place of a real session task, so a test can assert
-    /// which sessions the delivery worker wakes without standing up an adapter.
-    /// Not `#[cfg(test)]`: the suites that drive it live in upper crates, and a
-    /// cfg flag only ever applies within the crate that sets it.
+    /// which sessions the delivery worker wakes without standing up an
+    /// adapter. Not `#[cfg(test)]`: callers live in upper crates, and a cfg
+    /// flag only applies within the crate that sets it.
     pub fn register_review_wake_probe(
         &self,
         session_id: &str,
@@ -1055,8 +1050,8 @@ impl AcpRegistry {
 
     /// Register a prompt probe in place of a real session task.
     ///
-    /// Upper-crate delivery tests use this to prove that an integration hands a
-    /// follow-up to the ACP conversation rather than merely acknowledging its
+    /// Upper-crate delivery tests use this to prove an integration hands a
+    /// follow-up to the ACP conversation, not merely acknowledges the
     /// transport event. Production code never registers probes.
     pub fn register_prompt_probe(
         &self,
@@ -1241,9 +1236,9 @@ async fn start_inner(
         .await?;
         task.driver_epoch = driver_epoch;
         // `session/load` may replay an unanswered permission request and wait
-        // for the client response before returning. Register the task before
-        // setup so the REST permission route can drive that request instead of
-        // deadlocking against a handshake that has not published its handle.
+        // for the client response before returning, so register the task
+        // before setup — otherwise the REST permission route can't reach it
+        // and the handshake deadlocks.
         let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
         task.generation = state.acp.register(
             session_id,
@@ -1889,9 +1884,9 @@ impl Task {
 
     /// Bring the adapter-owned model/effort controls into line with Loom's
     /// resolved launch selectors. Claude's adapter, for example, forwards the
-    /// `_meta` model to the SDK but independently seeds its model config option
-    /// from settings/defaults. Going through the ordinary ACP config method
-    /// gives both sides one acknowledged state before the first prompt.
+    /// `_meta` model to the SDK but independently seeds its config option from
+    /// settings/defaults; going through the ordinary ACP config method gives
+    /// both sides one acknowledged state before the first prompt.
     async fn reconcile_initial_config(
         &mut self,
         launch: &AcpLaunch,
@@ -2028,10 +2023,10 @@ impl Task {
                 meta,
             } => {
                 self.acp_session_id = acp_session_id.clone();
-                // Continue the *existing* journal: seed the turn/seq cursor from it
-                // so a post-load prompt opens a fresh turn (rather than colliding
-                // with `Task::fresh`'s zeroed counters). `turns_dispatched > 0` makes
-                // the next `start_turn` advance the turn.
+                // Continue the *existing* journal: seed the turn/seq cursor so
+                // a post-load prompt opens a fresh turn instead of colliding
+                // with `Task::fresh`'s zeroed counters (`turns_dispatched > 0`
+                // then advances the turn on the next `start_turn`).
                 let (max_turn, max_seq) = chat::max_turn_seq(&self.db, &self.session_id)
                     .await?
                     .unwrap_or((0, -1));
@@ -2052,14 +2047,14 @@ impl Task {
                 self.stream
                     .write(&wire::request_line(id, method::SESSION_LOAD, params))
                     .await?;
-                // History replays as `session/update` notifications during the call.
+                // Full history replays synchronously before the response, so allow more time.
                 let load_timeout = launch.setup_timeout.saturating_mul(4);
                 let (res, err) = self
                     .recv_until_response(id, method::SESSION_LOAD, load_timeout, cmd_rx)
                     .await?;
                 self.suppress_journal = false;
-                // Drop any consolidation the suppressed replay left half-open so it
-                // can't flush stale history into a later turn.
+                // Drop any consolidation the suppressed replay left half-open
+                // so it can't flush stale history into a later turn.
                 self.buf = None;
                 self.tools.clear();
                 if res.is_none() {
@@ -2163,11 +2158,10 @@ impl Task {
         }
     }
 
-    /// During initialize/new/load only permission answers are safe to drive.
-    /// In particular, a replayed open permission can be a prerequisite for the
-    /// `session/load` response itself. Reject other controls promptly rather
-    /// than queueing an HTTP request behind setup or sending it with an empty
-    /// provider session id.
+    /// During initialize/new/load, only permission answers are safe to drive
+    /// — a replayed open permission can be a prerequisite for the
+    /// `session/load` response itself. Reject other controls immediately
+    /// rather than queue them behind setup or send an empty provider session id.
     async fn on_setup_command(&mut self, cmd: Command) {
         let setup_error = || anyhow!("ACP session setup is still in progress");
         match cmd {
@@ -2263,10 +2257,9 @@ impl Task {
             }
         };
         // Release the registry slot *before* touching the row: a session must
-        // never be both `orphaned` and live, or adoption refuses it ("session
-        // already has a live ACP task") and the repair sweep skips it, which
-        // leaves no way back. `remove_own` also reports whether this task was
-        // still this process's driver for the session.
+        // never be both `orphaned` and live, or adoption refuses it and the
+        // repair sweep skips it, leaving no way back. `remove_own` also
+        // reports whether this task was still the session's driver.
         let owns_registry_slot = self.registry.remove_own(&self.session_id, self.generation);
         let failure_message = stop_reason.failure_message();
         if let Some(message) = &failure_message {
@@ -2329,19 +2322,13 @@ impl Task {
         true
     }
 
-    /// Route one inbound frame (notification / agent request / response).
-    /// Record that the adapter is producing output.
+    /// Stamp `last_activity_at`, the signal the staleness monitor reads,
+    /// throttled to [`ACTIVITY_TOUCH_INTERVAL`].
     ///
-    /// `last_activity_at` is what the staleness monitor and the metadata
-    /// assistant read. Turn boundaries alone are far too coarse a signal for an
-    /// ACP session: a single turn runs for hours, so a session streaming tool
-    /// calls the whole time would otherwise be indistinguishable from one that
-    /// stopped at the prompt. A turn that genuinely wedges still goes stale —
-    /// this stamps output, not liveness.
-    ///
-    /// A `session/load` replay is deliberately excluded: re-streamed history is
-    /// not new activity, and stamping it would date a recovered session to its
-    /// restart.
+    /// Turn boundaries are too coarse a signal — a turn can run for hours —
+    /// so this stamps on frame receipt instead; a wedged turn still goes
+    /// stale. A `session/load` replay is excluded since re-streamed history
+    /// isn't new activity.
     async fn touch_activity(&mut self) {
         if self.suppress_journal {
             return;
@@ -2389,11 +2376,7 @@ impl Task {
         let notif: SessionNotification = serde_json::from_value(params)?;
         match notif.update {
             SessionUpdate::UserMessageChunk => {
-                // Never journaled: loom writes the `user_message` block itself at
-                // dispatch (`start_turn`), so an adapter-streamed user chunk is
-                // always an echo or a history replay — e.g. claude re-streams the
-                // retained user turns after a `/compact` — and journaling it here
-                // duplicated the visible chat history.
+                // Never journaled — see the module doc's `user_message` entry.
             }
             SessionUpdate::AgentMessageChunk { content } => {
                 if let Some(t) = content.text().map(str::to_string) {
@@ -2438,17 +2421,14 @@ impl Task {
                 cost,
                 meta,
             } => {
-                // Usage is metadata, not a prose boundary. Flushing here split
-                // replies into tiny blocks when an adapter reported it often.
-                // ACP requires both context fields; silently ignore a malformed
-                // legacy update instead of publishing a misleading 0/0 meter.
+                // Usage is metadata, not a prose boundary: flushing here would
+                // split replies into tiny blocks on a chatty adapter. Ignore a
+                // malformed update (missing a context field) rather than
+                // publish a misleading 0/0 meter.
                 //
-                // One update is a real boundary: claude-agent-acp emits a
-                // cost-bearing `task-notification` after an autonomous
-                // background-task continuation. There is no matching
-                // `session/prompt` response to close that output, so without
-                // honoring this marker its final prose stays only in the live
-                // chunk buffer until the next tool/message boundary.
+                // Exception: claude-agent-acp's cost-bearing task-notification
+                // has no `session/prompt` response to close it, so without
+                // this marker its prose sits unflushed until the next boundary.
                 let closes_task_notification = cost.is_some()
                     && meta
                         .claude_origin
@@ -2471,10 +2451,9 @@ impl Task {
                 }
                 if closes_task_notification {
                     self.flush_buf().await;
-                    // A late delta makes the browser show a live continuation.
-                    // The original prompt already ended, so mirror that durable
-                    // truth after settling the shadow without writing a second
-                    // `turn_end` block for the same turn.
+                    // A late delta would show the browser a live continuation,
+                    // but the original prompt already ended; mirror that
+                    // durable truth without writing a second `turn_end`.
                     if !self.turn_live {
                         self.emit(
                             "turn",
@@ -2705,11 +2684,10 @@ impl Task {
         error: Option<Value>,
         source: TurnEndSource,
     ) {
-        // A provider-synthesized turn end is not an acknowledgement from the
-        // adapter. Release before making the task idle so the immutable prompt
-        // can retry or rehome. A user cancellation is different: the protected
-        // prompt is already durably journaled and Stop is authoritative, so it
-        // consumes that delivery instead of replaying it into another turn.
+        // A provider-synthesized turn end is not an adapter acknowledgement:
+        // release before going idle so the immutable prompt can retry or
+        // rehome. A user cancellation differs — Stop is authoritative, so it
+        // consumes the already-journaled prompt instead of replaying it.
         let settlement = source.review_claim_settlement();
         if settlement == crate::review_inbox::ReviewClaimSettlement::Abandoned {
             self.settle_inflight_review(settlement, "synthetic turn settlement")
@@ -3094,13 +3072,12 @@ impl Task {
             .await
     }
 
-    /// Refuse to open a new turn once an automation-class session has spent its
-    /// `automation.turn_cap` turns: make sure the branch carries the loud
-    /// `blocked` attention tag (recorded on the bus so it lands on SSE) and
-    /// return the refusal as an error. Warm (watch-managed) sessions are exempt
-    /// infrastructure and 0 disables the cap. Only *new* turns are gated — an
-    /// in-flight turn is never interrupted. Best-effort reads: a lookup failure
-    /// never blocks a turn.
+    /// Refuse to open a new turn once an automation-class session has spent
+    /// its `automation.turn_cap` turns: tag the branch `blocked` (recorded on
+    /// the bus so it reaches SSE) and return the refusal as an error. Warm
+    /// (watch-managed) sessions are exempt; 0 disables the cap. Only *new*
+    /// turns are gated — an in-flight turn is never interrupted — and a
+    /// lookup failure never blocks one.
     async fn refuse_if_turn_capped(&self) -> Result<()> {
         let Some(session) = session::get(&self.db, &self.session_id)
             .await
@@ -3366,10 +3343,10 @@ impl Task {
             .await;
         if result.is_ok() && self.turn_live {
             self.automatic_dispatch_paused = true;
-            // The adapter notice belongs to the cancelled turn even when it
-            // arrives after an immediate restart. Bound suppression to that
-            // turn and its direct successor so unrelated future prose is never
-            // mistaken for adapter chrome if this adapter emits no notice.
+            // The adapter's interrupt notice belongs to the cancelled turn
+            // even if it arrives after an immediate restart. Bound
+            // suppression to that turn and its successor so later prose is
+            // never mistaken for adapter chrome.
             self.pending_interrupt_notice_through = Some(self.current_turn + 1);
             // Cancellation is a client-owned boundary. Some adapters do not
             // answer the cancelled prompt, so settle loom's journal and
@@ -3473,11 +3450,10 @@ impl Task {
             }
             Command::NotifyPending { reply } => {
                 // Submitted review feedback lives in the protected inbox, not
-                // the user-editable pending prompt. Submission is user input:
-                // replace ordinary live work with one visible review turn
-                // instead of hiding it behind an arbitrarily long boundary.
-                // A wake for the review already in flight is only a retry of
-                // the notifier and must never interrupt that same review.
+                // the editable pending prompt: replace ordinary live work with
+                // one visible review turn instead of queueing it silently. A
+                // wake for a review already in flight is a retry and must
+                // not interrupt that same review.
                 if self.inflight_review.is_some()
                     || self.compaction_turn
                     || self.automatic_dispatch_paused

@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import type { LaunchSource, ResolvedLaunch } from '../types';
+import type { ResolvedLaunch } from '../types';
 
 defineProps<{
   resolved: ResolvedLaunch | null;
   loading?: boolean;
 }>();
 
-function sourceLabel(source: LaunchSource): string {
+function sourceLabel(source: string): string {
   if (source === 'launch_override') return 'launch override';
   if (source === 'agent_default') return 'agent default';
   if (source === 'origin_default') return 'launch origin';

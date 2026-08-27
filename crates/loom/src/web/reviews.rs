@@ -1,15 +1,9 @@
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    Extension, Json,
-};
+use axum::http::StatusCode;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use weaver_api::{
-    AddReviewCommentReq, ArtifactTextAnchorDto, ChangeAnchorDto, CreateReviewReq,
-    ExpectedReviewRevisionReq, ResolveReviewCommentReq, ReviewAnchorDto, ReviewAnchorKindDto,
-    ReviewCommentDto, ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto, SubmitReviewReq,
-    UpdateReviewCommentReq, UpdateReviewReq,
+    ArtifactTextAnchorDto, ChangeAnchorDto, ReviewAnchorDto, ReviewAnchorKindDto, ReviewCommentDto,
+    ReviewDto, ReviewSubjectDto, ReviewSubjectKindDto,
 };
 use weaver_core::artifact::{self, Artifact};
 use weaver_core::branch::Branch;
@@ -19,7 +13,9 @@ use crate::auth::Principal;
 use crate::events;
 use crate::session::Session;
 
+use super::operations::{register, Bound, OperationContext};
 use super::{require_session, ApiResult, AppError, AppState};
+use weaver_api::operations::reviews;
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ReviewListQuery {
@@ -328,24 +324,12 @@ async fn list_for(
     Ok(out)
 }
 
-pub(super) async fn list_session_reviews(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Query(q): Query<ReviewListQuery>,
-) -> ApiResult<Json<Vec<ReviewDto>>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    Ok(Json(
-        list_for(&st, &principal, &session, &branch, &q).await?,
-    ))
-}
-
 async fn create_for(
     st: &AppState,
     principal: &Principal,
     session: &Session,
     branch: &Branch,
-    body: &CreateReviewReq,
+    body: &reviews::create::Input,
 ) -> ApiResult<ReviewDto> {
     require_operator(principal)?;
     let (subject_kind, subject_id, subject_key, subject_label, subject_version, current_version) =
@@ -409,18 +393,6 @@ async fn create_for(
     Ok(review_dto(&review, &current_version))
 }
 
-pub(super) async fn create_session_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(key): Path<String>,
-    Json(body): Json<CreateReviewReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    Ok(Json(
-        create_for(&st, &principal, &session, &branch, &body).await?,
-    ))
-}
-
 async fn creator_review(
     st: &AppState,
     principal: &Principal,
@@ -444,18 +416,6 @@ async fn submitted_operator_review(
         .await?
         .filter(|review| review.status == "submitted")
         .ok_or_else(|| AppError::not_found("submitted review"))
-}
-
-pub(super) async fn get_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-) -> ApiResult<Json<ReviewDto>> {
-    require_operator(&principal)?;
-    let item = review::get_visible(&st.db, review_id, &principal.username)
-        .await?
-        .ok_or_else(|| AppError::not_found("review"))?;
-    Ok(Json(durable_review_dto(&st, &item).await?))
 }
 
 async fn require_anchor(
@@ -552,163 +512,65 @@ async fn submitted_draft_conflict(st: &AppState, item: &review::Review) -> AppEr
     AppError::conflict("submitted reviews are immutable").with_details(json!({ "review": fresh }))
 }
 
-pub(super) async fn add_review_comment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-    Json(body): Json<AddReviewCommentReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
+// ---------------------------------------------------------------------------
+// Operation registry — `reviews.*`, bound onto `weaver_api::operations::reviews`.
+// The ownership/business-state checks (`creator_review`, `submitted_operator_review`,
+// the draft/submitted status guards) are checks about which review this credential
+// may act on, not about the credential's authority in general, so they are not
+// something `register`'s central `authorize()` can express.
+// ---------------------------------------------------------------------------
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<weaver_api::operations::reviews::get::Op, _, _>(get_operation),
+        register::<weaver_api::operations::reviews::update::Op, _, _>(update_operation),
+        register::<weaver_api::operations::reviews::discard::Op, _, _>(discard_operation),
+        register::<weaver_api::operations::reviews::retarget::Op, _, _>(retarget_operation),
+        register::<weaver_api::operations::reviews::list::Op, _, _>(list_operation),
+        register::<weaver_api::operations::reviews::create::Op, _, _>(create_operation),
+        register::<weaver_api::operations::reviews::comments::create::Op, _, _>(
+            comments_create_operation,
+        ),
+        register::<weaver_api::operations::reviews::comments::update::Op, _, _>(
+            comments_update_operation,
+        ),
+        register::<weaver_api::operations::reviews::comments::delete::Op, _, _>(
+            comments_delete_operation,
+        ),
+        register::<weaver_api::operations::reviews::comments::resolve::Op, _, _>(
+            comments_resolve_operation,
+        ),
+        register::<weaver_api::operations::reviews::submit::Op, _, _>(submit_operation),
+        register::<weaver_api::operations::reviews::retry_delivery::Op, _, _>(
+            retry_delivery_operation,
+        ),
+    ]
+}
+
+async fn get_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::get::Input,
+) -> ApiResult<weaver_api::operations::reviews::get::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    require_operator(&principal)?;
+    let item = review::get_visible(&st.db, input.id, &principal.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("review"))?;
+    durable_review_dto(&st, &item).await
+}
+
+async fn update_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::update::Input,
+) -> ApiResult<weaver_api::operations::reviews::update::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    let (anchor, subject_version) = require_anchor(
-        &st,
-        &item,
-        &body.subject_version,
-        body.anchor_kind,
-        &body.anchor,
-    )
-    .await?;
-    let updated = match review::add_comment(
-        &st.db,
-        item.id,
-        &principal.username,
-        body.expected_revision,
-        &review::NewComment {
-            subject_version: &subject_version,
-            anchor: &anchor,
-            body: &body.body,
-        },
-    )
-    .await
-    {
-        Ok(updated) => updated,
-        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
-    };
-    Ok(Json(durable_review_dto(&st, &updated).await?))
-}
-
-pub(super) async fn update_review_comment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((review_id, comment_id)): Path<(i64, i64)>,
-    Json(body): Json<UpdateReviewCommentReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
-    if item.status != "draft" {
-        return Err(submitted_draft_conflict(&st, &item).await);
-    }
-    if body.body.is_none() && body.subject_version.is_none() && body.anchor.is_none() {
-        return Err(AppError::bad_request("comment update is empty"));
-    }
-    if body.subject_version.is_some() && body.anchor.is_none() {
-        return Err(AppError::bad_request(
-            "a replacement anchor is required when changing comment revision",
-        ));
-    }
-    if body.anchor.is_some() && body.anchor_kind.is_none() {
-        return Err(AppError::bad_request(
-            "anchor_kind is required when replacing an anchor",
-        ));
-    }
-    let replacement = match (
-        body.subject_version.as_deref(),
-        body.anchor_kind,
-        body.anchor.as_ref(),
-    ) {
-        (Some(version), Some(kind), Some(anchor)) => {
-            Some(require_anchor(&st, &item, version, kind, anchor).await?)
-        }
-        (None, None, None) => None,
-        _ => {
-            return Err(AppError::bad_request(
-                "subject_version, anchor_kind, and anchor must be replaced together",
-            ))
-        }
-    };
-    let updated = match review::patch_comment(
-        &st.db,
-        item.id,
-        comment_id,
-        &principal.username,
-        body.expected_revision,
-        &review::CommentPatch {
-            subject_version: replacement.as_ref().map(|(_, version)| version.as_str()),
-            anchor: replacement.as_ref().map(|(anchor, _)| anchor),
-            body: body.body.as_deref(),
-        },
-    )
-    .await
-    {
-        Ok(updated) => updated,
-        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
-    };
-    Ok(Json(durable_review_dto(&st, &updated).await?))
-}
-
-pub(super) async fn delete_review_comment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((review_id, comment_id)): Path<(i64, i64)>,
-    Json(body): Json<ExpectedReviewRevisionReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
-    if item.status != "draft" {
-        return Err(submitted_draft_conflict(&st, &item).await);
-    }
-    let updated = match review::delete_comment(
-        &st.db,
-        item.id,
-        comment_id,
-        &principal.username,
-        body.expected_revision,
-    )
-    .await
-    {
-        Ok(updated) => updated,
-        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
-    };
-    Ok(Json(durable_review_dto(&st, &updated).await?))
-}
-
-pub(super) async fn resolve_review_comment(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((review_id, comment_id)): Path<(i64, i64)>,
-    Json(body): Json<ResolveReviewCommentReq>,
-) -> ApiResult<Json<ReviewCommentDto>> {
-    let item = submitted_operator_review(&st, &principal, review_id).await?;
-    let comment = review::set_comment_resolved(&st.db, item.id, comment_id, body.resolved)
-        .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    events::emit(
-        &st.bus,
-        &item.branch_id,
-        "review_comment_resolved",
-        json!({
-            "review_id": item.id,
-            "comment_id": comment.id,
-            "resolved": body.resolved,
-            "session_id": item.session_id,
-            "subject_kind": item.subject_kind,
-            "subject_key": item.subject_key,
-        }),
-    );
-    Ok(Json(comment_dto(&comment)))
-}
-
-pub(super) async fn update_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-    Json(body): Json<UpdateReviewReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
-    if item.status != "draft" {
-        return Err(submitted_draft_conflict(&st, &item).await);
-    }
-    let subject_version = match &body.subject_version {
+    let subject_version = match &input.subject_version {
         Some(version) if item.subject_kind == "artifact" => {
             let artifact = review_artifact(&st, &item).await?;
             Some(require_artifact_version(&st, &artifact, version, "review").await?)
@@ -730,9 +592,9 @@ pub(super) async fn update_review(
         &st.db,
         item.id,
         &principal.username,
-        body.expected_revision,
+        input.expected_revision,
         &review::DraftPatch {
-            summary: body.summary.as_deref(),
+            summary: input.summary.as_deref(),
             subject_version: subject_version.as_deref(),
         },
     )
@@ -741,34 +603,39 @@ pub(super) async fn update_review(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    Ok(Json(durable_review_dto(&st, &updated).await?))
+    durable_review_dto(&st, &updated).await
 }
 
-pub(super) async fn discard_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-    Json(body): Json<ExpectedReviewRevisionReq>,
-) -> ApiResult<Json<Value>> {
-    let item = creator_review(&st, &principal, review_id).await?;
+async fn discard_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::discard::Input,
+) -> ApiResult<weaver_api::operations::reviews::discard::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
-    if let Err(error) =
-        review::discard(&st.db, item.id, &principal.username, body.expected_revision).await
+    if let Err(error) = review::discard(
+        &st.db,
+        item.id,
+        &principal.username,
+        input.expected_revision,
+    )
+    .await
     {
         return Err(draft_mutation_error(&st, &item, error).await);
     }
-    Ok(Json(json!({ "discarded": true })))
+    Ok(weaver_api::operations::reviews::discard::Output { discarded: true })
 }
 
-pub(super) async fn retarget_review_to_current(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-    Json(body): Json<ExpectedReviewRevisionReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
+async fn retarget_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::retarget::Input,
+) -> ApiResult<weaver_api::operations::reviews::retarget::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
     if item.status != "draft" {
         return Err(submitted_draft_conflict(&st, &item).await);
     }
@@ -780,7 +647,7 @@ pub(super) async fn retarget_review_to_current(
             &st.db,
             item.id,
             &principal.username,
-            body.expected_revision,
+            input.expected_revision,
         )
         .await
     } else {
@@ -788,7 +655,7 @@ pub(super) async fn retarget_review_to_current(
             &st.db,
             item.id,
             &principal.username,
-            body.expected_revision,
+            input.expected_revision,
             &review::DraftPatch {
                 summary: None,
                 subject_version: Some(&current),
@@ -800,16 +667,186 @@ pub(super) async fn retarget_review_to_current(
         Ok(updated) => updated,
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
-    Ok(Json(review_dto(&updated, &current)))
+    Ok(review_dto(&updated, &current))
 }
 
-pub(super) async fn submit_review(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-    Json(body): Json<SubmitReviewReq>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = creator_review(&st, &principal, review_id).await?;
+async fn list_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::list::Input,
+) -> ApiResult<weaver_api::operations::reviews::list::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let q = ReviewListQuery {
+        subject_kind: input.subject_kind,
+        subject_key: input.subject_key,
+    };
+    list_for(&st, &principal, &session, &branch, &q).await
+}
+
+async fn create_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::create::Input,
+) -> ApiResult<weaver_api::operations::reviews::create::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    create_for(&st, &principal, &session, &branch, &input).await
+}
+
+async fn comments_update_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::comments::update::Input,
+) -> ApiResult<weaver_api::operations::reviews::comments::update::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
+    if item.status != "draft" {
+        return Err(submitted_draft_conflict(&st, &item).await);
+    }
+    if input.body.is_none() && input.subject_version.is_none() && input.anchor.is_none() {
+        return Err(AppError::bad_request("comment update is empty"));
+    }
+    if input.subject_version.is_some() && input.anchor.is_none() {
+        return Err(AppError::bad_request(
+            "a replacement anchor is required when changing comment revision",
+        ));
+    }
+    if input.anchor.is_some() && input.anchor_kind.is_none() {
+        return Err(AppError::bad_request(
+            "anchor_kind is required when replacing an anchor",
+        ));
+    }
+    let replacement = match (
+        input.subject_version.as_deref(),
+        input.anchor_kind,
+        input.anchor.as_ref(),
+    ) {
+        (Some(version), Some(kind), Some(anchor)) => {
+            Some(require_anchor(&st, &item, version, kind, anchor).await?)
+        }
+        (None, None, None) => None,
+        _ => {
+            return Err(AppError::bad_request(
+                "subject_version, anchor_kind, and anchor must be replaced together",
+            ))
+        }
+    };
+    let updated = match review::patch_comment(
+        &st.db,
+        item.id,
+        input.comment_id,
+        &principal.username,
+        input.expected_revision,
+        &review::CommentPatch {
+            subject_version: replacement.as_ref().map(|(_, version)| version.as_str()),
+            anchor: replacement.as_ref().map(|(anchor, _)| anchor),
+            body: input.body.as_deref(),
+        },
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
+    };
+    durable_review_dto(&st, &updated).await
+}
+
+async fn comments_delete_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::comments::delete::Input,
+) -> ApiResult<weaver_api::operations::reviews::comments::delete::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
+    if item.status != "draft" {
+        return Err(submitted_draft_conflict(&st, &item).await);
+    }
+    let updated = match review::delete_comment(
+        &st.db,
+        item.id,
+        input.comment_id,
+        &principal.username,
+        input.expected_revision,
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
+    };
+    durable_review_dto(&st, &updated).await
+}
+
+async fn comments_resolve_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::comments::resolve::Input,
+) -> ApiResult<weaver_api::operations::reviews::comments::resolve::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = submitted_operator_review(&st, &principal, input.id).await?;
+    let comment = review::set_comment_resolved(&st.db, item.id, input.comment_id, input.resolved)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    events::emit(
+        &st.bus,
+        &item.branch_id,
+        "review_comment_resolved",
+        json!({
+            "review_id": item.id,
+            "comment_id": comment.id,
+            "resolved": input.resolved,
+            "session_id": item.session_id,
+            "subject_kind": item.subject_kind,
+            "subject_key": item.subject_key,
+        }),
+    );
+    Ok(comment_dto(&comment))
+}
+
+async fn comments_create_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::comments::create::Input,
+) -> ApiResult<weaver_api::operations::reviews::comments::create::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
+    if item.status != "draft" {
+        return Err(submitted_draft_conflict(&st, &item).await);
+    }
+    let (anchor, subject_version) = require_anchor(
+        &st,
+        &item,
+        &input.subject_version,
+        input.anchor_kind,
+        &input.anchor,
+    )
+    .await?;
+    let updated = match review::add_comment(
+        &st.db,
+        item.id,
+        &principal.username,
+        input.expected_revision,
+        &review::NewComment {
+            subject_version: &subject_version,
+            anchor: &anchor,
+            body: &input.body,
+        },
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
+    };
+    durable_review_dto(&st, &updated).await
+}
+
+async fn submit_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::submit::Input,
+) -> ApiResult<weaver_api::operations::reviews::submit::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = creator_review(&st, &principal, input.id).await?;
     let current = current_review_version(&st, &item).await?;
     let result = if item.subject_kind == "changes" {
         let current = current
@@ -819,8 +856,8 @@ pub(super) async fn submit_review(
             &st.db,
             item.id,
             &principal.username,
-            body.expected_revision,
-            body.acknowledge_outdated,
+            input.expected_revision,
+            input.acknowledge_outdated,
             current,
         )
         .await
@@ -829,8 +866,8 @@ pub(super) async fn submit_review(
             &st.db,
             item.id,
             &principal.username,
-            body.expected_revision,
-            body.acknowledge_outdated,
+            input.expected_revision,
+            input.acknowledge_outdated,
         )
         .await
     };
@@ -861,15 +898,16 @@ pub(super) async fn submit_review(
     let refreshed = review::get(&st.db, item.id)
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
-    Ok(Json(durable_review_dto(&st, &refreshed).await?))
+    durable_review_dto(&st, &refreshed).await
 }
 
-pub(super) async fn retry_review_delivery(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(review_id): Path<i64>,
-) -> ApiResult<Json<ReviewDto>> {
-    let item = submitted_operator_review(&st, &principal, review_id).await?;
+async fn retry_delivery_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::retry_delivery::Input,
+) -> ApiResult<weaver_api::operations::reviews::retry_delivery::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    let item = submitted_operator_review(&st, &principal, input.id).await?;
     if item.delivery_state != "failed" {
         return Err(AppError::conflict(
             "only failed review deliveries can be retried",
@@ -884,5 +922,5 @@ pub(super) async fn retry_review_delivery(
     let refreshed = review::get(&st.db, item.id)
         .await?
         .ok_or_else(|| AppError::not_found("review"))?;
-    Ok(Json(durable_review_dto(&st, &refreshed).await?))
+    durable_review_dto(&st, &refreshed).await
 }

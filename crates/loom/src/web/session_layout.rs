@@ -1,37 +1,24 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     response::sse::{self, KeepAlive, Sse},
     Extension, Json,
 };
-use serde::Deserialize;
 use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
-use weaver_api::{
-    CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupPreferenceReq,
-    SessionLayoutView, SessionPlacementSelectorKind, SetSessionPlacementDefaultReq,
-    UpdateSessionGroupReq, UpdateSessionSpaceReq,
+use weaver_api::SessionLayoutView;
+
+use weaver_api::operations::session_layout::{
+    defaults, events, get, groups, r#move, reorder, restore, spaces,
 };
 
 use crate::auth::Principal;
 use crate::session_layout::{self, MutationError};
 
+use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
-
-fn require_human(principal: &Principal) -> ApiResult<()> {
-    if principal.is_human() {
-        Ok(())
-    } else {
-        Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "shared session layout requires a human credential",
-        ))
-    }
-}
 
 async fn mutation_response(
     st: &AppState,
@@ -53,164 +40,16 @@ async fn mutation_response(
     }
 }
 
-pub(super) async fn get_session_layout(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    Ok(Json(
-        session_layout::get_layout(&st.db, &principal.username).await?,
-    ))
-}
-
-pub(super) async fn create_session_space(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<CreateSessionSpaceReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::create_space(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn update_session_space(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateSessionSpaceReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::update_space(&st.db, &principal.username, &id, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn delete_session_space(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-    Json(req): Json<DeleteSessionSpaceReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::delete_space(&st.db, &principal.username, &id, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn create_session_group(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<CreateSessionGroupReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::create_group(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn update_session_group(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-    Json(req): Json<UpdateSessionGroupReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::update_group(&st.db, &principal.username, &id, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn delete_session_group(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-    Json(req): Json<DeleteSessionGroupReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::delete_group(&st.db, &principal.username, &id, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn reorder_session_layout(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<ReorderSessionLayoutReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::reorder(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn move_session_layout(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<MoveSessionsReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::move_sessions(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn restore_session_layout(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<RestoreSessionGroupsReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::restore_groups(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-pub(super) async fn set_session_group_preference(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path(id): Path<String>,
-    Json(req): Json<SessionGroupPreferenceReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    session_layout::set_preference(&st.db, &principal.username, &id, req.collapsed)
-        .await
-        .map(Json)
-        .map_err(|error| AppError::bad_request(error.to_string()))
-}
-
-pub(super) async fn set_session_placement_default(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Json(req): Json<SetSessionPlacementDefaultReq>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::set_default(&st.db, &principal.username, &req).await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct DeleteDefaultQuery {
-    expected_revision: i64,
-}
-
-pub(super) async fn delete_session_placement_default(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Path((kind, value)): Path<(SessionPlacementSelectorKind, String)>,
-    Query(query): Query<DeleteDefaultQuery>,
-) -> ApiResult<Json<SessionLayoutView>> {
-    require_human(&principal)?;
-    let result = session_layout::delete_default(
-        &st.db,
-        &principal.username,
-        kind,
-        &value,
-        query.expected_revision,
-    )
-    .await;
-    mutation_response(&st, &principal.username, result).await
-}
-
-/// Fleet-global layout tail. The browser still performs a normal GET after an
-/// event; the event is only invalidation, so reconnects and dropped messages
-/// cannot corrupt local selection/disclosure state.
+/// The `session_layout.events` operation — a fleet-global layout tail. Events
+/// carry no data; they trigger a normal read, so reconnects or dropped
+/// messages can't corrupt local selection/disclosure state.
 pub(super) async fn session_layout_events(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
+    Query(input): Query<events::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    require_human(&principal)?;
+    // Scoped to the signed-in operator's own dashboard state.
+    super::encodings::authorized::<events::Op>(&st, &principal, input).await?;
     let stream = BroadcastStream::new(st.bus.subscribe()).filter_map(|result| {
         let event = result.ok()?;
         if event.kind != "session_layout" {
@@ -222,4 +61,178 @@ pub(super) async fn session_layout_events(
             .unwrap_or_default()))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `session_layout.*`, bound onto
+// `weaver_api::operations::session_layout`. Revision-guarded mutations funnel
+// through `mutation_response`/`mutation_result`, which refetch the current
+// layout and hand it back alongside the 409 on conflict.
+// `session_layout.groups.preference.set` is the exception: a collapse toggle
+// carries no `expected_revision`, so there is nothing to conflict on.
+// ---------------------------------------------------------------------------
+
+/// The operation-typed twin of [`mutation_response`], unwrapping the `Json`
+/// wrapper to return the bare output.
+async fn mutation_result(
+    st: &AppState,
+    username: &str,
+    result: Result<SessionLayoutView, MutationError>,
+) -> ApiResult<SessionLayoutView> {
+    mutation_response(st, username, result)
+        .await
+        .map(|Json(layout)| layout)
+}
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<get::Op, _, _>(get_operation),
+        register::<spaces::create::Op, _, _>(spaces_create_operation),
+        register::<spaces::update::Op, _, _>(spaces_update_operation),
+        register::<spaces::delete::Op, _, _>(spaces_delete_operation),
+        register::<groups::create::Op, _, _>(groups_create_operation),
+        register::<groups::update::Op, _, _>(groups_update_operation),
+        register::<groups::delete::Op, _, _>(groups_delete_operation),
+        register::<groups::preference::set::Op, _, _>(groups_preference_set_operation),
+        register::<r#move::Op, _, _>(move_operation),
+        register::<reorder::Op, _, _>(reorder_operation),
+        register::<restore::Op, _, _>(restore_operation),
+        register::<defaults::set::Op, _, _>(defaults_set_operation),
+        register::<defaults::delete::Op, _, _>(defaults_delete_operation),
+    ]
+}
+
+async fn get_operation(context: OperationContext, _input: get::Input) -> ApiResult<get::Output> {
+    Ok(session_layout::get_layout(&context.state.db, &context.principal.username).await?)
+}
+
+async fn spaces_create_operation(
+    context: OperationContext,
+    input: spaces::create::Input,
+) -> ApiResult<spaces::create::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::create_space(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn spaces_update_operation(
+    context: OperationContext,
+    input: spaces::update::Input,
+) -> ApiResult<spaces::update::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::update_space(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn spaces_delete_operation(
+    context: OperationContext,
+    input: spaces::delete::Input,
+) -> ApiResult<spaces::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::delete_space(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn groups_create_operation(
+    context: OperationContext,
+    input: groups::create::Input,
+) -> ApiResult<groups::create::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::create_group(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn groups_update_operation(
+    context: OperationContext,
+    input: groups::update::Input,
+) -> ApiResult<groups::update::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::update_group(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn groups_delete_operation(
+    context: OperationContext,
+    input: groups::delete::Input,
+) -> ApiResult<groups::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::delete_group(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn groups_preference_set_operation(
+    context: OperationContext,
+    input: groups::preference::set::Input,
+) -> ApiResult<groups::preference::set::Output> {
+    session_layout::set_preference(
+        &context.state.db,
+        &context.principal.username,
+        &input.id,
+        input.collapsed,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+async fn move_operation(
+    context: OperationContext,
+    input: r#move::Input,
+) -> ApiResult<r#move::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::move_sessions(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn reorder_operation(
+    context: OperationContext,
+    input: reorder::Input,
+) -> ApiResult<reorder::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::reorder(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn restore_operation(
+    context: OperationContext,
+    input: restore::Input,
+) -> ApiResult<restore::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::restore_groups(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn defaults_set_operation(
+    context: OperationContext,
+    input: defaults::set::Input,
+) -> ApiResult<defaults::set::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::set_default(&st.db, &username, &input).await;
+    mutation_result(&st, &username, result).await
+}
+
+async fn defaults_delete_operation(
+    context: OperationContext,
+    input: defaults::delete::Input,
+) -> ApiResult<defaults::delete::Output> {
+    let st = context.state;
+    let username = context.principal.username;
+    let result = session_layout::delete_default(
+        &st.db,
+        &username,
+        input.selector_kind,
+        &input.selector_value,
+        input.expected_revision,
+    )
+    .await;
+    mutation_result(&st, &username, result).await
 }

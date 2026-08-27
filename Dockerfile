@@ -28,11 +28,14 @@ ARG LOOM_BUILD_REVISION
 # the target cached, cargo may skip build.rs (unchanged fingerprint), and
 # static/dist is excluded from the build context (.dockerignore) — so an
 # incremental build would otherwise have no bundle for the runtime stage to copy.
+# For the same reason the SPA's generated types are rendered here first: build.rs
+# writes them, and this build cannot rely on build.rs running.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     --mount=type=cache,target=/root/.npm \
     set -eux; \
+    cargo run --quiet -p weaver-api --bin generate-types; \
     ( cd crates/loom/frontend && npm ci && npm run build ); \
     if [ "$CARGO_PROFILE" = release ]; then \
         cargo build --release -p loom -p tapestry; TARGET_DIR=release; \

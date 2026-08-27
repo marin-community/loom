@@ -15,6 +15,7 @@ import {
   fetchTerminalConfig,
   ensureFontLoaded,
 } from '../lib/terminalConfig';
+import { operationPath } from '../api';
 
 // A real terminal in the browser: xterm.js bridged over a WebSocket to the
 // session's terminal supervisor, which streams the raw PTY. The supervisor is
@@ -166,7 +167,11 @@ const CONFIG_FETCH_TIMEOUT_MS = 1000;
 function wsUrl(): string {
   // http→ws / https→wss on the page origin.
   const base = location.origin.replace(/^http/, 'ws');
-  const path = props.wsPath ?? `/api/sessions/${props.id}/terminal`;
+  // Exactly one of the two is always set: `wsPath` for a terminal that is not a
+  // session's (the operator shell, a session debug shell), `id` otherwise.
+  const path =
+    props.wsPath ??
+    `${operationPath('sessions.terminal')}?session=${encodeURIComponent(props.id ?? '')}`;
   return `${base}${path}`;
 }
 

@@ -1,20 +1,21 @@
 //! Durable, shared Spaces → Groups → Sessions organization.
 //!
 //! Layout is deliberately independent from immutable session provenance and
-//! ancestry. Every shared mutation checks one optimistic revision, performs
-//! all moves and integer-rank renumbering in one immediate transaction, then
-//! advances the revision exactly once.
+//! ancestry. Every shared mutation performs all moves and integer-rank
+//! renumbering in one immediate transaction, then advances the revision
+//! exactly once — checking the caller's optimistic revision first whenever it
+//! supplied one (see [`LayoutCommand::begin`]).
 
 use anyhow::Result;
 use serde_json::json;
 use sqlx::{FromRow, Row, SqliteConnection};
 use std::collections::HashSet;
+use weaver_api::operations::session_layout::{
+    defaults, groups, r#move, reorder as reorder_op, restore, spaces,
+};
 use weaver_api::{
-    CreateSessionGroupReq, CreateSessionSpaceReq, DeleteSessionGroupReq, DeleteSessionSpaceReq,
-    MoveSessionsReq, ReorderSessionLayoutReq, RestoreSessionGroupsReq, SessionGroupView,
-    SessionLayoutItemKind, SessionLayoutView, SessionPlacementDefaultView,
+    SessionGroupView, SessionLayoutItemKind, SessionLayoutView, SessionPlacementDefaultView,
     SessionPlacementSelectorKind, SessionPlacementView, SessionSpaceView,
-    SetSessionPlacementDefaultReq, UpdateSessionGroupReq, UpdateSessionSpaceReq,
 };
 
 use crate::db::{now_iso, Db};
@@ -113,10 +114,21 @@ struct LayoutCommand<'a> {
 }
 
 impl<'a> LayoutCommand<'a> {
-    async fn begin(db: &'a Db, username: &'a str, expected_revision: i64) -> MutationResult<Self> {
+    /// Open the transaction every layout mutation runs in, holding the caller
+    /// to the revision it composed against.
+    ///
+    /// `None` means the caller never read a revision, so the change applies to
+    /// whatever is current.
+    async fn begin(
+        db: &'a Db,
+        username: &'a str,
+        expected_revision: Option<i64>,
+    ) -> MutationResult<Self> {
         let mut tx = weaver_core::db::begin_immediate(db).await?;
-        if current_revision_tx(&mut tx).await? != expected_revision {
-            return Err(MutationError::Conflict);
+        if let Some(expected) = expected_revision {
+            if current_revision_tx(&mut tx).await? != expected {
+                return Err(MutationError::Conflict);
+            }
         }
         Ok(Self { db, username, tx })
     }
@@ -241,7 +253,7 @@ pub async fn placement(db: &Db, session_id: &str) -> Result<Option<SessionPlacem
 pub async fn create_space(
     db: &Db,
     username: &str,
-    req: &CreateSessionSpaceReq,
+    req: &spaces::create::Input,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "space")?;
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
@@ -291,9 +303,9 @@ pub async fn create_space(
 pub async fn update_space(
     db: &Db,
     username: &str,
-    id: &str,
-    req: &UpdateSessionSpaceReq,
+    req: &spaces::update::Input,
 ) -> MutationResult<SessionLayoutView> {
+    let id = req.id.as_str();
     let name = clean_name(&req.name, "space")?;
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
     let tx = &mut *command.tx;
@@ -423,9 +435,9 @@ async fn move_container_contents(
 pub async fn delete_space(
     db: &Db,
     username: &str,
-    id: &str,
-    req: &DeleteSessionSpaceReq,
+    req: &spaces::delete::Input,
 ) -> MutationResult<SessionLayoutView> {
+    let id = req.id.as_str();
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
     let tx = &mut *command.tx;
     let space_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_spaces")
@@ -457,7 +469,7 @@ pub async fn delete_space(
 pub async fn create_group(
     db: &Db,
     username: &str,
-    req: &CreateSessionGroupReq,
+    req: &groups::create::Input,
 ) -> MutationResult<SessionLayoutView> {
     let name = clean_name(&req.name, "group")?;
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
@@ -511,9 +523,9 @@ pub async fn create_group(
 pub async fn update_group(
     db: &Db,
     username: &str,
-    id: &str,
-    req: &UpdateSessionGroupReq,
+    req: &groups::update::Input,
 ) -> MutationResult<SessionLayoutView> {
+    let id = req.id.as_str();
     let name = clean_name(&req.name, "group")?;
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
     let tx = &mut *command.tx;
@@ -554,9 +566,9 @@ pub async fn update_group(
 pub async fn delete_group(
     db: &Db,
     username: &str,
-    id: &str,
-    req: &DeleteSessionGroupReq,
+    req: &groups::delete::Input,
 ) -> MutationResult<SessionLayoutView> {
+    let id = req.id.as_str();
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
     let tx = &mut *command.tx;
     let space_id: Option<String> =
@@ -644,7 +656,7 @@ fn reposition(ids: &mut Vec<String>, id: &str, before_id: Option<&str>) -> Mutat
 pub async fn reorder(
     db: &Db,
     username: &str,
-    req: &ReorderSessionLayoutReq,
+    req: &reorder_op::Input,
 ) -> MutationResult<SessionLayoutView> {
     let mut command = LayoutCommand::begin(db, username, req.expected_revision).await?;
     let tx = &mut *command.tx;
@@ -770,7 +782,7 @@ pub async fn reorder(
 pub async fn move_sessions(
     db: &Db,
     username: &str,
-    req: &MoveSessionsReq,
+    req: &r#move::Input,
 ) -> MutationResult<SessionLayoutView> {
     if req.session_ids.is_empty() {
         return Err(MutationError::Invalid(
@@ -857,7 +869,7 @@ pub async fn move_sessions(
 pub async fn restore_groups(
     db: &Db,
     username: &str,
-    req: &RestoreSessionGroupsReq,
+    req: &restore::Input,
 ) -> MutationResult<SessionLayoutView> {
     if req.groups.is_empty() {
         return Err(MutationError::Invalid(
@@ -967,7 +979,7 @@ pub async fn set_preference(
 pub async fn set_default(
     db: &Db,
     username: &str,
-    req: &SetSessionPlacementDefaultReq,
+    req: &defaults::set::Input,
 ) -> MutationResult<SessionLayoutView> {
     let value = req.selector_value.trim();
     if value.is_empty() {
@@ -1004,7 +1016,7 @@ pub async fn delete_default(
     username: &str,
     selector_kind: SessionPlacementSelectorKind,
     selector_value: &str,
-    expected_revision: i64,
+    expected_revision: Option<i64>,
 ) -> MutationResult<SessionLayoutView> {
     if selector_kind == SessionPlacementSelectorKind::Origin && selector_value == "*" {
         return Err(MutationError::Invalid(
@@ -1091,11 +1103,11 @@ mod tests {
         let moved = move_sessions(
             &db,
             "operator",
-            &MoveSessionsReq {
+            &r#move::Input {
                 session_ids: vec!["b".to_string(), "a".to_string()],
                 destination_group_id: "group-github-inbox".to_string(),
                 before_session_id: Some("c".to_string()),
-                expected_revision: initial_revision,
+                expected_revision: Some(initial_revision),
             },
         )
         .await
@@ -1106,11 +1118,11 @@ mod tests {
             move_sessions(
                 &db,
                 "operator",
-                &MoveSessionsReq {
+                &r#move::Input {
                     session_ids: vec!["a".to_string()],
                     destination_group_id: "group-user-inbox".to_string(),
                     before_session_id: None,
-                    expected_revision: initial_revision,
+                    expected_revision: Some(initial_revision),
                 },
             )
             .await,
@@ -1126,7 +1138,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let restore = RestoreSessionGroupsReq {
+        let restore = restore::Input {
             groups: vec![
                 SessionGroupOrderReq {
                     group_id: "group-user-inbox".to_string(),
@@ -1137,7 +1149,7 @@ mod tests {
                     session_ids: vec!["c".to_string()],
                 },
             ],
-            expected_revision: moved.revision,
+            expected_revision: Some(moved.revision),
         };
         assert!(matches!(
             restore_groups(&db, "operator", &restore).await,
@@ -1164,10 +1176,10 @@ mod tests {
         let user_review = create_group(
             &db,
             "operator",
-            &CreateSessionGroupReq {
+            &groups::create::Input {
                 space_id: "space-user".to_string(),
                 name: "Review".to_string(),
-                expected_revision: initial_revision,
+                expected_revision: Some(initial_revision),
             },
         )
         .await
@@ -1183,15 +1195,15 @@ mod tests {
         let ops_review = create_group(
             &db,
             "operator",
-            &CreateSessionGroupReq {
+            &groups::create::Input {
                 space_id: "space-ops".to_string(),
                 name: "Review".to_string(),
-                expected_revision: user_review.revision,
+                expected_revision: Some(user_review.revision),
             },
         )
         .await
         .unwrap();
-        let move_group = |id: &str, destination: &str, revision| ReorderSessionLayoutReq {
+        let move_group = |id: &str, destination: &str, revision| reorder_op::Input {
             kind: SessionLayoutItemKind::Group,
             id: id.to_string(),
             before_id: None,
@@ -1202,7 +1214,7 @@ mod tests {
             reorder(
                 &db,
                 "operator",
-                &move_group(&review_id, "space-ops", ops_review.revision),
+                &move_group(&review_id, "space-ops", Some(ops_review.revision)),
             )
             .await,
             Err(MutationError::Invalid(message)) if message.contains("named 'Review'")
@@ -1211,11 +1223,7 @@ mod tests {
             reorder(
                 &db,
                 "operator",
-                &move_group(
-                    "group-user-inbox",
-                    "space-github",
-                    ops_review.revision,
-                ),
+                &move_group("group-user-inbox", "space-github", Some(ops_review.revision)),
             )
             .await,
             Err(MutationError::Invalid(message)) if message.contains("system key 'inbox'")
@@ -1224,10 +1232,10 @@ mod tests {
         let unique = create_group(
             &db,
             "operator",
-            &CreateSessionGroupReq {
+            &groups::create::Input {
                 space_id: "space-user".to_string(),
                 name: "Unique".to_string(),
-                expected_revision: ops_review.revision,
+                expected_revision: Some(ops_review.revision),
             },
         )
         .await
@@ -1243,7 +1251,7 @@ mod tests {
         let crossed = reorder(
             &db,
             "operator",
-            &move_group(&unique_id, "space-ops", unique.revision),
+            &move_group(&unique_id, "space-ops", Some(unique.revision)),
         )
         .await
         .unwrap();

@@ -5,8 +5,7 @@
 // exactly what a real terminal renders.
 
 import type { ITheme } from '@xterm/xterm';
-import { get } from '../api';
-import type { UserPreferencesEnvelope } from '../types';
+import { getPreferences } from '../api';
 
 // Terminal palettes, selected by the `terminal.theme` preference. The dark palette
 // keeps xterm's own ANSI colours (they already assume a dark terminal) but sits
@@ -125,7 +124,7 @@ export function defaultTerminalConfig(): TerminalConfig {
 // Best-effort fetch + resolve of the signed-in user's terminal preferences.
 export async function fetchTerminalConfig(): Promise<TerminalConfig> {
   try {
-    const res = (await get('/preferences')) as UserPreferencesEnvelope;
+    const res = await getPreferences();
     return resolveTerminalConfig(res.preferences);
   } catch {
     return defaultTerminalConfig();

@@ -1,4 +1,4 @@
-// One `/api/events` EventSource for the whole tab.
+// One `events.stream` EventSource for the whole tab.
 //
 // Browsers cap HTTP/1.1 at 6 connections per origin and that cap is a hard wall:
 // with 6 held open an ordinary `fetch()` never resolves — no error, no timeout,
@@ -18,6 +18,8 @@
 // would churn the shared stream on each navigation. A dropped topic simply stops
 // having listeners and is pruned at the next reconnect, which keeps returning to
 // a recently-viewed session free.
+
+import { operationPath } from '../api';
 
 type Listener = (data: unknown) => void;
 
@@ -118,7 +120,9 @@ function connect(): void {
   const topics = liveTopics();
   if (topics.length === 0) return;
 
-  const stream = new EventSource(`/api/events?topics=${encodeURIComponent(topics.join(','))}`);
+  const stream = new EventSource(
+    `${operationPath('events.stream')}?topics=${encodeURIComponent(topics.join(','))}`,
+  );
   source = stream;
   connected = new Set(topics);
 

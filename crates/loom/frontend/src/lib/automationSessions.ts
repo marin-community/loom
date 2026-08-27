@@ -59,5 +59,7 @@ export function unmatchedRunProjection(run: AutomationRun): UnmatchedRunProjecti
     case 'cancelled':
     case 'completed':
       return 'history';
+    default:
+      return 'intervention';
   }
 }

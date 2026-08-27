@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde_json::json;
-use weaver_api::{CreateReq, LaunchOverrides, LaunchSelection, ResolvedLaunchView};
+use weaver_api::{LaunchOverrides, LaunchSelection, ResolvedLaunchView};
 use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance};
 use weaver_core::tags;
@@ -16,6 +16,7 @@ use crate::runtime::{configure_session_github_auth, layer_launch_environment, se
 use crate::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
+use weaver_api::operations::sessions;
 
 #[derive(Debug)]
 pub enum ProvisionError {
@@ -148,8 +149,15 @@ enum ActorKind {
 pub struct Actor(ActorKind);
 
 impl Actor {
-    pub fn from_principal(principal: &Principal, delegated: bool) -> Self {
-        match &principal.grant {
+    /// The actor a credential launches as, or `None` if it cannot launch at all.
+    ///
+    /// `None` is currently only an anonymous caller. `authorize()` refuses
+    /// anonymous grants on every operation without `actor = Anonymous`, so
+    /// this is unreachable in practice. It returns an `Option` so provisioning
+    /// fails closed if that invariant ever breaks.
+    pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
+        Some(match &principal.grant {
+            Grant::Anonymous => return None,
             Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,
@@ -170,7 +178,7 @@ impl Actor {
                 session_id: session_id.clone(),
                 branch_id: branch_id.clone(),
             }),
-        }
+        })
     }
 
     pub fn producer(origin: &'static str, subject: impl Into<String>) -> Self {
@@ -386,7 +394,7 @@ fn tail_chars(s: &str, max: usize) -> String {
     format!("…(truncated)\n{tail}")
 }
 
-fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
+fn legacy_launch_selection(req: &sessions::launch::Input) -> LaunchSelection {
     let nonempty = |value: &Option<String>| {
         value
             .as_ref()
@@ -399,8 +407,8 @@ fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
             .unwrap_or_else(|| crate::profile::DEFAULT_PROFILE.to_string()),
         overrides: LaunchOverrides {
             agent: nonempty(&req.agent),
-            // Empty is an explicit "agent default" selector for these legacy
-            // fields, distinct from omission (which inherits the profile).
+            // Empty is an explicit "agent default" selector for these fields,
+            // distinct from omission (which inherits the profile).
             model: selected(&req.model),
             effort: selected(&req.effort),
             protocol: selected(&req.protocol),
@@ -410,7 +418,7 @@ fn legacy_launch_selection(req: &CreateReq) -> LaunchSelection {
     }
 }
 
-fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
+fn create_selection(req: &sessions::launch::Input) -> Result<LaunchSelection> {
     let Some(selection) = &req.selection else {
         return Ok(legacy_launch_selection(req));
     };
@@ -438,16 +446,23 @@ fn create_selection(req: &CreateReq) -> Result<LaunchSelection> {
     Ok(selection.clone())
 }
 
-/// Boxed so this future's state machine is codegen'd here, in `loom-launch`,
-/// rather than re-instantiated in whichever crate ends up polling it. An
-/// `async fn` body is emitted where it is awaited, and every caller of this one
-/// is itself an `async fn`, so the whole chain otherwise bubbles up into the
-/// root `loom` crate — 62k lines of LLVM IR on every `loom` rebuild.
-pub fn create(st: AppState, req: CreateReq, actor: Actor) -> BoxFut<'static, Result<Provisioned>> {
+/// Boxed so this future's state machine is codegen'd here in `loom-launch`.
+/// An `async fn` body is emitted where it is awaited, and since every caller
+/// is itself `async fn`, the whole chain would otherwise bubble into the root
+/// `loom` crate — inflating LLVM IR on every rebuild.
+pub fn create(
+    st: AppState,
+    req: sessions::launch::Input,
+    actor: Actor,
+) -> BoxFut<'static, Result<Provisioned>> {
     Box::pin(create_inner(st, req, actor))
 }
 
-async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Provisioned> {
+async fn create_inner(
+    st: AppState,
+    req: sessions::launch::Input,
+    actor: Actor,
+) -> Result<Provisioned> {
     let created_by = actor.display_creator();
     let origin = actor.origin();
     tracing::info!(
@@ -457,9 +472,8 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         origin,
         "starting session creation"
     );
-    // Attachment input is untrusted launch input, not a provisioning step.
-    // Decode and validate the entire batch before touching a repository,
-    // worktree, branch, work-item claim, or session row.
+    // Attachment input is untrusted launch input; validate the batch before
+    // touching a repository, worktree, branch, work-item claim, or session row.
     let prepared_scratch = prepare_initial_scratch(&req.scratch)?;
     let selection = create_selection(&req)?;
     let selected_profile_name = match selection.profile.trim() {
@@ -467,10 +481,9 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         name => name,
     }
     .to_string();
-    // This is both the capacity gate and the template-lifetime gate. Profile
+    // Acquire both the capacity gate and the template-lifetime gate. Profile
     // edits, retirement, recreation, clone, and environment mutation use the
-    // same permit; retaining it through session insertion closes the
-    // resolve/provision/delete gap even for unlimited profiles.
+    // same permit; holding it through session insertion prevents race windows.
     let _profile_permit = st.launch_gate.acquire_profile(&selected_profile_name).await;
     // Custom-agent and custom-MCP mutations share this boundary. Keep the
     // exact registry generation accepted below through command construction
@@ -885,9 +898,8 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     }
 
     // Unless the caller pins a base, fork from a freshly-fetched `origin/<default
-    // branch>` so new work starts from the latest mainline, not the launching
-    // checkout's (possibly stale) current branch. `default_base` degrades to the
-    // current branch on a remote-less repo.
+    // branch>` so new work starts from the latest mainline. `default_base`
+    // degrades to the current branch on a remote-less repo.
     let mut base = match req.base.clone() {
         Some(b) => b,
         None => git::default_base(&repo_root).await?,
@@ -978,10 +990,9 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
         (branch_name, work_dir)
     };
 
-    // A replacement launch may reuse a worktree whose previous session left
-    // Scratch files behind. Validate and write the merged set while holding the
-    // same path-scoped permit as live upload/delete routes, before creating any
-    // branch row, work-item claim, or session.
+    // A replacement launch may reuse a worktree with existing Scratch files.
+    // Validate and write the merged set while holding the path-scoped permit
+    // used by live upload/delete routes, before creating branch/work-item/session.
     let _scratch_permit = st.launch_gate.acquire_scratch(&work_dir).await;
     let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
 
@@ -1013,11 +1024,10 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
     tracing::debug!(branch = %branch.id, title = %title, "stamped branch title/goal/description");
 
     // Resolve the repository-scoped launching branch once: it names an
-    // explicitly claimed work item's `source_branch` and supplies the legacy
-    // `parent_branch_id` fallback. Only attribute that branch link inside this
-    // repo, and never to the branch itself — `resolve_key` searches globally,
-    // so a stray `$WEAVER_BRANCH` from a checkout elsewhere must not
-    // misattribute work-item provenance to an unrelated repository.
+    // explicitly claimed work item's `source_branch` and supplies the
+    // `parent_branch_id` fallback. Attribute that link only inside this repo,
+    // and never to the branch itself — `resolve_key` searches globally, so a
+    // stray `$WEAVER_BRANCH` from elsewhere must not misattribute provenance.
     let parent = match req
         .parent_branch
         .as_deref()
@@ -1171,10 +1181,9 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
                 run_repo_setup(&st, &branch.id, &work_dir, &run_dir, &script, &extra_env).await;
             if !outcome.success {
                 tracing::warn!(branch = %branch.id, "repo setup failed, aborting launch before agent start");
-                // Surface the failure as a loud, visible session state rather than
-                // launching the agent into a half-provisioned worktree. The
-                // worktree is left intact for inspection; full output is in the
-                // run dir's setup.log.
+                // Record a visible error session state instead of launching into a
+                // half-provisioned worktree. The worktree is left intact for
+                // inspection; full output is in run dir's setup.log.
                 let session = crate::session_layout::insert_session(
                     &st.db,
                     &st.bus,
@@ -1467,9 +1476,8 @@ async fn create_inner(st: AppState, req: CreateReq, actor: Actor) -> Result<Prov
 
 /// Session-specific operating context appended after the goal. Keep this
 /// compact: the goal is the outcome, the primer owns durable workflow rules,
-/// and this note only supplies the tracking contract that neither can know
-/// ahead of time. `loom summary` is a recovery path, not a mandatory first
-/// tool call that would inject the goal a second time.
+/// and this note supplies only the tracking contract. `loom summary` recovers
+/// context but is not a mandatory first turn.
 fn entrance_note(tracking_issue: Option<i64>) -> String {
     let mut note = "You are working in a Loom session. Use `loom summary` \
                     after compaction, `loom help` to explore the registered \
@@ -1524,10 +1532,10 @@ pub(crate) fn profile_instructions_section(instructions: &str) -> Option<String>
 
 /// Adopt the explicit work item attached to a launch, if any.
 ///
-/// `--claim <id>` and a GitHub-triggered launch keep the legacy issue
-/// association because external work needs a stable mapping. Plain session
-/// goals and delegated tasks live in their session channel and return `None`.
-/// `source_branch` retains provenance for the explicit compatibility cases.
+/// `--claim <id>` and a GitHub-triggered launch keep the issue association
+/// because external work needs a stable mapping. Plain session goals and
+/// delegated tasks live in their session channel and return `None`.
+/// `source_branch` retains provenance for these cases.
 #[allow(clippy::too_many_arguments)]
 async fn resolve_explicit_work_item(
     st: &AppState,
@@ -1543,8 +1551,8 @@ async fn resolve_explicit_work_item(
     tracing::debug!(branch = %branch.id, source = %source, "resolving explicit work item for session");
 
     // Claiming an existing Loom issue: that issue *is* the tracker, so the
-    // claim must actually land — otherwise we'd hand back a tracking id for an
-    // issue this branch never claimed. Propagate failures rather than swallow.
+    // claim must land. Propagate failures so we don't return a tracking id
+    // for an unclaimed issue.
     if let Some(id) = claim_issue {
         weaver_core::issue::set_claim(&st.db, id, Some(&branch.branch)).await?;
         events::record(
@@ -1595,7 +1603,7 @@ mod tests {
 
     #[test]
     fn legacy_create_preserves_explicit_agent_default_selectors() {
-        let req = CreateReq {
+        let req = sessions::launch::Input {
             profile: Some(" template ".to_string()),
             agent: Some(" ".to_string()),
             model: Some(" ".to_string()),
@@ -1644,8 +1652,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Ordinary delegated work lives in the child's channel, not a shadow
-        // issue whose lifecycle can drift from the session.
+        // Ordinary delegated work lives in the child's channel.
         let plain = resolve_explicit_work_item(
             &st,
             &child,
@@ -1689,7 +1696,7 @@ mod tests {
         assert_eq!(imported.source_branch.as_deref(), Some("weaver/parent"));
         assert_eq!(imported.github_issue, Some(19));
 
-        // Claiming an existing issue reuses it rather than opening a duplicate.
+        // Claiming an existing issue reuses it.
         let existing = weaver_core::issue::add(
             &db,
             &weaver_core::issue::NewIssue {

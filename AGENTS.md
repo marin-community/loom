@@ -5,11 +5,11 @@ short on purpose. Depth lives elsewhere, pull it in when you need it:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (internals: module map, REST API,
 storage, status model, GitHub integration), and [README.md](README.md) (user docs).
 The in-workspace primer is registered in code; run `loom help`, `loom summary`,
-and `loom permissions show` to discover the executable workflow surface.
+and `loom permissions show` to discover what you can run.
 
 ## What Loom is
 
-One public command surface over Loom's REST API:
+One public entry point to Loom's REST API:
 
 - **`loom`** — the orchestrator: REST + SSE server, Vue SPA, per-session
   detached Tapestry runtime supervisor + agent process, the monitor, and
@@ -98,13 +98,24 @@ when you're ready to land. The rules it enforces:
 
 ## Conventions
 
-- **API-first.** A new feature is a `web.rs` REST route first; the SPA and the
-  `loom` CLI both consume it. No business logic in `bin/loom.rs` or the Vue layer.
+- **API-first.** A new feature is an `#[operation]` declaration first, in the
+  bundle its id names (`issues.list` -> `crates/weaver-api/src/operations/issues.rs`).
+  REST, the `loom` CLI and MCP are all generated from it; nobody writes the
+  route, the clap command or the tool schema down a second time. No business
+  logic in the command line (`crates/loom/src/cli/`), MCP dispatch, or the Vue
+  layer.
 - **The frontend is a thin REST client** ([[ui-built-on-rest-api]]): every call
-  goes through `frontend/src/api.ts` (no inline `fetch`), and
-  `frontend/src/types.ts` mirrors the serde structs in `web.rs` by hand (no
-  codegen — keep them in sync). Don't invent browser-local features the `loom`
-  CLI can't observe.
+  goes through `frontend/src/api.ts` (no inline `fetch`), and its types are
+  **generated, not mirrored**. `frontend/src/api/generated.ts` is written from
+  the OpenAPI document by `crates/weaver-api/src/bin/generate-types.rs`;
+  regenerate it with `cargo run -p weaver-api --bin generate-types` whenever a
+  DTO or an operation changes. That file also carries the operation table
+  `invokeOperation` is keyed on, so an unknown operation id is a compile error
+  and no call site casts its result.
+  `frontend/src/types.ts` keeps only what the server does not declare: the
+  SPA's spelling of each generated name, and the layout of fields the API
+  serves as free-form JSON. Don't invent browser-local features the `loom` CLI
+  can't observe.
 - **Small SQLite app — don't flag scale.** `~/.weaver/weaver.db` holds ~hundreds
   of rows. Never raise N+1 queries, missing indexes, denormalization, join cost,
   or other scale/perf concerns — they don't apply here. Favor the clean general

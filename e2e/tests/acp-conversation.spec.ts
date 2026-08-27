@@ -49,7 +49,7 @@ async function defineFakeAcpAgent(
   name: string,
   label: string,
 ): Promise<void> {
-  const res = await fetch(`${weaver.baseUrl}/api/agents/custom`, {
+  const res = await fetch(`${weaver.baseUrl}/api/agents/custom/create`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
@@ -81,7 +81,7 @@ async function launchAcpSession(
   const agent = 'acp-fake';
   await defineFakeAcpAgent(weaver, agent, 'ACP fake');
 
-  const res = await fetch(`${weaver.baseUrl}/api/sessions`, {
+  const res = await fetch(`${weaver.baseUrl}/api/sessions/launch`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
@@ -116,11 +116,15 @@ async function openAcp(
 /** Exercise the durable queue contract directly. The conversation composer is
  * immediate by default, but queued feedback from another client remains an
  * editable, promotable part of the UI. */
-async function queueAcpPrompt(weaver: WeaverFixture, session: Session, text: string): Promise<void> {
-  const res = await fetch(`${weaver.baseUrl}/api/sessions/${session.id}/prompt`, {
+async function queueAcpPrompt(
+  weaver: WeaverFixture,
+  session: Session,
+  text: string,
+): Promise<void> {
+  const res = await fetch(`${weaver.baseUrl}/api/sessions/prompt/create`, {
     method: 'POST',
     headers: HEADERS,
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, session: session.id }),
   });
   if (!res.ok) throw new Error(`queueing ACP prompt failed: ${await res.text()}`);
 }
@@ -254,7 +258,7 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
     await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
-    await fetch(`${weaver.baseUrl}/api/profiles`, {
+    await fetch(`${weaver.baseUrl}/api/profiles/create`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -292,7 +296,11 @@ test.describe('acp conversation', () => {
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect
       .poll(async () => {
-        const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/chat`);
+        const res = await fetch(`${weaver.baseUrl}/api/sessions/chat`, {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ session: s.id }),
+        });
         const chat = (await res.json()) as {
           blocks: Array<{
             kind: string;
@@ -315,7 +323,11 @@ test.describe('acp conversation', () => {
     await expect
       .poll(
         async () => {
-          const res = await fetch(`${weaver.baseUrl}/api/sessions/${s.id}/chat`);
+          const res = await fetch(`${weaver.baseUrl}/api/sessions/chat`, {
+            method: 'POST',
+            headers: HEADERS,
+            body: JSON.stringify({ session: s.id }),
+          });
           const chat = (await res.json()) as {
             blocks: Array<{ kind: string; payload: { text?: string } }>;
           };
@@ -418,16 +430,14 @@ test.describe('acp conversation', () => {
     });
     test.skip(s === null, SKIP_MSG);
     // Serve an empty journal so the surface renders its fresh-session state.
-    await page.route(`**/api/sessions/${s!.id}/chat`, (route) =>
-      route.fulfill({ json: { blocks: [], live_turn: null } }),
-    );
-    await page.route(`**/api/sessions/${s!.id}/chat/stream`, (route) =>
-      route.fulfill({
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-        body: '',
-      }),
-    );
+    // The live tail needs no stub: it is multiplexed into `events.stream` as the
+    // `chat:<id>` topic, which only carries frames a working agent produces, and
+    // this one has been idle since launch.
+    await page.route('**/api/sessions/chat', (route) => {
+      const operands = route.request().postDataJSON() as { session?: string };
+      if (operands?.session !== s!.id) return route.fallback();
+      return route.fulfill({ json: { blocks: [], live_turn: null } });
+    });
     await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
     const empty = page.getByTestId('acp-empty');
     await expect(empty).toBeVisible();
@@ -447,12 +457,14 @@ test.describe('acp conversation', () => {
     });
     test.skip(s === null, SKIP_MSG);
     let snapshots = 0;
-    await page.route(`**/api/sessions/${s!.id}/chat*`, (route) => {
-      if (new URL(route.request().url()).pathname.endsWith('/chat/stream')) {
-        return route.continue();
-      }
+    await page.route('**/api/sessions/chat', (route) => {
+      const operands = route.request().postDataJSON() as {
+        session?: string;
+        before_turn?: number;
+      };
+      if (operands?.session !== s!.id) return route.fallback();
       snapshots += 1;
-      const older = new URL(route.request().url()).searchParams.has('before_turn');
+      const older = operands.before_turn !== undefined;
       return route.fulfill({
         json: {
           blocks: [
@@ -506,7 +518,9 @@ test.describe('acp conversation', () => {
     });
     let chatRequests = 0;
     page.on('request', (request) => {
-      if (new URL(request.url()).pathname.includes(`/api/sessions/${s!.id}/chat`)) {
+      const url = new URL(request.url());
+      const topics = decodeURIComponent(url.searchParams.get('topics') ?? '').split(',');
+      if (url.pathname === '/api/sessions/chat' || topics.includes(`chat:${s!.id}`)) {
         chatRequests += 1;
       }
     });
@@ -682,10 +696,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-recover')).toBeHidden();
   });
 
-  test('composer stops and sends when the running agent cannot steer', async ({
-    page,
-    weaver,
-  }) => {
+  test('composer stops and sends when the running agent cannot steer', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-queue-ui',

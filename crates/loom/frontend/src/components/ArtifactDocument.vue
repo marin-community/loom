@@ -338,9 +338,7 @@ function locateCycle() {
     const element =
       blockContaining(root, range.endContainer) ?? blockContaining(root, range.startContainer);
     const attr = element?.getAttribute('data-block');
-    const capturedBlock = anchor.block_index;
-    const block =
-      attr != null ? Number(attr) : typeof capturedBlock === 'number' ? capturedBlock : -1;
+    const block = attr != null ? Number(attr) : -1;
     located.push({ entry, range, block });
   }
   locatedEntries.value = located.map(({ entry, range }) => ({ entry, range }));

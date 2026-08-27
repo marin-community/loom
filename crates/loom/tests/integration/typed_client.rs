@@ -1,21 +1,21 @@
 //! The typed `weaver_api::Client` methods, round-tripped against a real server.
 //!
-//! These exercise the typed surface the Python binding wraps — `create_session`,
-//! `list_sessions`, `get_session`, and `mark` (triage) — deserializing real
-//! `SessionView`s rather than poking at raw JSON. They cover the DTO contract
-//! end-to-end: the server serializes the moved `weaver-api` structs and the
-//! client deserializes the same definitions.
+//! These exercise the typed client methods the Python binding wraps —
+//! `create_session`, `list_sessions`, `get_session`, and `mark` (triage) —
+//! deserializing real `SessionView`s rather than raw JSON. They cover the DTO
+//! contract end-to-end: the server serializes the moved `weaver-api` structs
+//! and the client deserializes the same definitions.
 
 use serial_test::serial;
 
 use serde_json::{json, Map, Value};
 use std::sync::{Arc, Mutex};
-use weaver_api::{
-    CreateChannelMessageReq, CreatePermissionRequestReq, CreateReq, DecidePermissionRequestReq,
-    SetSessionGithubAccessReq, SettingKind, SettingSource,
-};
+use weaver_api::{SettingKind, SettingSource};
+
+use weaver_api::operations::permissions as permission_ops;
 
 use crate::fixtures::TestServer;
+use weaver_api::operations::{branches, channels, sessions, settings};
 
 /// The value of a typed `BranchView`'s tag by key, or `None` when absent.
 fn tag_value<'a>(branch: &'a weaver_api::BranchView, key: &str) -> Option<&'a str> {
@@ -35,12 +35,11 @@ async fn typed_create_list_get_and_mark() {
     let ts = TestServer::start().await;
     let client = &ts.client;
 
-    // Typed create: build a CreateReq, get a SessionView back.
     let created = client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("typed client round-trip".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("typed client round-trip".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -55,7 +54,13 @@ async fn typed_create_list_get_and_mark() {
 
     // Session creation atomically creates its same-id default channel and
     // immutable opening goal message.
-    let channels = client.list_channels(false).await.unwrap();
+    let channels = client
+        .invoke::<channels::list::Op>(&channels::list::Input {
+            archived: false,
+            branch: String::new(),
+        })
+        .await
+        .unwrap();
     let channel = channels
         .iter()
         .find(|channel| channel.id == id)
@@ -67,59 +72,83 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(opening[0].kind, "goal");
     assert_eq!(opening[0].body, "typed client round-trip");
 
-    // Session credentials can bootstrap every resource-shaped tool from one
-    // caller-relative context, then inspect the same channel's bindings.
+    // The session credential implies its own session and branch, so `context`
+    // and the bindings lookup below can omit those ids.
     let session_token =
         loom::auth::create_session_token(&ts.state.db, Some("rjpower"), &id, &created.branch.id)
             .await
             .unwrap();
     let session_client =
         weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(session_token));
-    let context = session_client.self_context().await.unwrap();
+    let context = session_client
+        .invoke::<sessions::context::Op>(&sessions::context::Input {
+            session: String::new(),
+        })
+        .await
+        .unwrap();
     assert_eq!(context.session_id, id);
     assert_eq!(context.branch_id, created.branch.id);
     assert_eq!(context.channel_id, id);
-    assert_eq!(context.links.channel, format!("/api/channels/{id}"));
-    let bindings = session_client.channel_bindings(&id).await.unwrap();
+    assert_eq!(context.links.channel, "/api/channels/get");
+    let bindings = session_client
+        .invoke::<channels::bindings::list::Op>(&channels::bindings::list::Input {
+            channel: id.to_string(),
+            branch: String::new(),
+        })
+        .await
+        .unwrap();
     assert_eq!(bindings.len(), 1);
     assert_eq!(bindings[0].id, format!("session:{id}"));
     assert_eq!(bindings[0].label, "this session");
 
     // Retrying an append with the same key returns the original durable item.
-    let result_request = CreateChannelMessageReq {
+    let result_request = channels::messages::create::Input {
+        channel: id.to_string(),
         kind: "result".to_string(),
         urgency: "normal".to_string(),
         body: "done once".to_string(),
         payload: serde_json::json!({}),
         reply_to: None,
         idempotency_key: Some("typed-result-once".to_string()),
+        branch: String::new(),
     };
     let first = session_client
-        .send_channel_message(&id, &result_request)
+        .invoke::<channels::messages::create::Op>(&result_request)
         .await
         .unwrap();
     let retry = session_client
-        .send_channel_message(&id, &result_request)
+        .invoke::<channels::messages::create::Op>(&result_request)
         .await
         .unwrap();
     assert_eq!(retry.id, first.id);
     assert_eq!(retry.seq, first.seq);
     assert_eq!(
         session_client
-            .channel_messages_bounded(&id, 0, 1)
+            .invoke::<channels::messages::list::Op>(&channels::messages::list::Input {
+                channel: id.to_string(),
+                after: 0,
+                limit: 1_i64,
+                kinds: Vec::new(),
+                peek: false,
+                branch: String::new(),
+            })
             .await
             .unwrap()
             .len(),
         1
     );
 
-    // Typed list: the new session is the only one.
+    // The new session is the only one.
     let sessions = client.list_sessions().await.unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].id, id);
 
-    // Typed get by id.
-    let got = client.get_session(&id).await.unwrap();
+    let got = client
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: id.to_string(),
+        })
+        .await
+        .unwrap();
     assert_eq!(got.id, id);
     assert!(
         tag_value(&got.branch, "attention").is_none(),
@@ -130,8 +159,8 @@ async fn typed_create_list_get_and_mark() {
         "unmarked at first"
     );
 
-    // Typed mark (triage): stamps the watch axis as the `triage` tag, the
-    // agent's own `attention` tag untouched.
+    // Marking sets the `triage` tag; the agent's own `attention` tag stays
+    // untouched.
     let marked = client
         .mark(&id, "attention", "looks stuck", Some("typed-test"))
         .await
@@ -154,7 +183,11 @@ async fn typed_create_list_get_and_mark() {
     // Agent status is also a typed channel item while the compatibility tag
     // continues to drive the existing dashboard and mirrors.
     client
-        .set_branch_status(&created.branch.id, "attention", "review the boundary")
+        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+            level: "attention".to_string(),
+            message: Some("review the boundary".to_string()),
+            branch: created.branch.id.to_string(),
+        })
         .await
         .unwrap();
     let status = client.channel_messages(&id, first.seq).await.unwrap();
@@ -163,7 +196,10 @@ async fn typed_create_list_get_and_mark() {
     assert_eq!(status[0].urgency, "attention");
     assert_eq!(status[0].body, "review the boundary");
 
-    client.delete(&format!("/api/sessions/{id}")).await.unwrap();
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }
 
 #[serial]
@@ -172,10 +208,10 @@ async fn operation_discovery_and_permission_request_round_trip() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("request repository access".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("request repository access".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -201,51 +237,53 @@ async fn operation_discovery_and_permission_request_round_trip() {
     assert_eq!(request_operation.path, "/api/permissions/requests/create");
 
     let request = session
-        .create_permission_request(
-            &created.id,
-            &CreatePermissionRequestReq {
-                kind: "github_repository".to_string(),
-                repository: "acme/widgets".to_string(),
-                mode: "write".to_string(),
-                reason: "update the shared client".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            repository: "acme/widgets".to_string(),
+            reason: "update the shared client".to_string(),
+            mode: "write".to_string(),
+            session: created.id.clone(),
+        })
         .await
         .unwrap();
     assert_eq!(request.state, "pending");
     assert_eq!(
         session
-            .effective_permissions(&created.id)
+            .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
+                session: created.id.clone(),
+            })
             .await
             .unwrap()
             .pending_requests[0]
             .id,
         request.id
     );
-    let branch = session.get_session(&created.id).await.unwrap().branch;
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.to_string(),
+        })
+        .await
+        .unwrap()
+        .branch;
     assert_eq!(tag_value(&branch, "attention"), Some("attention"));
 
     let error = session
-        .decide_permission_request(
-            &request.id,
-            &DecidePermissionRequestReq {
-                decision: "deny".to_string(),
-                reason: String::new(),
-            },
-        )
+        .invoke::<permission_ops::requests::deny::Op>(&permission_ops::requests::deny::Input {
+            request: request.id.clone(),
+            reason: String::new(),
+        })
         .await
         .unwrap_err();
+    // `permissions.requests.deny` is declared `actor = User`, so the registry
+    // itself refuses a session credential: this operation does not accept a
+    // session grant.
     assert!(error.to_string().contains("human operator"));
 
     let denied = ts
         .client
-        .decide_permission_request(
-            &request.id,
-            &DecidePermissionRequestReq {
-                decision: "deny".to_string(),
-                reason: "not needed".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::deny::Op>(&permission_ops::requests::deny::Input {
+            request: request.id.clone(),
+            reason: "not needed".to_string(),
+        })
         .await
         .unwrap();
     assert_eq!(denied.state, "denied");
@@ -254,14 +292,15 @@ async fn operation_discovery_and_permission_request_round_trip() {
 
 /// A GitHub App installation token covers one owner, so a session holding
 /// access under two owners has no single token. Each repository is brokered on
-/// its own, and granting the second owner no longer has to mint the union.
+/// its own, so granting the second owner mints only that repository, not the
+/// union of both.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn github_credentials_are_brokered_per_repository_across_owners() {
     let ts = TestServer::start_with_app().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
             cwd: ts.cwd(),
             goal: Some("work across two owners".to_string()),
             agent: Some("shell".to_string()),
@@ -276,16 +315,12 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
         .await
         .unwrap();
 
-    // A human grants the second owner. Before per-repository brokering this
-    // failed here, because validation minted the whole prospective set.
+    // A human grants the second owner.
     ts.client
-        .set_session_github_access(
-            &created.id,
-            &SetSessionGithubAccessReq {
-                repository: "Open-Athena/mumwelt".to_string(),
-                mode: "write".to_string(),
-            },
-        )
+        .invoke::<permission_ops::github::grant::Op>(&permission_ops::github::grant::Input {
+            session: created.id.clone(),
+            repository: "Open-Athena/mumwelt".to_string(),
+        })
         .await
         .unwrap();
 
@@ -301,7 +336,9 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
 
     assert_eq!(
         session
-            .effective_permissions(&created.id)
+            .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
+                session: created.id.clone(),
+            })
             .await
             .unwrap()
             .github_repositories,
@@ -310,16 +347,22 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
 
     for repository in ["marin-community/marin", "Open-Athena/mumwelt"] {
         let credential = session
-            .github_token(&created.id, Some(repository))
+            .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+                session: created.id.clone(),
+                repository: Some(repository.to_string()),
+            })
             .await
             .unwrap();
         assert!(!credential.token.is_empty(), "no token for {repository}");
     }
 
-    // The unscoped form cannot represent a set spanning owners, which is
-    // exactly why the adapters name a repository.
+    // Omitting `repository` fails once the session's repositories span more
+    // than one owner: there is no single token to return.
     let error = session
-        .github_token(&created.id, None)
+        .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+            session: created.id.clone(),
+            repository: None,
+        })
         .await
         .unwrap_err()
         .to_string();
@@ -327,7 +370,10 @@ async fn github_credentials_are_brokered_per_repository_across_owners() {
 
     // A repository the session has no grant for is refused before any minting.
     let denied = session
-        .github_token(&created.id, Some("marin-community/vllm"))
+        .invoke::<permission_ops::github::token::Op>(&permission_ops::github::token::Input {
+            session: created.id.clone(),
+            repository: Some("marin-community/vllm".to_string()),
+        })
         .await
         .unwrap_err()
         .to_string();
@@ -346,7 +392,7 @@ async fn owner_pattern_applies_repository_access_without_a_human() {
     let ts = TestServer::start_with_app().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
             cwd: ts.cwd(),
             goal: Some("push to a sibling repository".to_string()),
             agent: Some("shell".to_string()),
@@ -373,15 +419,12 @@ async fn owner_pattern_applies_repository_access_without_a_human() {
     let session = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
 
     let granted = session
-        .create_permission_request(
-            &created.id,
-            &CreatePermissionRequestReq {
-                kind: "github_repository".to_string(),
-                repository: "marin-community/vllm".to_string(),
-                mode: "write".to_string(),
-                reason: "open the PR".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            session: created.id.clone(),
+            repository: "marin-community/vllm".to_string(),
+            mode: "write".to_string(),
+            reason: "open the PR".to_string(),
+        })
         .await
         .unwrap();
     assert_eq!(granted.state, "approved");
@@ -390,29 +433,43 @@ async fn owner_pattern_applies_repository_access_without_a_human() {
         Some("policy:marin-community/*")
     );
 
-    let effective = session.effective_permissions(&created.id).await.unwrap();
+    let effective = session
+        .invoke::<permission_ops::effective::get::Op>(&permission_ops::effective::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap();
     assert_eq!(effective.github_repositories, ["marin-community/vllm"]);
     assert_eq!(effective.github_repository_patterns, ["marin-community/*"]);
     assert!(effective.pending_requests.is_empty());
     // A policy grant is not an interruption.
-    let branch = session.get_session(&created.id).await.unwrap().branch;
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap()
+        .branch;
     assert_ne!(tag_value(&branch, "attention"), Some("attention"));
 
     // An owner the policy says nothing about still needs a person.
     let pending = session
-        .create_permission_request(
-            &created.id,
-            &CreatePermissionRequestReq {
-                kind: "github_repository".to_string(),
-                repository: "acme/widgets".to_string(),
-                mode: "write".to_string(),
-                reason: "unrelated".to_string(),
-            },
-        )
+        .invoke::<permission_ops::requests::create::Op>(&permission_ops::requests::create::Input {
+            session: created.id.clone(),
+            repository: "acme/widgets".to_string(),
+            mode: "write".to_string(),
+            reason: "unrelated".to_string(),
+        })
         .await
         .unwrap();
     assert_eq!(pending.state, "pending");
-    let branch = session.get_session(&created.id).await.unwrap().branch;
+    let branch = session
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: created.id.clone(),
+        })
+        .await
+        .unwrap()
+        .branch;
     assert_eq!(tag_value(&branch, "attention"), Some("attention"));
 }
 
@@ -442,10 +499,10 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("deliver one canonical result".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("deliver one canonical result".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
@@ -475,16 +532,18 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     .await
     .unwrap();
     let client = weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(token));
-    let request = CreateChannelMessageReq {
+    let request = channels::messages::create::Input {
+        channel: created.id.to_string(),
         kind: "result".to_string(),
         urgency: "normal".to_string(),
         body: "the canonical answer".to_string(),
         payload: json!({}),
         reply_to: None,
         idempotency_key: Some("answer-once".to_string()),
+        branch: String::new(),
     };
     let message = client
-        .send_channel_message(&created.id, &request)
+        .invoke::<channels::messages::create::Op>(&request)
         .await
         .unwrap();
     assert_eq!(message.deliveries.len(), 1);
@@ -499,8 +558,12 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     // second Slack reply after an ambiguous client-side failure.
     let retry = client
         .post(
-            &format!("/api/branches/{}/slack/reply", created.branch.id),
-            json!({ "text": "the canonical answer", "idempotency_key": "answer-once" }),
+            "/api/branches/slack/reply",
+            json!({
+                "branch": created.branch.id,
+                "text": "the canonical answer",
+                "idempotency_key": "answer-once"
+            }),
         )
         .await
         .unwrap();
@@ -512,7 +575,7 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
     assert_eq!(posted["text"], "the canonical answer");
 
     ts.client
-        .delete(&format!("/api/sessions/{}", created.id))
+        .post("/api/sessions/delete", json!({ "session": created.id }))
         .await
         .unwrap();
     weaver_core::config::apply(&ts.state.db, &[("slack.bot_token".to_string(), None)])
@@ -530,7 +593,10 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
     let ts = TestServer::start_api_only().await;
     let client = &ts.client;
 
-    let initial = client.list_settings().await.unwrap();
+    let initial = client
+        .invoke::<settings::get::Op>(&settings::get::Input {})
+        .await
+        .unwrap();
     let initial_setting = initial
         .settings
         .iter()
@@ -547,7 +613,15 @@ async fn typed_settings_get_and_patch_share_the_rich_envelope() {
 
     let mut changes = Map::new();
     changes.insert("server.auto_adopt".to_string(), Value::Bool(true));
-    let updated = client.patch_settings(changes).await.unwrap();
+    let updated = client
+        .invoke::<settings::patch::Op>(&settings::patch::Input {
+            changes: changes
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+        })
+        .await
+        .unwrap();
     let updated_setting = updated
         .settings
         .iter()

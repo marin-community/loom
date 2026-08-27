@@ -2,15 +2,15 @@
 //!
 //! Loom owns sessions (one terminal supervisor + one running agent per branch),
 //! the REST API, the Vue web UI, the monitor loop, and recently-used repository
-//! bookkeeping. `loom` is the single public command surface; its host-facing and
-//! worktree-facing commands are clients of the same REST API.
+//! bookkeeping. `loom` is the single public command-line interface; its
+//! host-facing and worktree-facing commands are clients of the same REST API.
 //!
 //! This crate is the HTTP/SSE/WebSocket adapter and the CLI. The engine beneath
 //! it is split by persistent store, agent mechanism, policy, editor, forge,
 //! launch, background-watch, and delivery subjects. Each layer is re-exported
 //! here, so `loom::session`, `loom::AppState` and friends keep stable paths.
 
-pub mod agent_cli;
+pub mod cli;
 pub mod client;
 pub mod endpoint;
 pub mod server;

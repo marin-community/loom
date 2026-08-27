@@ -4,7 +4,7 @@
 //! table and served under `BranchView::github` — a plain serializable row. The
 //! polling that *produces* it (shelling out to the `gh` CLI) lives in the loom
 //! orchestrator; this is only the model and its serialization, shared by the
-//! daemon and the API surface.
+//! daemon and the HTTP API.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -18,7 +18,7 @@ use sqlx::FromRow;
 /// is the time associated with the current `head_sha`; the poller preserves it
 /// while the head is unchanged so unrelated PR metadata does not make code look
 /// newly pushed.
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, schemars::JsonSchema)]
 pub struct GithubStatus {
     pub pr_number: i64,
     pub pr_url: String,

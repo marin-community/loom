@@ -4,12 +4,13 @@
 use std::path::PathBuf;
 
 use serde_json::json;
-use weaver_api::{HandoffReq, LaunchOverrides, LaunchSelection, ResolvedLaunchView};
+use weaver_api::{LaunchOverrides, LaunchSelection, ResolvedLaunchView};
 use weaver_core::branch::{self as branch_mod, Branch};
 use weaver_core::BoxFut;
 
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, custom_agents, events, repo, runtime, AppState};
+use weaver_api::operations::sessions;
 
 const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
 const HANDOFF_RECENT_MESSAGES: usize = 8;
@@ -68,7 +69,7 @@ fn legacy_handoff_mode(requested: &Option<String>, current: &str) -> String {
         .to_string()
 }
 
-fn handoff_selection(req: &HandoffReq, session: &Session) -> Result<LaunchSelection> {
+fn handoff_selection(req: &sessions::handoff::Input, session: &Session) -> Result<LaunchSelection> {
     if let Some(selection) = &req.selection {
         if !req.agent.trim().is_empty()
             || req.model.is_some()
@@ -91,8 +92,8 @@ fn handoff_selection(req: &HandoffReq, session: &Session) -> Result<LaunchSelect
             agent: Some(target.to_string()),
             model: req.model.clone(),
             effort: req.effort.clone(),
-            // A flattened handoff historically retained the live session's
-            // permission posture when mode was absent or blank.
+            // Absent or blank mode falls back to the live session's permission
+            // posture, for the flattened handoff form.
             mode: Some(legacy_handoff_mode(&req.mode, &session.launch_mode)),
             ..Default::default()
         },
@@ -252,7 +253,7 @@ fn legacy_handoff_snapshot(
 
 async fn legacy_handoff_plan(
     st: &AppState,
-    req: &HandoffReq,
+    req: &sessions::handoff::Input,
     session: &Session,
 ) -> Result<HandoffPlan> {
     let target = req.agent.trim();
@@ -378,7 +379,7 @@ async fn legacy_handoff_plan(
 pub fn handoff_session(
     st: &AppState,
     initial_session: Session,
-    req: HandoffReq,
+    req: sessions::handoff::Input,
 ) -> BoxFut<'_, Result<(Session, Branch)>> {
     Box::pin(handoff_session_inner(st, initial_session, req))
 }
@@ -386,7 +387,7 @@ pub fn handoff_session(
 async fn handoff_session_inner(
     st: &AppState,
     initial_session: Session,
-    req: HandoffReq,
+    req: sessions::handoff::Input,
 ) -> Result<(Session, Branch)> {
     require_handoff_source(&initial_session)?;
     let canonical = req.selection.is_some();

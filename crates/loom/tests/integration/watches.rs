@@ -1,20 +1,17 @@
-//! The Watch engine's **wiring**: the dispatcher's event→trigger
-//! matching, rounds landing marks and audit rows against the live server, and
-//! the guardrails (cooldown / no-overlap → `skipped`).
+//! The Watch engine: the dispatcher's event→trigger matching, rounds landing
+//! marks and audit rows against the live server, and the guardrails (cooldown
+//! / no-overlap → `skipped`).
 //!
-//! Test placement: a builtin program's *decision logic* is covered
-//! server-free by pytest (`python/weaver-loom/tests/`); these cases prove the
-//! plumbing — the script runs under the engine, reaches the fleet over REST,
-//! and its mutations land with attribution. Don't re-test program logic here.
+//! Test placement: a builtin program's *decision logic* is pytest-covered
+//! server-free (`python/weaver-loom/tests/`); these cases run the script
+//! under the engine, reaching the fleet over the HTTP API, with mutations
+//! landing attributed. Don't re-test program logic here.
 //!
-//! These cases drive the engine **directly** on the test server's isolated db
-//! rather than through the spawned background loop: the test harness pins the
-//! `watch.enabled` master switch off (it ships on by default), so the
-//! daemon's own engine idles and never races these deterministic calls. Each
-//! test builds its own
-//! `AppState` over the same isolated db (the harness exports `WEAVER_HOME`) and
-//! calls the public engine seams — `dispatch`, `fire_now`, `new_in_flight` /
-//! `fire` — so a round runs without waiting on the timer.
+//! These cases drive the engine directly on the test server's isolated db: the
+//! harness pins `watch.enabled` off, so the daemon's own engine never races
+//! these deterministic calls. Each test builds its own `AppState` over the
+//! same db and calls the engine seams (`dispatch`, `fire_now`,
+//! `new_in_flight`/`fire`) without waiting on the timer.
 
 use std::collections::HashSet;
 
@@ -52,7 +49,7 @@ async fn make_session(ts: &TestServer, goal: &str) -> (String, String, String) {
     let ws = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": goal, "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -80,11 +77,9 @@ async fn enabled_watch(state: &AppState, new: watch_store::NewWatch) -> watch_st
     watch_store::get(&state.db, &o.id).await.unwrap().unwrap()
 }
 
-/// The test-owned **survey fixture program** (`programs/survey.py`): records
-/// one `survey` action per surveyed session and mutates nothing. Engine-
-/// mechanics tests run it so they can assert "a round ran over exactly these
-/// sessions" from the run row alone, with no dependency on any builtin
-/// program's behavior (that logic is pytest-owned).
+/// Test-owned fixture program (`programs/survey.py`): records one `survey`
+/// action per surveyed session and mutates nothing, so a round's coverage can
+/// be asserted from the run row alone, independent of builtin program logic.
 fn survey_program() -> String {
     concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -140,12 +135,12 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "watch me").await;
 
-    // The agent declares `blocked` about itself (the reactive signal): its own
-    // `attention` tag.
+    // The agent declares itself `blocked` via its own `attention` tag — the
+    // reactive signal.
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "blocked", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "blocked", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -167,9 +162,8 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
 
     let in_flight = watch::new_in_flight();
 
-    // A matching reactive event: a `tag` write of the `attention` tag (value
-    // `blocked`) on a branch in this repo. The dispatcher maps the tag's
-    // key/value onto the trigger's match kind/level.
+    // The dispatcher maps a tag write's key/value onto the trigger's match
+    // kind/level.
     let ev = events::Event {
         id: 0,
         branch_id: branch_id.clone(),
@@ -179,8 +173,6 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     };
     watch::dispatch(&state, &in_flight, &ev).await;
 
-    // Exactly one run, and its run row records the survey of the in-scope
-    // session — the engine-observable proof the round ran.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -193,7 +185,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     );
 
     // Re-firing the identical event is idempotent: level-triggered, the round
-    // just re-surveys the current fleet — a fresh run row, same survey.
+    // re-surveys the current fleet — a fresh run row, same survey.
     watch::dispatch(&state, &in_flight, &ev).await;
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
@@ -205,8 +197,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
         "the re-fired round re-surveys, it does not 'handle' the event again"
     );
 
-    // The repo filter excludes an event from another repo: same kind/level but a
-    // branch that lives elsewhere must not fire this watch.
+    // The repo filter must exclude an event from another repo.
     let runs_before = watch_store::recent_runs(&state.db, &o.id, 100)
         .await
         .unwrap()
@@ -231,7 +222,7 @@ async fn dispatcher_matches_trigger_with_repo_filter_and_is_idempotent() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -254,9 +245,9 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     // The session reports `attention` about itself so it falls inside the
     // watch's `!ok` scope (the survey will name it, proving it ran).
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -326,8 +317,6 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
         "the woken round surveyed the in-scope stale session"
     );
 
-    // Once activity resumes (a non-stale pass clears the session from `seen`),
-    // the edge re-arms: a later stale crossing emits a fresh event.
     let watermark2 = events::max_id(&state.db).await.unwrap();
     // A high threshold makes this just-touched session read as not-stale, which
     // re-arms the edge…
@@ -346,14 +335,14 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
 
 /// Point the built-in Claude ACP adapter setting at the scripted test adapter
-/// with a fixed response. Base64 keeps arbitrary judgement JSON out of the
-/// shell command's quoting surface.
+/// with a fixed response. Base64 keeps arbitrary judgement JSON out of
+/// shell quoting.
 fn fake_judge_agent(_name: &str, out: &str) -> EnvVarGuard {
     fake_judge_runtime("WEAVER_CODEX_ACP_CMD", out)
 }
@@ -392,14 +381,11 @@ impl Drop for EnvVarGuard {
     }
 }
 
-/// The status program's wiring proof: a stale-triggered round asks the judge for
-/// a set of tags and reconciles its own marks — a recommended tag lands as its
-/// own typed key (never the agent's `attention` axis — no mirror), and a
-/// follow-up "nothing needed" verdict clears it. The program's decision logic
-/// (parse, no-judgement vs calm, capability branches, summaries) is covered
-/// server-free in `python/weaver-loom/tests/test_status_program.py`; dry-run
-/// flag propagation through the executor is covered by the lib test
-/// `run_script_round_trips_the_contract`.
+/// The status program end to end: a stale-triggered round asks the judge
+/// for a set of tags and reconciles its own marks — a recommended tag lands on
+/// its own typed key, never the agent's `attention` axis, and a follow-up
+/// "nothing needed" verdict clears it. The program's decision logic is
+/// pytest-covered server-free; this test runs the script against the live server.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn builtin_status_round_applies_typed_tags_and_reconciles() {
@@ -442,7 +428,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     // The judged tag landed on its own typed key, attributed to the watch.
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -459,7 +445,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         "the watch never mirrors onto the agent's own `attention` axis"
     );
 
-    // The run row records a `tag` action (not the old generic `mark`).
+    // The run row records a `tag` action.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -481,7 +467,7 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert!(
@@ -490,18 +476,18 @@ async fn builtin_status_round_applies_typed_tags_and_reconciles() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
 
-/// The `resume` builtin's wiring proof: a session whose live screen shows the
+/// The `resume` builtin end to end: a session whose live screen shows the
 /// transient-error signature (`API Error: 529 Overloaded`) is detected, nudged
 /// to resume, and the round persists its backoff bookkeeping — the lookaside
-/// `state` tracks the session (one attempt) and a dynamic `wake_at` is armed for
-/// the recheck. The backoff math / escalation / capability branches are covered
-/// server-free in `python/weaver-loom/tests/test_resume_program.py`; this proves
-/// the screen-scrape → nudge → state+wake plumbing against a live server.
+/// `state` tracks the session and a dynamic `wake_at` is armed for the
+/// recheck. The backoff math and capability branches are pytest-covered
+/// server-free; this test runs the screen-scrape → nudge → state+wake path
+/// against the live server.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_nudges_a_stalled_session_and_arms_backoff() {
@@ -548,7 +534,6 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         .await
         .unwrap();
 
-    // The run recorded a real `nudge` of the stalled session.
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
         .await
         .unwrap();
@@ -564,8 +549,7 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
         "the round nudges the stalled session: {actions}"
     );
 
-    // The watch now tracks the session (one attempt) and has armed a wake
-    // for the backoff recheck — the lookaside-state + dynamic-wake primitives.
+    // Backoff bookkeeping: one tracked attempt, and a wake armed for the recheck.
     let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
     let tracked = &after.state()[session_id.as_str()];
     assert_eq!(
@@ -580,7 +564,7 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -599,9 +583,9 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     let state = engine_state(&ts).await;
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "tick me").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -628,7 +612,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     let watermark = events::max_id(&state.db).await.unwrap();
     watch::tick_timer(&state).await;
 
-    // The tick is a first-class, logged `cron` system event carrying our id.
+    // The tick is a logged `cron` system event carrying our id.
     let new_events = events::since(&state.db, watermark).await.unwrap();
     let cron = new_events
         .iter()
@@ -651,8 +635,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
         "next_run_at moved forward off the past due time"
     );
 
-    // The dispatcher consumes that cron tick and runs the scheduled round; the
-    // run row records the survey of the in-scope session.
+    // The dispatcher consumes the cron tick and runs the scheduled round.
     let in_flight = watch::new_in_flight();
     watch::dispatch(&state, &in_flight, cron).await;
     let runs = watch_store::recent_runs(&state.db, &o.id, 10)
@@ -666,7 +649,7 @@ async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -685,9 +668,9 @@ async fn cooldown_and_overlap_refire_are_refused() {
     let state = engine_state(&ts).await;
     let (session_id, branch_id, repo_root) = make_session(&ts, "cool down").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "blocked", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "blocked", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -763,16 +746,16 @@ async fn cooldown_and_overlap_refire_are_refused() {
     }
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
 
-/// T8/T9: the operator REST surface end to end — create via POST, read back via
-/// GET, enable via PATCH, fire a `dry_run` round via POST /run (the audit row
-/// comes back with an outcome), list the round history via GET /runs, then
-/// DELETE. Plus the validation gates: a bad capability and a duplicate name are
-/// both rejected.
+/// T8/T9: the operator HTTP API end to end — create via `watches.create`,
+/// read back via `watches.get`, enable via `watches.update`, fire a `dry_run`
+/// round via `watches.run` (the audit row comes back with an outcome), list
+/// the round history via `watches.runs`, then `watches.delete`. Plus the
+/// validation gates: a bad capability and a duplicate name are both rejected.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_watch_lifecycle_and_validation() {
@@ -785,9 +768,9 @@ async fn rest_watch_lifecycle_and_validation() {
     // dry-run round has something to "would-tag".
     let (session_id, _branch_id, _repo_root) = make_session(&ts, "rest me").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{session_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -800,7 +783,7 @@ async fn rest_watch_lifecycle_and_validation() {
     let created = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({
                 "name": "rest-watch",
                 "trigger": { "cron": "0 * * * *" },
@@ -822,31 +805,41 @@ async fn rest_watch_lifecycle_and_validation() {
     assert_eq!(created["capabilities"][2], "mark");
     assert!(created["last_outcome"].is_null(), "never run yet");
 
-    // A duplicate name is rejected (the client surfaces the error status).
     let dup = ts
         .client
-        .post("/api/watches", json!({ "name": "rest-watch" }))
+        .post("/api/watches/create", json!({ "name": "rest-watch" }))
         .await;
     assert!(dup.is_err(), "a duplicate name is rejected");
 
-    // A bad capability is rejected at create time.
     let bad_cap = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "bad", "capabilities": ["observe", "teleport"] }),
         )
         .await;
     assert!(bad_cap.is_err(), "an unknown capability is rejected");
 
     // GET by id (resolve also accepts the name).
-    let got = ts.client.get(&format!("/api/watches/{id}")).await.unwrap();
+    let got = ts
+        .client
+        .post("/api/watches/get", json!({ "key": id.as_str() }))
+        .await
+        .unwrap();
     assert_eq!(got["name"], "rest-watch");
-    let by_name = ts.client.get("/api/watches/rest-watch").await.unwrap();
+    let by_name = ts
+        .client
+        .post("/api/watches/get", json!({ "key": "rest-watch" }))
+        .await
+        .unwrap();
     assert_eq!(by_name["id"], id.as_str());
 
     // It shows up in the list.
-    let list = ts.client.get("/api/watches").await.unwrap();
+    let list = ts
+        .client
+        .post("/api/watches/list", json!({}))
+        .await
+        .unwrap();
     assert!(list
         .as_array()
         .unwrap()
@@ -856,9 +849,9 @@ async fn rest_watch_lifecycle_and_validation() {
     // Enable via PATCH, and update a mutable field in the same call.
     let patched = ts
         .client
-        .patch(
-            &format!("/api/watches/{id}"),
-            json!({ "enabled": true, "cooldown_secs": 120 }),
+        .post(
+            "/api/watches/update",
+            json!({ "key": id, "enabled": true, "cooldown_secs": 120 }),
         )
         .await
         .unwrap();
@@ -868,10 +861,7 @@ async fn rest_watch_lifecycle_and_validation() {
     // Dry-run a round: it returns a run id + outcome, applies no mark.
     let run = ts
         .client
-        .post(
-            &format!("/api/watches/{id}/run"),
-            json!({ "dry_run": true }),
-        )
+        .post("/api/watches/run", json!({ "key": id, "dry_run": true }))
         .await
         .unwrap();
     let run_id = run["run_id"].as_i64().unwrap();
@@ -882,7 +872,7 @@ async fn rest_watch_lifecycle_and_validation() {
     );
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert!(
@@ -893,7 +883,7 @@ async fn rest_watch_lifecycle_and_validation() {
     // GET /runs returns the audit history with actions parsed back to JSON.
     let runs = ts
         .client
-        .get(&format!("/api/watches/{id}/runs?limit=10"))
+        .post("/api/watches/runs", json!({ "key": id, "limit": 10 }))
         .await
         .unwrap();
     let runs = runs.as_array().unwrap();
@@ -907,15 +897,18 @@ async fn rest_watch_lifecycle_and_validation() {
     // DELETE.
     let deleted = ts
         .client
-        .delete(&format!("/api/watches/{id}"))
+        .post("/api/watches/delete", json!({ "key": id }))
         .await
         .unwrap();
     assert_eq!(deleted["deleted"], true);
-    let gone = ts.client.get(&format!("/api/watches/{id}")).await;
+    let gone = ts
+        .client
+        .post("/api/watches/get", json!({ "key": id }))
+        .await;
     assert!(gone.is_err(), "a deleted watch 404s");
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -983,7 +976,7 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
     }
 }
 
-/// The registry over REST: every builtin carries its defaults, script programs
+/// The registry over the HTTP API: every builtin carries its defaults, script programs
 /// carry their read-only source, and `validate_program` rejects an unknown
 /// builtin at create time (naming the registry) while accepting a known one.
 #[serial]
@@ -991,7 +984,11 @@ fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
 async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ts = TestServer::start().await;
 
-    let programs = ts.client.get("/api/watches/programs").await.unwrap();
+    let programs = ts
+        .client
+        .post("/api/watches/programs", json!({}))
+        .await
+        .unwrap();
     let arr = programs.as_array().unwrap();
     let names: Vec<&str> = arr.iter().map(|p| p["program"].as_str().unwrap()).collect();
     for expected in [
@@ -1065,7 +1062,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let bad = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "bad", "program": "builtin:nope" }),
         )
         .await;
@@ -1073,7 +1070,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
     let ok = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({ "name": "good", "program": "builtin:archive-merged" }),
         )
         .await
@@ -1082,7 +1079,7 @@ async fn rest_lists_builtin_programs_and_validates_program_refs() {
 }
 
 /// The embedded builtin scripts end to end: each runs as a real `python3`
-/// subprocess against the live test server's REST API. `archive-merged` flags
+/// subprocess against the live test server's HTTP API. `archive-merged` flags
 /// the session whose stored PR snapshot is merged; `pr-label` flags the one
 /// with an open PR. This fixture grants the labeller only `observe`, so both
 /// rounds report their actions without mutating the fleet.
@@ -1135,7 +1132,10 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         .unwrap();
     let runs = ts
         .client
-        .get("/api/watches/archive-watch/runs?limit=10")
+        .post(
+            "/api/watches/runs",
+            json!({ "key": "archive-watch", "limit": 10 }),
+        )
         .await
         .unwrap();
     let run = runs
@@ -1172,7 +1172,10 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
         .unwrap();
     let runs = ts
         .client
-        .get("/api/watches/label-watch/runs?limit=10")
+        .post(
+            "/api/watches/runs",
+            json!({ "key": "label-watch", "limit": 10 }),
+        )
         .await
         .unwrap();
     let run = runs
@@ -1189,15 +1192,18 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
     assert_eq!(actions[0]["session"], open_id.as_str());
     assert_eq!(actions[0]["label"], "weaver");
 
-    // Observe-only: neither session was archived or otherwise mutated.
     for id in [&merged_id, &open_id] {
-        let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let view = ts
+            .client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         assert_ne!(view["status"], "archived", "builtin scripts mutate nothing");
     }
 
     for id in [merged_id, open_id] {
         ts.client
-            .delete(&format!("/api/sessions/{id}"))
+            .post("/api/sessions/delete", json!({ "session": id }))
             .await
             .unwrap();
     }
@@ -1206,9 +1212,9 @@ async fn builtin_scripts_report_merged_and_unlabelled_prs() {
 /// review-wait end to end: the embedded script runs as a real `python3`
 /// subprocess against the live server and *mutates* — it parks a session whose
 /// PR awaits an external review (`REVIEW_REQUIRED`) with the quiet
-/// `awaiting: review` mark, and un-parks it once the review lands. Proves the
-/// wiring (script → REST → tag, attributed) and the park/un-park reconcile that
-/// pytest covers in isolation.
+/// `awaiting: review` mark, and un-parks it once the review lands. Exercises
+/// the script → HTTP API → tag path, attributed, and the park/un-park
+/// reconcile that pytest covers in isolation.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
@@ -1238,13 +1244,13 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     )
     .await;
 
-    // Park: the round stamps `awaiting: review`, attributed to the watch.
+    // Park.
     watch::fire_now(&state, "review-wait", false, "manual")
         .await
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/get", json!({ "session": sid }))
         .await
         .unwrap();
     assert_eq!(
@@ -1258,7 +1264,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         "the parked mark carries the watch's attribution"
     );
 
-    // Review lands → un-park: the next round clears the watch's own mark.
+    // Review lands → un-park.
     snap.review_decision = Some("APPROVED".to_string());
     loom::github::upsert_status(&state.db, &branch, &snap)
         .await
@@ -1268,7 +1274,7 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
         .unwrap();
     let view = ts
         .client
-        .get(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/get", json!({ "session": sid }))
         .await
         .unwrap();
     assert!(
@@ -1277,13 +1283,13 @@ async fn review_wait_parks_and_unparks_a_session_awaiting_review() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{sid}"))
+        .post("/api/sessions/delete", json!({ "session": sid }))
         .await
         .unwrap();
 }
 
 /// The LLM judgement path end to end: the status script calls the daemon's
-/// `POST /api/agent/oneshot` for its verdict and applies the parsed tag set.
+/// `agents.oneshot` for its verdict and applies the parsed tag set.
 /// First drives the endpoint directly against configured Claude and Codex ACP
 /// adapters (an empty prompt 400s), then runs a round whose stubbed judge
 /// recommends a `blocked` mark on an otherwise-calm session — the tag lands
@@ -1301,7 +1307,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let _endpoint_agent = fake_judge_runtime("WEAVER_CLAUDE_ACP_CMD", "ping");
     let reply = ts
         .client
-        .post("/api/agent/oneshot", json!({ "prompt": "ping" }))
+        .post("/api/agents/oneshot", json!({ "prompt": "ping" }))
         .await
         .unwrap();
     assert_eq!(reply["output"], "ping", "the stub agent echoes the prompt");
@@ -1309,7 +1315,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let reply = ts
         .client
         .post(
-            "/api/agent/oneshot",
+            "/api/agents/oneshot",
             json!({ "prompt": "ping", "agent": "codex" }),
         )
         .await
@@ -1321,7 +1327,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     let reply = ts
         .client
         .post(
-            "/api/agent/oneshot",
+            "/api/agents/oneshot",
             json!({ "prompt": "ping", "profile": "watch" }),
         )
         .await
@@ -1333,7 +1339,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     drop(_codex_agent);
     assert!(
         ts.client
-            .post("/api/agent/oneshot", json!({ "prompt": "" }))
+            .post("/api/agents/oneshot", json!({ "prompt": "" }))
             .await
             .is_err(),
         "an empty prompt is rejected"
@@ -1369,7 +1375,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
 
     let view = ts
         .client
-        .get(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/get", json!({ "session": session_id }))
         .await
         .unwrap();
     assert_eq!(
@@ -1385,7 +1391,7 @@ async fn status_judgement_uses_the_oneshot_agent() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{session_id}"))
+        .post("/api/sessions/delete", json!({ "session": session_id }))
         .await
         .unwrap();
 }
@@ -1472,9 +1478,9 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     // An ordinary fleet session, reporting non-ok so the survey would mark it.
     let (visible_id, _branch_id, repo_root) = make_session(&ts, "visible work").await;
     ts.client
-        .put(
-            &format!("/api/sessions/{visible_id}/tags/attention"),
-            json!({ "value": "attention", "by": "agent" }),
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "session": visible_id, "key": "attention", "value": "attention", "by": "agent" }),
         )
         .await
         .unwrap();
@@ -1518,7 +1524,11 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     .unwrap();
 
     // The dashboard listing shows the ordinary session, not the warm one.
-    let list = ts.client.get("/api/sessions").await.unwrap();
+    let list = ts
+        .client
+        .post("/api/sessions/list", json!({}))
+        .await
+        .unwrap();
     let ids: Vec<&str> = list
         .as_array()
         .unwrap()
@@ -1554,7 +1564,7 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{visible_id}"))
+        .post("/api/sessions/delete", json!({ "session": visible_id }))
         .await
         .unwrap();
 }
@@ -1692,7 +1702,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
 
 /// T12: the engine reuses one warm session across rounds — asked twice to ensure
 /// a warm session for the same watch, it returns the same id and spawns no
-/// duplicate (the reuse that gives across-round memory).
+/// duplicate.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_warm_session_reuses_the_same_session() {
@@ -1726,7 +1736,6 @@ async fn ensure_warm_session_reuses_the_same_session() {
         .unwrap();
     assert_eq!(first, second, "the same warm session id is reused");
 
-    // Exactly one managed session exists for this watch — no duplicate spawn.
     let managed = session_mod::list_managed(&state.db).await.unwrap();
     let owned: Vec<_> = managed
         .iter()
@@ -1740,12 +1749,12 @@ async fn ensure_warm_session_reuses_the_same_session() {
     }
 }
 
-/// The end-to-end subscription path: a watch created over REST has its trigger
-/// reconciled from the script's register-mode manifest; a `pr_merged` event
-/// normalizes to `pr.merged`, wakes the subscribed watch, and the round —
+/// The end-to-end subscription path: a watch created over the HTTP API has its
+/// trigger reconciled from the script's register-mode manifest; a `pr_merged`
+/// event normalizes to `pr.merged`, wakes the subscribed watch, and the round —
 /// handed the triggering session — surveys only that branch (not the whole
 /// fleet). The run row records the captured execution log (stdout, exit code,
-/// trigger event), which is the watch execution log the UI renders.
+/// trigger event) that the UI renders.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
@@ -1757,16 +1766,16 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     let state = engine_state(&ts).await;
     let (merged_id, merged_branch, _repo) = make_session(&ts, "merged work").await;
     // A second live session in the same repo: it must NOT be surveyed, proving
-    // the round scoped to the triggering branch instead of the whole fleet.
+    // the round scoped to the triggering branch, not the whole fleet.
     let (_other_id, _other_branch, _repo) = make_session(&ts, "other work").await;
 
-    // Create the watch over REST: the script declares `on: [pr.merged]`, and the
+    // Create the watch over the HTTP API: the script declares `on: [pr.merged]`, and the
     // register-mode reconcile stores it (the script — not the caller — picks the
     // event), with no explicit trigger in the request.
     let created = ts
         .client
         .post(
-            "/api/watches",
+            "/api/watches/create",
             json!({
                 "name": "merge-watch",
                 "program": survey_triggered_program(),
@@ -1780,7 +1789,10 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         "the stored trigger came from the script's manifest: {created:?}"
     );
     ts.client
-        .patch("/api/watches/merge-watch", json!({ "enabled": true }))
+        .post(
+            "/api/watches/update",
+            json!({ "key": "merge-watch", "enabled": true }),
+        )
         .await
         .unwrap();
     let o = watch_store::get_by_name(&state.db, "merge-watch")
@@ -1821,7 +1833,7 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
     assert!(run.duration_ms.is_some());
 
     ts.client
-        .delete(&format!("/api/sessions/{merged_id}"))
+        .post("/api/sessions/delete", json!({ "session": merged_id }))
         .await
         .unwrap();
 }

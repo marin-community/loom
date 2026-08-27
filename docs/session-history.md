@@ -3,8 +3,8 @@
 Loom exposes one provider-neutral record contract for agent recall:
 
 ```text
-GET /api/sessions/{id}/history
-GET /api/sessions/{id}/history/search?q=<literal>
+POST /api/sessions/history/list    { session, ... }
+POST /api/sessions/history/search  { session, q, ... }
 ```
 
 Both routes accept `before=<opaque cursor>`, `limit=1..200` (default 100), and

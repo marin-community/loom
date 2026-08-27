@@ -2,7 +2,7 @@
 
 ## Configuration ownership
 
-Choose the configuration surface from who owns the value and how widely it
+Choose where to configure a value based on who owns it and how widely it
 should apply:
 
 | Owner | Configure in | Use for |
@@ -49,14 +49,14 @@ Loom resolves every registered setting through one explicit precedence chain:
 
 | Precedence | Source | Owned by | How to change it |
 |---|---|---|---|
-| 1 | Runtime override | admin | Administration settings, `PATCH /api/settings`, or `loom config set` |
+| 1 | Runtime override | admin | Administration settings, `settings.patch`, or `loom settings patch` |
 | 2 | Deployment default | infrastructure repository | `loom deployment apply` / `POST /api/deployment/reconcile` |
 | 3 | Built-in default | Loom release | `weaver-core::config::REGISTRY` |
 
 The runtime and deployment layers are separate database tables. A live edit
 therefore does not destroy the deployment's declared value: clearing the
 runtime override reveals the deployment default, and removing the deployment
-default reveals the built-in. `GET /api/settings` reports the effective
+default reveals the built-in. `settings.get` reports the effective
 `value`, its `source`, and any `deployment_value`; the Settings UI shows the
 same provenance.
 
@@ -161,10 +161,10 @@ idempotent, so the normal deployment loop can apply it on every rollout.
 
 Runtime edits take effect without rebuilding a deployment:
 
-Use Administration → Settings or `PATCH /api/settings` to set
+Use Administration → Settings or `loom settings patch` to set
 `slack.status_updates` to `false`.
 
-The Administration pages and `PATCH /api/settings` use the same validation and storage
+The Administration pages and `settings.patch` use the same validation and storage
 path. Send `null` to clear an override and inherit again:
 
 ```json

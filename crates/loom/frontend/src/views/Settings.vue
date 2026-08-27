@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { get, patch, listAgents } from '../api';
+import { invokeOperation, listAgents } from '../api';
 import type { CustomAgent, SettingsEnvelope, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
@@ -201,12 +201,9 @@ function defaultText(value: string): string {
 
 async function load() {
   try {
-    const [res, agentRes] = await Promise.all([
-      get('/settings') as Promise<SettingsEnvelope>,
-      listAgents(),
-    ]);
+    const [res, agentRes] = await Promise.all([invokeOperation('settings.get', {}), listAgents()]);
     if (!Array.isArray(res?.settings)) {
-      throw new Error('Unexpected /api/settings response — the server may be out of date.');
+      throw new Error('Unexpected settings.get response — the server may be out of date.');
     }
     settings.value = res.settings;
     customAgents.value = agentRes.custom;
@@ -260,7 +257,7 @@ async function saveKeys(keys: string[], label: string) {
   const changed = dirtyKeys(keys);
   if (!changed.length) return;
   await act(label, async () => {
-    const res = (await patch('/settings', patchBody(changed))) as SettingsEnvelope;
+    const res = await invokeOperation('settings.patch', { changes: patchBody(changed) });
     adopt(res, changed);
     notice.value = `Saved ${label}.`;
   });
@@ -268,7 +265,7 @@ async function saveKeys(keys: string[], label: string) {
 
 async function resetKeys(keys: string[], label: string) {
   await act(label, async () => {
-    const res = (await patch('/settings', patchBody(keys, true))) as SettingsEnvelope;
+    const res = await invokeOperation('settings.patch', { changes: patchBody(keys, true) });
     adopt(res, keys);
     notice.value = `Reset ${label}.`;
   });

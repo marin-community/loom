@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onActivated, onDeactivated, onUnmounted } from 'vue';
-import { get, upload, del } from '../api';
+import { deleteSessionScratch, listSessionScratch, uploadSessionScratch } from '../api';
 import type { ScratchFile } from '../types';
 import AttachmentDropzone from './AttachmentDropzone.vue';
 
@@ -33,7 +33,7 @@ function fmtBytes(n: number): string {
 
 async function refresh() {
   try {
-    files.value = (await get(`/sessions/${props.id}/scratch`)) as ScratchFile[];
+    files.value = await listSessionScratch(props.id);
     if (!files.value.length) menuOpen.value = false;
   } catch (e) {
     error.value = (e as Error).message;
@@ -46,7 +46,7 @@ async function uploadFiles(list: File[]) {
   error.value = '';
   try {
     for (const file of list) {
-      await upload(`/sessions/${props.id}/scratch?name=${encodeURIComponent(file.name)}`, file);
+      await uploadSessionScratch(props.id, file);
     }
     await refresh();
   } catch (e) {
@@ -63,7 +63,7 @@ function onScratchChanged(event: Event) {
 
 async function remove(name: string) {
   try {
-    await del(`/sessions/${props.id}/scratch?name=${encodeURIComponent(name)}`);
+    await deleteSessionScratch(props.id, name);
     await refresh();
   } catch (e) {
     error.value = (e as Error).message;

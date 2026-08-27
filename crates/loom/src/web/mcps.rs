@@ -1,30 +1,42 @@
 //! Provider-neutral inspection and administration of Loom's MCP registry.
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
-use weaver_api::{CustomMcpReq, CustomMcpView, McpRegistryView};
+use axum::http::StatusCode;
+use weaver_api::operations::mcps as mcps_operations;
+use weaver_api::{CustomMcpDeleteResult, CustomMcpReq, CustomMcpView, McpRegistryView};
 
-use super::{ApiResult, AppError, AppState};
+use super::operations::{register, Bound, OperationContext};
+use super::{ApiResult, AppError};
 
-pub(super) async fn list_mcps(State(st): State<AppState>) -> ApiResult<Json<McpRegistryView>> {
+pub(super) async fn get_mcp_registry_operation(
+    context: OperationContext,
+    _input: mcps_operations::get::Input,
+) -> ApiResult<McpRegistryView> {
+    let st = &context.state;
     let mut registry = crate::mcp::registry();
     registry.custom_servers = crate::custom_mcp::list(&st.db).await?;
-    Ok(Json(registry))
+    Ok(registry)
 }
 
-pub(super) async fn list_custom_mcps(
-    State(st): State<AppState>,
-) -> ApiResult<Json<Vec<CustomMcpView>>> {
-    Ok(Json(crate::custom_mcp::list(&st.db).await?))
+pub(super) async fn list_custom_mcps_operation(
+    context: OperationContext,
+    _input: mcps_operations::custom::list::Input,
+) -> ApiResult<Vec<CustomMcpView>> {
+    Ok(crate::custom_mcp::list(&context.state.db).await?)
 }
 
-pub(super) async fn create_custom_mcp(
-    State(st): State<AppState>,
-    Json(req): Json<CustomMcpReq>,
-) -> ApiResult<(StatusCode, Json<CustomMcpView>)> {
+pub(super) async fn create_custom_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::custom::create::Input,
+) -> ApiResult<CustomMcpView> {
+    let req = CustomMcpReq {
+        identity: input.identity,
+        label: input.label,
+        description: input.description,
+        source: input.source,
+        test_source: input.test_source,
+        enabled: input.enabled,
+    };
+    let st = &context.state;
     let _resolver = st.launch_gate.acquire_resolver().await;
     if crate::custom_mcp::get(&st.db, req.identity.trim())
         .await?
@@ -35,51 +47,79 @@ pub(super) async fn create_custom_mcp(
             format!("custom MCP '{}' already exists", req.identity.trim()),
         ));
     }
-    let value = crate::custom_mcp::upsert(&st.db, &req)
+    crate::custom_mcp::upsert(&st.db, &req)
         .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
-    Ok((StatusCode::CREATED, Json(value)))
+        .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
-fn identity_from_path(path: &str) -> String {
-    format!("/{}", path.trim_matches('/'))
-}
-
-pub(super) async fn get_custom_mcp(
-    State(st): State<AppState>,
-    Path(identity): Path<String>,
-) -> ApiResult<Json<CustomMcpView>> {
-    crate::custom_mcp::get(&st.db, &identity_from_path(&identity))
+/// `mcps.custom.get`. The `identity` field is the caller-supplied absolute
+/// identity directly.
+pub(super) async fn get_custom_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::custom::get::Input,
+) -> ApiResult<CustomMcpView> {
+    let st = &context.state;
+    let identity = &input.identity;
+    crate::custom_mcp::get(&st.db, identity)
         .await?
-        .map(Json)
         .ok_or_else(|| AppError::not_found("custom MCP"))
 }
 
-pub(super) async fn put_custom_mcp(
-    State(st): State<AppState>,
-    Path(identity): Path<String>,
-    Json(mut req): Json<CustomMcpReq>,
-) -> ApiResult<Json<CustomMcpView>> {
+/// `mcps.custom.update`. This upserts unconditionally: `custom_mcp::upsert`
+/// creates a first revision for an identity that doesn't exist yet the same
+/// way it revises an existing one, and this operation doesn't check
+/// existence first.
+pub(super) async fn update_custom_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::custom::update::Input,
+) -> ApiResult<CustomMcpView> {
+    let req = CustomMcpReq {
+        identity: input.identity,
+        label: input.label,
+        description: input.description,
+        source: input.source,
+        test_source: input.test_source,
+        enabled: input.enabled,
+    };
+    let st = &context.state;
     let _resolver = st.launch_gate.acquire_resolver().await;
-    req.identity = identity_from_path(&identity);
-    Ok(Json(
-        crate::custom_mcp::upsert(&st.db, &req)
-            .await
-            .map_err(|error| AppError::bad_request(error.to_string()))?,
-    ))
+    crate::custom_mcp::upsert(&st.db, &req)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))
 }
 
-pub(super) async fn delete_custom_mcp(
-    State(st): State<AppState>,
-    Path(identity): Path<String>,
-) -> ApiResult<StatusCode> {
+pub(super) async fn delete_custom_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::custom::delete::Input,
+) -> ApiResult<CustomMcpDeleteResult> {
+    let st = &context.state;
+    let identity = input.identity;
     let _resolver = st.launch_gate.acquire_resolver().await;
-    let removed = crate::custom_mcp::remove(&st.db, &identity_from_path(&identity))
+    let removed = crate::custom_mcp::remove(&st.db, &identity)
         .await
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     if removed {
-        Ok(StatusCode::NO_CONTENT)
+        Ok(CustomMcpDeleteResult {
+            deleted: true,
+            identity,
+        })
     } else {
         Err(AppError::not_found("custom MCP"))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Operation registry — `mcps.*` and `mcps.custom.*`, bound onto
+// `weaver_api::operations::mcps`.
+// ---------------------------------------------------------------------------
+
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![
+        register::<mcps_operations::get::Op, _, _>(get_mcp_registry_operation),
+        register::<mcps_operations::custom::list::Op, _, _>(list_custom_mcps_operation),
+        register::<mcps_operations::custom::get::Op, _, _>(get_custom_mcp_operation),
+        register::<mcps_operations::custom::create::Op, _, _>(create_custom_mcp_operation),
+        register::<mcps_operations::custom::update::Op, _, _>(update_custom_mcp_operation),
+        register::<mcps_operations::custom::delete::Op, _, _>(delete_custom_mcp_operation),
+    ]
 }

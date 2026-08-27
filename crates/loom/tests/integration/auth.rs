@@ -24,10 +24,13 @@ fn url(ts: &TestServer, path: &str) -> String {
 async fn personal_github_token_is_self_service_and_write_only() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();
-    let endpoint = url(&ts, "/api/auth/github-token");
+    let get_endpoint = url(&ts, "/api/auth/github_token/get");
+    let set_endpoint = url(&ts, "/api/auth/github_token/set");
+    let remove_endpoint = url(&ts, "/api/auth/github_token/remove");
 
     let initial: Value = http
-        .get(&endpoint)
+        .post(&get_endpoint)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -37,7 +40,7 @@ async fn personal_github_token_is_self_service_and_write_only() {
     assert_eq!(initial, json!({ "set": false, "updated_at": null }));
 
     let stored: Value = http
-        .put(&endpoint)
+        .post(&set_endpoint)
         .json(&json!({ "token": "github_pat_write_only" }))
         .send()
         .await
@@ -56,8 +59,15 @@ async fn personal_github_token_is_self_service_and_write_only() {
         Some("github_pat_write_only")
     );
 
-    let deleted = http.delete(&endpoint).send().await.unwrap();
-    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    let deleted = http
+        .post(&remove_endpoint)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let deleted: Value = deleted.json().await.unwrap();
+    assert_eq!(deleted, json!({ "set": false, "updated_at": null }));
     assert!(loom::user_token::get(&ts.state.db, "rjpower")
         .await
         .unwrap()
@@ -71,10 +81,16 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let http = reqwest::Client::new();
 
     // 1. Default: a loopback request is trusted as the seeded owner.
-    let r = http.get(url(&ts, "/api/sessions")).send().await.unwrap();
+    let r = http
+        .post(url(&ts, "/api/sessions/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -90,7 +106,7 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
 
     // 2. Trusted setup before locking down: mint a token and set a password.
     let created: Value = http
-        .post(url(&ts, "/api/auth/tokens"))
+        .post(url(&ts, "/api/auth/tokens/create"))
         .json(&json!({ "name": "ci" }))
         .send()
         .await
@@ -103,30 +119,36 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let token_id = created["id"].as_str().unwrap().to_string();
 
     let r = http
-        .post(url(&ts, "/api/auth/password"))
+        .post(url(&ts, "/api/auth/set_password"))
         .json(&json!({ "new_password": "correct horse" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(r.status(), StatusCode::OK);
 
     // 3. Lock it down: stop trusting loopback.
     let r = http
-        .patch(url(&ts, "/api/settings"))
-        .json(&json!({ "auth.trust_loopback": false }))
+        .post(url(&ts, "/api/settings/patch"))
+        .json(&json!({ "changes": { "auth.trust_loopback": false } }))
         .send()
         .await
         .unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
     // 4a. A bare request is now rejected.
-    let r = http.get(url(&ts, "/api/sessions")).send().await.unwrap();
+    let r = http
+        .post(url(&ts, "/api/sessions/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 
     // 4b. The bearer token works.
     let r = http
-        .get(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/list"))
         .bearer_auth(&token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -137,8 +159,9 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     let home = std::env::var("WEAVER_HOME").unwrap();
     let local = std::fs::read_to_string(Path::new(&home).join("loom-token")).unwrap();
     let r = http
-        .get(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/list"))
         .bearer_auth(local.trim())
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -163,8 +186,9 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     assert!(set_cookie.contains("HttpOnly"));
     let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
     let r = http
-        .get(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/list"))
         .header("cookie", &cookie_pair)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -173,9 +197,10 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
     // An explicit invalid bearer is authoritative: it cannot fall through to
     // the otherwise-valid cookie (or loopback trust).
     let r = http
-        .get(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/list"))
         .header("cookie", &cookie_pair)
         .bearer_auth("loom_revoked-or-invalid")
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -192,15 +217,17 @@ async fn loopback_trust_then_token_local_and_cookie_gate_access() {
 
     // 5. Revoking the token invalidates it immediately.
     let r = http
-        .delete(url(&ts, &format!("/api/auth/tokens/{token_id}")))
+        .post(url(&ts, "/api/auth/tokens/revoke"))
         .bearer_auth(&token)
+        .json(&json!({ "id": token_id }))
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::NO_CONTENT);
+    assert_eq!(r.status(), StatusCode::OK);
     let r = http
-        .get(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/list"))
         .bearer_auth(&token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -216,7 +243,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     let ts = TestServer::start_api_only().await;
     let http = reqwest::Client::new();
     let added: Value = http
-        .post(url(&ts, "/api/auth/users"))
+        .post(url(&ts, "/api/auth/users/create"))
         .json(&json!({ "username": "alice", "github_login": "alice-gh" }))
         .send()
         .await
@@ -232,12 +259,16 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         .await
         .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .bearer_auth(&user_token)
         .send()
         .await
@@ -263,8 +294,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     });
 
     let user_logs: Value = http
-        .get(url(&ts, "/api/logs"))
+        .post(url(&ts, "/api/logs/list"))
         .bearer_auth(&user_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -284,8 +316,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert!(!user_log["message"].as_str().unwrap().contains(LOG_SECRET));
 
     let admin_logs: Value = http
-        .get(url(&ts, "/api/logs"))
+        .post(url(&ts, "/api/logs/list"))
         .bearer_auth(&admin_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -306,7 +339,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
 
     const STREAM_MARKER: &str = "user-stream-redaction-check-1e52";
     let stream_response = http
-        .get(url(&ts, "/api/events?topics=logs"))
+        .get(url(&ts, "/api/events/stream?topics=logs"))
         .bearer_auth(&user_token)
         .send()
         .await
@@ -334,33 +367,35 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert!(stream_body.contains(STREAM_MARKER), "{stream_body}");
     assert!(!stream_body.contains(LOG_SECRET), "{stream_body}");
 
-    for path in [
-        "/api/sessions",
-        "/api/settings",
-        "/api/profiles",
-        "/api/agents",
-        "/api/mcps",
-        "/api/diagnostics",
-        "/api/logs",
-        "/api/status",
-        "/api/tasks",
-        "/api/session-layout",
-        "/api/watches",
-        "/api/watches/programs",
+    // These are `User`-reachable operations read via `POST` with an empty body.
+    for (path, body) in [
+        ("/api/sessions/list", json!({})),
+        ("/api/agents/list", json!({})),
+        ("/api/diagnostics/get", json!({})),
+        ("/api/logs/list", json!({})),
+        ("/api/diagnostics/status", json!({})),
+        ("/api/tasks/list", json!({})),
+        ("/api/session_layout/get", json!({})),
+        ("/api/watches/list", json!({})),
+        ("/api/watches/programs", json!({})),
+        ("/api/profiles/list", json!({})),
+        ("/api/mcps/get", json!({})),
+        ("/api/settings/get", json!({})),
     ] {
         let response = http
-            .get(url(&ts, path))
+            .post(url(&ts, path))
             .bearer_auth(&user_token)
+            .json(&body)
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "user GET {path}");
+        assert_eq!(response.status(), StatusCode::OK, "user POST {path}");
     }
 
     let preferences: Value = http
-        .patch(url(&ts, "/api/preferences"))
+        .post(url(&ts, "/api/preferences/patch"))
         .bearer_auth(&user_token)
-        .json(&json!({ "terminal.theme": "light" }))
+        .json(&json!({ "changes": { "terminal.theme": "light" } }))
         .send()
         .await
         .unwrap()
@@ -377,8 +412,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(theme["is_overridden"], true);
 
     let admin_preferences: Value = http
-        .get(url(&ts, "/api/preferences"))
+        .post(url(&ts, "/api/preferences/get"))
         .bearer_auth(&admin_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -395,8 +431,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(admin_theme["is_overridden"], false);
 
     let tokens: Vec<Value> = http
-        .get(url(&ts, "/api/auth/tokens"))
+        .post(url(&ts, "/api/auth/tokens/list"))
         .bearer_auth(&user_token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -406,27 +443,72 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     assert_eq!(tokens.len(), 1);
     assert_eq!(tokens[0]["name"], "alice-api");
 
+    // Operation dispatch deserializes the body before the actor check runs, so
+    // an empty `{}` would 400 on any operation with a required field before
+    // ever reaching the 403 this loop checks for — each entry below carries
+    // the minimal body its operation needs.
     let forbidden = [
-        (reqwest::Method::PATCH, "/api/settings"),
-        (reqwest::Method::POST, "/api/deployment/reconcile"),
-        (reqwest::Method::GET, "/api/auth/users"),
-        (reqwest::Method::GET, "/api/auth/github/config"),
-        (reqwest::Method::POST, "/api/auth/automation-token"),
-        (reqwest::Method::GET, "/api/auth/federations"),
-        (reqwest::Method::POST, "/api/profiles"),
-        (reqwest::Method::POST, "/api/agents/custom"),
-        (reqwest::Method::POST, "/api/mcps/custom"),
-        (reqwest::Method::PUT, "/api/env/SHARED_VALUE"),
-        (reqwest::Method::GET, "/api/shell/terminal"),
-        (reqwest::Method::POST, "/api/shell/restart"),
-        (reqwest::Method::POST, "/api/watches"),
-        (reqwest::Method::POST, "/api/watches/status/run"),
+        (reqwest::Method::POST, "/api/settings/patch", json!({})),
+        (
+            reqwest::Method::POST,
+            "/api/deployment/reconcile",
+            json!({}),
+        ),
+        (reqwest::Method::POST, "/api/auth/users/list", json!({})),
+        (
+            reqwest::Method::POST,
+            "/api/auth/github_config/get",
+            json!({}),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/auth/automation_token",
+            json!({ "subject": "probe" }),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/auth/federations/list",
+            json!({}),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/profiles/create",
+            json!({
+                "name": "probe",
+                "agent_kind": "shell",
+                "ambient_allowlist": [],
+                "github_repositories": [],
+                "runtime_permissions": []
+            }),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/agents/custom/create",
+            json!({ "name": "probe" }),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/mcps/custom/create",
+            json!({ "identity": "/probe", "label": "probe", "source": "# probe" }),
+        ),
+        (reqwest::Method::GET, "/api/shell/terminal", json!({})),
+        (reqwest::Method::POST, "/api/shell/restart", json!({})),
+        (
+            reqwest::Method::POST,
+            "/api/watches/create",
+            json!({ "name": "probe" }),
+        ),
+        (
+            reqwest::Method::POST,
+            "/api/watches/run",
+            json!({ "key": "status" }),
+        ),
     ];
-    for (method, path) in forbidden {
+    for (method, path, body) in forbidden {
         let response = http
             .request(method, url(&ts, path))
             .bearer_auth(&user_token)
-            .json(&json!({}))
+            .json(&body)
             .send()
             .await
             .unwrap();
@@ -437,10 +519,28 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         );
     }
 
+    // `settings.env.set` takes the variable name in the body rather than the
+    // path, so unlike the bare entries above it needs a real payload to clear
+    // input validation before the actor check gets a chance to reject it —
+    // the same reason `/api/settings/get` was lifted into the `(path, body)`
+    // reachable list earlier in this test.
+    let response = http
+        .post(url(&ts, "/api/settings/env/set"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "name": "SHARED_VALUE", "value": "x" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::FORBIDDEN,
+        "user request /api/settings/env/set"
+    );
+
     let promoted: Value = http
-        .put(url(&ts, "/api/auth/users/alice/role"))
+        .post(url(&ts, "/api/auth/users/set_role"))
         .bearer_auth(&admin_token)
-        .json(&json!({ "role": "admin" }))
+        .json(&json!({ "username": "alice", "role": "admin" }))
         .send()
         .await
         .unwrap()
@@ -449,9 +549,9 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
         .unwrap();
     assert_eq!(promoted["role"], "admin");
     let response = http
-        .patch(url(&ts, "/api/settings"))
+        .post(url(&ts, "/api/settings/patch"))
         .bearer_auth(&user_token)
-        .json(&json!({ "terminal.theme": "light" }))
+        .json(&json!({ "changes": { "terminal.theme": "light" } }))
         .send()
         .await
         .unwrap();
@@ -463,7 +563,7 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
 async fn absurd_token_expiry_is_a_bad_request_not_a_panic() {
     let ts = TestServer::start().await;
     let response = reqwest::Client::new()
-        .post(url(&ts, "/api/auth/tokens"))
+        .post(url(&ts, "/api/auth/tokens/create"))
         .json(&json!({ "name": "too-long", "expires_in_days": i64::MAX }))
         .send()
         .await
@@ -478,8 +578,8 @@ async fn health_is_public_but_protected_routes_are_not() {
     let http = reqwest::Client::new();
 
     // Lock down loopback so the gate is in force.
-    http.patch(url(&ts, "/api/settings"))
-        .json(&json!({ "auth.trust_loopback": false }))
+    http.post(url(&ts, "/api/settings/patch"))
+        .json(&json!({ "changes": { "auth.trust_loopback": false } }))
         .send()
         .await
         .unwrap();
@@ -488,9 +588,11 @@ async fn health_is_public_but_protected_routes_are_not() {
     let r = http.get(url(&ts, "/api/health")).send().await.unwrap();
     assert_eq!(r.status(), StatusCode::OK);
 
-    // /api/auth/me stays public, and now reports an unauthenticated caller.
+    // `auth.me` is declared `actor = Anonymous`, so it answers without a
+    // credential and reports the caller as unauthenticated.
     let me: Value = http
-        .get(url(&ts, "/api/auth/me"))
+        .post(url(&ts, "/api/auth/me"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap()
@@ -499,8 +601,12 @@ async fn health_is_public_but_protected_routes_are_not() {
         .unwrap();
     assert_eq!(me["authenticated"], false);
 
-    // A protected route is gated.
-    let r = http.get(url(&ts, "/api/branches")).send().await.unwrap();
+    let r = http
+        .post(url(&ts, "/api/branches/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -509,14 +615,17 @@ async fn health_is_public_but_protected_routes_are_not() {
 async fn registered_and_custom_api_routes_are_both_protected() {
     let ts = TestServer::start().await;
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();
 
     for (method, path) in [
         (reqwest::Method::POST, "/api/issues/list"),
-        (reqwest::Method::GET, "/api/sessions"),
+        (reqwest::Method::POST, "/api/sessions/list"),
     ] {
         let response = http
             .request(method.clone(), url(&ts, path))
@@ -549,7 +658,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let created = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "goal": "scoped parent",
@@ -569,7 +678,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let sibling = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "scoped sibling", "agent": "shell" }),
         )
         .await
@@ -597,21 +706,26 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
     let http = reqwest::Client::new();
 
     let own = http
-        .get(url(&ts, &format!("/api/sessions/{session_id}")))
+        .post(url(&ts, "/api/sessions/get"))
         .bearer_auth(&token)
+        .json(&json!({ "session": session_id }))
         .send()
         .await
         .unwrap();
     assert_eq!(own.status(), StatusCode::OK);
     let own_channel = http
-        .get(url(&ts, &format!("/api/channels/{session_id}")))
+        .post(url(&ts, "/api/channels/get"))
         .bearer_auth(&token)
+        .json(&json!({ "channel": session_id }))
         .send()
         .await
         .unwrap();
@@ -625,15 +739,16 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .unwrap();
     assert_eq!(issue.status(), StatusCode::OK);
     let own_history = http
-        .get(url(&ts, &format!("/api/sessions/{session_id}/history")))
+        .post(url(&ts, "/api/sessions/history/list"))
         .bearer_auth(&token)
+        .json(&json!({ "session": session_id }))
         .send()
         .await
         .unwrap();
     assert_eq!(own_history.status(), StatusCode::OK);
 
     let child = http
-        .post(url(&ts, "/api/sessions"))
+        .post(url(&ts, "/api/sessions/launch"))
         .bearer_auth(&token)
         .json(&json!({ "cwd": ts.cwd(), "goal": "scoped child", "agent": "shell" }))
         .send()
@@ -648,26 +763,27 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         .unwrap();
     assert_eq!(child_row.parent_session_id.as_deref(), Some(session_id));
     let child_channel = http
-        .get(url(&ts, &format!("/api/channels/{child_id}")))
+        .post(url(&ts, "/api/channels/get"))
         .bearer_auth(&token)
+        .json(&json!({ "channel": child_id }))
         .send()
         .await
         .unwrap();
     assert_eq!(child_channel.status(), StatusCode::OK);
     let custom = http
-        .post(url(&ts, "/api/channels"))
+        .post(url(&ts, "/api/channels/create"))
         .bearer_auth(&token)
         .json(&json!({ "name": "shared review", "topic": "explicit pipe" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(custom.status(), StatusCode::CREATED);
+    assert_eq!(custom.status(), StatusCode::OK);
     let custom: Value = custom.json().await.unwrap();
     let custom_id = custom["id"].as_str().unwrap();
     let invite = http
-        .put(url(&ts, &format!("/api/channels/{custom_id}/subscription")))
+        .post(url(&ts, "/api/channels/subscription/set"))
         .bearer_auth(&token)
-        .json(&json!({ "mode": "deliver", "session_id": child_id }))
+        .json(&json!({ "channel": custom_id, "mode": "deliver", "session": child_id }))
         .send()
         .await
         .unwrap();
@@ -676,8 +792,9 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     assert_eq!(invite["subject_id"], child_id);
     assert_eq!(invite["mode"], "deliver");
     let visible_channels = http
-        .get(url(&ts, "/api/channels"))
+        .post(url(&ts, "/api/channels/list"))
         .bearer_auth(&token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -700,22 +817,25 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     .await
     .unwrap();
     let invited_archive = http
-        .delete(url(&ts, &format!("/api/channels/{custom_id}")))
+        .post(url(&ts, "/api/channels/archive"))
         .bearer_auth(&child_token)
+        .json(&json!({ "channel": custom_id }))
         .send()
         .await
         .unwrap();
     assert_eq!(invited_archive.status(), StatusCode::FORBIDDEN);
     let sibling_channel = http
-        .get(url(&ts, &format!("/api/channels/{sibling_id}")))
+        .post(url(&ts, "/api/channels/get"))
         .bearer_auth(&token)
+        .json(&json!({ "channel": sibling_id }))
         .send()
         .await
         .unwrap();
     assert_eq!(sibling_channel.status(), StatusCode::FORBIDDEN);
     let creator_archive = http
-        .delete(url(&ts, &format!("/api/channels/{custom_id}")))
+        .post(url(&ts, "/api/channels/archive"))
         .bearer_auth(&token)
+        .json(&json!({ "channel": custom_id }))
         .send()
         .await
         .unwrap();
@@ -732,7 +852,7 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let close_unrelated = http
         .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
-        .json(&json!({ "id": unrelated.id }))
+        .json(&json!({ "ids": [unrelated.id] }))
         .send()
         .await
         .unwrap();
@@ -748,18 +868,25 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     let close_foreign = http
         .post(url(&ts, "/api/issues/close"))
         .bearer_auth(&token)
-        .json(&json!({ "id": foreign.id }))
+        .json(&json!({ "ids": [foreign.id] }))
         .send()
         .await
         .unwrap();
     assert_eq!(close_foreign.status(), StatusCode::FORBIDDEN);
-    for path in [
-        format!("/api/sessions/{sibling_id}/history"),
-        format!("/api/sessions/{sibling_id}/history/search?q=secret"),
+    for (path, body) in [
+        (
+            "/api/sessions/history/list",
+            json!({ "session": sibling_id }),
+        ),
+        (
+            "/api/sessions/history/search",
+            json!({ "session": sibling_id, "q": "secret" }),
+        ),
     ] {
         let sibling_history = http
-            .get(url(&ts, &path))
+            .post(url(&ts, path))
             .bearer_auth(&token)
+            .json(&body)
             .send()
             .await
             .unwrap();
@@ -770,8 +897,9 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
         );
     }
     let admin = http
-        .get(url(&ts, "/api/auth/tokens"))
+        .post(url(&ts, "/api/auth/tokens/list"))
         .bearer_auth(&token)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -788,14 +916,15 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     .unwrap();
     for credential in [&token, &automation.token] {
         let layout = http
-            .get(url(&ts, "/api/session-layout"))
+            .post(url(&ts, "/api/session_layout/get"))
             .bearer_auth(credential)
+            .json(&json!({}))
             .send()
             .await
             .unwrap();
         assert_eq!(layout.status(), StatusCode::FORBIDDEN);
         let mutation = http
-            .post(url(&ts, "/api/session-layout/moves"))
+            .post(url(&ts, "/api/session_layout/move"))
             .bearer_auth(credential)
             .json(&json!({
                 "session_ids": [session_id],
@@ -816,7 +945,7 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     let parent = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "cwd": ts.cwd(), "goal": "scoped parent", "agent": "shell" }),
         )
         .await
@@ -832,7 +961,10 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     .await
     .unwrap();
     ts.client
-        .patch("/api/settings", json!({ "auth.trust_loopback": false }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "auth.trust_loopback": false } }),
+        )
         .await
         .unwrap();
 
@@ -880,6 +1012,91 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
     assert_eq!(child.creator_kind, "session");
     assert_eq!(
         child.parent_branch_id, None,
-        "legacy branch ancestry remains repository-scoped"
+        "branch ancestry is repository-scoped"
     );
+}
+
+/// A branch key is not a branch. Whatever a session credential spells, the
+/// branch it reaches is the one the key *resolves* to, and that row has to be
+/// in its own tree.
+#[tokio::test]
+#[serial]
+async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
+    let ts = TestServer::start().await;
+    let created = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "branch scope", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let session_id = created["id"].as_str().unwrap();
+    let branch_id = created["branch"]["id"].as_str().unwrap().to_string();
+    let branch_name = created["branch"]["branch"].as_str().unwrap().to_string();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), session_id, &branch_id)
+            .await
+            .unwrap();
+
+    // Same branch name, different repository, inserted afterwards so it wins
+    // `resolve_key`'s newest-first tiebreak. The id is fixed so the test can
+    // name a prefix of it.
+    let foreign_repo = format!("{}-foreign", ts.cwd());
+    let foreign = weaver_core::branch::insert(
+        &ts.state.db,
+        "zzzzfore",
+        &foreign_repo,
+        &branch_name,
+        "main",
+    )
+    .await
+    .unwrap();
+
+    let http = reqwest::Client::new();
+    let get_branch = |key: String| {
+        let http = http.clone();
+        let url = url(&ts, "/api/branches/get");
+        let token = token.clone();
+        async move {
+            http.post(url)
+                .bearer_auth(&token)
+                .json(&json!({ "branch": key }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    for key in [
+        foreign.id.clone(),
+        "zzzz".to_string(),
+        format!("{foreign_repo}:{branch_name}"),
+        // The bare name is ambiguous and resolves to the newest match — the
+        // foreign row; denying is the fail-closed answer.
+        branch_name.clone(),
+        // `LIKE` metacharacters resolve literally, not as SQL wildcards.
+        "%".to_string(),
+        "_".to_string(),
+    ] {
+        let response = get_branch(key.clone()).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "branch key {key:?} should not reach outside the session's tree"
+        );
+    }
+
+    // The forms that name the caller's own branch still work — `repo_root:name`,
+    // and the empty key, which is how an agent says "my branch" by saying nothing.
+    for key in [
+        branch_id.clone(),
+        format!("{}:{branch_name}", ts.cwd()),
+        String::new(),
+    ] {
+        let response = get_branch(key.clone()).await;
+        assert_eq!(response.status(), StatusCode::OK, "own branch as {key:?}");
+        let view: Value = response.json().await.unwrap();
+        assert_eq!(view["id"].as_str(), Some(branch_id.as_str()));
+    }
 }

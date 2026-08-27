@@ -26,13 +26,14 @@ const SKIP_MSG = 'server does not launch acp sessions over REST here';
 
 /** Any request that holds a connection open for its lifetime. */
 function isStream(url: string): boolean {
-  return (
-    url.includes('/api/events') ||
-    url.includes('/api/logs/stream') ||
-    url.includes('/chat/stream') ||
-    url.includes('/api/session-layout/events') ||
-    /\/api\/sessions\/[^/]+\/events/.test(url)
-  );
+  const path = new URL(url).pathname;
+  return [
+    '/api/events/stream',
+    '/api/logs/stream',
+    '/api/sessions/chat/stream',
+    '/api/sessions/events/stream',
+    '/api/session_layout/events',
+  ].includes(path);
 }
 
 /**
@@ -53,7 +54,7 @@ async function launchAcpSession(
   weaver: WeaverFixture,
   opts: { goal: string; name: string },
 ): Promise<Session | null> {
-  const res = await fetch(`${weaver.baseUrl}/api/agents/custom`, {
+  const res = await fetch(`${weaver.baseUrl}/api/agents/custom/create`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
@@ -69,7 +70,7 @@ async function launchAcpSession(
   if (!res.ok && res.status !== 409)
     throw new Error(`defining the fake agent failed: ${await res.text()}`);
 
-  const created = await fetch(`${weaver.baseUrl}/api/sessions`, {
+  const created = await fetch(`${weaver.baseUrl}/api/sessions/launch`, {
     method: 'POST',
     headers: HEADERS,
     body: JSON.stringify({
@@ -109,7 +110,7 @@ test.describe('multiplexed event stream', () => {
 
     // ...and it is the multiplexed route, carrying both per-session topics.
     const url = open[0].url();
-    expect(url).toContain('/api/events?topics=');
+    expect(url).toContain('/api/events/stream?topics=');
     const topics = decodeURIComponent(new URL(url).searchParams.get('topics') ?? '').split(',');
     expect(topics).toContain('layout');
     expect(topics).toContain(`session:${s!.id}`);

@@ -7,36 +7,43 @@
 //! Past the cap an ordinary `fetch()` never resolves: no error, no timeout, and
 //! nothing in the server log, because the request never leaves the browser.
 //!
-//! `GET /api/events?topics=…` folds all of them onto one connection. Every frame
-//! is the default `message` event carrying `{topic, event, data}`, so the client
-//! routes on `topic` and recovers the original per-stream event name from
-//! `event`. The per-stream routes stay as they are — they remain the documented
-//! single-stream API, and this is the browser's connection-thrifty path.
+//! `events.stream` (`GET /api/events/stream?topics=…`) folds all of them onto one
+//! connection. Every frame is the default `message` event carrying
+//! `{topic, event, data}`, so the client routes on `topic` and recovers the
+//! original per-stream event name from `event`. The single-topic operations
+//! (`session_layout.events`, `logs.stream`, `sessions.events.stream`,
+//! `sessions.chat.stream`) remain the documented one-stream-per-connection API;
+//! this is the browser's connection-thrifty path over the same feeds.
 //!
-//! Authorization is deliberately *not* a new policy surface: each topic maps
-//! back to the concrete route it replaces and is run through the same
-//! [`grant_allows`] check the router applies, so a session-scoped credential
-//! reaches exactly the topics whose routes it could already have called.
+//! This adds no enforcement path of its own. `events.stream` is a container:
+//! reaching it grants nothing, and each topic is authorized against
+//! the *declaration* of the single-topic operation it stands in for — the same
+//! actor policy, grants, and `Scoped` resource check that operation gets when
+//! called directly. So a credential reaches exactly the topics it could already
+//! have opened one at a time, and adding a topic means naming its operation
+//! rather than editing a path allowlist.
 
 use std::convert::Infallible;
 use std::pin::Pin;
 
 use axum::{
     extract::{Query, State},
-    http::{Method, StatusCode},
+    http::StatusCode,
     response::sse::{self, KeepAlive, Sse},
     Extension,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt, StreamMap};
 
+use weaver_api::operations::{events, logs as log_operations, session_layout, sessions};
+
 use crate::auth::Principal;
 use crate::logs;
 
-use super::auth::grant_allows;
+use super::encodings::authorized;
 use super::{require_branch, require_session, ApiResult, AppError, AppState};
 
 /// A boxed per-topic stream. Every topic is erased to this so one [`StreamMap`]
@@ -52,17 +59,9 @@ const MAX_TOPICS: usize = 64;
 /// Not a parseable topic name, so it cannot collide with a caller's topic.
 const KEEPALIVE_KEY: &str = "__keepalive";
 
-#[derive(Debug, Deserialize)]
-pub(super) struct EventsQuery {
-    /// Comma-separated topic list: `layout`, `logs`, `session:<key>`,
-    /// `chat:<key>`.
-    #[serde(default)]
-    topics: String,
-}
-
 /// One frame on the multiplexed stream. `event` is the event name the
 /// single-stream route would have used, so the client's per-topic handlers are
-/// unchanged from the un-multiplexed shape.
+/// unchanged from the un-multiplexed stream.
 #[derive(Debug, Serialize)]
 struct Frame<'a> {
     topic: &'a str,
@@ -120,20 +119,48 @@ impl Topic {
         }
     }
 
-    /// The route this topic stands in for. Authorization runs against this path,
-    /// so the multiplexed stream can never widen a credential's reach.
-    fn route(&self) -> String {
+    /// Authorize this topic as the operation it stands in for.
+    ///
+    /// The stand-in is the whole mechanism: `layout` is `session_layout.events`,
+    /// `session:<key>` is `sessions.events.stream` on that key, and so on. Each
+    /// gets its own declaration's actor policy, grants, and resource scope, so
+    /// the multiplexed stream cannot widen a credential's reach — and a topic
+    /// added here without an operation behind it does not compile.
+    async fn authorize(&self, st: &AppState, principal: &Principal) -> ApiResult<()> {
         match self {
-            Self::Layout => "/api/session-layout/events".to_string(),
-            Self::Logs => "/api/logs/stream".to_string(),
-            Self::Session(key) => format!("/api/sessions/{key}/events"),
-            Self::Chat(key) => format!("/api/sessions/{key}/chat/stream"),
+            Self::Layout => {
+                authorized::<session_layout::events::Op>(st, principal, Default::default()).await?;
+            }
+            Self::Logs => {
+                authorized::<log_operations::stream::Op>(st, principal, Default::default()).await?;
+            }
+            Self::Session(key) => {
+                authorized::<sessions::events::stream::Op>(
+                    st,
+                    principal,
+                    sessions::events::stream::Input {
+                        session: key.clone(),
+                    },
+                )
+                .await?;
+            }
+            Self::Chat(key) => {
+                authorized::<sessions::chat::stream::Op>(
+                    st,
+                    principal,
+                    sessions::chat::stream::Input {
+                        session: key.clone(),
+                    },
+                )
+                .await?;
+            }
         }
+        Ok(())
     }
 }
 
-/// `GET /api/events?topics=layout,logs,session:abc,chat:abc` — every live stream
-/// the caller asked for, folded onto one connection.
+/// The `events.stream` operation — `?topics=layout,logs,session:abc,chat:abc`,
+/// every live stream the caller asked for folded onto one connection.
 ///
 /// A topic the credential may not read fails the whole request: the client picks
 /// its own topics, so that is a bug worth surfacing loudly rather than a stream
@@ -143,9 +170,10 @@ impl Topic {
 pub(super) async fn events_mux(
     State(st): State<AppState>,
     Extension(principal): Extension<Principal>,
-    Query(q): Query<EventsQuery>,
+    Query(input): Query<events::stream::Input>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>> {
-    let raw: Vec<&str> = q
+    let input = authorized::<events::stream::Op>(&st, &principal, input).await?;
+    let raw: Vec<&str> = input
         .topics
         .split(',')
         .map(str::trim)
@@ -169,12 +197,11 @@ pub(super) async fn events_mux(
         let topic = Topic::parse(name).ok_or_else(|| {
             AppError::new(StatusCode::BAD_REQUEST, format!("unknown topic '{name}'"))
         })?;
-        if !grant_allows(&st, &principal, &Method::GET, &topic.route()).await {
-            return Err(AppError::new(
-                StatusCode::FORBIDDEN,
-                format!("credential grant forbids topic '{name}'"),
-            ));
-        }
+        // A topic the credential may not read fails the whole request, with the
+        // refusing operation's own message rather than a generic one.
+        topic.authorize(&st, &principal).await.map_err(|error| {
+            AppError::new(error.status, format!("topic '{name}': {}", error.message()))
+        })?;
         streams.insert(
             name.to_string(),
             topic_stream(&st, &principal, name, topic).await?,

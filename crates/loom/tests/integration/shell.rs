@@ -1,5 +1,5 @@
-//! The operator scratch shell: `/api/shell/terminal` lazily spawns a single
-//! login shell, keystrokes round-trip through it, and `POST /api/shell/restart`
+//! The operator scratch shell: `shell.terminal` lazily spawns a single
+//! login shell, keystrokes round-trip through it, and `shell.restart`
 //! replaces it with a fresh supervisor.
 
 use std::time::Duration;
@@ -24,7 +24,7 @@ async fn connect_shell(addr: &std::net::SocketAddr) -> TermWs {
 
 /// Connect to a session's worktree debug shell `idx`.
 async fn connect_session_shell(addr: &std::net::SocketAddr, id: &str, idx: u32) -> TermWs {
-    let url = format!("ws://{addr}/api/sessions/{id}/shell/{idx}/terminal");
+    let url = format!("ws://{addr}/api/sessions/shells/terminal?session={id}&index={idx}");
     let (ws, _resp) = tokio_tungstenite::connect_async(url)
         .await
         .expect("session shell websocket should connect");
@@ -119,7 +119,7 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
 
     let session = client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({ "goal": "debug shell test", "cwd": ts.cwd(), "agent": "shell" }),
         )
         .await
@@ -168,19 +168,26 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     // The live shell is rediscoverable both via the helper and the HTTP route.
     assert_eq!(shell::list_debug(&id).await, vec![0]);
     let listed = client
-        .get(&format!("/api/sessions/{id}/shells"))
+        .post("/api/sessions/shells/list", json!({ "session": id }))
         .await
         .unwrap();
-    assert_eq!(listed, json!([0]), "the route lists the live shell index");
+    assert_eq!(
+        listed,
+        json!([0]),
+        "sessions.shells.list reports the live shell index"
+    );
 
     // A second index is an independent shell — multiple tabs.
     let mut sh1 = connect_session_shell(&ts.addr, &id, 1).await;
     await_shell_ready(&mut sh1, "RDY1").await;
     assert_eq!(shell::list_debug(&id).await, vec![0, 1], "both shells live");
 
-    // Closing one tab (DELETE) kills just that supervisor.
+    // Closing one tab (DELETE) kills only that supervisor.
     client
-        .delete(&format!("/api/sessions/{id}/shell/0"))
+        .post(
+            "/api/sessions/shells/delete",
+            json!({ "session": id, "index": 0 }),
+        )
         .await
         .unwrap();
     let mut gone = false;
@@ -203,7 +210,7 @@ async fn session_debug_shells_run_in_worktree_and_are_swept_on_archive() {
     sh0.send(Message::Close(None)).await.ok();
     sh1.send(Message::Close(None)).await.ok();
     client
-        .post(&format!("/api/sessions/{id}/archive"), json!({}))
+        .post("/api/sessions/archive", json!({ "session": id }))
         .await
         .unwrap();
     let mut swept = false;

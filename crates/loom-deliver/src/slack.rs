@@ -1,20 +1,20 @@
 //! Slack integration — Socket Mode.
 //!
 //! The Slack analog of the GitHub `@loom` trigger ([`crate::github_trigger`] +
-//! [`crate::github`]), with the transport inverted: instead of receiving an
-//! inbound, HMAC-verified webhook, loom is an **outbound websocket client**. A
-//! background task ([`run`]) opens a [Socket Mode] connection with the app-level
-//! token, receives `slash_commands` / `app_mention` envelopes, and — for an
-//! authorized trigger — continues the session already wired to that thread or
-//! pulls the conversation and launches one, replying in-thread with a live "On
-//! it" card only for a launch. As the session reports `loom status`,
-//! [`sync_status_message`] edits that Slack message in place, exactly as
-//! [`crate::github::sync_status_comment`] edits the GitHub comment.
+//! [`crate::github`]), but transport-inverted: loom is an **outbound websocket
+//! client** rather than an HMAC-verified inbound webhook. A background task
+//! ([`run`]) opens a [Socket Mode] connection with the app-level token, receives
+//! `slash_commands` / `app_mention` envelopes, and — for an authorized trigger —
+//! continues the session already wired to that thread or pulls the conversation
+//! and launches one, replying in-thread with a live "On it" card only for a
+//! launch. As the session reports `loom status`, [`sync_status_message`] edits
+//! that Slack message in place, exactly as [`crate::github::sync_status_comment`]
+//! edits the GitHub comment.
 //!
-//! The socket is authenticated (the app token) and single-workspace, so there is
-//! no HMAC to verify — but delivery is still *at-least-once* (a missed 3-second
-//! ACK or a reconnect boundary redelivers), so we keep GitHub's
-//! [`crate::github_trigger::record_delivery`] dedupe, keyed on Slack's `event_id`.
+//! The socket is single-workspace, so there is no HMAC to verify — but delivery
+//! is still *at-least-once* (a missed ACK or a reconnect redelivers), so we
+//! reuse GitHub's [`crate::github_trigger::record_delivery`] dedupe, keyed on
+//! Slack's `event_id`.
 //!
 //! [Socket Mode]: https://docs.slack.dev/apis/events-api/using-socket-mode/
 
@@ -32,7 +32,7 @@ use crate::AppState;
 use crate::Db;
 
 /// Env var / settings key for the app-level token (`xapp-…`). Held outside the
-/// settings registry (like the GitHub webhook secret) so `GET /api/settings`
+/// settings registry (like the GitHub webhook secret) so `settings.get`
 /// never returns it; set it through the environment or `loom config`.
 pub const APP_TOKEN_ENV: &str = "LOOM_SLACK_APP_TOKEN";
 pub const APP_TOKEN_KEY: &str = "slack.app_token";
@@ -134,7 +134,7 @@ fn now() -> String {
 }
 
 /// `env`, else the `key` setting; empty when neither is set. Mirrors
-/// [`crate::github_trigger`]'s private resolver — kept per-module by design.
+/// [`crate::github_trigger`]'s private resolver.
 async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     if let Ok(v) = std::env::var(env) {
         let v = v.trim().to_string();
@@ -215,8 +215,8 @@ pub async fn access(db: &Db) -> Access {
 }
 
 /// Why a trigger was not acted on. Every variant is logged, counted, and shown
-/// in the Connections pane — a silently dropped mention is indistinguishable
-/// from a broken socket, which is the failure this whole path exists to avoid.
+/// in the Connections pane, so a silently dropped mention doesn't look like a
+/// broken socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Denial {
     /// From another Slack workspace, including a Slack Connect channel shared
@@ -302,8 +302,8 @@ pub struct SlackWeb {
 }
 
 async fn slack_response(method: &str, response: reqwest::Response) -> Result<Value> {
-    // HTTP 429 carries a `Retry-After` (seconds); surface it so the caller
-    // can back off rather than hammer a rate-limited method.
+    // HTTP 429 carries a `Retry-After` (seconds); include it in the error
+    // so the caller can back off.
     if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
         let retry = response
             .headers()
@@ -439,7 +439,7 @@ impl SlackWeb {
     /// One page of a thread's replies, oldest-first (Slack returns them in
     /// order) — up to [`THREAD_FETCH_CAP`], which the caller trims to the
     /// context budget. Best-effort: a `not_in_channel` (the bot was never
-    /// invited) surfaces as the error so the caller can tell the user.
+    /// invited) comes back as the error, so the caller can tell the user.
     pub async fn conversations_replies(&self, channel: &str, ts: &str) -> Result<Vec<HistMsg>> {
         let limit = THREAD_FETCH_CAP.to_string();
         let v = self
@@ -490,11 +490,10 @@ impl SlackWeb {
 pub struct AuthTest {
     pub user_id: String,
     pub team_id: String,
-    /// Set only for a real bot token. `auth.test` answers for a human's user
-    /// token (`xoxp-…`) too — with that person's user id and no `bot_id` — so a
+    /// Set only for a real bot token. `auth.test` also answers for a human's
+    /// user token (`xoxp-…`), with that person's user id and no `bot_id` — so a
     /// deployment handed the wrong token connects, reports healthy, and then
-    /// discards every mention its operator types as loom's own. This field is
-    /// what tells the two apart.
+    /// discards every mention its operator types as loom's own.
     pub bot_id: Option<String>,
 }
 
@@ -651,7 +650,6 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
     let team_id = payload["team_id"].as_str().unwrap_or_default().to_string();
     let channel_id = event["channel"].as_str()?.to_string();
     let event_ts = event["ts"].as_str()?.to_string();
-    // Anchor on the enclosing thread if there is one, else the mention itself.
     let root_ts = event["thread_ts"].as_str().unwrap_or(&event_ts).to_string();
     let text = strip_leading_mention(event["text"].as_str().unwrap_or_default());
     let dedupe_id = payload["event_id"]
@@ -670,7 +668,7 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
 }
 
 /// Drop a leading `<@U…>` bot mention (and following whitespace) from an
-/// app_mention's text, leaving just the user's instruction.
+/// app_mention's text, leaving only the user's instruction.
 fn strip_leading_mention(text: &str) -> String {
     let t = text.trim_start();
     if let Some(rest) = t.strip_prefix('<') {
@@ -683,7 +681,7 @@ fn strip_leading_mention(text: &str) -> String {
     t.to_string()
 }
 
-/// Split an optional `owner/name:` repo prefix off the command text. Returns
+/// Split an optional `owner/name:` repo prefix off the message text. Returns
 /// `(repo, remaining_text)`. Only a bare `owner/name:` at the very start counts
 /// — anything else leaves the text untouched and the repo `None`.
 pub fn parse_repo_prefix(text: &str) -> (Option<String>, String) {
@@ -1026,9 +1024,9 @@ pub fn parse_wiring(value: &str) -> Option<(String, String, String)> {
 }
 
 /// Validate a caller-supplied [`weaver_api::SlackThreadRef`] into a trimmed
-/// `(channel, thread_ts)`. Slack ids are opaque, so this is a shape check, not a
-/// existence check: enough that a malformed or injected value cannot reach a Web
-/// API call or be stored as a route. Existence is Slack's answer to give, at
+/// `(channel, thread_ts)`. Slack ids are opaque, so this is a format check, not
+/// an existence check: enough that a malformed or injected value cannot reach a
+/// Web API call or be stored as a route. Existence is Slack's answer to give, at
 /// `chat.postMessage` time.
 pub fn parse_thread_ref(
     target: &weaver_api::SlackThreadRef,
@@ -1058,12 +1056,12 @@ pub fn parse_thread_ref(
     Ok((channel.to_string(), thread_ts.to_string()))
 }
 
-/// Spawn every status-card mirror a branch is wired for. The one seam the status
-/// write path (and artifact publish/delete) calls — GitHub self-gates on the
-/// `github` tag, Slack on the `slack` tag, so an unwired branch is a no-op for
-/// each. Fans a status change out to whichever origin thread(s) a session came
-/// from; adding a third surface is one line here, not another edit at five call
-/// sites.
+/// Spawn every status-card mirror a branch is wired for. Called from the
+/// status-write path and from artifact publish/delete; GitHub self-gates on
+/// the `github` tag, Slack on the `slack` tag, so an unwired branch is a no-op
+/// for each. Fans a status change out to every origin thread a session is
+/// wired to; adding a new origin means one more call here, not an edit at
+/// every status-write call site.
 pub fn spawn_status_mirrors(state: AppState, branch_id: String) {
     weaver_core::spawn_boxed(Box::pin(crate::github::sync_status_comment(
         state.clone(),
@@ -1081,7 +1079,7 @@ pub fn spawn_status_mirrors(state: AppState, branch_id: String) {
 /// tiny, so one global lock (rather than a per-wiring map) is ample.
 static CREATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Act on an authorized-shaped trigger: dedupe, authorize, resolve the repo,
+/// Act on a parsed trigger: dedupe, authorize, resolve the repo,
 /// launch (or forward), wire the branch, and post the "On it" card. Runs in a
 /// detached task after the envelope is ACKed. `bot` is our own identity (its
 /// `team_id` is the authorization boundary).
@@ -1316,7 +1314,6 @@ async fn launch_inner(
     let branch_name = format!("slack-{}", short_hash(&wiring));
     let branch_ref = format!("weaver/{branch_name}");
 
-    // Pull the conversation to seed the session.
     let history = pull_history(web, trigger).await;
 
     // Reuse or relaunch: does a branch already exist for this thread?
@@ -1355,9 +1352,7 @@ async fn launch_inner(
                             "slack: recording forwarded follow-up failed"
                         );
                     }
-                    // Acknowledge only after the conversation accepted the
-                    // follow-up. The eyes reaction therefore means "delivered
-                    // to the session", not merely "received by loom".
+                    // Ack only after the follow-up is accepted, not merely received.
                     if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
                         web.add_reaction(&trigger.channel_id, event_ts, "eyes")
                             .await
@@ -1413,7 +1408,7 @@ async fn launch_inner(
         .trim()
         .to_string();
     let branch_exists = crate::git::branch_exists(&repo_root, &branch_ref).await;
-    let mut req = weaver_api::dto::CreateReq {
+    let mut req = weaver_api::operations::sessions::launch::Input {
         repo: Some(repo.to_string()),
         goal: Some(goal),
         profile: Some(profile.clone()),
@@ -1769,9 +1764,9 @@ pub async fn run(state: AppState) {
     }
 }
 
-/// How often a live socket re-reads `slack.enabled`. The switch documents
-/// itself as closing a live connection, so it cannot wait for Slack's own
-/// refresh (tens of minutes away) to take effect.
+/// How often a live socket re-reads `slack.enabled`. The kill switch closes a
+/// live connection, so it can't wait for Slack's own refresh (tens of minutes
+/// away) to take effect.
 const KILL_SWITCH_POLL: Duration = Duration::from_secs(10);
 
 /// One connection lifecycle: open the socket, then read/ACK/dispatch until Slack
@@ -1870,9 +1865,8 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 ))
                 .await
                 .ok();
-                // Every arriving envelope is logged. Whether loom is receiving
-                // at all is the first question a stalled integration raises, and
-                // it used to be unanswerable from the outside.
+                // Every arriving envelope is logged, so whether loom is
+                // receiving at all is answerable from the outside.
                 let event_type = payload["event"]["type"].as_str().unwrap_or("-");
                 tracing::info!(
                     kind = %kind,
@@ -1894,7 +1888,7 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                 let trigger = match kind.as_str() {
                     "slash_commands" => trigger_from_slash(&payload),
                     "events_api" => trigger_from_event(&payload),
-                    _ => None, // `interactive` is unused in V1
+                    _ => None, // `interactive` is unused
                 };
                 match trigger {
                     Some(trigger) => {
@@ -2031,9 +2025,7 @@ mod tests {
         assert!(trigger_from_event(&payload).is_none());
     }
 
-    /// The default boundary: the workspace plus the channel invite. No list to
-    /// maintain, and a deployment that ships tokens works for the people who can
-    /// already see the bot.
+    /// The default boundary: workspace membership plus the channel invite.
     #[test]
     fn workspace_access_admits_any_person_in_the_workspace() {
         let bot = auth("BOT", "T1");
@@ -2044,14 +2036,11 @@ mod tests {
     #[test]
     fn workspace_access_rejects_other_apps() {
         let bot = auth("BOT", "T1");
-        // An alerting bot whose message happens to contain `@loom` must not
-        // launch a privileged session.
         assert_eq!(
             authorize(&Access::Workspace, &bot, &trigger("U2", "T1", true)),
             Err(Denial::Automation)
         );
-        // …unless its identity is named explicitly, which is how an approved
-        // automation opts in.
+        // …unless explicitly listed.
         assert_eq!(
             authorize(
                 &Access::Listed(vec!["U2".into()]),
@@ -2263,8 +2252,7 @@ mod tests {
         assert_eq!(session.id, "s-ops");
     }
 
-    /// The fall-through cases all mean "let the ordinary launch path handle it",
-    /// which is what keeps an unrelated mention from being swallowed.
+    /// The fall-through cases all mean "let the ordinary launch path handle it".
     #[tokio::test]
     async fn an_unrouted_thread_falls_through_to_a_launch() {
         let (db, _branch) = db_with_routed_alert("running").await;

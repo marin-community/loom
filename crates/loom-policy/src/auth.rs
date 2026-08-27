@@ -1,7 +1,7 @@
 //! Authentication for the loom daemon — who may drive the fleet over HTTP.
 //!
 //! This is a loom-only concern: the daemon-less `weaver` CLI talks straight to
-//! sqlite and never authenticates. Three credential shapes all resolve to one
+//! sqlite and never authenticates. Three credential kinds all resolve to one
 //! [`Principal`]:
 //!
 //! * **API tokens** (`loom_…`) — the `LOOM_TOKEN` a CI job or remote `loom` CLI
@@ -67,6 +67,11 @@ pub enum AuthVia {
     Token,
     /// A valid browser session cookie.
     Session,
+    /// No credential was presented at all.
+    ///
+    /// Only reaches operations declaring `actor = Anonymous`; see
+    /// [`Grant::Anonymous`].
+    Nothing,
 }
 
 impl AuthVia {
@@ -75,6 +80,7 @@ impl AuthVia {
             AuthVia::Loopback => "loopback",
             AuthVia::Token => "token",
             AuthVia::Session => "session",
+            AuthVia::Nothing => "none",
         }
     }
 }
@@ -86,6 +92,12 @@ impl AuthVia {
 pub enum Grant {
     Admin,
     User,
+    /// No credential was presented.
+    ///
+    /// Only operations declaring `actor = Anonymous` accept this, so a request
+    /// with no principal yet is still authorized through the ordinary
+    /// `authorize()` path.
+    Anonymous,
     Automation {
         subject: String,
         profiles: Vec<String>,
@@ -112,6 +124,20 @@ pub struct Principal {
 }
 
 impl Principal {
+    /// The caller that presented nothing.
+    ///
+    /// Constructed by the auth middleware only for requests whose target
+    /// operation declares `actor = Anonymous`. See [`Grant::Anonymous`].
+    pub fn anonymous() -> Self {
+        Self {
+            username: String::new(),
+            github_login: None,
+            via: AuthVia::Nothing,
+            grant: Grant::Anonymous,
+            automation_context: None,
+        }
+    }
+
     pub fn is_admin(&self) -> bool {
         matches!(self.grant, Grant::Admin)
     }
@@ -124,7 +150,7 @@ impl Principal {
         match self.grant {
             Grant::Admin => Some(UserRole::Admin),
             Grant::User => Some(UserRole::User),
-            Grant::Automation { .. } | Grant::Session { .. } => None,
+            Grant::Automation { .. } | Grant::Session { .. } | Grant::Anonymous => None,
         }
     }
 }
@@ -182,7 +208,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 }
 
 /// Constant-time verify a password against a stored argon2 hash. A malformed
-/// stored hash simply fails (never panics).
+/// stored hash fails (never panics).
 fn verify_password(password: &str, stored: &str) -> bool {
     match PasswordHash::new(stored) {
         Ok(parsed) => Argon2::default()
@@ -297,7 +323,7 @@ pub struct CommitIdentity {
 /// login on file (a password-only operator — nothing to attribute to). The
 /// email is GitHub's stable `<id>+<login>@users.noreply.github.com` form, which
 /// links the commit to the account without exposing a private address; it falls
-/// back to the id-less `<login>@…` shape for a user who hasn't signed in via
+/// back to the id-less `<login>@…` form for a user who hasn't signed in via
 /// GitHub since [`update_github_profile`] began recording the id. The name is
 /// the captured display name, else the login.
 pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIdentity>> {
@@ -768,7 +794,7 @@ pub fn session_capabilities_for_policy(
 ) -> Result<Vec<String>> {
     let snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(policy_mcp_access).context("invalid session MCP policy snapshot")?;
-    Ok(weaver_api::session_capabilities_from_mcp(
+    Ok(loom_agent::mcp::session_capabilities(
         restricted,
         snapshot
             .capability_sets
@@ -1027,11 +1053,9 @@ async fn env_or_setting(db: &Db, env: &str, key: &str) -> String {
     crate::config::get(db, key).await.unwrap_or_default()
 }
 
-/// The configured OAuth client id (env-or-settings), or an empty string when
-/// unset. The public half of the sign-in credential — shown in the settings UI.
-/// Resolved the same way as [`github_oauth`] so the two never disagree (a deploy
-/// that sets `LOOM_GITHUB_CLIENT_ID` in its env reports the live id, not a
-/// blank, even though nothing was written to the settings table).
+/// The configured OAuth client id (env-or-settings), or empty when unset —
+/// the public half shown in the settings UI. Resolved the same way as
+/// [`github_oauth`] so the two stay in sync.
 pub async fn oauth_client_id(db: &Db) -> String {
     env_or_setting(db, "LOOM_GITHUB_CLIENT_ID", GH_CLIENT_ID_KEY).await
 }
@@ -1149,8 +1173,8 @@ pub async fn exchange_code(cfg: &GithubOAuth, code: &str, redirect_uri: &str) ->
 }
 
 /// The authenticated user's GitHub profile, as much as sign-in needs: `login`
-/// for the allowlist check, and `id`/`name` for commit attribution (design
-/// §6.3, Level A). `name` is the free-text profile name and may be absent.
+/// for the allowlist check, and `id`/`name` for commit attribution. `name` is
+/// the free-text profile name and may be absent.
 pub struct GithubUser {
     pub login: String,
     pub id: i64,
@@ -1173,7 +1197,7 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
         .send()
         .await
         .context("fetching GitHub user")?;
-    // Surface GitHub's status + body instead of a bare "request failed" — a 401
+    // Report GitHub's status + body instead of a bare "request failed" — a 401
     // here means the token was rejected, which is otherwise invisible.
     let status = resp.status();
     if !status.is_success() {
@@ -1236,15 +1260,13 @@ mod tests {
         let hash = hash_password("hunter2").unwrap();
         assert!(verify_password("hunter2", &hash));
         assert!(!verify_password("hunter3", &hash));
-        // A garbage stored hash fails closed rather than panicking.
+        // A garbage stored hash fails closed.
         assert!(!verify_password("hunter2", "not-a-hash"));
     }
 
-    /// `db::connect_in_memory`, with `LOOM_OWNER_GITHUB` set for the duration of
-    /// the call so `seed_owner` seeds `owner` — since it no longer defaults to
-    /// a real login (fail-closed on an unset env var), every test below that
-    /// relies on a pre-seeded owner sets one explicitly. The caller must be
-    /// `#[serial]`: the env var is process-global.
+    /// `db::connect_in_memory`, with `LOOM_OWNER_GITHUB` set so `seed_owner`
+    /// plants an owner. Every test that relies on a pre-seeded owner must set
+    /// one explicitly. The caller must be `#[serial]`: the env var is global.
     async fn connect_in_memory_with_owner(owner: &str) -> Db {
         std::env::set_var("LOOM_OWNER_GITHUB", owner);
         let db = db::connect_in_memory().await.unwrap();
@@ -1456,7 +1478,7 @@ mod tests {
     async fn expired_token_does_not_resolve() {
         let db = connect_in_memory_with_owner("rjpower").await;
         let (plain, info) = create_token(&db, "rjpower", "old", Some(30)).await.unwrap();
-        // Fresh token resolves; backdate its expiry and it no longer does.
+        // Fresh token resolves; once expired, it doesn't.
         assert!(lookup_token(&db, &plain).await.unwrap().is_some());
         sqlx::query("UPDATE api_tokens SET expires_at = '2000-01-01T00:00:00.000Z' WHERE id = ?")
             .bind(&info.id)

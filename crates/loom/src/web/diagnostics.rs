@@ -13,19 +13,20 @@ use axum::{
     extract::State,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Extension, Json,
+    Json,
 };
 use sqlx::FromRow;
+use weaver_api::operations::diagnostics as diagnostics_operations;
 use weaver_api::{
     DiagnosticFederation, DiagnosticProblemSummary, DiagnosticProfileCapacity, DiagnosticRunCount,
     DiagnosticRunFailure, DiagnosticRunSummary, DiagnosticSessionCount, DiagnosticsView,
     MigrationStreamView, ReadinessView,
 };
 
-use crate::auth::Principal;
 use crate::db::Db;
 
-use super::{ApiResult, AppError, AppState};
+use super::operations::{register, Bound, OperationContext};
+use super::{ApiResult, AppState};
 
 const LOCAL_RUNNER_POOL: &str = "local";
 const METRICS_CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
@@ -423,14 +424,21 @@ async fn metric_snapshot(db: &Db) -> Result<DiagnosticsView> {
     })
 }
 
-pub(super) async fn diagnostics(
-    State(st): State<AppState>,
-    Extension(principal): Extension<Principal>,
-) -> ApiResult<Json<DiagnosticsView>> {
-    if !principal.is_human() {
-        return Err(AppError::new(StatusCode::FORBIDDEN, "human grant required"));
-    }
-    Ok(Json(snapshot(&st.db).await?))
+/// `diagnostics.get`'s route binding. Its sibling `diagnostics.status` is
+/// bound in `web/logview.rs`.
+pub(super) fn bound_operations() -> Vec<Bound> {
+    vec![register::<diagnostics_operations::get::Op, _, _>(
+        diagnostics_operation,
+    )]
+}
+
+/// `diagnostics.get`. `actor = User` in the operation declaration
+/// restricts this to human principals.
+async fn diagnostics_operation(
+    context: OperationContext,
+    _input: diagnostics_operations::get::Input,
+) -> ApiResult<DiagnosticsView> {
+    Ok(snapshot(&context.state.db).await?)
 }
 
 fn append_help(output: &mut String, name: &str, help: &str, metric_type: &str) {
@@ -615,8 +623,8 @@ async fn render_metrics(db: &Db, view: &DiagnosticsView) -> Result<String> {
     Ok(output)
 }
 
-/// Public scrape surface. It contains aggregates only; the richer inventory is
-/// human-gated at `/api/diagnostics`.
+/// The Prometheus scrape route. It contains aggregates only; the richer
+/// inventory is human-gated at `/api/diagnostics`.
 pub(super) async fn metrics(State(st): State<AppState>) -> Response {
     match metric_snapshot(&st.db).await {
         Ok(view) => match render_metrics(&st.db, &view).await {

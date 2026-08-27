@@ -6,34 +6,23 @@
 //! stores, and restricted profiles never inherit these values. The one-shot
 //! judgement agent and watch scripts run env-stripped and get none of them.
 //!
-//! This remains a flat name/value API for existing settings, setup, GitHub,
-//! watch, and shell callers, but storage lives in `profile_env` under the
+//! This is a flat name/value API for existing settings, setup, GitHub,
+//! watch, and shell callers; storage lives in `profile_env` under the
 //! protected `default` profile. New profile-specific callers use
-//! [`crate::profile`] directly. Unlike [`crate::config`] there is no
-//! registry of known keys, because the whole point is arbitrary,
-//! deploy-specific variables. The only constraint is that a name is a valid
-//! POSIX shell identifier, since the value is exported by the launch script.
+//! [`crate::profile`] directly. Unlike [`crate::config`], keys aren't
+//! enumerated — values are arbitrary and deploy-specific. The only
+//! constraint is that a name is a valid POSIX shell identifier, since the
+//! value is exported by the launch script.
 
 use anyhow::Result;
-use serde::Serialize;
 use sqlx::Row;
+use weaver_api::AgentEnvVarView;
 
 use crate::db::{now_iso, Db};
-
-/// One stored variable with its bookkeeping timestamp — what the settings pane
-/// renders and what the API returns.
-#[derive(Debug, Clone, Serialize)]
-pub struct EnvVar {
-    pub name: String,
-    pub value: String,
-    pub updated_at: String,
-}
 
 /// Names loom owns and exports itself ([`crate::agent::launch`]). Operator vars
 /// are exported *after* these, so allowing one of these names through would let a
 /// stored value shadow Loom's control variables or GitHub credential policy.
-/// We reserve the whole `WEAVER_`/`LOOM_` prefix space plus the stock GitHub
-/// clients' token names.
 const RESERVED_PREFIXES: &[&str] = &["WEAVER_", "LOOM_"];
 const RESERVED_NAMES: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
 
@@ -42,13 +31,11 @@ pub fn is_github_token_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// Validate an environment-variable name. Accept the POSIX-portable identifier
-/// shape (`[A-Za-z_][A-Za-z0-9_]*`): a leading letter or underscore, then
-/// letters, digits, or underscores. This is exactly what the `export NAME=…` in
-/// the launch script can carry, and rejecting anything else keeps a stray name
-/// from corrupting the script. Names in loom's own [`RESERVED_PREFIXES`] are also
-/// rejected so an operator var can't shadow the environment loom needs. The error
-/// is a key-free reason so callers can prefix it with whatever context they like.
+/// Validate an environment-variable name as a POSIX shell identifier
+/// (`[A-Za-z_][A-Za-z0-9_]*`) — what `export NAME=…` in the launch script
+/// can carry — and reject names in loom's own [`RESERVED_PREFIXES`]. The
+/// error is a key-free reason so callers can prefix it with whatever
+/// context they like.
 pub fn validate_name(name: &str) -> std::result::Result<(), String> {
     if name.is_empty() {
         return Err("name must not be empty".to_string());
@@ -80,7 +67,7 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
 }
 
 /// Every stored variable, ordered by name.
-pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
+pub async fn list(db: &Db) -> Result<Vec<AgentEnvVarView>> {
     let rows = sqlx::query(
         "SELECT name, value, updated_at FROM profile_env
          WHERE profile_name = 'default' ORDER BY name",
@@ -89,7 +76,7 @@ pub async fn list(db: &Db) -> Result<Vec<EnvVar>> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|r| EnvVar {
+        .map(|r| AgentEnvVarView {
             name: r.get::<String, _>("name"),
             value: r.get::<String, _>("value"),
             updated_at: r.get::<String, _>("updated_at"),
@@ -163,8 +150,6 @@ mod tests {
 
     #[test]
     fn validate_name_rejects_loom_reserved_names() {
-        // Operator vars are exported after loom's own, so these must not be
-        // settable or they'd shadow the environment the agent depends on.
         assert!(validate_name("WEAVER_API").is_err());
         assert!(validate_name("WEAVER_BRANCH").is_err());
         assert!(validate_name("LOOM_TOKEN").is_err());
@@ -181,7 +166,6 @@ mod tests {
         set(&db, "GH_HOST", "github.example.com").await.unwrap();
         set(&db, "API_TOKEN", "secret").await.unwrap();
         let all = list(&db).await.unwrap();
-        // Ordered by name: API_TOKEN before GH_HOST.
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].name, "API_TOKEN");
         assert_eq!(all[1].name, "GH_HOST");

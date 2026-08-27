@@ -26,7 +26,7 @@ test.describe('creating a session via the UI form', () => {
   });
 
   test('launches from the workbench with canonical profile and title', async ({ page, weaver }) => {
-    await fetch(`${weaver.baseUrl}/api/profiles`, {
+    await fetch(`${weaver.baseUrl}/api/profiles/create`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -89,7 +89,11 @@ test.describe('creating a session via the UI form', () => {
     expect(session.resolved_launch?.provenance.mode).toBe('profile');
     expect(session.branch.title).toBe('Investigate the attached trace');
     expect(session.branch.title_provenance).toBe('derived');
-    const res = await fetch(`${weaver.baseUrl}/api/sessions/${session.id}/scratch`);
+    const res = await fetch(`${weaver.baseUrl}/api/sessions/scratch/list`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: session.id }),
+    });
     const files = (await res.json()) as { name: string; bytes: number }[];
     expect(files).toEqual([{ name: 'trace.log', bytes: Buffer.byteLength('panic at line 42\n') }]);
 

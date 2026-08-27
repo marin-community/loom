@@ -1,16 +1,11 @@
-//! The cross-process wire contract: the request and response (View) DTOs the
-//! loom REST API speaks. These are the single source of truth — the loom server
-//! serializes them, the typed [`crate::Client`] and the future Python binding
-//! deserialize them, and `frontend/types.ts` mirrors them by hand.
+//! The request and response (View) types the loom REST API speaks. The loom
+//! server serializes them, the typed [`crate::Client`] and the future Python
+//! binding deserialize them, and `frontend/types.ts` mirrors them by hand.
 //!
-//! The response (`*View`) types carry `from_parts` constructors that build a
-//! plain wire struct from the `weaver-core` domain types (`Branch`, `Issue`,
-//! `Watch`, …). The async server-side builders that touch the database
-//! (counting open issues, joining the latest run) stay in the loom server and
-//! call these once they've gathered the parts — so the wire struct has exactly
-//! one definition while the DB access stays where the daemon owns it.
-
-use std::collections::BTreeMap;
+//! Response (`*View`) types carry `from_parts` constructors that build the
+//! response struct from `weaver-core` domain types (`Branch`, `Issue`,
+//! `Watch`, …); the async DB lookups that gather the parts stay in the loom
+//! server.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,7 +18,7 @@ use weaver_core::watch::{Watch, WatchRun};
 
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident => $value:literal),+ $(,)? }) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
         pub enum $name {
             $(
                 #[serde(rename = $value)]
@@ -66,7 +61,7 @@ macro_rules! wire_enum {
 /// a reason, author, and timestamp. The well-known keys are `attention` (the
 /// agent's self-report) and `triage` (a watch's assessment); any other key
 /// is a free-form, quiet pill. Absence is the calm state — there is no `ok` tag.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagView {
     pub key: String,
     pub value: String,
@@ -87,9 +82,9 @@ impl From<&Tag> for TagView {
     }
 }
 
-/// Branch with denormalized open-issue count, returned by `/api/branches` and
+/// Branch with denormalized open-issue count, returned by `branches.list` and
 /// embedded under `SessionView::branch`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BranchView {
     pub id: String,
     /// Short label: the branch name with the optional `weaver/` prefix stripped.
@@ -103,9 +98,8 @@ pub struct BranchView {
     /// The agent's current-state message, set via `loom status`, shown even
     /// when the branch is calm. The attention *level* is the `attention` tag.
     pub description: String,
-    /// Every tag on the branch (the agent's `attention`, a watch's
-    /// `triage`, and any free-form key), ordered by key. Empty when the branch is
-    /// calm and unmarked — absence is the default state, there is no `ok` tag.
+    /// Every tag on the branch (the agent's `attention`, a watch's `triage`,
+    /// and any free-form key), ordered by key. Empty when calm and unmarked.
     pub tags: Vec<TagView>,
     pub repo_root: String,
     pub branch: String,
@@ -124,9 +118,8 @@ pub struct BranchView {
 }
 
 impl BranchView {
-    /// Build the wire view from a branch plus the parts the server gathered (its
-    /// tags, the open-issue count, and the latest GitHub snapshot). The async DB
-    /// lookups that produce those parts live in the loom server.
+    /// Build the view from a branch plus the parts the server already
+    /// gathered: tags, open-issue count, and latest GitHub snapshot.
     pub fn from_parts(
         branch: &Branch,
         tags: &[Tag],
@@ -159,10 +152,10 @@ impl BranchView {
     }
 }
 
-/// Compact branch projection embedded in [`SessionSummaryView`]. It carries
-/// only the identity, status, search, and GitHub fields fleet surfaces render;
-/// large goal text and detail-only metadata remain on [`BranchView`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Compact branch view embedded in [`SessionSummaryView`]. It carries only the
+/// identity, status, search, and GitHub fields fleet indexes carry; large goal
+/// text and detail-only metadata remain on [`BranchView`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct BranchSummaryView {
     pub id: String,
     pub name: String,
@@ -191,7 +184,7 @@ impl From<&BranchView> for BranchSummaryView {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionTransitionView {
     /// Stable operation name: currently `archiving` or `adopting`.
     pub kind: String,
@@ -201,12 +194,12 @@ pub struct SessionTransitionView {
     pub started_at: String,
 }
 
-/// Compact session projection returned by `GET /api/sessions/summary`.
+/// Compact session view returned by `sessions.summary.list`.
 ///
 /// This is the polling/search contract for fleet indexes. A client follows with
-/// `GET /api/sessions/{id}` only when it opens a session or discloses the row's
-/// complete context.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `sessions.get` only when it opens a session or discloses the row's complete
+/// context.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionSummaryView {
     pub id: String,
     pub status: String,
@@ -235,8 +228,10 @@ pub struct SessionSummaryView {
     pub branch: BranchSummaryView,
 }
 
-/// Session-scoped view returned by the `/api/sessions[/...]` endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The complete session view, as against the compact
+/// [`SessionSummaryView`] fleet indexes poll: every field a session detail view
+/// needs, including the session's whole [`BranchView`].
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionView {
     pub id: String,
     pub status: String,
@@ -248,9 +243,9 @@ pub struct SessionView {
     pub model: String,
     pub effort: String,
     pub github_repo: Option<String>,
-    /// GitHub issue linked to this session's explicit work item, if any. This is
-    /// separate from `branch.github`, which is the pull request created by the
-    /// work. The compatibility work item remains the source of truth for edits.
+    /// GitHub issue linked to this session's explicit work item, if any —
+    /// distinct from `branch.github`, the pull request the work produced.
+    /// `tracking_issue` remains the field edits go through.
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
@@ -262,15 +257,14 @@ pub struct SessionView {
     /// Branch id of the session that **launched** this one — the parent in the
     /// dashboard's session tree — or `null` for a top-level session.
     pub parent_id: Option<String>,
-    /// Exact immutable session id of the launcher. New rows always stamp this;
-    /// `parent_id` remains as a legacy branch-ancestry fallback for rows created
-    /// before exact session lineage was recorded.
+    /// Exact immutable session id of the launcher. New rows always stamp this.
+    /// `parent_id` is retained for backward compatibility with older sessions.
     #[serde(default)]
     pub parent_session_id: Option<String>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created warm watch sessions and rows
-    /// that predate the column. A tracking/UX field,
-    /// not a security boundary: the fleet stays co-owned by everyone authenticated.
+    /// that predate the column. Not a security boundary: the fleet stays
+    /// co-owned by everyone authenticated.
     pub created_by: Option<String>,
     /// How this session came to exist: `"user"` (hand-launched), `"agent"`
     /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
@@ -278,8 +272,7 @@ pub struct SessionView {
     #[serde(default = "default_origin")]
     pub origin: String,
     /// Machine tier: `"interactive"` or `"automation"`. Both appear in the
-    /// normal fleet; the class remains useful for policy and compatibility
-    /// filters.
+    /// normal fleet.
     #[serde(default = "default_class")]
     pub class: String,
     /// Completed agent turns on this session.
@@ -345,7 +338,7 @@ pub struct SessionView {
     pub branch: BranchView,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct TitleGenerationView {
     pub enabled: bool,
     /// `idle`, `running`, `generated`, `protected`, `disabled`, `unavailable`,
@@ -366,7 +359,7 @@ fn default_title_provenance() -> String {
     "user".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResumptionEvidenceView {
     /// `conversation` or `artifact`.
     pub kind: String,
@@ -376,7 +369,7 @@ pub struct ResumptionEvidenceView {
     pub cursor: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ResumptionCueView {
     /// `generated`, `generating`, `due`, `not_due`, `disabled`, or
     /// `unavailable`.
@@ -416,8 +409,8 @@ wire_enum!(SessionCreatorFilter {
     OtherUsers => "other-users",
 });
 
-/// Typed filters for `GET /api/sessions/search`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Typed filters for `sessions.list`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchSessionsOptions {
     #[serde(default, rename = "q")]
     pub query: String,
@@ -431,10 +424,17 @@ pub struct SearchSessionsOptions {
     pub attention: Option<SessionSearchAttention>,
     #[serde(default)]
     pub creator: Option<SessionCreatorFilter>,
+    /// Include automation-class sessions. `None` takes the operation's default,
+    /// which is to include them; `loom ps` passes `Some(false)`.
+    #[serde(default)]
+    pub automation: Option<bool>,
+    /// Include engine-managed warm sessions. Human credentials only.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// One session's canonical position in the shared Spaces → Groups layout.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionPlacementView {
     pub session_id: String,
     pub group_id: String,
@@ -446,7 +446,7 @@ pub struct SessionPlacementView {
 }
 
 /// An ordered, flat group inside one session space.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionGroupView {
     pub id: String,
     pub space_id: String,
@@ -461,7 +461,7 @@ pub struct SessionGroupView {
 }
 
 /// A top-level shared fleet space.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionSpaceView {
     pub id: String,
     pub name: String,
@@ -471,7 +471,7 @@ pub struct SessionSpaceView {
 }
 
 /// One configurable default-placement selector.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionPlacementDefaultView {
     pub selector_kind: SessionPlacementSelectorKind,
     pub selector_value: String,
@@ -479,18 +479,46 @@ pub struct SessionPlacementDefaultView {
 }
 
 /// Complete shared session layout at one optimistic-concurrency revision.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionLayoutView {
     pub revision: i64,
     pub spaces: Vec<SessionSpaceView>,
     pub defaults: Vec<SessionPlacementDefaultView>,
 }
 
+/// The kind of one normalized history record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryKind {
+    Message,
+    Reasoning,
+    ToolCall,
+    ToolResult,
+    Context,
+    Event,
+    Image,
+}
+
+impl HistoryKind {
+    /// The JSON spelling, matching `HistoryRecordView::kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Reasoning => "reasoning",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::Context => "context",
+            Self::Event => "event",
+            Self::Image => "image",
+        }
+    }
+}
+
 /// One provider-neutral conversation record returned by the session history
-/// API. Optional fields are capability claims, not placeholders: notably,
-/// `tool_input` is absent when the source protocol did not provide invocation
-/// arguments (ACP currently provides only tool title/status/content/locations).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// API. Optional fields are capability claims, not placeholders: `tool_input`
+/// is absent when the source protocol did not provide invocation arguments
+/// (ACP currently provides only tool title/status/content/locations).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryRecordView {
     /// Opaque, source-stable position used as the exclusive paging cursor.
     pub cursor: String,
@@ -518,7 +546,7 @@ pub struct HistoryRecordView {
 }
 
 /// A source-provided file location attached to a normalized history record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryLocationView {
     pub path: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,7 +556,7 @@ pub struct HistoryLocationView {
 /// One newest-tail page of normalized session history. Records are returned in
 /// chronological display order; pass `older_cursor` as `before` to continue
 /// backward. The same envelope is used by literal search.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryPageView {
     /// Normalizer/source label (`acp`, `claude`, `codex`, ...).
     pub source: String,
@@ -538,7 +566,7 @@ pub struct HistoryPageView {
 }
 
 /// Cumulative session cost optionally reported alongside ACP context usage.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpCost {
     pub amount: f64,
     pub currency: String,
@@ -546,7 +574,7 @@ pub struct AcpCost {
 
 /// Current model-context utilization for an ACP session. This is context-window
 /// state, not a provider account/rate-limit quota.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AcpUsage {
     pub used: u64,
     pub size: u64,
@@ -555,7 +583,7 @@ pub struct AcpUsage {
 }
 
 /// A GitHub issue association carried by a session's explicit work item.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct GithubIssueRef {
     pub repo: String,
     pub number: i64,
@@ -584,7 +612,7 @@ fn default_prelude() -> String {
 /// A reusable, named session launch template. It is concretized into an
 /// immutable `ResolvedLaunchView` for each accepted launch/handoff. Secret
 /// environment values are excluded; `env` contains metadata only.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileView {
     pub name: String,
     pub description: String,
@@ -625,7 +653,7 @@ pub struct ProfileView {
     pub env: Vec<ProfileEnvView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileEnvView {
     pub name: String,
     /// `literal` or `gcp_secret`. The value itself is never returned.
@@ -635,10 +663,10 @@ pub struct ProfileEnvView {
     pub updated_at: String,
 }
 
-/// One trusted MCP adapter Loom can launch.  This is deliberately provider
-/// neutral: clients select a capability set, while an agent runtime translates
-/// its tools into that provider's permission vocabulary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One trusted MCP adapter Loom can launch. Provider neutral: clients select a
+/// capability set, while an agent runtime translates its tools into that
+/// provider's permission vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpAdapterView {
     pub name: String,
     pub description: String,
@@ -646,7 +674,7 @@ pub struct McpAdapterView {
 }
 
 /// An inspectable, content-addressed collection of MCP tools.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpCapabilitySetView {
     pub name: String,
     pub group: String,
@@ -661,7 +689,7 @@ pub struct McpCapabilitySetView {
 }
 
 /// The trusted MCP registry exposed to operators and the settings UI.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpRegistryView {
     pub adapters: Vec<McpAdapterView>,
     pub capability_sets: Vec<McpCapabilitySetView>,
@@ -670,7 +698,7 @@ pub struct McpRegistryView {
 }
 
 /// Provider-neutral MCP selection carried by a profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpAccess {
     /// `none`, `all`, or `groups`.
     pub mode: String,
@@ -688,7 +716,7 @@ impl Default for McpAccess {
 }
 
 /// Exact MCP registry content stamped onto a launched session.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpPolicySnapshot {
     pub selection: McpAccess,
     #[serde(default)]
@@ -698,7 +726,7 @@ pub struct McpPolicySnapshot {
 }
 
 /// Source-redacted MCP audit policy returned on ordinary session views.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionMcpPolicyView {
     pub selection: McpAccess,
     #[serde(default)]
@@ -707,7 +735,7 @@ pub struct SessionMcpPolicyView {
     pub custom_servers: Vec<SessionCustomMcpView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCustomMcpView {
     pub identity: String,
     pub group: String,
@@ -739,7 +767,7 @@ impl From<&McpPolicySnapshot> for SessionMcpPolicyView {
 }
 
 /// Exact executable custom MCP revision stamped onto a session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomMcpSnapshot {
     pub identity: String,
     pub group: String,
@@ -753,7 +781,7 @@ pub struct CustomMcpSnapshot {
 }
 
 /// Body for creating or updating an operator-authored MCP server.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomMcpReq {
     pub identity: String,
     pub label: String,
@@ -771,7 +799,7 @@ fn default_true() -> bool {
 }
 
 /// Latest custom MCP definition and validation result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CustomMcpView {
     pub identity: String,
     pub group: String,
@@ -789,7 +817,14 @@ pub struct CustomMcpView {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Response from the scalar `mcps.custom.delete` operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CustomMcpDeleteResult {
+    pub deleted: bool,
+    pub identity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpServerProcessView {
     pub name: String,
     pub command: String,
@@ -797,7 +832,7 @@ pub struct McpServerProcessView {
 }
 
 /// Fully resolved non-secret profile policy without launching a session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EffectiveProfileView {
     pub profile: ProfileView,
     pub mcp_policy: McpPolicySnapshot,
@@ -805,10 +840,17 @@ pub struct EffectiveProfileView {
     pub mcp_servers: Vec<McpServerProcessView>,
 }
 
+/// Response from the scalar `profiles.delete` operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ProfileDeleteResult {
+    pub deleted: bool,
+    pub name: String,
+}
+
 /// Fields a caller may layer over a named profile for one launch. Presence is
 /// significant: an omitted (or blank agent) field inherits while an explicit
 /// empty model or effort selects the agent's own default.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchOverrides {
     #[serde(default)]
     pub agent: Option<String>,
@@ -826,7 +868,7 @@ pub struct LaunchOverrides {
 
 /// Canonical profile-template selection accepted by launch preview, session
 /// create, handoff, and profile clone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchSelection {
     #[serde(default = "default_profile")]
     pub profile: String,
@@ -844,7 +886,7 @@ impl Default for LaunchSelection {
 }
 
 /// Provenance for every concrete runtime selector in a resolved launch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchProvenanceView {
     pub agent: String,
     pub model: String,
@@ -859,9 +901,9 @@ pub struct LaunchProvenanceView {
 }
 
 /// Capacity observed while resolving a launch. The repository launch gate
-/// rechecks it immediately before provisioning, so this is an honest preview,
-/// not an admission reservation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// rechecks it immediately before provisioning: this is a preview, not a
+/// reserved slot.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LaunchCapacityView {
     pub active: i64,
     pub maximum: Option<i64>,
@@ -871,7 +913,7 @@ pub struct LaunchCapacityView {
 
 /// Source-redacted security and lifecycle policy that will be stamped on the
 /// session. Environment values and custom MCP source are deliberately absent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResolvedLaunchPolicyView {
     pub strict: bool,
     pub restricted: bool,
@@ -891,7 +933,7 @@ pub struct ResolvedLaunchPolicyView {
 
 /// Concrete source-redacted immutable launch snapshot returned by preview and
 /// exposed on the created session (or replacement handoff runtime).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ResolvedLaunchView {
     pub selection: LaunchSelection,
     #[serde(default)]
@@ -912,40 +954,9 @@ pub struct ResolvedLaunchView {
     pub errors: Vec<String>,
 }
 
-/// Body for `POST /api/session-launches/resolve`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResolveLaunchReq {
-    #[serde(default)]
-    pub selection: LaunchSelection,
-}
-
-/// Body for `POST /api/profiles/{name}/clone`. Creation is insert-only and
-/// atomic; the caller may submit the fully edited proposed template.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CloneProfileReq {
-    pub name: String,
-    pub expected_profile_revision: i64,
-    /// Resolver fingerprint from the composition the caller reviewed. A custom
-    /// agent/MCP/policy-default drift returns 409 with a fresh preview.
-    pub expected_resolver_revision: String,
-    #[serde(default)]
-    pub overrides: LaunchOverrides,
-    /// Optional editable template proposal. When present, policy/lifecycle/MCP
-    /// fields are validated as submitted while source revision and environment
-    /// copy remain server-owned and atomic.
-    #[serde(default)]
-    pub template: Option<ProfileReq>,
-    #[serde(default)]
-    pub copy_environment: bool,
-    /// Editable write-only environment composition. Omission preserves the
-    /// legacy `copy_environment` behavior.
-    #[serde(default)]
-    pub environment: Option<CloneProfileEnvironmentReq>,
-}
-
 /// Atomic environment composition for a cloned profile. Inherited values are
 /// copied server-side; literal values and secret references are write-only.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloneProfileEnvironmentReq {
     #[serde(default)]
     pub inherit: bool,
@@ -955,7 +966,7 @@ pub struct CloneProfileEnvironmentReq {
     pub set: Vec<ProfileEnvMutationReq>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProfileEnvMutationReq {
     pub name: String,
     #[serde(default)]
@@ -964,9 +975,38 @@ pub struct ProfileEnvMutationReq {
     pub secret_ref: Option<String>,
 }
 
+/// Result of archiving a custom channel.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChannelArchiveResult {
+    pub archived: bool,
+}
+
+/// One file in a session's Scratch directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchFileView {
+    pub name: String,
+    pub bytes: u64,
+}
+
+/// Result of writing a Scratch file: the accepted name, its size, and the
+/// worktree-relative path the session sees it at.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchWriteResult {
+    pub name: String,
+    pub bytes: u64,
+    pub path: String,
+}
+
+/// Result of deleting a Scratch file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ScratchDeleteResult {
+    pub name: String,
+    pub deleted: bool,
+}
+
 /// Shared upload limits for launch-time and live-session Scratch attachments:
 /// 20 files, 25 MiB each, 50 MiB decoded total. `.gitignore` is reserved.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScratchLimitsView {
     pub max_files: usize,
     pub max_file_bytes: usize,
@@ -974,60 +1014,8 @@ pub struct ScratchLimitsView {
     pub max_name_bytes: usize,
 }
 
-/// Body for creating or replacing a profile.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ProfileReq {
-    pub name: String,
-    #[serde(default)]
-    pub description: String,
-    pub agent_kind: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub effort: String,
-    #[serde(default)]
-    pub protocol: String,
-    #[serde(default)]
-    pub mode: String,
-    #[serde(default = "default_class")]
-    pub class: String,
-    #[serde(default)]
-    pub strict: bool,
-    #[serde(default)]
-    pub env_clear: bool,
-    #[serde(default)]
-    pub ambient_allowlist: Vec<String>,
-    #[serde(default)]
-    pub idle_archive_secs: Option<i64>,
-    #[serde(default)]
-    pub max_concurrent: i64,
-    #[serde(default)]
-    pub turn_budget: Option<i64>,
-    #[serde(default = "default_prelude")]
-    pub prelude: String,
-    /// Organization-owned instructions appended to this profile's opening
-    /// prompt for every launch origin.
-    #[serde(default)]
-    pub instructions: String,
-    #[serde(default)]
-    pub restricted: bool,
-    /// Repositories for which Loom may broker a short-lived GitHub App token.
-    #[serde(default)]
-    pub github_repositories: Vec<String>,
-    /// Provider-specific fallback permissions. New integrations should use
-    /// `mcp_access`; `allowed_tools` remains a read-compatible input alias.
-    #[serde(default, alias = "allowed_tools")]
-    pub runtime_permissions: Vec<String>,
-    #[serde(default)]
-    pub mcp_access: McpAccess,
-    /// Optimistic update guard. Omitted remains compatible with older clients;
-    /// interactive editors always send the revision they loaded.
-    #[serde(default)]
-    pub expected_revision: Option<i64>,
-}
-
 /// A short-lived GitHub App installation token brokered for one session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubTokenView {
     pub token: String,
 }
@@ -1035,7 +1023,7 @@ pub struct GithubTokenView {
 /// One explicit repository grant layered onto a session's launch-time GitHub
 /// policy. GitHub App credentials currently expose one reviewed write policy;
 /// `none` is accepted only as the mutation that revokes a grant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionGithubAccessView {
     pub repository: String,
     pub mode: String,
@@ -1043,14 +1031,8 @@ pub struct SessionGithubAccessView {
     pub granted_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetSessionGithubAccessReq {
-    pub repository: String,
-    pub mode: String,
-}
-
 /// Durable request for a human to expand one live session's external access.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct PermissionRequestView {
     pub id: String,
     pub session_id: String,
@@ -1066,30 +1048,8 @@ pub struct PermissionRequestView {
     pub decision_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreatePermissionRequestReq {
-    /// Currently `github_repository`.
-    pub kind: String,
-    pub repository: String,
-    #[serde(default = "default_permission_request_mode")]
-    pub mode: String,
-    pub reason: String,
-}
-
-fn default_permission_request_mode() -> String {
-    "write".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DecidePermissionRequestReq {
-    /// `approve` or `deny`.
-    pub decision: String,
-    #[serde(default)]
-    pub reason: String,
-}
-
 /// Current Loom operation grants and external repository scope for a session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EffectivePermissionsView {
     pub session_id: String,
     pub actor: String,
@@ -1103,35 +1063,18 @@ pub struct EffectivePermissionsView {
     pub pending_requests: Vec<PermissionRequestView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PutProfileEnvReq {
-    /// A write-only literal. Exactly one of `value` and `secret_ref` is required.
-    #[serde(default)]
-    pub value: Option<String>,
-    /// A GCP Secret Manager version resource, resolved only at launch/respawn.
-    #[serde(default)]
-    pub secret_ref: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AutomationTokenReq {
-    pub subject: String,
-    pub profiles: Vec<String>,
-    pub ttl_secs: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AutomationTokenView {
     pub token: String,
     pub expires_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FederateReq {
     pub token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FederationReq {
     /// Stable operator-owned identity used for idempotent reconciliation.
     pub name: String,
@@ -1167,7 +1110,7 @@ fn github_oidc_issuer() -> String {
     "https://token.actions.githubusercontent.com".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FederationView {
     pub id: String,
     pub name: String,
@@ -1186,15 +1129,7 @@ pub struct FederationView {
     pub updated_at: String,
 }
 
-/// One named profile and its authoritative write-only environment declaration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentProfileReq {
-    pub profile: ProfileReq,
-    #[serde(default)]
-    pub env: Vec<DeploymentProfileEnvReq>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentProfileEnvReq {
     pub name: String,
     /// Omit both fields to preserve an existing write-only value by name.
@@ -1204,8 +1139,16 @@ pub struct DeploymentProfileEnvReq {
     pub secret_ref: Option<String>,
 }
 
+/// One named profile and its authoritative write-only environment declaration.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DeploymentProfileReq {
+    pub profile: crate::operations::profiles::update::Input,
+    #[serde(default)]
+    pub env: Vec<DeploymentProfileEnvReq>,
+}
+
 /// A scalar setting value in a JSON or YAML deployment manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum DeploymentSettingValue {
     String(String),
@@ -1223,24 +1166,7 @@ impl DeploymentSettingValue {
     }
 }
 
-/// Declarative runtime resources rendered by infrastructure tooling and
-/// reconciled by name.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DeploymentReq {
-    /// Organization defaults for registered runtime settings. Live DB values
-    /// remain a higher-precedence override.
-    #[serde(default)]
-    pub settings: BTreeMap<String, DeploymentSettingValue>,
-    #[serde(default)]
-    pub profiles: Vec<DeploymentProfileReq>,
-    #[serde(default)]
-    pub federations: Vec<FederationReq>,
-    /// Remove previously deployment-managed resources omitted from this request.
-    #[serde(default)]
-    pub prune: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentView {
     pub settings: Vec<SettingView>,
     pub profiles: Vec<ProfileView>,
@@ -1252,58 +1178,18 @@ pub struct DeploymentView {
 /// of the thread's root. The workspace is loom's own — a caller cannot address
 /// another team — and the bot token stays server-side, so this is a destination
 /// request, not a capability the caller holds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackThreadRef {
     pub channel: String,
     pub thread_ts: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunReq {
-    pub profile: String,
-    /// Caller-selected durable key. Verified GitHub callers may leave this
-    /// blank to use repository/run/attempt, or provide a bounded deterministic
-    /// key (for example an issue body hash) that Loom namespaces to the verified
-    /// identity.
-    #[serde(default)]
-    pub idempotency_key: String,
-    #[serde(default = "actions_source")]
-    pub source: String,
-    #[serde(default)]
-    pub watch_id: Option<String>,
-    /// Stable conversation route for related automation deliveries. Each
-    /// idempotency key remains a distinct run; channel deliveries reuse one
-    /// live ACP session.
-    #[serde(default)]
-    pub channel: Option<String>,
-    /// The Slack thread this delivery was announced in. Loom routes the thread to
-    /// the session the run lands on, which lets that session reply there and
-    /// lets a `@bot` mention in the thread reach it — without re-pointing the
-    /// session's single `slack` status-card wiring.
-    #[serde(default)]
-    pub slack: Option<SlackThreadRef>,
-    pub session: CreateReq,
-}
-
-/// One invocation of Loom's fixed, session-scoped GitHub tool surface.
-/// `arguments` is validated against the named tool by the server; the generic
-/// envelope keeps MCP transport details out of the REST contract.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RestrictedGithubToolReq {
-    #[serde(default)]
-    pub arguments: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RestrictedGithubToolView {
     pub text: String,
 }
 
-fn actions_source() -> String {
-    "actions".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RunView {
     pub id: String,
     pub actor_subject: String,
@@ -1321,8 +1207,28 @@ pub struct RunView {
     pub updated_at: String,
 }
 
+/// One detached background task's lifecycle, as `tasks.list` exposes it —
+/// currently the GitHub `@loom` trigger launches, which run off the webhook
+/// request so a slow clone can't blow GitHub's delivery timeout. Human-only
+/// self-service debugging (Settings → Diagnostics): a task label names a
+/// repo/issue an operator can act on.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TaskView {
+    pub id: u64,
+    /// A coarse category, e.g. `github-trigger`.
+    pub kind: String,
+    /// A human label, e.g. `marin-community/marin#6823 (@rjpower)`.
+    pub label: String,
+    /// `running` | `done` | `error`.
+    pub state: String,
+    /// Outcome detail: a session id, `forwarded`, or an error message.
+    pub detail: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
 /// One migration stream's observed and expected state.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct MigrationStreamView {
     pub stream: String,
     pub current: i64,
@@ -1332,8 +1238,9 @@ pub struct MigrationStreamView {
 }
 
 /// Public readiness response. Liveness remains the process-only `/api/health`;
-/// this shape proves that the database and both migration streams are usable.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// this response proves that the database and both migration streams are
+/// usable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ReadinessView {
     pub status: String,
     pub database: bool,
@@ -1345,7 +1252,7 @@ pub struct ReadinessView {
 
 /// A session count across every bounded control-plane dimension available in
 /// the current schema. `runner_pool` is `local` until runner pools land.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticSessionCount {
     pub status: String,
     pub class: String,
@@ -1355,7 +1262,7 @@ pub struct DiagnosticSessionCount {
     pub count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticProfileCapacity {
     pub profile: String,
     pub revision: i64,
@@ -1365,7 +1272,7 @@ pub struct DiagnosticProfileCapacity {
     pub available: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticRunCount {
     pub status: String,
     pub source: String,
@@ -1376,7 +1283,7 @@ pub struct DiagnosticRunCount {
 
 /// A redacted recent failed run. Deliberately excludes actor, idempotency key,
 /// session id, request body, and raw failure summary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticRunFailure {
     pub source: String,
     pub profile: String,
@@ -1384,7 +1291,7 @@ pub struct DiagnosticRunFailure {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticRunSummary {
     pub counts: Vec<DiagnosticRunCount>,
     pub stale_creating: i64,
@@ -1393,7 +1300,7 @@ pub struct DiagnosticRunSummary {
 
 /// Aggregated orphan/error inventory. No session, branch, path, principal, or
 /// error text crosses this diagnostics boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticProblemSummary {
     pub status: String,
     pub class: String,
@@ -1406,7 +1313,7 @@ pub struct DiagnosticProblemSummary {
 
 /// Non-secret federation mapping metadata useful for verifying deployment
 /// reconciliation. This never includes a bearer/OIDC token or signing key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticFederation {
     pub name: String,
     pub provider: String,
@@ -1417,8 +1324,8 @@ pub struct DiagnosticFederation {
     pub updated_at: String,
 }
 
-/// Human-readable operational snapshot returned by `/api/diagnostics`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Human-readable operational snapshot returned by `diagnostics.get`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct DiagnosticsView {
     pub sessions: Vec<DiagnosticSessionCount>,
     pub profiles: Vec<DiagnosticProfileCapacity>,
@@ -1433,7 +1340,7 @@ fn default_class() -> String {
 }
 
 /// Issue as the API exposes it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueView {
     pub id: i64,
     pub repo_root: String,
@@ -1456,13 +1363,14 @@ pub struct IssueView {
     /// Live state of the linked GitHub thread, fetched at read time by the
     /// single-issue endpoint when the issue carries a `github_repo` +
     /// `github_issue` link. Absent on list endpoints (no fan-out of GitHub
-    /// calls) and when the fetch fails — the ledger fields above still stand.
+    /// calls) and when the fetch fails — the issue's own fields above still
+    /// stand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_state: Option<GithubThreadState>,
 }
 
 /// One initial tag supplied while creating an issue.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueTagInput {
     pub key: String,
     pub value: String,
@@ -1473,7 +1381,7 @@ pub struct IssueTagInput {
 }
 
 /// One command validated and applied atomically to every requested issue.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IssueAction {
     Close,
@@ -1492,15 +1400,8 @@ pub enum IssueAction {
     Delete,
 }
 
-/// Body for `POST /api/issues/actions`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IssueActionsReq {
-    pub ids: Vec<i64>,
-    pub action: IssueAction,
-}
-
 /// One ID or precondition reported in an atomic action error's `details`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueActionProblem {
     pub id: i64,
     /// Stable machine-readable category such as `not_found`, `invalid_state`,
@@ -1509,8 +1410,9 @@ pub struct IssueActionProblem {
     pub error: String,
 }
 
-/// Aggregate outcome from a successful atomic `POST /api/issues/actions`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Aggregate outcome shared by every atomic work-item mutation: `issues.actions`
+/// and the `issues.close` / `issues.reopen` / `issues.delete` shorthands.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueActionsResult {
     /// Updated issue views for close, reopen, tag, and untag.
     pub issues: Vec<IssueView>,
@@ -1518,16 +1420,11 @@ pub struct IssueActionsResult {
     pub deleted_ids: Vec<i64>,
 }
 
-/// Response from the scalar `DELETE /api/issues/{id}` operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DeleteIssueResult {
-    pub deleted: bool,
-}
-
 /// The minimal live snapshot of a GitHub thread `loom issues get` renders
-/// beside the weaver ledger: enough to notice "this was closed / re-titled
-/// while I worked". An agent that needs the discussion reads it with `gh`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// beside loom's own issue record: enough to notice "this was closed /
+/// re-titled while I worked". An agent that needs the discussion reads it
+/// with `gh`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubThreadState {
     /// `open` | `closed`.
     pub state: String,
@@ -1537,7 +1434,7 @@ pub struct GithubThreadState {
 }
 
 impl IssueView {
-    /// Build the wire view from an [`Issue`] and the tags gathered for it.
+    /// Build the view from an [`Issue`] and the tags gathered for it.
     pub fn from_parts(i: Issue, tags: &[Tag]) -> Self {
         IssueView {
             id: i.id,
@@ -1559,7 +1456,7 @@ impl IssueView {
 }
 
 impl From<Issue> for IssueView {
-    /// Convenience for call sites that don't surface tags (the tag list is left
+    /// Convenience for call sites without tags to attach (the tag list is left
     /// empty). Tag-aware endpoints use [`IssueView::from_parts`].
     fn from(i: Issue) -> Self {
         IssueView::from_parts(i, &[])
@@ -1568,14 +1465,14 @@ impl From<Issue> for IssueView {
 
 // ---------------------------------------------------------------------------
 // Artifacts — named, versioned documents an agent (or the user) writes to
-// weaver. The envelope, a version row, and the full view (content + projected
-// references). The projection backs both the SPA chips and `loom artifacts
-// show`. See docs/artifacts.md.
+// weaver. The envelope, a version row, and the full view (content + reference
+// map). The reference map backs both the SPA chips and `loom artifacts show`.
+// See docs/artifacts.md.
 // ---------------------------------------------------------------------------
 
 /// An artifact envelope as the API exposes it: identity, kind, title, scope, and
 /// its latest revision number.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactMeta {
     pub id: i64,
     pub name: String,
@@ -1591,7 +1488,7 @@ pub struct ArtifactMeta {
 
 /// One revision of an artifact (metadata only — the version picker lists these;
 /// content is fetched per-rev through the artifact GET with `?rev=`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactVersion {
     pub rev: i64,
     /// `agent` | `user` — who wrote this revision.
@@ -1601,7 +1498,7 @@ pub struct ArtifactVersion {
 
 /// The live status of one issue referenced from an artifact — what the renderer
 /// stamps into a `#N` chip.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IssueRefStatus {
     pub id: i64,
     pub title: String,
@@ -1611,10 +1508,10 @@ pub struct IssueRefStatus {
     pub claimed_branch: Option<String>,
 }
 
-/// The projected reference map an artifact's content names. Keyed by id-as-string
-/// so it round-trips cleanly through JSON object keys. v1 projects issues; the
+/// The reference map an artifact's content names. Keyed by id-as-string so it
+/// round-trips cleanly through JSON object keys. v1 covers issues; the
 /// `artifact:`/`session:` reference kinds are reserved for later probes.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactRefs {
     /// `{"<issue id>": { id, title, status, claimed_branch }}` for every `#N`
     /// the content references.
@@ -1624,16 +1521,25 @@ pub struct ArtifactRefs {
 
 /// The full artifact view returned by the artifact GET/PUT: the envelope, the
 /// content of the selected (default latest) revision, the version list for a
-/// picker, and the projected reference map.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// picker, and the reference map.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactView {
     pub meta: ArtifactMeta,
     /// Raw content of the selected revision — the dashboard renders and edits it.
     pub content: String,
     /// Every revision, newest first, for the version picker.
     pub versions: Vec<ArtifactVersion>,
-    /// References found in the content, resolved against the live ledger.
+    /// References found in the content, resolved against current issue
+    /// records.
     pub refs: ArtifactRefs,
+}
+
+/// Response from `artifacts.delete`: confirms the artifact and its complete
+/// revision and discussion history were removed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ArtifactDeleteResult {
+    pub deleted: bool,
+    pub name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,7 +1552,7 @@ pub struct ArtifactView {
 
 /// A thread's anchor: the quoted span plus a little surrounding context for
 /// disambiguation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AnchorDto {
     pub quote: String,
     pub prefix: String,
@@ -1654,7 +1560,7 @@ pub struct AnchorDto {
 }
 
 /// One reply in a thread, as the API exposes it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CommentDto {
     pub seq: i64,
     /// `agent` | `user`.
@@ -1665,7 +1571,7 @@ pub struct CommentDto {
 
 /// A discussion thread on an artifact span: its anchor, status, and comments
 /// (oldest first), as the GET/POST thread endpoints expose it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ThreadDto {
     pub id: i64,
     /// The artifact revision the anchor was taken from.
@@ -1678,42 +1584,38 @@ pub struct ThreadDto {
     pub comments: Vec<CommentDto>,
 }
 
-/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads`: open a new
-/// thread anchored to a quoted span, seeded with its first comment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewThreadBody {
-    pub base_rev: i64,
-    pub anchor: AnchorDto,
-    pub body: String,
-}
-
-/// Body for `POST /api/sessions/{id}/artifacts/{name}/threads/{tid}/comments`:
-/// append a reply to an existing thread.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewCommentBody {
-    pub body: String,
-}
-
 // ---------------------------------------------------------------------------
 // Reviews — creator-private draft feedback over versioned artifacts. The
-// generic subject/anchor shapes are shared with the future changes viewer.
+// generic subject/anchor types are shared with the future changes viewer.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewSubjectKindDto {
     Artifact,
     Changes,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl std::str::FromStr for ReviewSubjectKindDto {
+    type Err = String;
+
+    fn from_str(kind: &str) -> Result<Self, Self::Err> {
+        match kind.trim() {
+            "artifact" => Ok(Self::Artifact),
+            "changes" => Ok(Self::Changes),
+            other => Err(format!("unknown review subject kind `{other}`")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewAnchorKindDto {
     Text,
     Change,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewSubjectDto {
     pub kind: ReviewSubjectKindDto,
     /// Stable internal artifact envelope id.
@@ -1725,7 +1627,7 @@ pub struct ReviewSubjectDto {
     pub current_version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactTextAnchorDto {
     pub quote: String,
@@ -1737,14 +1639,14 @@ pub struct ArtifactTextAnchorDto {
     pub block_index: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSideDto {
     Old,
     New,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeAnchorDto {
     pub path: ChangePathDto,
@@ -1759,7 +1661,7 @@ pub struct ChangeAnchorDto {
     pub context_after: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ReviewAnchorDto {
     Text(ArtifactTextAnchorDto),
@@ -1772,7 +1674,7 @@ impl From<ArtifactTextAnchorDto> for ReviewAnchorDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewCommentDto {
     pub id: i64,
     pub subject_version: String,
@@ -1784,7 +1686,7 @@ pub struct ReviewCommentDto {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReviewDto {
     pub id: i64,
     pub session_id: String,
@@ -1809,74 +1711,12 @@ pub struct ReviewDto {
     pub legacy: bool,
 }
 
-/// Create or recover the caller's one draft for a session/subject.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateReviewReq {
-    pub subject_kind: ReviewSubjectKindDto,
-    /// Artifact name for `subject_kind = "artifact"`.
-    pub subject_key: String,
-    pub subject_version: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AddReviewCommentReq {
-    pub expected_revision: i64,
-    pub subject_version: String,
-    pub anchor_kind: ReviewAnchorKindDto,
-    pub anchor: ReviewAnchorDto,
-    pub body: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateReviewCommentReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub subject_version: Option<String>,
-    #[serde(default)]
-    pub anchor_kind: Option<ReviewAnchorKindDto>,
-    #[serde(default)]
-    pub anchor: Option<ReviewAnchorDto>,
-    #[serde(default)]
-    pub body: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SubmitReviewReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub acknowledge_outdated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpdateReviewReq {
-    pub expected_revision: i64,
-    #[serde(default)]
-    pub summary: Option<String>,
-    #[serde(default)]
-    pub subject_version: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExpectedReviewRevisionReq {
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolveReviewCommentReq {
-    pub resolved: bool,
-}
-
 // ---------------------------------------------------------------------------
 // Changes — one bounded, typed snapshot of the session worktree relative to
 // its real branch base.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeFileStatusDto {
     Added,
@@ -1888,7 +1728,7 @@ pub enum ChangeFileStatusDto {
     Untracked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSourceDto {
     Committed,
@@ -1897,7 +1737,7 @@ pub enum ChangeSourceDto {
     Untracked,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeContentDto {
     Text,
@@ -1906,7 +1746,7 @@ pub enum ChangeContentDto {
     Unsupported,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeLineKindDto {
     Context,
@@ -1914,7 +1754,7 @@ pub enum ChangeLineKindDto {
     Deletion,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeLineDto {
     pub kind: ChangeLineKindDto,
     pub old_line: Option<u32>,
@@ -1922,14 +1762,14 @@ pub struct ChangeLineDto {
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeHunkDto {
     pub header: String,
     pub lines: Vec<ChangeLineDto>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeFileDto {
     pub status: ChangeFileStatusDto,
     pub path: ChangePathDto,
@@ -1942,7 +1782,7 @@ pub struct ChangeFileDto {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangePathDto {
     /// URL-safe base64 of the exact repo-relative Git path bytes.
     pub bytes: String,
@@ -1950,7 +1790,7 @@ pub struct ChangePathDto {
     pub display: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeBaseUnavailableReasonDto {
     UnbornHead,
@@ -1958,7 +1798,7 @@ pub enum ChangeBaseUnavailableReasonDto {
     NoMergeBase,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum ChangeBaseDto {
     Available {
@@ -1971,7 +1811,7 @@ pub enum ChangeBaseDto {
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeTotalsDto {
     pub files: u32,
     pub additions: u32,
@@ -1979,7 +1819,7 @@ pub struct ChangeTotalsDto {
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeLimitsDto {
     pub max_files: u32,
     pub max_hunks_per_file: u32,
@@ -1988,7 +1828,7 @@ pub struct ChangeLimitsDto {
     pub max_line_bytes: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangeSetDto {
     pub version: Option<String>,
     pub base: ChangeBaseDto,
@@ -1999,11 +1839,10 @@ pub struct ChangeSetDto {
     pub limits: ChangeLimitsDto,
 }
 
-/// One watch, as the API exposes it. The JSON-bearing columns
-/// (`trigger`, `scope`, `params`) are returned as **parsed** structured JSON so
-/// a UI never re-parses strings; `capabilities` is a real array; the rest is the
-/// stored definition plus its schedule bookkeeping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One watch, as the API exposes it. The JSON-bearing columns (`trigger`,
+/// `scope`, `params`) are returned as **parsed** structured JSON so a UI never
+/// re-parses strings; `capabilities` is a real array.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchView {
     pub id: String,
     pub name: String,
@@ -2051,9 +1890,8 @@ pub struct WatchView {
 }
 
 impl WatchView {
-    /// Build the wire view from a watch plus the most recent round's
-    /// outcome (the server reads that from the run history). The JSON columns
-    /// are parsed here via the domain accessors.
+    /// Build the view from a watch plus the most recent round's outcome,
+    /// read from the run history.
     pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
         Self {
             id: o.id.clone(),
@@ -2081,11 +1919,10 @@ impl WatchView {
     }
 }
 
-/// One round in a watch's history (the audit trail), with `actions`
-/// parsed back into JSON for a UI to render. The `stdout`/`stderr`/`exit_code`/
-/// `duration_ms` fields are the captured execution log — what the script printed
-/// and returned — surfaced so a run page shows exactly what happened.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One round in a watch's history (the audit trail), with `actions` parsed
+/// back into JSON for a UI to render. `stdout`/`stderr`/`exit_code`/
+/// `duration_ms` are the script's captured execution log.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchRunView {
     pub id: i64,
     pub trigger_reason: String,
@@ -2127,10 +1964,10 @@ impl From<WatchRun> for WatchRunView {
     }
 }
 
-/// One **program** a watch can run, as `GET /api/watches/programs`
-/// exposes it. Builtin programs are Python scripts that ship inside the loom
-/// binary; the embedded source is returned for a read-only view in the panel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One **program** a watch can run, as `watches.programs` exposes it. Builtin
+/// programs are Python scripts that ship inside the loom binary; the embedded
+/// source is returned for a read-only view in the panel.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProgramView {
     /// The reference a watch's `program` field names it by, e.g.
     /// `builtin:status` or `builtin:archive-merged`.
@@ -2154,6 +1991,10 @@ pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
 pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
 pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
+// `branches.slack.reply` and `channels.messages.create` spell these bounds as
+// schemars literals, which cannot reference a constant.
+const _: () = assert!(CHANNEL_IDEMPOTENCY_KEY_MAX_LEN == 255);
+const _: () = assert!(CHANNEL_MESSAGE_LIMIT_MAX == 500);
 pub const CHANNEL_SLACK_ORIGIN_BINDING_ID: &str = "slack:origin";
 
 pub fn channel_session_binding_id(session_id: &str) -> String {
@@ -2162,7 +2003,7 @@ pub fn channel_session_binding_id(session_id: &str) -> String {
 
 /// One durable communication context. A session channel uses its owning
 /// session id as `id`; custom channels have an independent id.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChannelView {
     pub id: String,
     pub kind: String,
@@ -2182,12 +2023,16 @@ pub struct ChannelView {
     pub unread_urgent_count: i64,
     #[serde(default)]
     pub last_message: Option<ChannelMessageView>,
+    /// This channel's server-owned delivery bindings, included directly so
+    /// REST, the CLI, and MCP all see the same data.
+    #[serde(default)]
+    pub bindings: Vec<ChannelBindingView>,
 }
 
 /// One server-owned destination bound to a durable channel. Agents address the
 /// Loom channel; the daemon owns provider coordinates and reports delivery per
 /// binding without exposing credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct ChannelBindingView {
     pub id: String,
     pub kind: String,
@@ -2197,7 +2042,7 @@ pub struct ChannelBindingView {
 }
 
 /// One append-only item in a channel's monotonically sequenced history.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChannelMessageView {
     pub id: String,
     pub channel_id: String,
@@ -2215,7 +2060,7 @@ pub struct ChannelMessageView {
 }
 
 /// Attempt and outcome for delivery of one channel message to one binding.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChannelDeliveryView {
     /// Stable identity within the channel, for example `session:<id>` or
     /// `slack:origin`.
@@ -2234,17 +2079,26 @@ pub struct ChannelDeliveryView {
 
 /// Caller-relative bootstrap context used by in-session tools. REST resources
 /// remain canonically id-addressed; this view resolves `self` once.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SelfContextView {
     pub session_id: String,
     pub branch_id: String,
+    /// The branch's human name. Carried alongside the id because context fields
+    /// need both and confusing them is silent — see `ContextSource::BranchName`.
+    #[serde(default)]
+    pub branch_name: String,
     pub repo_root: String,
     pub channel_id: String,
     pub session_url: String,
     pub links: SelfContextLinks,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Where a session reads its own channel, artifacts, and session record.
+///
+/// Each value is a route, not a per-id URL: the operand these three reads
+/// take is the caller's own context, so a session credential posting an
+/// empty body to any of them gets its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SelfContextLinks {
     pub channel: String,
     pub artifacts: String,
@@ -2253,7 +2107,7 @@ pub struct SelfContextLinks {
 
 /// One structured catch-up for an agent resuming a session. Consumers render
 /// this for terminals or return it directly over MCP.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionCatchupView {
     pub session_id: String,
     pub branch_id: String,
@@ -2268,7 +2122,7 @@ pub struct SessionCatchupView {
 }
 
 /// The authenticated caller's subscription to a channel.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChannelSubscriptionView {
     pub channel_id: String,
     pub subject_kind: String,
@@ -2279,175 +2133,27 @@ pub struct ChannelSubscriptionView {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateChannelReq {
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub topic: String,
-    /// Required for an admin-created repo channel; ignored for a session
-    /// principal, whose repository and branch are derived from its grant.
-    #[serde(default)]
-    pub repo_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateChannelMessageReq {
-    #[serde(default = "default_channel_message_kind")]
-    pub kind: String,
-    #[serde(default = "default_channel_urgency")]
-    pub urgency: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub payload: Value,
-    #[serde(default)]
-    pub reply_to: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
-fn default_channel_message_kind() -> String {
-    CHANNEL_DEFAULT_MESSAGE_KIND.to_string()
-}
-
-fn default_channel_urgency() -> String {
-    CHANNEL_DEFAULT_URGENCY.to_string()
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetChannelSubscriptionReq {
-    #[serde(default = "default_channel_subscription_mode")]
-    pub mode: String,
-    /// Optional descendant session to subscribe. Omission updates the caller's
-    /// own subscription; admin callers may name any session.
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-fn default_channel_subscription_mode() -> String {
-    CHANNEL_DEFAULT_SUBSCRIPTION_MODE.to_string()
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetChannelReadMarkerReq {
-    /// Omission advances through the latest message in the response snapshot.
-    #[serde(default)]
-    pub seq: Option<i64>,
-}
-
 // ---------------------------------------------------------------------------
 // Request payloads
 // ---------------------------------------------------------------------------
 
 /// One launch-time scratch file: a name plus its base64-encoded bytes. JSON
 /// can't carry raw binary, so the UI reads each dropped file as base64.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ScratchUpload {
     pub name: String,
     #[serde(default)]
     pub content_base64: String,
 }
 
-/// Body for `POST /api/sessions`: launch a new session.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateReq {
-    /// The repo to fork the session's worktree from, as a local path. Ignored
-    /// when `repo` (a managed repo) is set; otherwise required.
-    #[serde(default)]
-    pub cwd: String,
-    /// An optional **managed** repository to launch against: a GitHub `owner/name`
-    /// slug or URL. When set, loom resolves it against the registered repo
-    /// allowlist, clones it into the managed repo store if absent (else fetches),
-    /// and uses that checkout as the repo root — `cwd` is then ignored. Unset (the
-    /// default) keeps the historical behaviour: fork from `cwd`'s repo.
-    #[serde(default)]
-    pub repo: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub goal: Option<String>,
-    #[serde(default)]
-    pub base: Option<String>,
-    #[serde(default)]
-    pub agent: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub issue: Option<i64>,
-    /// A GitHub issue number the caller already holds the content of (the
-    /// `@loom` trigger, whose webhook payload carries the thread): recorded on
-    /// the compatibility work item as its GitHub link, with none of `issue`'s
-    /// fetch-and-seed. Ignored when `issue` is set.
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    /// A pre-existing weaver backlog item to claim for this session. Seeds
-    /// title/goal/description and stamps `claimed_branch`; ordinary launches
-    /// do not create a work item.
-    #[serde(default)]
-    pub claim_issue: Option<i64>,
-    #[serde(default)]
-    pub existing_branch: Option<String>,
-    /// The branch (id or name) of the agent launching this session, when it is
-    /// itself a weaver session delegating work. It defines the session-tree
-    /// parent and, for an explicitly claimed/imported work item, that item's
-    /// `source_branch`. The `loom` CLI fills this from `$WEAVER_BRANCH`; a
-    /// human/dashboard launch leaves it unset.
-    #[serde(default)]
-    pub parent_branch: Option<String>,
-    /// Model selector accepted by the selected agent type; blank/absent uses
-    /// the agent runtime's default.
-    #[serde(default)]
-    pub model: Option<String>,
-    /// Reasoning effort ('low' | 'medium' | 'high' | 'xhigh' | 'max');
-    /// blank/absent uses the agent runtime's default.
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Reference files to drop into the new worktree's `scratch/` directory
-    /// before the agent launches. Empty/absent for a plain session.
-    #[serde(default)]
-    pub scratch: Vec<ScratchUpload>,
-    /// Execution-backend override: `"terminal"` forces the PTY fallback for a
-    /// builtin; `"acp"` opts in explicitly. Blank/absent uses the agent's
-    /// declared default (acp for the builtins). Rejected for agents that don't
-    /// support the requested backend.
-    #[serde(default)]
-    pub protocol: Option<String>,
-    /// The ACP launch permission posture (`auto` | `bypassPermissions` |
-    /// `acceptEdits` | `default` | `plan`). Blank/absent uses the configured
-    /// `agent.mode` (which defaults to `auto`: a background classifier vets each
-    /// tool call and escalates only risky actions). Ignored for a terminal launch.
-    #[serde(default)]
-    pub mode: Option<String>,
-    /// Session class override: `"interactive"` or `"automation"` (anything else
-    /// is rejected). Blank/absent derives from the launch origin
-    /// (watch/actions/ops/grafana → automation, else interactive).
-    /// Automation-class sessions remain in the default human fleet; survey
-    /// callers can explicitly request `automation=false`.
-    #[serde(default)]
-    pub class: Option<String>,
-    /// Named launch profile. Blank/absent selects `default`.
-    #[serde(default)]
-    pub profile: Option<String>,
-    /// Canonical launch selection. Requires both expected revisions returned by
-    /// `/api/session-launches/resolve`. Flattened fields remain compatible.
-    #[serde(default)]
-    pub selection: Option<LaunchSelection>,
-    /// Revisions returned by the last resolve preview. Canonical input requires
-    /// both; drift returns 409 with a fresh preview.
-    #[serde(default)]
-    pub expected_profile_revision: Option<i64>,
-    #[serde(default)]
-    pub expected_resolver_revision: Option<String>,
-}
-
-/// Body for `POST /api/sessions/{id}/handoff`: canonical `selection` requires
-/// both revisions from `/handoff/resolve` and stamps the target template.
-/// Flattened input is legacy runtime-only compatibility and preserves the
-/// session's stamped profile/policy.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The handoff arguments a caller assembles before invoking `sessions.handoff`,
+/// splatted field-for-field into that operation's input rather than sent as its
+/// own body. Canonical `selection` requires both revisions from
+/// `sessions.handoff.resolve` and stamps the target template; flattened fields
+/// remain for backward compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HandoffReq {
-    /// Legacy flattened runtime selector. Canonical clients use `selection`.
+    /// Flattened runtime selector for backward compatibility. Canonical clients use `selection`.
     #[serde(default)]
     pub agent: String,
     /// Blank/absent uses the target runtime's default.
@@ -2467,140 +2173,17 @@ pub struct HandoffReq {
     pub expected_resolver_revision: Option<String>,
 }
 
-/// Body for `PATCH /api/sessions/{id}`. Branch-level fields (goal/title/
-/// description) are forwarded to the underlying branch row. The attention *level*
-/// is set through the tags endpoints (`PUT/DELETE /sessions/{id}/tags/{key}`),
-/// not here.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PatchSessionReq {
-    #[serde(default)]
-    pub status: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Required with `title`: the label/provenance the caller observed.
-    #[serde(default)]
-    pub expected_title: Option<String>,
-    #[serde(default)]
-    pub expected_title_provenance: Option<String>,
-    #[serde(default)]
-    pub goal: Option<String>,
-    /// The agent's current-state message — the prose shown beside the level.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Retained only to return an explicit compatibility error. Layout clients
-    /// must use the revisioned session-layout move API.
-    #[serde(default)]
-    pub park: Option<String>,
-    /// Retained only to return an explicit compatibility error. Layout clients
-    /// must use the revisioned session-layout move API.
-    #[serde(default)]
-    pub sort_order: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetTitleGenerationReq {
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EnsureResumptionCueReq {
-    /// Explicit user request. False is the on-return path and respects the
-    /// configured inactivity threshold.
-    #[serde(default)]
-    pub force: bool,
-}
-
-/// Create a space and its useful empty Inbox group.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateSessionSpaceReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateSessionSpaceReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-/// Deleting a non-empty space atomically moves its sessions/defaults here.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteSessionSpaceReq {
-    #[serde(default)]
-    pub destination_group_id: Option<String>,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateSessionGroupReq {
-    pub space_id: String,
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateSessionGroupReq {
-    pub name: String,
-    pub expected_revision: i64,
-}
-
-/// Deleting a group never deletes sessions. A destination is required whenever
-/// the group owns placements or default-placement selectors.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeleteSessionGroupReq {
-    #[serde(default)]
-    pub destination_group_id: Option<String>,
-    pub expected_revision: i64,
-}
-
 // Reorder one space, or one group (optionally into another space).
 wire_enum!(SessionLayoutItemKind {
     Space => "space",
     Group => "group",
 });
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReorderSessionLayoutReq {
-    pub kind: SessionLayoutItemKind,
-    pub id: String,
-    #[serde(default)]
-    pub before_id: Option<String>,
-    #[serde(default)]
-    pub destination_space_id: Option<String>,
-    pub expected_revision: i64,
-}
-
-/// Atomically move one or more sessions to an exact group insertion point.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MoveSessionsReq {
-    pub session_ids: Vec<String>,
-    pub destination_group_id: String,
-    #[serde(default)]
-    pub before_session_id: Option<String>,
-    pub expected_revision: i64,
-}
-
 /// One complete group order in an atomic layout restore.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SessionGroupOrderReq {
     pub group_id: String,
     pub session_ids: Vec<String>,
-}
-
-/// Atomically restore the complete membership and order of a set of groups.
-///
-/// The supplied groups must cover exactly the sessions currently placed in
-/// those groups. This makes an undo fail as a stale whole instead of partially
-/// overwriting an intervening placement.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RestoreSessionGroupsReq {
-    pub groups: Vec<SessionGroupOrderReq>,
-    pub expected_revision: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionGroupPreferenceReq {
-    pub collapsed: bool,
 }
 
 wire_enum!(SessionPlacementSelectorKind {
@@ -2609,32 +2192,8 @@ wire_enum!(SessionPlacementSelectorKind {
     Watch => "watch",
 });
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetSessionPlacementDefaultReq {
-    pub selector_kind: SessionPlacementSelectorKind,
-    pub selector_value: String,
-    pub group_id: String,
-    pub expected_revision: i64,
-}
-
-/// Body for `PUT /api/sessions/{id}/tags/{key}`: set (upsert) a tag. The `key`
-/// is the path segment; this carries the rest. For a loud key (`attention` |
-/// `triage`) `value` is `attention` | `blocked` — to return to calm, `DELETE`
-/// the tag rather than setting an `ok` value.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TagReq {
-    pub value: String,
-    /// One-line reason accompanying the tag.
-    #[serde(default)]
-    pub note: String,
-    /// Who is setting it (a watch name or `manual`); the server defaults a
-    /// missing author.
-    #[serde(default)]
-    pub by: Option<String>,
-}
-
-/// One desired tag in `PUT /api/sessions/{id}/tags`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// One desired tag in `sessions.tags.replace`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagInput {
     pub key: String,
     pub value: String,
@@ -2644,28 +2203,16 @@ pub struct TagInput {
 }
 
 /// One exact `(key, value)` tag to clear in the same atomic replacement.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TagMatch {
     pub key: String,
     pub value: String,
 }
 
-/// Body for `PUT /api/sessions/{id}/tags`: atomically replace the tags authored
-/// by `by` with `tags`. `clear` is reserved for exact-match lifecycle marks such
-/// as `idle: idle` that the caller is explicitly replacing too.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetTagsReq {
-    #[serde(default)]
-    pub tags: Vec<TagInput>,
-    #[serde(default)]
-    pub clear: Vec<TagMatch>,
-    /// The author whose existing tag set is replaced. Defaults to `manual`.
-    #[serde(default)]
-    pub by: Option<String>,
-}
-
-/// Body for `POST /api/sessions/{id}/send`: type a message into the agent pane.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// In-process arguments for typing a message into a session's agent pane, not
+/// sent directly as a request body: `Client::nudge` and loom's channel
+/// delivery path each translate it into `sessions.send` input.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SendReq {
     /// The text to type into the agent's pane.
     pub text: String,
@@ -2694,154 +2241,32 @@ impl SendReq {
     }
 }
 
-/// Body for `POST /api/agent/oneshot`: run a fresh ACP prompt through a
-/// registered agent and return its text as `{output}` (`null` when the adapter
-/// is absent or fails — callers degrade gracefully).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct AgentOneshotReq {
-    pub prompt: String,
-    /// Optional launch profile. When set, its runtime and policy are
-    /// authoritative; model and effort remain optional per-call overrides.
-    #[serde(default)]
-    pub profile: String,
-    /// Registered ACP runtime. Empty preserves the historical Claude default.
-    #[serde(default)]
-    pub agent: String,
-    /// Model override advertised by the runtime; empty keeps its ACP default.
-    #[serde(default)]
-    pub model: String,
-    /// Reasoning effort override advertised by the runtime; empty keeps its
-    /// ACP default.
-    #[serde(default)]
-    pub effort: String,
+/// Result of `sessions.send`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionSendResult {
+    pub sent: bool,
+    pub submitted: bool,
+    /// Whether the prompt was queued behind an active turn. Set only for an ACP
+    /// session; `null` for a terminal session, which has no queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queued: Option<bool>,
+    /// The turn the prompt belongs to. Set only for an ACP session; `null`
+    /// for a terminal session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<i64>,
 }
 
-/// Issue fields nested in the input to `POST /api/issues/create`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateIssueReq {
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    #[serde(default)]
-    pub tags: Vec<IssueTagInput>,
+/// Result of `sessions.interrupt`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionInterruptResult {
+    pub interrupted: bool,
 }
 
-/// Body for `PATCH /api/issues/{id}`: every mutable field optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PatchIssueReq {
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    /// "open" or "closed".
-    #[serde(default)]
-    pub status: Option<String>,
-    /// GitHub issue mapping as `owner/name#number`. An empty string clears the
-    /// mapping; absent leaves it unchanged.
-    #[serde(default)]
-    pub github: Option<String>,
-    /// The branch currently working the issue. `null` clears the claim; absent
-    /// leaves it unchanged. Claims are created through session launch, so this
-    /// patch field deliberately supports clearing only.
-    #[serde(
-        default,
-        deserialize_with = "deserialize_present_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub claimed_branch: Option<Option<String>>,
-}
-
-/// Preserve the PATCH distinction between an absent field and an explicit
-/// JSON `null`: serde's ordinary `Option<Option<T>>` handling maps both to the
-/// outer `None`.
-fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Ok(Some(Option::<T>::deserialize(deserializer)?))
-}
-
-/// Body for `POST /api/issues/backlog/create`: create an unclaimed repo-level
-/// backlog item.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateRepoIssueReq {
-    pub repo_root: String,
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    #[serde(default)]
-    pub github_issue: Option<i64>,
-    /// The branch that filed this backlog item (provenance) — `None` for a
-    /// bare API call with no originating branch. When set and it resolves to
-    /// a live branch in this repo, an `issue_added` event is recorded there.
-    #[serde(default)]
-    pub source_branch: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<IssueTagInput>,
-}
-
-/// Body for `PUT /api/sessions/{id}/artifacts/{name}`: a user edit that appends
-/// a new revision (`author: user`). `title`/`kind` update the envelope; omit
-/// them to keep the current values.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ArtifactWriteBody {
-    pub content: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    /// Optimistic-concurrency guard: if set and it doesn't match the
-    /// artifact's current latest revision, the server rejects the write with
-    /// 409 instead of silently overwriting a newer edit. Omitted (the
-    /// default) force-writes as before — backward compatible.
-    #[serde(default)]
-    pub base_rev: Option<i64>,
-}
-
-/// Body for `PUT /api/branches/{id}/artifacts/{name}`: create-or-append,
-/// unlike the session-scoped `PUT` (which requires the artifact to already
-/// exist). `author` defaults to `agent` — the CLI's writer; a `user` edit goes
-/// through the session-scoped route instead.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ArtifactUpsertReq {
-    pub content: String,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>,
-    #[serde(default)]
-    pub author: Option<String>,
-    /// Write the repo-shared scope (`branch_id IS NULL`) instead of this
-    /// branch's own copy.
-    #[serde(default)]
-    pub repo: bool,
-    /// Reject the write when the currently resolved artifact has advanced past
-    /// the revision the caller edited. `None` preserves force-write behavior.
-    #[serde(default)]
-    pub base_rev: Option<i64>,
-}
-
-/// Body for `POST /api/branches/{id}/status`: set the agent's attention level
-/// and current-state message in one call. `level` is `ok` | `attention` |
-/// `blocked`; an absent or empty `message` leaves the previous one in place.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct BranchStatusReq {
-    pub level: String,
-    #[serde(default)]
-    pub message: Option<String>,
-}
-
-/// Body for `POST /api/branches/{id}/events`: append a raw event row (e.g. an
-/// agent hook). The one escape hatch for an event kind with no dedicated
-/// mutating route of its own.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateEventReq {
-    pub kind: String,
-    #[serde(default)]
-    pub data: Value,
+/// Result of `sessions.preview`: the session's terminal pane (or, for an ACP
+/// session, its recent journal) rendered as plain text.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionPreviewResult {
+    pub screen: String,
 }
 
 wire_enum!(SettingKind {
@@ -2881,8 +2306,8 @@ impl From<weaver_core::config::SettingSource> for SettingSource {
 }
 
 /// One registered setting with all registry metadata and its effective value,
-/// as both `GET` and `PATCH /api/settings` return it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// as both `settings.get` and `settings.patch` return it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettingView {
     pub key: String,
     pub label: String,
@@ -2920,14 +2345,14 @@ impl From<weaver_core::config::SettingView> for SettingView {
     }
 }
 
-/// The envelope both `GET` and `PATCH /api/settings` return.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The envelope both `settings.get` and `settings.patch` return.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SettingsEnvelope {
     pub settings: Vec<SettingView>,
 }
 
 /// One personal preference with its deployment-wide inherited value.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserPreferenceView {
     pub key: String,
     pub label: String,
@@ -2939,74 +2364,189 @@ pub struct UserPreferenceView {
     pub is_overridden: bool,
 }
 
-/// Effective personal preferences returned by `GET` and `PATCH /api/preferences`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Effective personal preferences returned by `preferences.get` and
+/// `preferences.patch`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserPreferencesEnvelope {
     pub preferences: Vec<UserPreferenceView>,
 }
 
-/// Body for `POST /api/watches`. JSON-bearing fields take structured JSON
-/// (`trigger`/`scope`/`params`), which the server serializes into the stored
-/// text columns. Optional fields fall back to the model's defaults.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateWatchReq {
+/// One variable in the default profile's environment, as the
+/// `settings.env.*` compatibility facade returns it and
+/// `loom_store::agent_env` stores it. Unlike [`ProfileEnvView`], the value is
+/// not redacted: this facade predates the write-only convention profiles use.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentEnvVarView {
     pub name: String,
-    #[serde(default)]
-    pub trigger: Option<Value>,
-    #[serde(default)]
-    pub scope: Option<Value>,
-    #[serde(default)]
-    pub program: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub cooldown_secs: Option<i64>,
-    /// Whether the watch fires as soon as it is created. Omitted by API
-    /// clients that want the model default (disabled); the loom UI sends `true`
-    /// so a watcher picked from the builtin registry is live without a separate
-    /// manual enable.
-    #[serde(default)]
-    pub enabled: Option<bool>,
+    pub value: String,
+    pub updated_at: String,
 }
 
-/// Body for `PATCH /api/watches/{id}`: every mutable field optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PatchWatchReq {
-    #[serde(default)]
-    pub enabled: Option<bool>,
-    #[serde(default)]
-    pub trigger: Option<Value>,
-    #[serde(default)]
-    pub scope: Option<Value>,
-    #[serde(default)]
-    pub program: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub capabilities: Option<Vec<String>>,
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub cooldown_secs: Option<i64>,
+/// Result of `watches.delete`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct WatchDeleteResult {
+    pub deleted: bool,
+    pub id: String,
 }
 
-/// Body for `POST /api/watches/{id}/run`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RunWatchReq {
-    #[serde(default)]
-    pub dry_run: bool,
+/// Result of firing a watch round on demand (`watches.run`): the round's id and
+/// its closed outcome, re-read from the run history once the round finishes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct WatchRunResult {
+    pub run_id: i64,
+    /// `ok|noop|skipped|error`, or empty if the round row could not be
+    /// re-read.
+    pub outcome: String,
+    pub summary: String,
+}
+
+// ---------------------------------------------------------------------------
+// Managed repositories
+//
+// Mirrors of `loom-forge::repo`'s `ManagedRepo`/`RecentRepo` and the
+// `crates/loom/src/web/repos.rs` / `repo_env.rs` ad hoc response types.
+// weaver-api depends only on weaver-core, not on loom-forge or loom-store, so
+// these types are defined here rather than imported.
+// ---------------------------------------------------------------------------
+
+/// A repo registered in the managed store (the slug → (remote, path) mapping
+/// that doubles as the clone allowlist). Mirrors `loom_forge::repo::ManagedRepo`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoView {
+    /// Canonical GitHub `owner/name`.
+    pub slug: String,
+    /// The clone source URL.
+    pub remote_url: String,
+    /// The managed on-disk clone path.
+    pub path: String,
+    pub created_at: String,
+}
+
+/// One recently-used repository. Mirrors `loom_forge::repo::RecentRepo`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RecentRepoView {
+    pub repo_root: String,
+    pub last_used_at: String,
+    /// How many tracked branches exist in this repo (may be zero).
+    pub active_branches: i64,
+}
+
+/// One local git branch of a repo checkout, as `repos.branches` reports it —
+/// name, its worktree if one is checked out, and whether it is the checkout's
+/// current branch.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoBranchView {
+    pub name: String,
+    pub worktree: Option<String>,
+    pub current: bool,
+}
+
+/// Result of validating a launch fork point against a repo checkout
+/// (`repos.revisions.validate`).
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoRevisionValidationView {
+    pub valid: bool,
+    pub repo_root: String,
+    /// Why resolution failed, when `valid` is false.
+    pub message: Option<String>,
+}
+
+/// One per-repo environment variable's metadata, and the row type
+/// `loom_store::repo_env` reads. The value is omitted: per-repo variables are
+/// write-only, so a stored secret can be replaced but never read back.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoEnvVarView {
+    pub name: String,
+    pub updated_at: String,
+}
+
+/// The per-repo environment variables' metadata, as every repo-env mutation
+/// returns it so the caller can refresh in one round trip.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoEnvView {
+    pub repo_root: String,
+    pub env: Vec<RepoEnvVarView>,
+}
+
+/// Result of `shell.restart`: the operator shell's process was replaced, so its
+/// working directory and environment are whatever a fresh login gets.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ShellRestartResult {
+    pub restarted: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+//
+// Mirrors of `loom_agent::agent`'s `AgentMetadata`/`AgentChoice` and
+// `loom_agent::custom_agents::CustomAgent`, plus the ad hoc envelopes
+// `agents.list` and the `agents.custom.*` mutations return.
+// ---------------------------------------------------------------------------
+
+/// One selectable value for an agent's `model` or `effort` choice.  Mirrors
+/// `loom_agent::agent::AgentChoice`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentChoiceView {
+    pub id: String,
+    pub label: String,
+}
+
+/// One agent runtime the picker offers — a builtin (`claude`, `codex`) or an
+/// operator-defined custom agent. Mirrors `loom_agent::agent::AgentMetadata`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentMetadataView {
+    pub kind: String,
+    pub label: String,
+    pub models: Vec<AgentChoiceView>,
+    pub efforts: Vec<AgentChoiceView>,
+    pub accepts_raw_model: bool,
+    pub supports_hooks: bool,
+    /// True for the code-shipped `claude`/`codex`; false for an
+    /// operator-defined custom agent (which the UI may edit or delete).
+    pub builtin: bool,
+    /// Whether this runtime can be driven through ACP.
+    pub supports_acp: bool,
+    /// The agent's declared execution backend: `"terminal"` or `"acp"`.
+    pub protocol: String,
+}
+
+/// One operator-defined custom agent definition — a row of the
+/// `custom_agents` table and the type the API returns for the editor.
+/// Mirrors `loom_agent::custom_agents::CustomAgent`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CustomAgentView {
+    /// The id referenced by the agent list and a session's `agent_kind`.
+    pub name: String,
+    /// The display name shown in the agent picker.
+    pub label: String,
+    /// Shell run in the worktree before launch.
+    pub setup: String,
+    /// The fresh-session launch command; the goal is appended as an argument.
+    pub launch: String,
+    /// The adopt/resume command (no goal). Blank reuses `launch`.
+    pub resume: String,
+    /// Whether the agent fires loom's lifecycle hooks.
+    pub reports_status: bool,
+    /// Execution backend: `"terminal"` or `"acp"`. Blank reads as `"terminal"`.
+    pub protocol: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// `agents.list` — the picker list (builtins + custom) plus the full
+/// custom-agent definitions the editor round-trips.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentsView {
+    pub agents: Vec<AgentMetadataView>,
+    pub custom: Vec<CustomAgentView>,
+    pub default_agent: String,
+}
+
+/// Returned by every `agents.custom.*` mutation so the caller can refresh
+/// the editor's list in one round trip.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CustomAgentsView {
+    pub custom: Vec<CustomAgentView>,
 }
 
 // ---------------------------------------------------------------------------
@@ -3018,22 +2558,18 @@ wire_enum!(UserRole {
     User => "user",
 });
 
-fn default_user_role() -> UserRole {
-    UserRole::User
-}
-
 /// Which sign-in methods the server currently offers — what the login screen
 /// renders. `password` is always available (any user can be given one);
 /// `github` is true only once an OAuth app is configured.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AuthMethods {
     pub password: bool,
     pub github: bool,
 }
 
-/// `GET /api/auth/me` — who the caller is and what the login screen needs. The
-/// SPA hits this on load: `authenticated: false` means show the login view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `auth.me` — who the caller is and what the login screen needs. The SPA hits
+/// this on load: `authenticated: false` means show the login view.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MeView {
     pub authenticated: bool,
     /// The approved username, when authenticated.
@@ -3048,9 +2584,9 @@ pub struct MeView {
     pub methods: AuthMethods,
 }
 
-/// One API token's non-secret metadata (`GET /api/auth/tokens`). The secret
+/// One API token's non-secret metadata (`auth.tokens.list`). The secret
 /// itself is only ever returned once, in [`CreatedTokenView`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TokenView {
     pub id: String,
     pub name: String,
@@ -3061,9 +2597,9 @@ pub struct TokenView {
     pub expires_at: Option<String>,
 }
 
-/// `POST /api/auth/tokens` reply — the one and only time the plaintext token is
+/// `auth.tokens.create` reply — the one and only time the plaintext token is
 /// shown. Store it now; the server keeps only a hash.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreatedTokenView {
     /// The full secret — present once, never retrievable again.
     pub token: String,
@@ -3071,31 +2607,16 @@ pub struct CreatedTokenView {
     pub info: TokenView,
 }
 
-/// Body for `POST /api/auth/tokens`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CreateTokenReq {
-    pub name: String,
-    /// Optional lifetime in days; omitted / non-positive means it never expires.
-    #[serde(default)]
-    pub expires_in_days: Option<i64>,
-}
-
-/// Body for `POST /api/auth/login` (username/password).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Body for `auth.login` (username/password).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LoginReq {
     pub username: String,
     pub password: String,
 }
 
-/// Body for `POST /api/auth/password` — set/change the caller's own password.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetPasswordReq {
-    pub new_password: String,
-}
-
-/// One approved operator (`GET /api/auth/users`). The password hash is never
+/// One approved operator (`auth.users.list`). The password hash is never
 /// exposed — only whether one is set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct UserView {
     pub username: String,
     pub github_login: Option<String>,
@@ -3104,30 +2625,12 @@ pub struct UserView {
     pub created_at: String,
 }
 
-/// Body for `POST /api/auth/users` — approve a new operator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AddUserReq {
-    pub username: String,
-    #[serde(default)]
-    pub github_login: Option<String>,
-    #[serde(default)]
-    pub password: Option<String>,
-    #[serde(default = "default_user_role")]
-    pub role: UserRole,
-}
-
-/// Body for `PUT /api/auth/users/{username}/role`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetUserRoleReq {
-    pub role: UserRole,
-}
-
-/// `GET /api/auth/github/config` — the GitHub App / sign-in setup, secret
+/// `auth.github_config.get` — the GitHub App / sign-in setup, secret
 /// withheld. loom is driven by a single GitHub App (see [the GitHub
 /// trigger](../../../docs/github-trigger.md)): its OAuth client powers
 /// "Sign in with GitHub" (`configured`/`client_id`), and the same App's id and
 /// private key power the `@loom` trigger (`app_configured`/`app_id`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubConfigView {
     /// Whether both a client id and secret are present (sign-in is live).
     pub configured: bool,
@@ -3150,13 +2653,139 @@ pub struct GithubConfigView {
     pub app_slug: String,
 }
 
-/// Body for `PUT /api/auth/github/config`. The secret is write-only — send it to
-/// set it, omit it to leave the stored one untouched.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SetGithubConfigReq {
-    pub client_id: String,
+/// Whether the caller has a personal GitHub token on file, and when it last
+/// changed (`auth.github_token.get`/`.set`/`.remove`). Write-only: the
+/// value itself is never returned, only this status.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct GithubTokenStatusView {
+    pub set: bool,
+    pub updated_at: Option<String>,
+}
+
+/// Result of `auth.tokens.revoke`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RevokeTokenResult {
+    pub revoked: bool,
+    pub id: String,
+}
+
+/// Result of `auth.federations.remove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoveFederationResult {
+    pub removed: bool,
+    pub id: String,
+}
+
+/// Result of `auth.users.remove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoveUserResult {
+    pub removed: bool,
+    pub username: String,
+}
+
+// -- Session sub-resources ----------------------------------------------------
+
+/// Result of `sessions.archive`. `kind` is `"session"` for a real session or
+/// `"launch_attempt"` when the id named a reservation that never became one
+/// (its reserved runtime is torn down and the automation row kept as history).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionArchiveResult {
+    pub archived: bool,
+    pub kind: String,
+    pub branch: String,
     #[serde(default)]
-    pub client_secret: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Result of `sessions.mode`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionModeResult {
+    pub mode_id: String,
+}
+
+/// Result of `sessions.url`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionUrlView {
+    pub url: String,
+}
+
+/// Result of `sessions.files`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionFilesView {
+    pub files: Vec<String>,
+}
+
+/// Result of `sessions.raw`: a worktree file's bytes, base64-encoded because
+/// JSON cannot carry raw binary, plus the content type guessed from its
+/// extension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionRawFileView {
+    pub content_type: String,
+    pub content_base64: String,
+}
+
+/// Result of `sessions.ide_info`: whether the embedded editor is enabled and
+/// runnable on this host.
+#[derive(
+    Debug, Clone, Default, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema,
+)]
+pub struct SessionIdeInfoView {
+    pub enabled: bool,
+    pub available: bool,
+    pub idle_timeout_secs: i64,
+}
+
+/// One journaled ACP chat block, as `sessions.chat` exposes it and as
+/// `loom_store::chat` journals it. Addressed by `(turn, seq)`. `payload` is
+/// passed through as JSON; the client renders it by `kind`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChatBlockView {
+    pub turn: i64,
+    pub seq: i64,
+    pub kind: String,
+    pub payload: Value,
+    pub created_at: String,
+}
+
+/// The paging cursor `sessions.chat` returns when older blocks remain.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct ChatCursorView {
+    pub turn: i64,
+    pub seq: i64,
+}
+
+/// Agent-owned controls for the conversation composer, mirrored from the live
+/// ACP adapter (or its last persisted snapshot). Kept as ACP-shaped JSON so
+/// new ACP fields pass through without a schema change.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AcpMetadataView {
+    #[serde(default)]
+    pub commands: Vec<Value>,
+    #[serde(default)]
+    pub config_options: Vec<Value>,
+    #[serde(default)]
+    pub modes: Vec<Value>,
+    #[serde(default)]
+    pub steering_supported: bool,
+}
+
+/// Result of `sessions.chat`: a page of the journal plus the composer state
+/// needed to render it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionChatView {
+    pub blocks: Vec<ChatBlockView>,
+    #[serde(default)]
+    pub older_cursor: Option<ChatCursorView>,
+    /// The turn currently in flight, if any (ACP only).
+    #[serde(default)]
+    pub live_turn: Option<i64>,
+    /// The permission posture captured when the in-flight turn started; may
+    /// differ from a live `current_mode` selection, which applies next turn.
+    #[serde(default)]
+    pub effective_mode: Option<String>,
+    #[serde(default)]
+    pub pending_prompt: Option<String>,
+    pub metadata: AcpMetadataView,
 }
 
 #[cfg(test)]

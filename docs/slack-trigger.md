@@ -12,8 +12,8 @@ comment (see [The status card](#the-status-card)).
 The transport is inverted from GitHub's: instead of receiving an inbound,
 HMAC-verified webhook, loom is an **outbound [Socket Mode]** websocket client
 — there is no public URL to expose or secret to verify a signature against.
-The connection self-gates on configuration: it only opens once both Slack
-tokens are set and the `slack.enabled` kill switch is on (see [Configure the
+The connection only opens once both Slack tokens are set and the
+`slack.enabled` kill switch is on (see [Configure the
 tokens](#configure-the-tokens)). In place of GitHub's signature check, the
 trigger is protected by the workspace the app is installed in and the channels
 its bot has been invited to (see [Who can trigger](#who-can-trigger)).
@@ -36,9 +36,10 @@ frame it receives, in order:
    is step 4's decision, so every rejection is one loom can log, count, and
    show rather than a silent drop.
 3. **Dedupes.** Socket Mode delivery is *at-least-once* — a missed ACK or a
-   reconnect boundary redelivers a frame — so loom keeps the same delivery
-   ledger the GitHub webhook uses, keyed on Slack's `event_id` (a mention) or
-   `trigger_id` (a slash command). A replay is a no-op.
+   reconnect boundary redelivers a frame — so loom records each delivery in
+   the same `processed_deliveries` table the GitHub webhook uses, keyed on
+   Slack's `event_id` (a mention) or `trigger_id` (a slash command). A replay
+   is a no-op.
 4. **Authorizes.** The event must come from loom's own workspace, must not be
    loom's own post, and must be typed by a person rather than posted through
    another app (see [Who can trigger](#who-can-trigger)). Every refusal is
@@ -94,7 +95,8 @@ header template, and trigger profile are registered settings
 configurable through both the runtime Settings API and a deployment manifest.
 Organization instructions belong on the selected profile, where the same
 mechanism also covers GitHub, user, delegated, and automation sessions. The
-older `slack.prompt_instructions` remains as an additive compatibility overlay.
+older `slack.prompt_instructions` is still appended alongside the profile's
+instructions.
 See [Configuration policy](configuration.md).
 
 Loom seeds an editable `slack` starter profile from the generic default with a
@@ -102,7 +104,7 @@ small, deployment-neutral instruction document. It remains opt-in so existing
 installations keep their current profile environment and runtime until an
 operator selects it.
 
-Where a trigger anchors differs by shape: a **slash command's payload carries
+Where a trigger anchors differs by trigger type: a **slash command's payload carries
 no thread reference at all**, so it can only start a new thread — loom posts
 a placeholder card first and that message's own `ts` becomes the thread root.
 An **`@marinbot` mention** continues whatever thread it was typed in
@@ -186,7 +188,7 @@ Two secrets enable the integration — set **both**, or it stays idle
   is what the pane checks.
 
 Both are held outside the settings registry — like the GitHub webhook secret
-and App private key — so `GET /api/settings` never returns them. Set them
+and App private key — so `settings.get` never returns them. Set them
 through the environment, or in `loom.toml` (see
 [`loom.toml.example`](../loom.toml.example)) and run `loom config render-env`
 to fold them into the deploy's `.env`.
@@ -213,7 +215,7 @@ so a broken link names itself. A live socket is not the same as a working
 integration: the connection can be up while the bot token belongs to a person,
 or while no repository is configured, and the pane distinguishes those.
 
-`GET /api/slack/status` returns the same structure for scripting. Alongside it,
+`slack.status` returns the same structure for scripting. Alongside it,
 the server log carries one line per arriving envelope (`slack: envelope
 received`, with the event type, channel, and user), the app id from the `hello`
 frame, and a reason for every trigger that did not become a session. The most
@@ -238,12 +240,12 @@ from its actions menu.
 ## The reply route
 
 A session's own replies — a question, a design to review, the finished
-result — post back to the wired thread through `POST
-/api/branches/{branch}/slack/reply` with `{"text": "…"}` and the session's
-`LOOM_TOKEN`. loom resolves the destination channel and thread from the
-branch's `slack` wiring tag server-side; the bot token itself never reaches
-the agent, the same separation used by Loom's App-backed server-side GitHub
-tools.
+result — post back to the wired thread through `branches.slack.reply`
+(`POST /api/branches/slack/reply` with `{"text": "…"}`) and the session's
+`LOOM_TOKEN`; the branch is resolved from the calling session, never supplied
+by hand. loom resolves the destination channel and thread from the branch's
+`slack` wiring tag server-side; the bot token itself never reaches the agent,
+the same separation used by Loom's App-backed server-side GitHub tools.
 
 Adding `"thread": {"channel": "C…", "thread_ts": "…"}` posts to one of the
 session's *routed* threads instead (see [Automation-delivered
@@ -254,7 +256,8 @@ among the session's own threads rather than granting it the workspace. The
 
 ## Automation-delivered threads
 
-A `POST /api/runs` body may carry `"slack": {"channel": "C…", "thread_ts": "…"}`
+A `runs.create` (`POST /api/runs/create`) body may carry
+`"slack": {"channel": "C…", "thread_ts": "…"}`
 — the thread the caller announced this delivery in. loom **routes** that thread
 to whichever session the run lands on, and from then on the thread and the
 session are joined in both directions:
@@ -267,7 +270,7 @@ session are joined in both directions:
 
 This is a **many-to-one** relation, which is why it is not the `slack` tag.
 That tag fixes *one* thread as a session's status-card home, the right model for
-a session born from a conversation. An operator session is the other shape: one
+a session born from a conversation. An operator session is the other case: one
 long-lived session fed alerts through an [automation
 channel](configuration.md), each alert announced in its own thread. Its `slack`
 tag is deliberately left alone — a single card cannot follow a session that is
@@ -276,9 +279,9 @@ rather than a live trail.
 
 Routes are delivery records, not caller-chosen grants: loom writes one only
 where it accepted a run for that thread, the workspace is always loom's own, and
-`channel`/`thread_ts` are shape-checked (a `#channel-name` is rejected — Slack
+`channel`/`thread_ts` are format-checked (a `#channel-name` is rejected — Slack
 ids only). Re-delivering the same alert is idempotent. `followups_routed` in
-`GET /api/slack/status` counts mentions delivered this way, which is how a
+`slack.status` counts mentions delivered this way, which is how a
 working alert conversation is distinguished from one quietly launching a
 duplicate session per reply.
 
@@ -316,7 +319,7 @@ Two things are easy to miss after any of the above:
   not apply a new scope to an existing installation's token until you do.
 - **Invite the bot** to each channel it should trigger from or read history
   in — `/invite @marinbot`. The bot scopes above grant *capability*; channel
-  membership is what makes a specific conversation reachable. A trigger from
+  membership makes a specific conversation reachable. A trigger from
   a channel the bot hasn't been invited to still authorizes, but seeding the
   session fails to read history (the reply notes it couldn't read the
   conversation and to invite the bot).

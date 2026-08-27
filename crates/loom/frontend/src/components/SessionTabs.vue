@@ -18,7 +18,7 @@ const props = defineProps<{
   /** Artifacts is open in the rail (popped out) rather than the work area. */
   artifactsPopped?: boolean;
   /** Execution backend — selects the tab set + order. */
-  protocol?: 'terminal' | 'acp';
+  protocol?: string;
 }>();
 defineEmits<{ select: [Tab] }>();
 

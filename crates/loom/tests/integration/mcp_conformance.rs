@@ -11,13 +11,19 @@ use tokio::{
 };
 
 use crate::fixtures::TestServer;
+use weaver_api::operations::sessions;
 
 fn loom_bin() -> &'static str {
     env!("CARGO_BIN_EXE_loom")
 }
 
 async fn run_adapter(adapter: &str) -> (Vec<Value>, std::process::ExitStatus) {
+    // Its own home, so this cannot depend on which test ran last: the adapter
+    // is a subprocess and inherits whatever `WEAVER_HOME` the process-global
+    // env happens to hold.
+    let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(loom_bin())
+        .env("WEAVER_HOME", home.path())
         .args(["mcp", "serve", adapter])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -107,6 +113,11 @@ async fn run_scoped_calls(
     values
 }
 
+/// `#[serial]` because the adapter subprocesses inherit process-global env
+/// (`WEAVER_HOME`, `WEAVER_API`) that every `TestServer::start` rewrites. Run
+/// concurrently, this test points its adapters at another test's home while
+/// that home is being torn down, and fails on whatever error comes back.
+#[serial]
 #[tokio::test]
 async fn every_builtin_speaks_mcp_stdio() {
     for (adapter, expected_tools) in [
@@ -114,7 +125,9 @@ async fn every_builtin_speaks_mcp_stdio() {
         ("context", 1),
         ("channel", 8),
         ("artifact", 8),
-        ("issue", 8),
+        // `actions` (bulk apply) and `backlog_add` joined the registry-driven
+        // catalogue; the count is asserted so a tool cannot appear unnoticed.
+        ("issue", 10),
         ("session", 7),
         ("history", 2),
         ("messaging", 2),
@@ -123,11 +136,12 @@ async fn every_builtin_speaks_mcp_stdio() {
         let (values, status) = run_adapter(adapter).await;
         assert!(status.success(), "{adapter} did not exit cleanly");
         assert_eq!(values.len(), 4, "{adapter} replied to a notification");
-        assert_eq!(values[0]["id"], 1);
-        assert_eq!(values[1]["id"], 2);
+        assert_eq!(values[0]["id"], 1, "{adapter} initialize reply");
+        assert_eq!(values[1]["id"], 2, "{adapter} tools/list reply");
         assert_eq!(
             values[1]["result"]["tools"].as_array().unwrap().len(),
-            expected_tools
+            expected_tools,
+            "{adapter} tool count"
         );
         assert_eq!(
             values[2],
@@ -137,12 +151,18 @@ async fn every_builtin_speaks_mcp_stdio() {
                 "error": { "code": -32601, "message": "method not found: unknown/method" }
             })
         );
-        assert_eq!(values[3]["id"], 4);
-        assert_eq!(values[3]["result"]["isError"], true);
-        assert!(values[3]["result"]["content"][0]["text"]
+        assert_eq!(values[3]["id"], 4, "{adapter} unknown-tool reply id");
+        assert_eq!(
+            values[3]["result"]["isError"], true,
+            "{adapter} unknown-tool isError"
+        );
+        let text = values[3]["result"]["content"][0]["text"]
             .as_str()
-            .unwrap()
-            .contains("unknown"));
+            .unwrap_or_default();
+        assert!(
+            text.contains("unknown"),
+            "{adapter} should report an unknown tool, said: {text}"
+        );
     }
 }
 
@@ -152,20 +172,20 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
     let ts = TestServer::start().await;
     let created = ts
         .client
-        .create_session(&weaver_api::CreateReq {
-            cwd: ts.cwd(),
-            goal: Some("typed MCP projections".to_string()),
-            agent: Some("shell".to_string()),
+        .invoke::<sessions::launch::Op>(&sessions::launch::Input {
+            goal: (Some("typed MCP projections".to_string())).clone(),
+            cwd: (ts.cwd()).clone(),
+            agent: (Some("shell".to_string())).clone(),
             ..Default::default()
         })
         .await
         .unwrap();
     let issue = ts
         .client
-        .create_branch_issue(
-            &created.branch.id,
-            &weaver_api::CreateIssueReq {
+        .invoke::<weaver_api::operations::issues::create::Op>(
+            &weaver_api::operations::issues::create::Input {
                 title: "close through MCP".to_string(),
+                branch: created.branch.id.clone(),
                 ..Default::default()
             },
         )
@@ -194,7 +214,9 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/call",
-                "params": { "name": "close", "arguments": { "id": issue.id } }
+                // `issues.close` applies atomically to a set; the single-id case is
+                // the one-element set.
+                "params": { "name": "close", "arguments": { "ids": [issue.id] } }
             }),
         ],
     )
@@ -245,7 +267,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
     );
 
     ts.client
-        .delete(&format!("/api/sessions/{}", created.id))
+        .post("/api/sessions/delete", json!({ "session": created.id }))
         .await
         .unwrap();
 }

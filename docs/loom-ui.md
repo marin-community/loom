@@ -7,10 +7,10 @@ lifecycle state are server-backed so the CLI observes the same system.
 Live updates arrive over one connection. Browsers cap HTTP/1.1 at six
 connections per origin and an EventSource holds one for its whole life, so a
 view that opens its own stream spends a slot the rest of the page needs — past
-the cap a `fetch()` simply never resolves, with no error and nothing in the
+the cap a `fetch()` never resolves, with no error and nothing in the
 server log. Components subscribe to a named topic through `lib/eventStream.ts`
 (`layout`, `logs`, `session:{id}`, `chat:{id}`) and it multiplexes them onto a
-single `GET /api/events`. Subscribe and unsubscribe with the component's
+single `events.stream`. Subscribe and unsubscribe with the component's
 keep-alive lifecycle; use `onOpen` to re-snapshot, since a reconnect can leave
 a gap.
 

@@ -70,7 +70,7 @@ test.describe('rich markdown rendering', () => {
     // The relative image resolves to the session's raw-bytes endpoint.
     await expect(body.locator('img')).toHaveAttribute(
       'src',
-      new RegExp(`/api/sessions/${session.id}/raw\\?path=shot\\.png$`),
+      new RegExp(`/api/sessions/raw\\?session=${session.id}&path=shot\\.png$`),
     );
 
     // The mermaid block is rendered to an SVG. Its bundle is lazy-loaded and the

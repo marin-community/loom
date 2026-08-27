@@ -36,6 +36,10 @@ import ToggleSwitch from '../components/ToggleSwitch.vue';
 import { timeAgo } from '../lib/time';
 import { confirmAction } from '../lib/confirmation';
 import {
+  actionsOf,
+  paramsOf,
+  scopeOf,
+  triggerOf,
   triggerSummary,
   scopeSummary,
   repoLabel,
@@ -189,7 +193,7 @@ const showRoutineRuns = ref(false);
 
 function isSignalRun(run: WatchRun): boolean {
   return (
-    Boolean(run.actions?.length) ||
+    Boolean(actionsOf(run).length) ||
     Boolean(run.stderr) ||
     (run.exit_code != null && run.exit_code !== 0) ||
     !['ok', 'noop'].includes(run.outcome)
@@ -443,14 +447,20 @@ useCommandScope('watches', 'Watches', watchCommands, 100);
 function applyProgramDefaults(programRef: string) {
   const p = programs.value.find((x) => x.program === programRef);
   if (!p) return;
-  const t = p.defaults?.trigger ?? {};
+  const defaults = (p.defaults ?? {}) as {
+    trigger?: WatchTrigger;
+    scope?: WatchScope;
+    params?: Record<string, unknown>;
+    capabilities?: string[];
+  };
+  const t = defaults.trigger ?? {};
   form.triggerKind = 'auto';
   if (t.cron) form.cron = t.cron;
   if (t.every) form.every = t.every;
   if (Array.isArray(t.on) && t.on.length) form.on = t.on.join(', ');
   else if (t.event) form.on = t.level ? `${t.event}=${t.level}` : t.event;
-  form.scopeAttention = p.defaults?.scope?.attention ?? '';
-  const granted = p.defaults?.capabilities ?? [];
+  form.scopeAttention = defaults.scope?.attention ?? '';
+  const granted = defaults.capabilities ?? [];
   for (const c of GRANTABLE_CAPABILITIES) form.capabilities[c] = granted.includes(c);
 }
 
@@ -487,7 +497,9 @@ async function create() {
     const programRef = form.program === 'custom' ? form.customProgram.trim() : form.program;
     // Start from the program's suggested params, the prompt layered on top.
     const chosen = programs.value.find((p) => p.program === programRef);
-    const params: Record<string, unknown> = { ...(chosen?.defaults?.params ?? {}) };
+    const params: Record<string, unknown> = chosen
+      ? { ...paramsOf({ params: chosen.defaults }) }
+      : {};
     if (form.prompt.trim()) params.prompt = form.prompt.trim();
 
     const body: WatchCreateInput = {
@@ -902,14 +914,14 @@ onActivated(() => {
               </div>
             </div>
             <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
-              <span class="meta-chip">{{ triggerSummary(selected.trigger) }}</span>
-              <span class="meta-chip">{{ scopeSummary(selected.scope) }}</span>
+              <span class="meta-chip">{{ triggerSummary(triggerOf(selected)) }}</span>
+              <span class="meta-chip">{{ scopeSummary(scopeOf(selected)) }}</span>
               <span class="font-mono text-faint">{{ selected.program }}</span>
               <span
-                v-if="selected.trigger.repo || selected.scope.repo"
-                :title="selected.trigger.repo || selected.scope.repo"
+                v-if="triggerOf(selected).repo || scopeOf(selected).repo"
+                :title="triggerOf(selected).repo || scopeOf(selected).repo"
                 class="meta-chip"
-                >📁 {{ repoLabel(selected.trigger.repo || selected.scope.repo || '') }}</span
+                >📁 {{ repoLabel(triggerOf(selected).repo || scopeOf(selected).repo || '') }}</span
               >
               <span class="ml-auto font-mono text-2xs text-faint">
                 <span v-if="selected.last_run_at"
@@ -1026,8 +1038,8 @@ onActivated(() => {
                       formatMs(r.duration_ms)
                     }}</span>
                     <span v-if="r.exit_code != null" class="meta-chip">exit {{ r.exit_code }}</span>
-                    <span v-if="r.actions && r.actions.length">
-                      {{ r.actions.length }} action{{ r.actions.length === 1 ? '' : 's' }}
+                    <span v-if="actionsOf(r).length">
+                      {{ actionsOf(r).length }} action{{ actionsOf(r).length === 1 ? '' : 's' }}
                     </span>
                     <span class="ml-auto text-accent">{{
                       expanded[r.id] ? 'Hide' : 'Details'
@@ -1040,12 +1052,12 @@ onActivated(() => {
                   data-testid="watch-run-detail"
                   class="space-y-3 border-t border-line p-3"
                 >
-                  <ul
-                    v-if="r.actions && r.actions.length"
-                    data-testid="watch-run-actions"
-                    class="space-y-1"
-                  >
-                    <li v-for="(a, j) in r.actions" :key="j" class="flex items-start gap-2 text-xs">
+                  <ul v-if="actionsOf(r).length" data-testid="watch-run-actions" class="space-y-1">
+                    <li
+                      v-for="(a, j) in actionsOf(r)"
+                      :key="j"
+                      class="flex items-start gap-2 text-xs"
+                    >
                       <span class="meta-chip shrink-0">
                         <span v-if="a.would" class="text-faint">would </span
                         >{{ a.action || a.would || 'action' }}
@@ -1078,7 +1090,7 @@ onActivated(() => {
                   </div>
 
                   <p
-                    v-if="!(r.actions && r.actions.length) && !r.stdout && !r.stderr"
+                    v-if="!actionsOf(r).length && !r.stdout && !r.stderr"
                     class="text-xs text-faint"
                   >
                     No actions or output recorded.
@@ -1150,9 +1162,9 @@ onActivated(() => {
 
               <dl class="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-2 text-sm">
                 <dt class="text-faint">Trigger</dt>
-                <dd class="font-mono">{{ triggerSummary(selected.trigger) }}</dd>
+                <dd class="font-mono">{{ triggerSummary(triggerOf(selected)) }}</dd>
                 <dt class="text-faint">Scope</dt>
-                <dd class="font-mono">{{ scopeSummary(selected.scope) }}</dd>
+                <dd class="font-mono">{{ scopeSummary(scopeOf(selected)) }}</dd>
                 <dt class="text-faint">Program</dt>
                 <dd class="font-mono">{{ selected.program }}</dd>
 

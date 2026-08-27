@@ -56,7 +56,10 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
     let ts = TestServer::start().await;
     let mut profile = interactive_shell_profile("one-at-a-time");
     profile["max_concurrent"] = json!(1);
-    ts.client.post("/api/profiles", profile).await.unwrap();
+    ts.client
+        .post("/api/profiles/create", profile)
+        .await
+        .unwrap();
 
     let other_repo = tempfile::tempdir().unwrap();
     crate::fixtures::sh(other_repo.path(), "git", &["init", "-b", "main"]);
@@ -71,7 +74,7 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
     crate::fixtures::sh(other_repo.path(), "git", &["commit", "-m", "init"]);
 
     let permit = ts.state.launch_gate.acquire_profile("one-at-a-time").await;
-    let url = format!("http://{}/api/sessions", ts.addr);
+    let url = format!("http://{}/api/sessions/launch", ts.addr);
     let first_http = reqwest::Client::new();
     let first_url = url.clone();
     let first_cwd = ts.cwd();
@@ -151,10 +154,10 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
         1
     );
     ts.client
-        .delete(&format!(
-            "/api/sessions/{}",
-            session["id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/delete",
+            json!({ "session": session["id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
 }
@@ -163,12 +166,16 @@ async fn profile_capacity_admission_is_serialized_across_repositories() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn profile_and_mcp_rest_journey() {
     let ts = TestServer::start_api_only().await;
-    let stock = ts.client.get("/api/profiles/github_comment").await.unwrap();
+    let stock = ts
+        .client
+        .post("/api/profiles/get", json!({ "name": "github_comment" }))
+        .await
+        .unwrap();
     assert_eq!(stock["restricted"], true);
     assert_eq!(stock["mcp_access"]["groups"], json!(["github"]));
     assert!(stock["env"].as_array().unwrap().is_empty());
 
-    let registry = ts.client.get("/api/mcps").await.unwrap();
+    let registry = ts.client.post("/api/mcps/get", json!({})).await.unwrap();
     let github = registry["capability_sets"]
         .as_array()
         .unwrap()
@@ -179,22 +186,25 @@ async fn profile_and_mcp_rest_journey() {
     assert!(github.get("source").is_none());
 
     ts.client
-        .post("/api/profiles", interactive_shell_profile("clone-source"))
+        .post(
+            "/api/profiles/create",
+            interactive_shell_profile("clone-source"),
+        )
         .await
         .unwrap();
     let source_profile = ts
         .client
-        .put(
-            "/api/profiles/clone-source/env/TOKEN",
-            json!({ "value": "write-only-source" }),
+        .post(
+            "/api/profiles/env/set",
+            json!({ "profile": "clone-source", "name": "TOKEN", "value": "write-only-source" }),
         )
         .await
         .unwrap();
     assert!(!source_profile.to_string().contains("write-only-source"));
     ts.client
-        .put(
-            "/api/profiles/clone-source/env/REMOVE_ME",
-            json!({ "value": "discarded" }),
+        .post(
+            "/api/profiles/env/set",
+            json!({ "profile": "clone-source", "name": "REMOVE_ME", "value": "discarded" }),
         )
         .await
         .unwrap();
@@ -220,7 +230,11 @@ async fn profile_and_mcp_rest_journey() {
         "CLI clone failed: {}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    let cloned = ts.client.get("/api/profiles/cli-clone").await.unwrap();
+    let cloned = ts
+        .client
+        .post("/api/profiles/get", json!({ "name": "cli-clone" }))
+        .await
+        .unwrap();
     assert_eq!(
         cloned["env"]
             .as_array()
@@ -268,7 +282,7 @@ print("custom tests passed")
     let custom = ts
         .client
         .post(
-            "/api/mcps/custom",
+            "/api/mcps/custom/create",
             json!({
                 "identity": "/ops/status",
                 "label": "Status helper",
@@ -289,7 +303,7 @@ print("custom tests passed")
         .unwrap()
         .contains("custom tests passed"));
 
-    let registry = ts.client.get("/api/mcps").await.unwrap();
+    let registry = ts.client.post("/api/mcps/get", json!({})).await.unwrap();
     assert!(registry["custom_servers"]
         .as_array()
         .unwrap()
@@ -306,13 +320,13 @@ print("custom tests passed")
     });
     let created_profile = ts
         .client
-        .post("/api/profiles", profile_req.clone())
+        .post("/api/profiles/create", profile_req.clone())
         .await
         .unwrap();
     assert_eq!(created_profile["revision"], 1);
     let effective = ts
         .client
-        .get("/api/profiles/custom-tools/effective")
+        .post("/api/profiles/effective", json!({ "name": "custom-tools" }))
         .await
         .unwrap();
     assert_eq!(
@@ -335,10 +349,10 @@ print("custom tests passed")
     let source_v2 = source.replace("Return a value.", "Return a pinned value.");
     let edited = ts
         .client
-        .put(
-            "/api/mcps/custom/ops/status",
+        .post(
+            "/api/mcps/custom/update",
             json!({
-                "identity": "/ignored/by/put/path",
+                "identity": "/ops/status",
                 "label": "Status helper",
                 "description": "Test custom MCP",
                 "source": source_v2.clone(),
@@ -351,7 +365,7 @@ print("custom tests passed")
     assert_eq!(edited["revision"], 2);
     let still_pinned = ts
         .client
-        .get("/api/profiles/custom-tools/effective")
+        .post("/api/profiles/effective", json!({ "name": "custom-tools" }))
         .await
         .unwrap();
     assert_eq!(
@@ -361,23 +375,23 @@ print("custom tests passed")
 
     let reconciled = ts
         .client
-        .put("/api/profiles/custom-tools", profile_req)
+        .post("/api/profiles/update", profile_req)
         .await
         .unwrap();
     assert_eq!(reconciled["revision"], 2);
     let effective = ts
         .client
-        .get("/api/profiles/custom-tools/effective")
+        .post("/api/profiles/effective", json!({ "name": "custom-tools" }))
         .await
         .unwrap();
     assert_eq!(effective["mcp_policy"]["custom_servers"][0]["revision"], 2);
 
     let disabled = ts
         .client
-        .put(
-            "/api/mcps/custom/ops/status",
+        .post(
+            "/api/mcps/custom/update",
             json!({
-                "identity": "/ignored/by/put/path",
+                "identity": "/ops/status",
                 "label": "Status helper",
                 "description": "Test custom MCP",
                 "source": source_v2,
@@ -391,7 +405,8 @@ print("custom tests passed")
     assert_eq!(disabled["revision"], 3);
 
     let response = reqwest::Client::new()
-        .delete(format!("http://{}/api/mcps/custom/ops/status", ts.addr))
+        .post(format!("http://{}/api/mcps/custom/delete", ts.addr))
+        .json(&json!({ "identity": "/ops/status" }))
         .send()
         .await
         .unwrap();
@@ -399,17 +414,28 @@ print("custom tests passed")
     assert!(response.text().await.unwrap().contains("pinned by profile"));
 
     let response = reqwest::Client::new()
-        .delete(format!("http://{}/api/profiles/custom-tools", ts.addr))
+        .post(format!("http://{}/api/profiles/delete", ts.addr))
+        .json(&json!({ "name": "custom-tools" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["name"], "custom-tools");
+
+    // `profiles.delete` and `mcps.custom.delete` are ordinary operations and
+    // reply 200 with the typed delete result.
     let response = reqwest::Client::new()
-        .delete(format!("http://{}/api/mcps/custom/ops/status", ts.addr))
+        .post(format!("http://{}/api/mcps/custom/delete", ts.addr))
+        .json(&json!({ "identity": "/ops/status" }))
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(deleted["deleted"], true);
+    assert_eq!(deleted["identity"], "/ops/status");
 }
 
 #[serial]
@@ -424,7 +450,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "cwd": ts.cwd(),
                 "profile": "github_comment",
@@ -452,9 +478,14 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     )
     .await
     .unwrap();
+    // `permissions.github.token` is the operation that serves this now. It is
+    // declared `actor = SessionOnly` — no human may stand in for a session to
+    // fetch its credential — and a *restricted* session is refused on top of
+    // that, which is what this asserts.
     let token_response = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions/{id}/github/token", ts.addr))
+        .post(format!("http://{}/api/permissions/github/token", ts.addr))
         .bearer_auth(session_token)
+        .json(&json!({ "session": id }))
         .send()
         .await
         .unwrap();
@@ -465,17 +496,17 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     );
     assert!(ts
         .client
-        .put(
-            &format!("/api/sessions/{id}/mode"),
-            json!({ "mode_id": "bypassPermissions" }),
+        .post(
+            "/api/sessions/mode",
+            json!({ "mode_id": "bypassPermissions", "session": id }),
         )
         .await
         .is_err());
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/handoff"),
-            json!({ "agent": "codex" }),
+            "/api/sessions/handoff",
+            json!({ "agent": "codex", "session": id }),
         )
         .await
         .is_err());
@@ -483,7 +514,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     loop {
         let chat = ts
             .client
-            .get(&format!("/api/sessions/{id}/chat"))
+            .post("/api/sessions/chat", json!({ "session": id }))
             .await
             .unwrap();
         if let Some(message) = chat["blocks"]
@@ -542,8 +573,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let response = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 7, "body": "clean body" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 7, "body": "clean body" } }),
         )
         .await
         .unwrap();
@@ -553,8 +584,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let second_response = ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_view"),
-            json!({ "arguments": { "number": 7 } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_view", "arguments": { "number": 7 } }),
         )
         .await
         .unwrap();
@@ -565,8 +596,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 8, "body": "wrong issue" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 8, "body": "wrong issue" } }),
         )
         .await
         .is_err());
@@ -579,8 +610,8 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     assert!(ts
         .client
         .post(
-            &format!("/api/sessions/{id}/restricted-github/issue_edit"),
-            json!({ "arguments": { "number": 7, "body": "no longer allowed" } }),
+            "/api/permissions/github/restricted/invoke",
+            json!({ "session": id, "tool": "issue_edit", "arguments": { "number": 7, "body": "no longer allowed" } }),
         )
         .await
         .is_err());
@@ -596,7 +627,7 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     let ts = TestServer::start().await;
     ts.client
         .post(
-            "/api/profiles",
+            "/api/profiles/create",
             json!({
                 "name": "ops",
                 "description": "operations intake",
@@ -626,7 +657,7 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     });
     let first = ts
         .client
-        .post("/api/runs", first_request.clone())
+        .post("/api/runs/create", first_request.clone())
         .await
         .unwrap();
     let second_request = json!({
@@ -642,16 +673,20 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
     });
     let second = ts
         .client
-        .post("/api/runs", second_request.clone())
+        .post("/api/runs/create", second_request.clone())
         .await
         .unwrap();
-    let duplicate = ts.client.post("/api/runs", second_request).await.unwrap();
+    let duplicate = ts
+        .client
+        .post("/api/runs/create", second_request)
+        .await
+        .unwrap();
     let mut collision_request = first_request;
     collision_request["channel"] = json!("another-operator");
     collision_request["session"]["goal"] = json!("must not be delivered");
     let collision = ts
         .client
-        .post("/api/runs", collision_request)
+        .post("/api/runs/create", collision_request)
         .await
         .unwrap();
 
@@ -664,16 +699,16 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 
     let sessions = ts
         .client
-        .get("/api/sessions?automation=true")
+        .post("/api/sessions/summary/list", json!({ "automation": true }))
         .await
         .unwrap();
     assert_eq!(sessions.as_array().unwrap().len(), 1);
     let launched = ts
         .client
-        .get(&format!(
-            "/api/sessions/{}",
-            first["session_id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/get",
+            json!({ "session": first["session_id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
     assert_eq!(launched["origin"], "grafana");
@@ -682,10 +717,10 @@ async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries(
 
     let chat = ts
         .client
-        .get(&format!(
-            "/api/sessions/{}/chat",
-            first["session_id"].as_str().unwrap()
-        ))
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": first["session_id"].as_str().unwrap() }),
+        )
         .await
         .unwrap();
     let second_deliveries = chat["blocks"]
@@ -729,7 +764,7 @@ async fn automation_channel_exposes_a_retryable_launch_failure() {
     .unwrap();
     ts.client
         .post(
-            "/api/profiles",
+            "/api/profiles/create",
             json!({
                 "name": "ops",
                 "description": "operations intake",
@@ -750,7 +785,7 @@ async fn automation_channel_exposes_a_retryable_launch_failure() {
     let error = ts
         .client
         .post(
-            "/api/runs",
+            "/api/runs/create",
             json!({
                 "profile": "ops",
                 "source": "grafana",
@@ -770,7 +805,7 @@ async fn automation_channel_exposes_a_retryable_launch_failure() {
         "unexpected response: {error}"
     );
 
-    let runs = ts.client.get("/api/runs").await.unwrap();
+    let runs = ts.client.post("/api/runs/list", json!({})).await.unwrap();
     let run = &runs.as_array().unwrap()[0];
     assert_eq!(run["status"], "waiting");
     assert!(
@@ -881,7 +916,10 @@ async fn deployment_reconcile_rest_journey() {
 
     let runtime = ts
         .client
-        .patch("/api/settings", json!({ "slack.status_updates": true }))
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "slack.status_updates": true } }),
+        )
         .await
         .unwrap();
     let runtime_setting = runtime["settings"]
@@ -896,9 +934,9 @@ async fn deployment_reconcile_rest_journey() {
 
     let inherited = ts
         .client
-        .patch(
-            "/api/settings",
-            json!({ "slack.status_updates": serde_json::Value::Null }),
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "slack.status_updates": serde_json::Value::Null } }),
         )
         .await
         .unwrap();
@@ -926,7 +964,11 @@ async fn deployment_reconcile_rest_journey() {
         )
         .await
         .unwrap();
-    let pruned = ts.client.get("/api/settings").await.unwrap();
+    let pruned = ts
+        .client
+        .post("/api/settings/get", json!({}))
+        .await
+        .unwrap();
     let pruned_setting = pruned["settings"]
         .as_array()
         .unwrap()
@@ -936,7 +978,8 @@ async fn deployment_reconcile_rest_journey() {
     assert_eq!(pruned_setting["value"], "true");
     assert_eq!(pruned_setting["source"], "default");
     let profile = reqwest::Client::new()
-        .get(format!("http://{}/api/profiles/ops", ts.addr))
+        .post(format!("http://{}/api/profiles/get", ts.addr))
+        .json(&json!({ "name": "ops" }))
         .send()
         .await
         .unwrap();
@@ -966,11 +1009,12 @@ async fn deployment_reconcile_rest_journey() {
             .await
             .unwrap()
     });
-    let mutation_url = format!("http://{}/api/agents/custom/shell", ts.addr);
+    let mutation_url = format!("http://{}/api/agents/custom/update", ts.addr);
     let mutation = tokio::spawn(async move {
         reqwest::Client::new()
-            .put(mutation_url)
+            .post(mutation_url)
             .json(&json!({
+                "name": "shell",
                 "label": "Shell changed to ACP",
                 "setup": "",
                 "launch": "node fake-acp.mjs",

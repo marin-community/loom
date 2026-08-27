@@ -53,8 +53,8 @@ async fn failed_launch_attempt_can_be_archived_then_removed_by_reserved_session_
     let archived = ts
         .client
         .post(
-            &format!("/api/sessions/{}/archive", run.session_id),
-            json!({}),
+            "/api/sessions/archive",
+            json!({ "session": run.session_id }),
         )
         .await
         .unwrap();
@@ -66,7 +66,7 @@ async fn failed_launch_attempt_can_be_archived_then_removed_by_reserved_session_
 
     let removed = ts
         .client
-        .delete(&format!("/api/sessions/{}", run.session_id))
+        .post("/api/sessions/delete", json!({ "session": run.session_id }))
         .await
         .unwrap();
     assert_eq!(removed["deleted"], true);
@@ -87,8 +87,8 @@ async fn archiving_a_creating_attempt_tears_down_its_reserved_runtime() {
 
     ts.client
         .post(
-            &format!("/api/sessions/{}/archive", run.session_id),
-            json!({}),
+            "/api/sessions/archive",
+            json!({ "session": run.session_id }),
         )
         .await
         .unwrap();
@@ -112,7 +112,7 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
     let finished = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "finished but inspectable",
                 "cwd": ts.cwd(),
@@ -124,9 +124,9 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
     let finished_id = finished["id"].as_str().unwrap();
     let finished_term = finished["term_session"].as_str().unwrap();
     ts.client
-        .patch(
-            &format!("/api/sessions/{finished_id}"),
-            json!({ "status": "done" }),
+        .post(
+            "/api/sessions/update",
+            json!({ "session": finished_id, "status": "done" }),
         )
         .await
         .unwrap();
@@ -171,7 +171,7 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
         .unwrap();
     wait_dead(transient).await;
     ts.client
-        .delete(&format!("/api/sessions/{finished_id}"))
+        .post("/api/sessions/delete", json!({ "session": finished_id }))
         .await
         .unwrap();
     backend::kill_session(unrelated).await.unwrap();
@@ -185,7 +185,7 @@ async fn reconciliation_terminalizes_a_session_that_landed_after_cancellation() 
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "late automation session",
                 "cwd": ts.cwd(),
@@ -218,11 +218,15 @@ async fn reconciliation_terminalizes_a_session_that_landed_after_cancellation() 
         .unwrap();
     assert_eq!(report.invalidated_sessions, 1);
     wait_dead(term).await;
-    let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
     assert_eq!(view["status"], "error");
 
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -234,7 +238,7 @@ async fn admin_inventory_can_see_and_remove_managed_sessions() {
     let session = ts
         .client
         .post(
-            "/api/sessions",
+            "/api/sessions/launch",
             json!({
                 "goal": "managed inventory",
                 "cwd": ts.cwd(),
@@ -251,23 +255,32 @@ async fn admin_inventory_can_see_and_remove_managed_sessions() {
         .await
         .unwrap();
 
+    // `managed` is the operator escape hatch, off unless asked for: a warm
+    // session an engine owns is invisible to an ordinary listing even with
+    // automation and history widened all the way open.
     let ordinary = ts
         .client
-        .get("/api/sessions?automation=true&archived=true")
+        .post(
+            "/api/sessions/list",
+            json!({ "automation": true, "history": true }),
+        )
         .await
         .unwrap();
     assert!(ordinary.as_array().unwrap().is_empty());
 
     let admin = ts
         .client
-        .get("/api/sessions?automation=true&archived=true&managed=true")
+        .post(
+            "/api/sessions/list",
+            json!({ "automation": true, "history": true, "managed": true }),
+        )
         .await
         .unwrap();
     assert_eq!(admin.as_array().unwrap().len(), 1);
     assert_eq!(admin[0]["id"], id);
 
     ts.client
-        .delete(&format!("/api/sessions/{id}"))
+        .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
 }
@@ -280,7 +293,7 @@ async fn every_recorded_session_state_can_be_archived_and_removed() {
         let session = ts
             .client
             .post(
-                "/api/sessions",
+                "/api/sessions/launch",
                 json!({
                     "goal": format!("archive {status}"),
                     "name": format!("archive-{status}"),
@@ -292,26 +305,33 @@ async fn every_recorded_session_state_can_be_archived_and_removed() {
             .unwrap();
         let id = session["id"].as_str().unwrap();
         ts.client
-            .patch(&format!("/api/sessions/{id}"), json!({ "status": status }))
+            .post(
+                "/api/sessions/update",
+                json!({ "session": id, "status": status }),
+            )
             .await
             .unwrap();
 
         let archived = ts
             .client
-            .post(&format!("/api/sessions/{id}/archive"), json!({}))
+            .post("/api/sessions/archive", json!({ "session": id }))
             .await
             .unwrap();
         assert_eq!(archived["archived"], true, "could not archive {status}");
-        let view = ts.client.get(&format!("/api/sessions/{id}")).await.unwrap();
+        let view = ts
+            .client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
         assert_eq!(view["status"], "archived");
 
         // Archive is idempotent and remove remains available afterwards.
         ts.client
-            .post(&format!("/api/sessions/{id}/archive"), json!({}))
+            .post("/api/sessions/archive", json!({ "session": id }))
             .await
             .unwrap();
         ts.client
-            .delete(&format!("/api/sessions/{id}"))
+            .post("/api/sessions/delete", json!({ "session": id }))
             .await
             .unwrap();
     }

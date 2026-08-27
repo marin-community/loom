@@ -10,7 +10,7 @@
 //!
 //! Binary frames both directions. server → client is raw PTY output bytes. The
 //! client → server hot path is opcode-prefixed (the ttyd/terminado/VS Code
-//! shape):
+//! convention):
 //!
 //! * `0x00 <bytes…>` — keystrokes, forwarded verbatim to the PTY writer.
 //! * `0x01 <cols:u16_be> <rows:u16_be>` — resize (exactly 5 bytes).
@@ -20,7 +20,6 @@
 //! dropped.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
 use axum::http::header::{HOST, ORIGIN};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -38,13 +37,17 @@ const MAX_FRAME: usize = 64 * 1024;
 const OP_INPUT: u8 = 0x00;
 const OP_RESIZE: u8 = 0x01;
 
-/// `GET /api/sessions/{id}/terminal` — upgrade to a WebSocket bridged to the
+/// The `sessions.terminal` operation — upgrade to a WebSocket bridged to the
 /// session's terminal supervisor.
+///
+/// Not an axum handler: `key` arrives as a declared operand, so the extraction
+/// and the registry's authorization live together in `loom::web::encodings` and
+/// this crate stays a transport.
 pub async fn terminal_ws(
     ws: WebSocketUpgrade,
-    State(st): State<EditorState>,
-    Path(key): Path<String>,
-    headers: HeaderMap,
+    st: &EditorState,
+    key: &str,
+    headers: &HeaderMap,
 ) -> Response {
     // CSWSH defence: CORS does NOT apply to WebSockets, so a localhost bind is
     // not protection — validate the Origin before upgrading. See `origin_ok`.
@@ -52,12 +55,12 @@ pub async fn terminal_ws(
     // trusted directly; absent that, only loopback or a *proxied* same-Host
     // Origin is accepted.
     let base_url = crate::config::get(&st.db, "auth.base_url").await;
-    if !origin_ok(&headers, &st.addr, base_url.as_deref()) {
-        // This rejection used to be silent — invisible behind a reverse proxy,
-        // where it surfaces only as the browser's endless "reconnecting". Log it
-        // with the Origin/Host so a proxy misconfig is one `docker logs` away.
-        let origin = header_str(&headers, ORIGIN);
-        let host = header_str(&headers, HOST);
+    if !origin_ok(headers, &st.addr, base_url.as_deref()) {
+        // Log the Origin/Host so a proxy misconfig is one `docker logs` away — a
+        // silent rejection here is invisible, surfacing only as the browser's
+        // endless "reconnecting".
+        let origin = header_str(headers, ORIGIN);
+        let host = header_str(headers, HOST);
         tracing::warn!(
             session = %key,
             origin = %origin,
@@ -69,7 +72,7 @@ pub async fn terminal_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let session = match session::resolve_key(&st.db, &key).await {
+    let session = match session::resolve_key(&st.db, key).await {
         Ok(Some((s, _))) => s,
         _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
@@ -86,20 +89,16 @@ pub async fn terminal_ws(
     upgrade_to_bridge(ws, target)
 }
 
-/// `GET /api/shell/terminal` — upgrade to a WebSocket bridged to the operator
+/// The `shell.terminal` operation — upgrade to a WebSocket bridged to the operator
 /// scratch shell (see [`crate::shell`]). Same Origin check and byte pump as
 /// [`terminal_ws`], but there is no session to look up: the shell is a single
 /// fixed supervisor, spawned lazily here on first attach so the UI can connect
 /// without a separate "create" step.
-pub async fn shell_ws(
-    ws: WebSocketUpgrade,
-    State(st): State<EditorState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn shell_ws(ws: WebSocketUpgrade, st: &EditorState, headers: &HeaderMap) -> Response {
     let base_url = crate::config::get(&st.db, "auth.base_url").await;
-    if !origin_ok(&headers, &st.addr, base_url.as_deref()) {
-        let origin = header_str(&headers, ORIGIN);
-        let host = header_str(&headers, HOST);
+    if !origin_ok(headers, &st.addr, base_url.as_deref()) {
+        let origin = header_str(headers, ORIGIN);
+        let host = header_str(headers, HOST);
         tracing::warn!(
             origin = %origin,
             host = %host,
@@ -109,7 +108,7 @@ pub async fn shell_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    if let Err(e) = crate::shell::ensure(&st).await {
+    if let Err(e) = crate::shell::ensure(st).await {
         tracing::error!(error = %format!("{e:#}"), "failed to bring up operator scratch shell");
         return (StatusCode::INTERNAL_SERVER_ERROR, "could not start shell").into_response();
     }
@@ -118,21 +117,22 @@ pub async fn shell_ws(
     upgrade_to_bridge(ws, target)
 }
 
-/// `GET /api/sessions/{id}/shell/{idx}/terminal` — upgrade to a WebSocket bridged
+/// The `sessions.shells.terminal` operation — upgrade to a WebSocket bridged
 /// to one of the session's worktree **debug shells** (see [`crate::shell`]). Same
 /// Origin check and byte pump as [`terminal_ws`], but the target is a plain login
 /// shell *in the session's worktree*, spawned lazily here on first attach — not
 /// the agent itself. Multiple indices give multiple concurrent shells.
 pub async fn session_shell_ws(
     ws: WebSocketUpgrade,
-    State(st): State<EditorState>,
-    Path((key, idx)): Path<(String, u32)>,
-    headers: HeaderMap,
+    st: &EditorState,
+    key: &str,
+    idx: u32,
+    headers: &HeaderMap,
 ) -> Response {
     let base_url = crate::config::get(&st.db, "auth.base_url").await;
-    if !origin_ok(&headers, &st.addr, base_url.as_deref()) {
-        let origin = header_str(&headers, ORIGIN);
-        let host = header_str(&headers, HOST);
+    if !origin_ok(headers, &st.addr, base_url.as_deref()) {
+        let origin = header_str(headers, ORIGIN);
+        let host = header_str(headers, HOST);
         tracing::warn!(
             session = %key,
             origin = %origin,
@@ -144,11 +144,11 @@ pub async fn session_shell_ws(
         );
         return (StatusCode::FORBIDDEN, "cross-origin websocket rejected").into_response();
     }
-    let (session, _) = match session::resolve_key(&st.db, &key).await {
+    let (session, _) = match session::resolve_key(&st.db, key).await {
         Ok(Some(pair)) => pair,
         _ => return (StatusCode::NOT_FOUND, "no such session").into_response(),
     };
-    let target = match crate::shell::ensure_debug(&st, &session, idx).await {
+    let target = match crate::shell::ensure_debug(st, &session, idx).await {
         Ok(name) => name,
         Err(e) => {
             tracing::error!(session = %key, idx, error = %format!("{e:#}"), "failed to bring up session debug shell");
@@ -232,9 +232,9 @@ async fn bridge(socket: WebSocket, target: String) -> anyhow::Result<()> {
         }
     });
 
-    // Whichever pump finishes first, drop the other — dropping `input` closes the
-    // socket write half, which the supervisor sees as a clean detach (the child
-    // keeps running, a refresh reconnects and repaints).
+    // Whichever pump finishes first, drop the other: dropping `input` closes
+    // the socket write half, which the supervisor reads as a clean detach —
+    // the child keeps running, and a refresh reconnects and repaints.
     tokio::select! {
         _ = &mut out_task => in_task.abort(),
         _ = &mut in_task => out_task.abort(),
