@@ -46,9 +46,13 @@ pub mod federate {
     /// it holds no *Loom* credential, not that it is unauthenticated: the OIDC
     /// token is verified in the request body, so there is no `Principal` for
     /// `authorize` to inspect and the operation vouches for itself.
-    #[operation(id = "auth.federate", actor = Anonymous, io = Session, scope = Global, risk = Write)]
+    #[operation(id = "auth.federate", actor = Anonymous, io = Session, scope = Global, risk = Write,
+                cli = "auth federate")]
     pub struct Input {
-        /// The workload-identity OIDC token to exchange.
+        /// The workload-identity OIDC token to exchange. On the command line
+        /// this names a file, or `-`/omitted to read stdin, so the token does
+        /// not appear in shell history or process arguments.
+        #[operand(positional, from_file)]
         pub token: String,
     }
 

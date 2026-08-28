@@ -416,7 +416,25 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   verifies the workload's OIDC identity and returns an automation-scoped token
   with a fixed ten-minute lifetime. The workflow exchanges again for each run;
   it does not store a personal token or choose one of the day-based lifetimes
-  shown on the personal-token page. See
+  shown on the personal-token page. The CLI reads the OIDC token from stdin and
+  can create the run directly, so workflow tokens never need to appear in
+  command arguments and callers do not need to assemble Loom HTTP requests:
+
+  ```sh
+  echo "::add-mask::$oidc_token"
+  loom_token=$(printf '%s' "$oidc_token" |
+    WEAVER_API="$LOOM_URL" loom auth federate | jq -er .token)
+  echo "::add-mask::$loom_token"
+
+  WEAVER_API="$LOOM_URL" LOOM_TOKEN="$loom_token" loom runs create \
+    --profile github_comment \
+    --idempotency-key "prose-cleanup:issue:123:$body_hash" \
+    --session "$(jq -cn --arg repo "$GITHUB_REPOSITORY" \
+      --arg goal 'Clean up issue prose' \
+      '{repo:$repo,title:"Prose cleanup",goal:$goal,github_issue:123}')"
+  ```
+
+  See
   [Restricted sessions](docs/restricted-sessions.md).
 
 To configure **GitHub sign-in**: register an OAuth app on GitHub with the

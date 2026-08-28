@@ -20,7 +20,8 @@ pub mod create {
     ///
     /// The runtime is the only real caller, presenting an automation bearer token
     /// minted by `auth.automation_token`. `Admin` can still reach it directly.
-    #[operation(id = "runs.create", actor = Internal, scope = Global, risk = Write)]
+    #[operation(id = "runs.create", actor = Internal, scope = Global, risk = Write,
+                cli = "runs create")]
     pub struct Input {
         /// Launch profile the run executes under.
         pub profile: String,
