@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 use serde_json::json;
 
-use weaver_api::operations::{branches, channels};
+use weaver_api::operations::{channels, sessions};
 
 use super::{branch_key, channel_key, client, render};
 
@@ -70,9 +70,7 @@ async fn cmd_channel(cmd: ChannelCmd) -> Result<()> {
             let repo_root = match branch_key() {
                 Ok(key) => Some(
                     client
-                        .invoke::<branches::get::Op>(&branches::get::Input {
-                            branch: key.to_string(),
-                        })
+                        .invoke::<sessions::context::Op>(&sessions::context::Input { session: key })
                         .await?
                         .repo_root,
                 ),

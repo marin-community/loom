@@ -251,7 +251,10 @@ pub(super) async fn require_auth(
                             {
                                 "this operation requires a human operator"
                             }
-                            _ => "credential lacks this operation's registered capability or scope",
+                            // Scope is checked from the decoded operation input
+                            // by `operations::authorize`; this middleware has
+                            // only checked actor and registered capabilities.
+                            _ => "credential lacks this operation's registered capability",
                         })
                         .unwrap_or("credential grant forbids this route");
                 return AppError::new(StatusCode::FORBIDDEN, message).into_response();

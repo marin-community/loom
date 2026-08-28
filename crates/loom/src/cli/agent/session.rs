@@ -4,7 +4,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use weaver_api::operations::branches;
+use weaver_api::operations::sessions;
 use weaver_api::BranchView;
 use weaver_core::tags;
 
@@ -34,11 +34,10 @@ pub fn run_chatlog(file: Option<String>, as_json: bool) -> Result<()> {
 async fn cmd_where() -> Result<()> {
     let client = client();
     let key = branch_key()?;
-    let b = client
-        .invoke::<branches::get::Op>(&branches::get::Input {
-            branch: key.to_string(),
-        })
+    let session = client
+        .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
         .await?;
+    let b = session.branch;
     println!("repo:      {}", b.repo_root);
     println!("branch:    {}", b.branch);
     println!("base:      {}", b.base_branch);
@@ -50,9 +49,7 @@ async fn cmd_log(limit: i64) -> Result<()> {
     let client = client();
     let key = branch_key()?;
     let mut history = client
-        .invoke::<branches::events::list::Op>(&branches::events::list::Input {
-            branch: key.to_string(),
-        })
+        .invoke::<sessions::events::list::Op>(&sessions::events::list::Input { session: key })
         .await?;
     history.truncate(limit.max(0) as usize);
     if history.is_empty() {
@@ -228,7 +225,11 @@ async fn cmd_hook(event: String) -> Result<()> {
         };
         let is_compact = source.as_deref() == Some("compact");
         client
-            .record_branch_event(&key, "hook", json!({ "event": event, "source": source }))
+            .invoke::<sessions::events::create::Op>(&sessions::events::create::Input {
+                kind: "hook".to_string(),
+                data: json!({ "event": event, "source": source }),
+                session: key.clone(),
+            })
             .await?;
         if is_session_start {
             // After a compaction the agent has lost its working context but the
@@ -236,9 +237,7 @@ async fn cmd_hook(event: String) -> Result<()> {
             // `loom summary` catch-up) rather than the full repository primer. On a
             // genuine start/resume/clear, inject the full primer.
             let b = client
-                .invoke::<branches::get::Op>(&branches::get::Input {
-                    branch: key.to_string(),
-                })
+                .invoke::<sessions::status::get::Op>(&sessions::status::get::Input { session: key })
                 .await?;
             let context = if is_compact {
                 let summary = render_summary(&client, &b).await.unwrap_or_default();

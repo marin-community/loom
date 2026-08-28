@@ -105,9 +105,10 @@ pub enum Grant {
     Session {
         session_id: String,
         branch_id: String,
-        /// `None` is the compatibility form minted before operation-bound
-        /// authorization. Newly minted credentials always carry an explicit
-        /// capability set derived from the immutable launch policy.
+        /// `None` is an unrestricted session: actor and resource scope still
+        /// apply, but newly registered session operations remain reachable.
+        /// Restricted sessions carry the exact capability set derived from
+        /// their immutable launch policy.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<String>>,
     },
@@ -733,15 +734,14 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     let hash = sha256_hex(token);
     let row = sqlx::query(
         "SELECT t.id AS id, t.username AS username, u.github_login AS github_login,
-                u.role AS role, t.kind AS kind, t.grant_json AS grant_json
-         FROM api_tokens t JOIN users u ON u.username = t.username
+                u.role AS role, t.kind AS kind, t.grant_json AS grant_json,
+                s.policy_restricted AS session_restricted
+         FROM api_tokens t
+         JOIN users u ON u.username = t.username
+         LEFT JOIN sessions s ON s.id = t.bound_session_id
          WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)
            AND (
-             t.kind != 'session' OR EXISTS(
-               SELECT 1 FROM sessions s
-               WHERE s.id = t.bound_session_id
-                 AND s.status NOT IN ('done', 'error', 'archived')
-             )
+             t.kind != 'session' OR s.status NOT IN ('done', 'error', 'archived')
            )",
     )
     .bind(&hash)
@@ -753,7 +753,7 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     };
     let id: String = row.get("id");
     let kind: String = row.get("kind");
-    let grant = if kind == TokenKind::Pat.as_str() || kind == TokenKind::Local.as_str() {
+    let mut grant = if kind == TokenKind::Pat.as_str() || kind == TokenKind::Local.as_str() {
         row.get::<UserRole, _>("role").grant()
     } else {
         let grant_json: String = row.get("grant_json");
@@ -765,6 +765,17 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
             }
         }
     };
+    // Unrestricted session policy is forward-compatible by definition. Older
+    // Loom versions serialized the then-current complete grant list, which
+    // made a surviving token lose access whenever an upgrade registered a new
+    // grant. Normalize those durable credentials as they authenticate; the
+    // session row remains the source of truth and restricted credentials keep
+    // their exact launch-time capabilities.
+    if kind == "session" && row.get::<Option<bool>, _>("session_restricted") == Some(false) {
+        if let Grant::Session { capabilities, .. } = &mut grant {
+            *capabilities = None;
+        }
+    }
     let _ = sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
         .bind(now_iso())
         .bind(&id)
@@ -803,13 +814,24 @@ pub fn session_capabilities_for_policy(
     ))
 }
 
-async fn stored_session_capabilities(db: &Db, session_id: &str) -> Result<Vec<String>> {
+fn session_token_capabilities_for_policy(
+    restricted: bool,
+    policy_mcp_access: &str,
+) -> Result<Option<Vec<String>>> {
+    if restricted {
+        session_capabilities_for_policy(true, policy_mcp_access).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+async fn stored_session_capabilities(db: &Db, session_id: &str) -> Result<Option<Vec<String>>> {
     let row = sqlx::query("SELECT policy_restricted, policy_mcp_access FROM sessions WHERE id = ?")
         .bind(session_id)
         .fetch_optional(db)
         .await?;
     match row {
-        Some(row) => session_capabilities_for_policy(
+        Some(row) => session_token_capabilities_for_policy(
             row.get::<bool, _>("policy_restricted"),
             row.get::<String, _>("policy_mcp_access").as_str(),
         ),
@@ -817,7 +839,7 @@ async fn stored_session_capabilities(db: &Db, session_id: &str) -> Result<Vec<St
         // first callback cannot race the token row. That path calls the
         // explicit-policy helper; retain unrestricted behavior as a safe
         // compatibility fallback for direct test fixtures.
-        None => Ok(weaver_api::all_session_capabilities()),
+        None => Ok(None),
     }
 }
 
@@ -826,7 +848,7 @@ async fn mint_staged_session_token(
     owner: Option<&str>,
     session_id: &str,
     branch_id: &str,
-    capabilities: Vec<String>,
+    capabilities: Option<Vec<String>>,
 ) -> Result<StagedSessionToken> {
     let username = match owner {
         Some(username) if get_user(db, username).await?.is_some() => username.to_string(),
@@ -839,7 +861,7 @@ async fn mint_staged_session_token(
     let grant = serde_json::to_string(&Grant::Session {
         session_id: session_id.to_string(),
         branch_id: branch_id.to_string(),
-        capabilities: Some(capabilities),
+        capabilities,
     })?;
     sqlx::query(
         "INSERT INTO api_tokens
@@ -880,7 +902,7 @@ pub async fn stage_session_token_with_policy(
     restricted: bool,
     policy_mcp_access: &str,
 ) -> Result<StagedSessionToken> {
-    let capabilities = session_capabilities_for_policy(restricted, policy_mcp_access)?;
+    let capabilities = session_token_capabilities_for_policy(restricted, policy_mcp_access)?;
     mint_staged_session_token(db, owner, session_id, branch_id, capabilities).await
 }
 
@@ -1463,7 +1485,44 @@ mod tests {
         };
         assert_eq!(session_id, "s1");
         assert_eq!(branch_id, branch.id);
-        assert_eq!(capabilities, Some(weaver_api::all_session_capabilities()));
+        assert_eq!(capabilities, None);
+
+        // Credentials minted by older Loom versions froze an unrestricted
+        // session to the complete capability list that existed at the time.
+        // Authentication upgrades that representation in memory so a server
+        // upgrade can register new operations without replacing the plaintext
+        // token held by a surviving runtime.
+        let legacy_grant = serde_json::to_string(&Grant::Session {
+            session_id: "s1".to_string(),
+            branch_id: branch.id.clone(),
+            capabilities: Some(vec!["loom/sessions/read@v1".to_string()]),
+        })
+        .unwrap();
+        sqlx::query("UPDATE api_tokens SET grant_json = ? WHERE bound_session_id = 's1'")
+            .bind(legacy_grant)
+            .execute(&db)
+            .await
+            .unwrap();
+        let upgraded = lookup_token(&db, &plain).await.unwrap().unwrap();
+        assert!(matches!(
+            upgraded.grant,
+            Grant::Session {
+                capabilities: None,
+                ..
+            }
+        ));
+        sqlx::query("UPDATE sessions SET policy_restricted = 1 WHERE id = 's1'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let pinned = lookup_token(&db, &plain).await.unwrap().unwrap();
+        assert!(matches!(
+            pinned.grant,
+            Grant::Session {
+                capabilities: Some(ref values),
+                ..
+            } if values == &["loom/sessions/read@v1"]
+        ));
         assert_eq!(list_tokens(&db, "rjpower").await.unwrap().len(), 0);
         crate::session::set_status(&db, "s1", "archived")
             .await

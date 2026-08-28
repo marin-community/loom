@@ -3,7 +3,7 @@
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 
-use weaver_api::operations::branches;
+use weaver_api::operations::sessions;
 use weaver_api::{BranchView, Client};
 use weaver_core::tags;
 
@@ -57,23 +57,22 @@ pub async fn run(cmd: TagCmd) -> Result<()> {
 /// `repo:branch`, or unambiguous prefix) when given, else the current branch.
 async fn resolve_tag_target(
     client: &Client,
-    current_key: &str,
     session: Option<&str>,
-) -> Result<BranchView> {
+) -> Result<(BranchView, String)> {
+    let key = match session {
+        Some(key) => key.to_string(),
+        None => branch_key()?,
+    };
+    let resolved = client
+        .invoke::<sessions::tags::list::Op>(&sessions::tags::list::Input {
+            session: key.clone(),
+        })
+        .await;
     match session {
-        Some(key) => client
-            .invoke::<branches::get::Op>(&branches::get::Input {
-                branch: key.to_string(),
-            })
-            .await
-            .map_err(|_| anyhow!("no session matching '{key}'")),
-        None => {
-            client
-                .invoke::<branches::get::Op>(&branches::get::Input {
-                    branch: current_key.to_string(),
-                })
-                .await
-        }
+        Some(spelled) => resolved
+            .map(|branch| (branch, key))
+            .map_err(|_| anyhow!("no session matching '{spelled}'")),
+        None => resolved.map(|branch| (branch, key)),
     }
 }
 
@@ -81,7 +80,6 @@ async fn resolve_tag_target(
 /// self-report and a watch's `triage` assessment with any free-form axis.
 async fn cmd_tag(cmd: TagCmd) -> Result<()> {
     let client = client();
-    let key = branch_key()?;
     match cmd {
         TagCmd::Set {
             key: tag_key,
@@ -90,7 +88,7 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
             session,
             by,
         } => {
-            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            let (target, session_key) = resolve_tag_target(&client, session.as_deref()).await?;
             let tag_key = tag_key.trim();
             let value = value.trim();
             let note = note.trim();
@@ -105,12 +103,12 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
                 bail!("a tag value cannot be empty — use `loom sessions tags delete {tag_key}` to clear it");
             }
             client
-                .invoke::<branches::tags::set::Op>(&branches::tags::set::Input {
+                .invoke::<sessions::tags::set::Op>(&sessions::tags::set::Input {
                     key: tag_key.to_string(),
                     value: value.to_string(),
                     note: note.to_string(),
                     by: Some(by.to_string()),
-                    branch: target.id.to_string(),
+                    session: session_key,
                 })
                 .await?;
             if note.is_empty() {
@@ -126,19 +124,19 @@ async fn cmd_tag(cmd: TagCmd) -> Result<()> {
             key: tag_key,
             session,
         } => {
-            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            let (target, session_key) = resolve_tag_target(&client, session.as_deref()).await?;
             let tag_key = tag_key.trim();
             client
-                .invoke::<branches::tags::delete::Op>(&branches::tags::delete::Input {
+                .invoke::<sessions::tags::delete::Op>(&sessions::tags::delete::Input {
                     key: tag_key.to_string(),
                     by: Some("manual".to_string()),
-                    branch: target.id.to_string(),
+                    session: session_key,
                 })
                 .await?;
             println!("tag: {} → cleared {tag_key}", target.branch);
         }
         TagCmd::Ls { session } => {
-            let target = resolve_tag_target(&client, &key, session.as_deref()).await?;
+            let (target, _) = resolve_tag_target(&client, session.as_deref()).await?;
             if target.tags.is_empty() {
                 println!("(no tags)");
                 return Ok(());

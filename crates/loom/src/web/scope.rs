@@ -102,7 +102,16 @@ pub(crate) async fn require_session_access(
     if session.is_empty() || session == "self" || session == own {
         return Ok(());
     }
-    if super::auth::is_session_descendant(st, own, session).await {
+    // Session handlers accept every key `session::resolve_key` understands:
+    // session id, branch id/name, or `repo:branch`. Resolve before comparing
+    // ancestry so the scope check and handler cannot disagree about the same
+    // typed operand.
+    let Some((resolved, _)) = crate::session::resolve_key(&st.db, session).await? else {
+        return Err(denied(
+            "session credentials are limited to their own session",
+        ));
+    };
+    if super::auth::is_session_descendant(st, own, &resolved.id).await {
         return Ok(());
     }
     Err(denied(

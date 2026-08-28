@@ -1106,12 +1106,12 @@ async fn prompt_resources(work_dir: &str, files: &[String]) -> ApiResult<Vec<Val
 // ---------------------------------------------------------------------------
 // Operation registry bindings
 //
-// The `sessions` bundle: 17 operations under `weaver_api::operations::sessions`.
+// The `sessions` bundle under `weaver_api::operations::sessions`.
 // `sessions.summary.get` lives in the sibling `session_summary.rs` and is
 // folded in below, and `sessions.github.access.list` is bound below to a
 // handler in `github_access.rs`, beside the repository-access helpers it reads
 // through. `sessions.context` also lives in a sibling file
-// (`self_context.rs`), but `registry()` (`web/operations.rs`, coordinator-owned)
+// (`self_context.rs`), but the top-level registry (`web/operations.rs`)
 // already wires `self_context::bound_operations()` in on its own and treats
 // it as independent, so it is deliberately NOT re-added here; doing so would
 // register `sessions.context` twice and panic the router on startup. Every

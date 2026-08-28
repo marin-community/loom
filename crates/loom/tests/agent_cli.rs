@@ -40,7 +40,11 @@ fn loom_bin() -> std::path::PathBuf {
 /// suite is that a session row exists at all, because a session credential is
 /// how the server resolves the caller's own repository, branch, and session for
 /// every declaration-served command.
-async fn seed_session(db: &weaver_core::db::Db, branch_id: &str) -> loom::session::Session {
+async fn seed_session(
+    db: &weaver_core::db::Db,
+    branch_id: &str,
+    policy: &session_mod::SessionLaunchPolicy,
+) -> loom::session::Session {
     session_mod::insert_with_policy(
         db,
         &session_mod::NewSession {
@@ -61,15 +65,15 @@ async fn seed_session(db: &weaver_core::db::Db, branch_id: &str) -> loom::sessio
             class: "interactive".to_string(),
             tracking_issue_id: None,
         },
-        &launch_policy(),
+        policy,
     )
     .await
     .unwrap()
 }
 
 /// An ordinary unrestricted launch policy — what loom assigns to a session
-/// it starts. `restricted: false` mints a credential carrying the full session
-/// capability set, as a real agent's does.
+/// it starts. `restricted: false` mints a forward-compatible credential whose
+/// capabilities follow the registered session operation set.
 fn launch_policy() -> session_mod::SessionLaunchPolicy {
     session_mod::SessionLaunchPolicy {
         profile: loom::profile::DEFAULT_PROFILE.to_string(),
@@ -94,6 +98,13 @@ fn launch_policy() -> session_mod::SessionLaunchPolicy {
     }
 }
 
+fn restricted_launch_policy() -> session_mod::SessionLaunchPolicy {
+    session_mod::SessionLaunchPolicy {
+        restricted: true,
+        ..launch_policy()
+    }
+}
+
 /// A running loom server, isolated in its own temp `WEAVER_HOME`/sqlite db,
 /// with one branch row seeded — the target `$WEAVER_BRANCH` names, exactly as
 /// loom would set it for a real session — plus the session running on it and
@@ -106,9 +117,9 @@ struct Env {
     session_id: String,
     /// The session credential loom hands an agent as `$LOOM_TOKEN`.
     ///
-    /// A declaration-served command resolves `repo_root`, `branch` and
-    /// `session` from the caller's own credential, so without a session token
-    /// every operand the dispatcher supplies would be empty.
+    /// A declaration-served command can resolve `repo_root`, `branch` and
+    /// `session` from the caller's own credential when its context operands are
+    /// omitted.
     token: String,
     db: weaver_core::db::Db,
     _home: tempfile::TempDir,
@@ -116,6 +127,10 @@ struct Env {
 
 impl Env {
     async fn start() -> Self {
+        Self::start_with_policy(launch_policy()).await
+    }
+
+    async fn start_with_policy(policy: session_mod::SessionLaunchPolicy) -> Self {
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("WEAVER_HOME", home.path());
         seed_migrated_db();
@@ -160,7 +175,7 @@ impl Env {
         };
         tokio::spawn(server::serve(state, listener));
 
-        let session = seed_session(&pool, &branch.id).await;
+        let session = seed_session(&pool, &branch.id, &policy).await;
         let token = auth::create_session_token(&pool, None, &session.id, &branch.id)
             .await
             .unwrap();
@@ -244,6 +259,21 @@ impl Env {
     fn run_raw(&self, args: &[&str]) -> std::process::Output {
         self.command(args).output().expect("failed to spawn weaver")
     }
+
+    async fn replace_token_capabilities(&self, capabilities: Vec<String>) {
+        let grant = serde_json::to_string(&auth::Grant::Session {
+            session_id: self.session_id.clone(),
+            branch_id: self.branch_id.clone(),
+            capabilities: Some(capabilities),
+        })
+        .unwrap();
+        sqlx::query("UPDATE api_tokens SET grant_json = ? WHERE bound_session_id = ?")
+            .bind(grant)
+            .bind(&self.session_id)
+            .execute(&self.db)
+            .await
+            .unwrap();
+    }
 }
 
 /// The goal lives as the `goal` artifact; writing it keeps the branch's
@@ -268,6 +298,45 @@ async fn where_reports_resolved_branch() {
         out.contains("branch:    feature-test"),
         "where output: {out}"
     );
+}
+
+/// Session orientation is baseline access for a restricted agent. These
+/// commands describe `sessions.*` operations, so their hand-written rendering
+/// must not introduce a hidden dependency on a `branches.*` capability the
+/// launch policy did not grant.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn restricted_session_can_run_orientation_commands() {
+    let env = Env::start_with_policy(restricted_launch_policy()).await;
+
+    let summary = env.run(&["summary"]);
+    assert!(summary.contains(BRANCH_GOAL), "summary: {summary}");
+
+    let context = env.run(&["self"]);
+    assert!(
+        context.contains("branch:    feature-test"),
+        "self: {context}"
+    );
+
+    let status = env.run(&["status", "get"]);
+    assert!(status.contains(BRANCH_GOAL), "status: {status}");
+
+    env.run(&["sessions", "events"]);
+}
+
+/// A live runtime keeps its plaintext token across Loom server upgrades. An
+/// unrestricted token minted before a newly registered grant existed must
+/// therefore acquire that grant from the durable session policy rather than
+/// remain frozen to its old serialized list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn legacy_unrestricted_token_reaches_new_operation_grants() {
+    let env = Env::start().await;
+    env.replace_token_capabilities(vec!["loom/sessions/read@v1".to_string()])
+        .await;
+
+    let branch = env.run(&["branches", "get"]);
+    assert!(branch.contains(&env.branch_name), "branch: {branch}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
