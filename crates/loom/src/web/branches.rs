@@ -11,7 +11,6 @@ use super::operations::{register, Bound, OperationContext};
 use super::{author_or_manual, branch_view, require_branch};
 use super::{ApiResult, AppError, AppState};
 use axum::http::StatusCode;
-use weaver_api::operations::channels;
 
 // ---------------------------------------------------------------------------
 // Branches
@@ -143,7 +142,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::get::Op, _, _>(get_operation),
         register::<ops::update::Op, _, _>(update_operation),
         register::<ops::status::set::Op, _, _>(status_set_operation),
-        register::<ops::slack::reply::Op, _, _>(slack_reply_operation),
+        register::<ops::slack::send::Op, _, _>(slack_send_operation),
         register::<ops::events::list::Op, _, _>(events_list_operation),
         register::<ops::events::create::Op, _, _>(events_create_operation),
         register::<ops::tags::set::Op, _, _>(tags_set_operation),
@@ -343,83 +342,18 @@ async fn status_set_operation(
     branch_view(&st.db, &branch).await
 }
 
-/// `branches.slack.reply`. Backs the `loom_messaging::slack_reply` MCP tool,
-/// so an agent posts through this same operation rather than a separate
-/// path.
-async fn slack_reply_operation(
+async fn slack_send_operation(
     context: OperationContext,
-    input: ops::slack::reply::Input,
-) -> ApiResult<ops::slack::reply::Output> {
+    input: ops::slack::send::Input,
+) -> ApiResult<ops::slack::send::Output> {
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
     let text = input.text.trim();
     if text.is_empty() {
         return Err(AppError::bad_request("text is required"));
     }
-    if input.thread.is_none() {
-        // No thread named: fall back to the branch's wired Slack thread.
-        let wired = tags::get(&st.db, &branch.id, crate::slack::WIRED_TAG)
-            .await?
-            .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
-        if crate::slack::parse_wiring(&wired.value).is_none() {
-            return Err(AppError::bad_request("malformed slack wiring tag"));
-        }
-        let channel_id = crate::channels::session_channel_for_branch(&st.db, &branch.id)
-            .await?
-            .ok_or_else(|| AppError::bad_request("this branch has no open session channel"))?;
-        let channel = crate::channels::access(&st.db, &channel_id)
-            .await?
-            .ok_or_else(|| AppError::not_found("channel"))?;
-        let author =
-            crate::channels::Subject::new(crate::channels::SubjectKind::Session, &channel_id);
-        let request = channels::messages::create::Input {
-            kind: "result".to_string(),
-            urgency: "normal".to_string(),
-            body: text.to_string(),
-            payload: json!({ "compatibility_source": "slack_reply" }),
-            reply_to: None,
-            idempotency_key: input.idempotency_key,
-            // The channel and branch are passed to `append_and_deliver` directly.
-            ..Default::default()
-        };
-        let (inserted, message) =
-            super::channels::append_and_deliver(&st, &channel_id, &channel, &author, &request)
-                .await?;
-        super::channels::record_channel_message_event(
-            &st,
-            &channel_id,
-            &author,
-            &message,
-            inserted,
-        )
-        .await;
-        let delivery = message
-            .deliveries
-            .iter()
-            .find(|delivery| delivery.binding_id == weaver_api::CHANNEL_SLACK_ORIGIN_BINDING_ID)
-            .ok_or_else(|| AppError::bad_request("this branch is not wired to a Slack thread"))?;
-        if delivery.state == "failed" {
-            return Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                delivery
-                    .last_error
-                    .clone()
-                    .unwrap_or_else(|| "Slack delivery failed".to_string()),
-            ));
-        }
-        return Ok(json!({
-            "posted": delivery.state == "delivered",
-            "ts": delivery.external_id,
-            "message_id": message.id,
-            "delivery": delivery,
-        }));
-    }
-
-    let target = input
-        .thread
-        .as_ref()
-        .ok_or_else(|| AppError::bad_request("thread is required"))?;
-    let (channel, root) = crate::slack::parse_thread_ref(target).map_err(AppError::bad_request)?;
+    let (channel, root) =
+        crate::slack::parse_thread_ref(&input.thread).map_err(AppError::bad_request)?;
     if !crate::slack_routes::allows(&st.db, &branch.id, &channel, &root).await? {
         return Err(AppError::new(
             StatusCode::FORBIDDEN,
@@ -432,7 +366,7 @@ async fn slack_reply_operation(
     let ts = web
         .post_message(&channel, Some(&root), text)
         .await
-        .map_err(|e| AppError::new(StatusCode::BAD_GATEWAY, e.to_string()))?;
+        .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, error.to_string()))?;
     Ok(json!({ "posted": true, "ts": ts }))
 }
 

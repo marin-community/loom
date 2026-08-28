@@ -2521,7 +2521,7 @@ mod tests {
                 ("GH_TOKEN".to_string(), "github".to_string()),
             ],
             env_clear: false,
-            mcp_servers: vec![json!({"name":"loom_history"})],
+            mcp_servers: vec![json!({"name":"loom"})],
             new_or_load: NewOrLoad::New {
                 cwd: PathBuf::from("/worktree"),
                 meta: Some(json!({"provider":"options"})),
@@ -2980,7 +2980,7 @@ mod tests {
             None,
             "default",
             true,
-            r#"["Read(./**)","mcp__loom_github__issue_view","mcp__loom_github__issue_comment"]"#,
+            r#"["Read(./**)","mcp__loom__github_issue_view","mcp__loom__github_issue_comment"]"#,
         )
         .unwrap();
         let restricted = &restricted["claudeCode"]["options"];
@@ -2991,8 +2991,8 @@ mod tests {
             restricted["allowedTools"],
             json!([
                 "Read(./**)",
-                "mcp__loom_github__issue_view",
-                "mcp__loom_github__issue_comment"
+                "mcp__loom__github_issue_view",
+                "mcp__loom__github_issue_comment"
             ])
         );
         assert!(restricted.get("mcpServers").is_none());
@@ -3025,7 +3025,7 @@ mod tests {
                 mode: "default",
                 prelude: "none",
                 restricted: true,
-                allowed_tools: r#"["Read(./**)","mcp__loom_github__issue_edit"]"#,
+                allowed_tools: r#"["Read(./**)","mcp__loom__github_issue_edit"]"#,
                 mcp_access:
                     r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
                 custom: None,
@@ -3052,20 +3052,17 @@ mod tests {
             .iter()
             .any(|(name, value)| { name == "CLAUDE_CODE_DISABLE_AUTO_MEMORY" && value == "1" }));
         assert_eq!(launch.mcp_servers.len(), 1);
-        assert_eq!(launch.mcp_servers[0]["name"], "loom_github");
+        assert_eq!(launch.mcp_servers[0]["name"], "loom");
         assert!(launch.mcp_servers[0]["command"]
             .as_str()
             .is_some_and(|command| std::path::Path::new(command).is_absolute()));
-        assert_eq!(
-            launch.mcp_servers[0]["args"],
-            json!(["mcp", "serve", "github"])
-        );
+        assert_eq!(launch.mcp_servers[0]["args"], json!(["mcp", "serve"]));
         assert_eq!(
             launch.mcp_servers[0]["env"],
             json!([
                 {
                     "name": "LOOM_MCP_ALLOWED_TOOLS",
-                    "value": "[\"issue_edit\"]"
+                    "value": "[\"github_issue_edit\"]"
                 },
                 {
                     "name": "WEAVER_API",

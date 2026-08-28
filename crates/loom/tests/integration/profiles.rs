@@ -180,7 +180,7 @@ async fn profile_and_mcp_rest_journey() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|set| set["name"] == "mcp/github/comment@v1")
+        .find(|set| set["name"] == "loom/github/comment@v1")
         .unwrap();
     assert!(github["digest"].as_str().unwrap().starts_with("sha256:"));
     assert!(github.get("source").is_none());
@@ -539,7 +539,7 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
             .await
             .unwrap();
     let stamped: Vec<String> = serde_json::from_str(&stamped).unwrap();
-    assert!(stamped.contains(&"mcp__loom_github__issue_edit".to_string()));
+    assert!(stamped.contains(&"mcp__loom__github_issue_edit".to_string()));
     assert!(!stamped.contains(&"mcp/github/comment".to_string()));
     let mcp_policy: String =
         sqlx::query_scalar("SELECT policy_mcp_access FROM sessions WHERE id = ?")

@@ -244,7 +244,7 @@ mod tests {
     fn only_the_fixed_mcp_tools_map_to_permissions() {
         assert_eq!(
             crate::mcp::github::permission_rule("issue_edit").as_deref(),
-            Some("mcp__loom_github__issue_edit")
+            Some("mcp__loom__github_issue_edit")
         );
         assert!(crate::mcp::github::permission_rule("repository_delete").is_none());
     }

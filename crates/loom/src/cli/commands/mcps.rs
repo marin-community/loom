@@ -20,9 +20,9 @@ pub enum McpCmd {
     Add(Box<McpAddOpts>),
     /// Remove an operator-authored MCP definition.
     Rm { identity: String },
-    /// Run one trusted stdio adapter (used only by Loom's agent runtime).
+    /// Run Loom's trusted aggregate stdio server (used only by the agent runtime).
     #[command(hide = true)]
-    Serve { adapter: String },
+    Serve,
     /// Run an exact custom source snapshot (used only by the agent runtime).
     #[command(hide = true)]
     ServeCustom { identity: String },
@@ -48,7 +48,7 @@ pub struct McpAddOpts {
 
 pub async fn run_mcp(cmd: McpCmd) -> Result<()> {
     match cmd {
-        McpCmd::Serve { adapter } => crate::mcp::serve(&adapter).await,
+        McpCmd::Serve => crate::mcp::serve().await,
         McpCmd::ServeCustom { identity } => crate::custom_mcp::serve_from_env(&identity).await,
         McpCmd::Show { name } => {
             let registry = client::default()?

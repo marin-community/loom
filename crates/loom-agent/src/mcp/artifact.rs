@@ -17,10 +17,8 @@ use serde_json::{json, Value};
 use weaver_api::operations::artifacts;
 
 use super::dispatch::{export, Export};
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
+use super::{Adapter, CapabilitySet, ToolFuture};
 use weaver_api::operations::sessions;
-
-const SERVER_NAME: &str = "loom_artifact";
 
 /// The tools this server exports, in the order it advertises them. `list`,
 /// `get`, and `write` are served by hand below — they resolve each artifact's
@@ -42,40 +40,23 @@ fn exports() -> &'static [Export] {
     })
 }
 
-// The names these sets carried before the `loom/` rename. Sessions pinned to
-// one still resolve it.
-const SUPERSEDED: &[(&str, &str)] = &[
-    ("mcp/artifact/read@v1", "loom/artifacts/read@v1"),
-    ("mcp/artifact/write@v1", "loom/artifacts/write@v1"),
-];
-
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "artifact",
-    server_name: SERVER_NAME,
     description: "Named, versioned deliverables and anchored review threads.",
     capability_sets,
     exports,
-    superseded: &[
-        ("mcp/artifact/read@v1", "loom/artifacts/read@v1"),
-        ("mcp/artifact/write@v1", "loom/artifacts/write@v1"),
-    ],
     expand_tool_set,
-    is_permission_rule,
-    server_config,
     tools,
-    serve: serve_boxed,
+    call: call_boxed,
 };
 
 /// Capability sets are derived from the registry: every `artifacts.*` operation
 /// exposed as an MCP tool on this server contributes its tool to the set
-/// named by its grant, plus the same sets under the names they were superseded
-/// away from.
+/// named by its grant.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
-        let mut sets = super::dispatch::capability_sets(exports(), "artifact", describe_capability);
-        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
-        sets
+        super::dispatch::capability_sets(exports(), "artifact", describe_capability)
     })
 }
 
@@ -87,16 +68,8 @@ fn describe_capability(grant: &str) -> &'static str {
     }
 }
 
-fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
-}
-
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
-}
-
-fn server_config() -> Value {
-    super::builtin_server_config("artifact")
+    super::dispatch::expand_tool_set("artifact", capability_sets(), name)
 }
 
 fn tools() -> Value {
@@ -120,7 +93,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     if super::dispatch::lookup(exports(), name).is_none() {
         bail!("unknown artifact tool '{name}'");
     }
-    if !super::runtime_tool_allowed(name) {
+    if !super::runtime_adapter_tool_allowed("artifact", name) {
         bail!("artifact tool '{name}' is not allowed by this session");
     }
     arguments
@@ -129,7 +102,7 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     let client = super::runtime_client("artifact")?;
     match name {
         "list" | "get" | "write" => with_dashboard_url(&client, name, arguments).await,
-        _ => super::dispatch::call_tool(&client, SERVER_NAME, exports(), name, arguments).await,
+        _ => super::dispatch::call_tool(&client, "artifact", exports(), name, arguments).await,
     }
 }
 
@@ -235,10 +208,6 @@ async fn with_dashboard_url(
     }
 }
 
-fn serve_boxed() -> ServeFuture {
-    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +216,6 @@ mod tests {
     fn capability_sets_are_grouped_by_grant() {
         assert_eq!(expand_tool_set("loom/artifacts/read@v1").unwrap().len(), 4);
         assert_eq!(expand_tool_set("loom/artifacts/write@v1").unwrap().len(), 4);
-        assert_eq!(expand_tool_set("mcp/artifact/read@v1").unwrap().len(), 4);
-        assert_eq!(expand_tool_set("mcp/artifact/write@v1").unwrap().len(), 4);
+        assert!(expand_tool_set("mcp/artifact/read@v1").is_none());
     }
 }

@@ -533,9 +533,9 @@ mod tests {
             "claudeCode": { "options": { "settingSources": [], "tools": ["Read"] } }
         });
         let servers = vec![json!({
-            "name": "loom_github",
+            "name": "loom",
             "command": "/usr/bin/loom",
-            "args": ["mcp", "serve", "github"],
+            "args": ["mcp", "serve"],
             "env": [],
         })];
         let params = load_session_params("session-1", "/worktree", &servers, Some(&meta));

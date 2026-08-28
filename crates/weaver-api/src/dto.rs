@@ -663,11 +663,9 @@ pub struct ProfileEnvView {
     pub updated_at: String,
 }
 
-/// One trusted MCP adapter Loom can launch. Provider neutral: clients select a
-/// capability set, while an agent runtime translates its tools into that
-/// provider's permission vocabulary.
+/// One trusted tool domain exposed through Loom's aggregate MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct McpAdapterView {
+pub struct McpDomainView {
     pub name: String,
     pub description: String,
     pub server_name: String,
@@ -681,17 +679,14 @@ pub struct McpCapabilitySetView {
     pub version: String,
     pub digest: String,
     pub description: String,
-    pub adapter: String,
+    pub domain: String,
     pub tools: Vec<String>,
-    /// Canonical replacement for a compatibility-only capability identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deprecated_by: Option<String>,
 }
 
 /// The trusted MCP registry exposed to operators and the settings UI.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct McpRegistryView {
-    pub adapters: Vec<McpAdapterView>,
+    pub domains: Vec<McpDomainView>,
     pub capability_sets: Vec<McpCapabilitySetView>,
     #[serde(default)]
     pub custom_servers: Vec<CustomMcpView>,
@@ -1178,7 +1173,7 @@ pub struct DeploymentView {
 /// of the thread's root. The workspace is loom's own — a caller cannot address
 /// another team — and the bot token stays server-side, so this is a destination
 /// request, not a capability the caller holds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackThreadRef {
     pub channel: String,
     pub thread_ts: String,
@@ -1991,7 +1986,7 @@ pub const CHANNEL_DEFAULT_URGENCY: &str = "normal";
 pub const CHANNEL_DEFAULT_SUBSCRIPTION_MODE: &str = "observe";
 pub const CHANNEL_MESSAGE_LIMIT_MAX: usize = 500;
 pub const CHANNEL_IDEMPOTENCY_KEY_MAX_LEN: usize = 255;
-// `branches.slack.reply` and `channels.messages.create` spell these bounds as
+// `branches.slack.send` and `channels.messages.create` spell these bounds as
 // schemars literals, which cannot reference a constant.
 const _: () = assert!(CHANNEL_IDEMPOTENCY_KEY_MAX_LEN == 255);
 const _: () = assert!(CHANNEL_MESSAGE_LIMIT_MAX == 500);

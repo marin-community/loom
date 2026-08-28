@@ -798,8 +798,8 @@ Agent recall uses the related
 [normalized history/search contract](session-history.md). ACP records come
 directly from `chat_blocks`; terminal records reuse the fingerprint-cached Iris
 normalizer on read and the archived `chat.json` fallback. The trusted
-`loom_session.history` and `loom_session.search` tools call these REST routes;
-the older `mcp/history/self@v1` adapter remains compatible. Both resolve the
+`loom.session_history` and `loom.session_search` tools call these REST routes.
+Both resolve the
 caller through session-scoped context, so neither adds a parallel data model or
 authorization path.
 
@@ -1054,8 +1054,8 @@ automation with `prelude = none`, `mode = default`, no ambient allowlist, and
 scoped Claude SDK tool rules. The first prompt is the caller's complete
 `session.goal`; Loom does not add `WEAVER.md` or infer rewrite instructions.
 Profiles select reviewed built-in MCP capability sets such as
-`mcp/github/comment@v1`; the MCP registry expands them into exact permissions at
-session creation and derives the trusted adapter command from those stamped
+`loom/github/comment@v1`; the MCP registry expands them into exact permissions at
+session creation and derives the trusted aggregate-server command from those stamped
 rules. Repository/profile data never supplies executable MCP configuration.
 Restricted launch and recovery omit repository environment/setup and Claude
 user/project/local settings. Repository reads are path-scoped, and GitHub
@@ -1107,20 +1107,22 @@ revision. Launch copies the capability
 identities/digests and custom source revisions into
 `sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
 descriptors whose exposed tools are filtered to the stamped rules.
-Built-in adapters include `loom_context`, `loom_channel`, `loom_artifact`, and
-`loom_session`, alongside the specialized history, messaging, and
-fixed-repository GitHub adapters. Resource tools return concise text plus
+One built-in `loom` MCP server exposes namespaced context, channel, artifact,
+session, messaging, permission, issue, and fixed-repository GitHub tools.
+Resource tools return concise text plus
 machine-readable MCP `structuredContent`; their DTOs are the same ones used by
-the REST client and CLI. The ordinary first-party adapters obtain their names,
+the REST client and CLI. The ordinary first-party domains obtain their names,
 descriptions, input schemas, and invocation target from `OperationSpec`;
-genuinely nested or special behavior remains an explicit custom adapter. Builtin
+genuinely nested or special behavior remains explicit. Builtin
 capability digest goldens ensure this declaration migration cannot invalidate a
 pinned profile accidentally.
-Small remote adapters map session defaults when needed and add the
+Small remote domains map session defaults when needed and add the
 established text presentation. The shared descriptor-driven dispatcher retains
 runtime allow-list gating and object-argument checks; authorization and domain
 validation remain authoritative at the REST boundary.
-Neither an unchanged profile nor recovery re-resolves the current registry.
+Neither an unchanged profile nor recovery re-resolves current capability
+definitions; identities that no longer exist are omitted when the server
+configuration is built.
 Custom definitions live under
 absolute identities such as `/engineering/search/docs`; their first segment is
 the selectable group. A save runs `initialize` and `tools/list`, then optional

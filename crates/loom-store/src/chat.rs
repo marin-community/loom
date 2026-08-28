@@ -170,8 +170,8 @@ pub fn handoff_prompt(goal: &str, summary: Option<&str>, recent_dialogue: &str) 
          the work in the current worktree; do not restart completed work.\n\n\
          Goal:\n{}\n\nHandoff summary:\n{}\n\nRecent conversation:\n{}\n\n\
          Full history:\nIf the self-history MCP is available, use \
-         `mcp__loom_history__history` to page this session or \
-         `mcp__loom_history__search` for case-insensitive literal search. Otherwise fetch the \
+         `mcp__loom__session_history` to page this session or \
+         `mcp__loom__session_search` for case-insensitive literal search. Otherwise fetch the \
          newest normalized page with:\n\n\
          `curl -fsS -H \"Authorization: Bearer $LOOM_TOKEN\" \
          \"$WEAVER_API/api/sessions/$LOOM_SESSION_ID/history\"`\n\n\
@@ -1215,7 +1215,7 @@ mod tests {
         assert!(prompt.contains("recent answer"));
         assert!(prompt.contains("Tests pass; update the route."));
         assert!(prompt.contains("$LOOM_SESSION_ID/history"));
-        assert!(prompt.contains("mcp__loom_history__history"));
+        assert!(prompt.contains("mcp__loom__session_history"));
         assert!(prompt.contains("older_cursor"));
     }
 

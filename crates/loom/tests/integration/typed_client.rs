@@ -554,20 +554,6 @@ async fn channel_result_delivers_once_to_the_bound_slack_origin() {
         Some("1786.1234")
     );
 
-    // The legacy facade retries the same canonical item instead of posting a
-    // second Slack reply after an ambiguous client-side failure.
-    let retry = client
-        .post(
-            "/api/branches/slack/reply",
-            json!({
-                "branch": created.branch.id,
-                "text": "the canonical answer",
-                "idempotency_key": "answer-once"
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(retry["message_id"], message.id);
     assert_eq!(delivered.lock().unwrap().len(), 1);
     let posted = delivered.lock().unwrap()[0].clone();
     assert_eq!(posted["channel"], "C123");

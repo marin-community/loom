@@ -8,10 +8,10 @@ the workflow owns task semantics, stale-write checks, and prose policy.
 The stock `github_comment` profile uses Claude over ACP with no Loom prelude,
 no repository environment or setup script, no Claude user/project/local
 settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP tool.
-The profile selects that reviewed tool as `mcp/github/comment@v1`; Loom expands
+The profile selects that reviewed tool as `loom/github/comment@v1`; Loom expands
 the set into exact tool permissions when it stamps the session and launches the
-corresponding built-in adapter from its registry. Profile data cannot provide an
-adapter command. New adapter families belong in `crates/loom-agent/src/mcp/` and must
+single built-in MCP server from its registry. Profile data cannot provide a
+server command. New tool domains belong in `crates/loom-agent/src/mcp/` and must
 be registered by Loom before a profile can select one.
 The MCP bridge calls a session-scoped Loom endpoint; Loom calls GitHub through
 its App client against the session's fixed repository and linked issue/PR

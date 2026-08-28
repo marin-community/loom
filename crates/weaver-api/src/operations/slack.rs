@@ -1,7 +1,7 @@
 //! Slack integration status.
 //!
 //! Read-only, server-wide connection health for the Settings → Slack panel.
-//! Kept separate from `branches.slack.reply`, which is branch-specific.
+//! Kept separate from `branches.slack.send`, which is branch-specific.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;

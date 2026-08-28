@@ -140,31 +140,27 @@ fn missing_required(schema: &Value, arguments: &Value) -> Vec<String> {
 /// such, not masked by an unrelated client failure like a missing `LOOM_TOKEN`.
 pub(crate) async fn call_adapter_tool(
     adapter: &str,
-    server: &str,
     exports: &[Export],
     tool: &str,
     arguments: Value,
 ) -> Result<Value> {
-    if !super::runtime_tool_allowed(tool) {
-        bail!("{server} tool '{tool}' is not allowed by this session");
+    if !super::runtime_adapter_tool_allowed(adapter, tool) {
+        bail!("{adapter} tool '{tool}' is not allowed by this session");
     }
-    lookup(exports, tool).with_context(|| format!("unknown {server} tool '{tool}'"))?;
+    lookup(exports, tool).with_context(|| format!("unknown {adapter} tool '{tool}'"))?;
     let client = super::runtime_client(adapter)?;
-    call_tool(&client, server, exports, tool, arguments).await
+    call_tool(&client, adapter, exports, tool, arguments).await
 }
 
 pub(crate) async fn call_tool(
     client: &Client,
-    server: &str,
+    domain: &str,
     exports: &[Export],
     tool: &str,
     arguments: Value,
 ) -> Result<Value> {
-    if !super::runtime_tool_allowed(tool) {
-        bail!("{server} tool '{tool}' is not allowed by this session");
-    }
     let export =
-        lookup(exports, tool).with_context(|| format!("unknown {server} tool '{tool}'"))?;
+        lookup(exports, tool).with_context(|| format!("unknown {domain} tool '{tool}'"))?;
     let context = if export.operation.context.is_empty() {
         ContextValues::default()
     } else {
@@ -211,24 +207,16 @@ pub(crate) fn lookup<'a>(exports: &'a [Export], tool: &str) -> Option<&'a Export
     exports.iter().find(|export| export.tool == tool)
 }
 
-/// Whether `rule` (a Claude permission rule, `mcp__<server>__<tool>`) names one
-/// of this adapter's tools.
-pub(crate) fn is_permission_rule(server: &str, exports: &[Export], rule: &str) -> bool {
-    rule.strip_prefix("mcp__")
-        .and_then(|suffix| suffix.split_once("__"))
-        .is_some_and(|(candidate, tool)| candidate == server && lookup(exports, tool).is_some())
-}
-
 /// The permission rules one capability set expands to.
 pub(crate) fn expand_tool_set(
-    server: &str,
+    domain: &str,
     sets: &[CapabilitySet],
     name: &str,
 ) -> Option<Vec<String>> {
     sets.iter().find(|set| set.name == name).map(|set| {
         set.tools
             .iter()
-            .map(|tool| format!("mcp__{server}__{tool}"))
+            .map(|tool| super::builtin_permission_rule(domain, tool))
             .collect()
     })
 }
@@ -260,35 +248,6 @@ pub(crate) fn capability_sets(
             version: grant.rsplit('@').next().unwrap_or("v1"),
             description: describe(grant),
             tools: Vec::leak(tools),
-        })
-        .collect()
-}
-
-/// Re-publish derived sets under names they were renamed away from.
-///
-/// A set that was renamed is still the same set: a session pinned to
-/// `mcp/artifact/read@v1` must resolve exactly what `loom/artifacts/read@v1`
-/// resolves, including operations exported since the rename. Restating the tool
-/// list under the old name would freeze it at the membership it had on the day
-/// the alias was written.
-pub(crate) fn alias_capability_sets(
-    sets: &[CapabilitySet],
-    superseded: &[(&'static str, &'static str)],
-) -> Vec<CapabilitySet> {
-    superseded
-        .iter()
-        .map(|(before, after)| {
-            let set = sets
-                .iter()
-                .find(|set| set.name == *after)
-                .unwrap_or_else(|| panic!("`{before}` names `{after}`, which nothing exports"));
-            CapabilitySet {
-                name: before,
-                group: set.group,
-                version: set.version,
-                description: set.description,
-                tools: set.tools,
-            }
         })
         .collect()
 }

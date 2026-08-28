@@ -9,36 +9,26 @@ use serde_json::Value;
 use weaver_api::operations::sessions;
 
 use super::dispatch::{export, Export};
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
-
-const SERVER_NAME: &str = "loom_context";
+use super::{Adapter, CapabilitySet, ToolFuture};
 
 fn exports() -> &'static [Export] {
     static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
     EXPORTS.get_or_init(|| vec![export::<sessions::context::Op>("get")])
 }
 
-// `sessions.context` claims `loom/sessions/read@v1`, the same grant
-// `loom_session`'s read tools claim, but it is served by a different process
-// and `expand_tool_set` resolves a set name to the first adapter that
-// recognizes it. So this adapter names its own set, and only its tools are
-// derived. `mcp/context/read@v1` is the name that set carried before the
-// `loom/` rename.
+// `sessions.context` claims `loom/sessions/read@v1`, the same grant as the
+// session tools. This domain has its own capability identity so profiles can
+// select only the caller-context surface.
 const SET_NAME: &str = "loom/context/read@v1";
-const SUPERSEDED: &[(&str, &str)] = &[("mcp/context/read@v1", SET_NAME)];
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "context",
-    server_name: SERVER_NAME,
     description: "Canonical identifiers and links for the calling session.",
     capability_sets,
     exports,
-    superseded: &[("mcp/context/read@v1", SET_NAME)],
     expand_tool_set,
-    is_permission_rule,
-    server_config,
     tools,
-    serve: serve_boxed,
+    call: call_boxed,
 };
 
 fn capability_sets() -> &'static [CapabilitySet] {
@@ -48,7 +38,6 @@ fn capability_sets() -> &'static [CapabilitySet] {
         for set in &mut sets {
             set.name = SET_NAME;
         }
-        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
         sets
     })
 }
@@ -62,16 +51,8 @@ fn describe_capability(grant: &str) -> &'static str {
     }
 }
 
-fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
-}
-
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
-}
-
-fn server_config() -> Value {
-    super::builtin_server_config("context")
+    super::dispatch::expand_tool_set("context", capability_sets(), name)
 }
 
 fn tools() -> Value {
@@ -81,13 +62,8 @@ fn tools() -> Value {
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("context", SERVER_NAME, exports(), &name, arguments)
-            .await
+        super::dispatch::call_adapter_tool("context", exports(), &name, arguments).await
     })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
 }
 
 #[cfg(test)]
@@ -99,11 +75,5 @@ mod tests {
         let names: Vec<_> = exports().iter().map(|export| export.tool).collect();
         assert_eq!(names, ["get"]);
         assert_eq!(exports()[0].operation.id, "sessions.context");
-    }
-
-    #[test]
-    fn permission_rules_only_recognize_exported_tools() {
-        assert!(is_permission_rule("mcp__loom_context__get"));
-        assert!(!is_permission_rule("mcp__loom_context__bogus"));
     }
 }
