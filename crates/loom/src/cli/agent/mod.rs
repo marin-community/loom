@@ -35,7 +35,7 @@ pub use tags::{run as run_tag, TagCmd};
 use anyhow::{anyhow, bail, Result};
 use std::sync::OnceLock;
 
-use weaver_api::operations::{branches, Operation, Render};
+use weaver_api::operations::{sessions, Operation, Render};
 use weaver_api::render::sessions::status_line;
 use weaver_api::Client;
 
@@ -102,8 +102,8 @@ fn channel_key(explicit: Option<String>) -> Result<String> {
 async fn working_branch_status(client: &Client, repo_root: &str, claimed: &str) -> Option<String> {
     let key = format!("{repo_root}:{claimed}");
     let b = client
-        .invoke::<branches::get::Op>(&branches::get::Input {
-            branch: key.to_string(),
+        .invoke::<sessions::status::get::Op>(&sessions::status::get::Input {
+            session: key.to_string(),
         })
         .await
         .ok()?;

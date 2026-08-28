@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use clap::Subcommand;
 
 use weaver_api::operations::issues as issue_ops;
-use weaver_api::operations::{artifacts, branches, channels, sessions};
+use weaver_api::operations::{artifacts, channels, sessions};
 use weaver_api::render::sessions::{github_wiring, status_line};
 use weaver_api::{BranchView, Client, IssueView, ThreadDto};
 use weaver_core::tags;
@@ -39,10 +39,9 @@ pub async fn run(cmd: StatusCmd) -> Result<()> {
 
 pub async fn run_summary() -> Result<()> {
     let client = client();
+    let key = branch_key()?;
     let branch = client
-        .invoke::<branches::get::Op>(&branches::get::Input {
-            branch: (branch_key()?).to_string(),
-        })
+        .invoke::<sessions::status::get::Op>(&sessions::status::get::Input { session: key })
         .await?;
     print!("{}", render_summary(&client, &branch).await?);
     Ok(())
@@ -303,9 +302,7 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
         return cmd_status_write(&client, &key, &level, &message).await;
     }
     let b = client
-        .invoke::<branches::get::Op>(&branches::get::Input {
-            branch: key.to_string(),
-        })
+        .invoke::<sessions::status::get::Op>(&sessions::status::get::Input { session: key })
         .await?;
     println!("{}", render::<sessions::status::get::Op>(&b));
     Ok(())
@@ -314,7 +311,7 @@ async fn cmd_status(level: Option<String>, message: String) -> Result<()> {
 /// Report the agent's status: set the attention level and, when a message is
 /// given, the accompanying current-state note. The level lives on the
 /// `attention` tag — `ok` clears it (absence is the calm state), `attention`/
-/// `blocked` set it. One call (`POST /branches/{id}/status`) writes the
+/// `blocked` set it. One `sessions.status.set` call writes the
 /// description, sets or clears the tag, and records a single `tag` event
 /// atomically server-side. An empty message leaves the previous message in
 /// place — `loom status set --tag ok` lowers the level without wiping what
@@ -329,10 +326,10 @@ async fn cmd_status_write(client: &Client, key: &str, level: &str, message: &str
         bail!("unknown status '{level}' — expected one of ok, attention, blocked");
     }
     let updated = client
-        .invoke::<branches::status::set::Op>(&branches::status::set::Input {
+        .invoke::<sessions::status::set::Op>(&sessions::status::set::Input {
             level: level.to_string(),
             message: (!message.is_empty()).then(|| message.to_string()),
-            branch: key.to_string(),
+            session: key.to_string(),
         })
         .await?;
     println!("{}", render::<sessions::status::set::Op>(&updated));

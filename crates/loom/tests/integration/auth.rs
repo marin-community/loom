@@ -995,7 +995,7 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
         ])
         .env("WEAVER_API", format!("http://{}", ts.addr))
         .env("WEAVER_BRANCH", parent_branch_id)
-        .env("LOOM_TOKEN", token)
+        .env("LOOM_TOKEN", &token)
         .output()
         .expect("running scoped loom session launch");
     assert!(
@@ -1014,6 +1014,26 @@ async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {
         child.parent_branch_id, None,
         "branch ancestry is repository-scoped"
     );
+
+    // The handler and its declared Session scope accept the same key forms.
+    // In particular, a cross-repository child can be addressed by
+    // `repo:branch`; authorization resolves that spelling before checking the
+    // session tree instead of rejecting it as though it were a literal id.
+    let child_branch = weaver_core::branch::get(&ts.state.db, &child.branch_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let child_key = format!("{}:{}", child_branch.repo_root, child_branch.branch);
+    let response = reqwest::Client::new()
+        .post(url(&ts, "/api/sessions/get"))
+        .bearer_auth(&token)
+        .json(&json!({ "session": child_key }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let resolved: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(resolved["id"], child.id);
 }
 
 /// A branch key is not a branch. Whatever a session credential spells, the

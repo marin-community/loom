@@ -74,19 +74,45 @@ async function seedAutomationSession(baseUrl: string, repoPath: string): Promise
   return (await response.json()) as { id: string };
 }
 
+let failedRunProfileSequence = 0;
+
 async function createFailedRun(baseUrl: string) {
+  const profile = `failed-run-${++failedRunProfileSequence}`;
+  const profileResponse = await fetch(`${baseUrl}/api/profiles/create`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: profile,
+      description: 'Playwright failed automation run',
+      agent_kind: 'shell',
+      model: '',
+      effort: '',
+      protocol: 'terminal',
+      mode: 'auto',
+      class: 'automation',
+      strict: true,
+      env_clear: true,
+      ambient_allowlist: [],
+      max_concurrent: 0,
+      prelude: 'none',
+      restricted: false,
+      runtime_permissions: [],
+      mcp_access: { mode: 'none', groups: [] },
+    }),
+  });
+  expect(profileResponse.ok, await profileResponse.text()).toBe(true);
+
   const response = await fetch(`${baseUrl}/api/runs/create`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      profile: 'default',
+      profile,
       idempotency_key: `failed-workbench-${Date.now()}`,
       source: 'ops',
       session: {
         cwd: '/definitely/missing/automation-repo',
         title: 'failed-automation-task',
         goal: 'Exercise launch failure visibility',
-        agent: 'shell',
       },
     }),
   });

@@ -200,8 +200,8 @@ fn grants_allow(principal: &Principal, operation: &OperationSpec) -> bool {
     let Grant::Session { capabilities, .. } = &principal.grant else {
         return true;
     };
-    // `None` is the compatibility form minted before capability-bound
-    // credentials; it is unrestricted by construction.
+    // `None` is the forward-compatible form for an unrestricted session;
+    // actor and resource scope still constrain it.
     capabilities.as_ref().is_none_or(|granted| {
         operation
             .grants

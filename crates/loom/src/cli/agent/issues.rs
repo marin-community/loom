@@ -3,8 +3,8 @@
 use anyhow::{anyhow, bail, Result};
 use clap::Subcommand;
 
-use weaver_api::operations::branches;
 use weaver_api::operations::issues as issue_ops;
+use weaver_api::operations::sessions;
 use weaver_api::render::sessions::{attention, status_line};
 use weaver_api::{Client, IssueAction, IssueView};
 use weaver_core::tags;
@@ -116,9 +116,7 @@ async fn cmd_issue(cmd: IssueCmd) -> Result<()> {
     let client = client();
     let key = branch_key()?;
     let b = client
-        .invoke::<branches::get::Op>(&branches::get::Input {
-            branch: key.to_string(),
-        })
+        .invoke::<sessions::status::get::Op>(&sessions::status::get::Input { session: key })
         .await?;
     match cmd {
         IssueCmd::Add {
@@ -549,8 +547,8 @@ async fn cmd_issue_wait(
             if let Some(name) = cur.claimed_branch.as_deref() {
                 let key = format!("{repo_root}:{name}");
                 if let Ok(row) = client
-                    .invoke::<branches::get::Op>(&branches::get::Input {
-                        branch: key.to_string(),
+                    .invoke::<sessions::status::get::Op>(&sessions::status::get::Input {
+                        session: key.to_string(),
                     })
                     .await
                 {
