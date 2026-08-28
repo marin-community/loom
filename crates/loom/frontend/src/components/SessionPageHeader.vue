@@ -345,6 +345,7 @@ async function submitHandoff() {
       await resolveHandoff();
     }
     handoffError.value = message;
+    await emit('reload');
   } finally {
     handoffBusy.value = false;
   }

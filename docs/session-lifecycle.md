@@ -70,12 +70,15 @@ Long-running external mutations keep that last completed status and publish a
 durable `transition` alongside it. Archive reports `archiving` with stages such
 as conversation capture, agent shutdown, worktree removal, and finalization.
 Adopt/recover report `adopting`, including worktree rebuild where recovery needs
-one. Fleet and detail views show the transition and current free-text stage;
-lifecycle actions and conversation input stay unavailable until it clears.
+one. Provider replacement reports `handoff` while it pauses the source and
+transfers context to the incoming model. Fleet and detail views show the
+transition and current free-text stage; lifecycle actions and conversation input
+stay unavailable until it clears.
 Competing operations serialize on the lifecycle lock and also claim the marker
 atomically, so overlapping server generations cannot both mutate the same row.
-On restart Loom resumes an interrupted archive/adoption or restores the last
-recoverable stable state before ordinary supervisor reconciliation.
+On restart Loom resumes an interrupted archive/adoption, releases an interrupted
+handoff into a driveable or recoverable state, or restores the last recoverable
+stable state before ordinary supervisor reconciliation.
 
 `automation_runs.status` describes delivery/provisioning rather than agent
 liveness: `creating`, `waiting`, `delivering`, `running`, `failed`,

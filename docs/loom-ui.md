@@ -83,6 +83,11 @@ promoted with **Stop & send**. Permission requests and runtime controls stay in
 the conversation that produced them; elapsed quiet time is evidence, not an
 automatic “stuck” verdict.
 
+An in-place model handoff pauses conversation input and shows the server-owned
+handoff stage until the incoming provider is ready. The same transition appears
+in the session header and fleet, so leaving the open Details popover does not
+hide a transfer that is still running.
+
 Review contains **Changes** and **Artifacts**. Both use the same staged review
 workflow:
 

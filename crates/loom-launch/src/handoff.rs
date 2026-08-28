@@ -9,7 +9,7 @@ use weaver_core::branch::{self as branch_mod, Branch};
 use weaver_core::BoxFut;
 
 use crate::session::{self as session_mod, Session};
-use crate::{agent, backend, custom_agents, events, repo, runtime, AppState};
+use crate::{agent, backend, custom_agents, events, lifecycle, repo, runtime, AppState};
 use weaver_api::operations::sessions;
 
 const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
@@ -381,7 +381,17 @@ pub fn handoff_session(
     initial_session: Session,
     req: sessions::handoff::Input,
 ) -> BoxFut<'_, Result<(Session, Branch)>> {
-    Box::pin(handoff_session_inner(st, initial_session, req))
+    let st = st.clone();
+    Box::pin(async move {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        weaver_core::spawn_boxed(Box::pin(async move {
+            let result = handoff_session_inner(&st, initial_session, req).await;
+            let _ = result_tx.send(result);
+        }));
+        result_rx.await.map_err(|_| {
+            HandoffError::internal("handoff task stopped before reporting its result")
+        })?
+    })
 }
 
 async fn handoff_session_inner(
@@ -585,6 +595,14 @@ async fn handoff_session_inner(
             runtime::MISSING_GITHUB_TOKEN_MESSAGE.to_string(),
         ));
     }
+    if !session_mod::begin_transition(&st.db, &session.id, "handoff", "Pausing session").await? {
+        return Err(HandoffError::conflict(
+            "another lifecycle transition already owns this session",
+        ));
+    }
+    lifecycle::record_transition(st, &branch, "handoff", "Pausing session").await;
+
+    let result: Result<(Session, Branch)> = async {
     // A healthy task quiesces on its ordered command channel, preserving the
     // active-turn/queue safety gate. A missing task is the recovery case: settle
     // its persisted in-flight turn, retain the durable queue, and continue.
@@ -607,6 +625,14 @@ async fn handoff_session_inner(
         None
     };
     let source_task_quiesced = snapshot.is_some();
+    lifecycle::transition_step(
+        st,
+        &session,
+        &branch,
+        "handoff",
+        &format!("Transferring context to {target}"),
+    )
+    .await?;
     // Re-read after the task handshake: it may have vanished after our initial
     // route snapshot while persisting a newer in-flight turn.
     let persisted = session_mod::get(&st.db, &session.id)
@@ -868,6 +894,11 @@ async fn handoff_session_inner(
             "replacement provider token could not be committed: {error}"
         )));
     }
+    if !session_mod::clear_transition(&st.db, &session.id, "handoff").await? {
+        return Err(HandoffError::conflict(
+            "handoff lost ownership of its lifecycle transition",
+        ));
+    }
 
     events::record(
         &st.db,
@@ -881,6 +912,31 @@ async fn handoff_session_inner(
     session_mod::with_branch(&st.db, &session.id)
         .await?
         .ok_or_else(|| HandoffError::not_found("session"))
+    }
+    .await;
+
+    if result.is_err() {
+        match session_mod::clear_transition(&st.db, &session.id, "handoff").await {
+            Ok(true) => {
+                events::record(
+                    &st.db,
+                    &st.bus,
+                    &branch.id,
+                    "handoff",
+                    json!({ "state": "stopped" }),
+                )
+                .await
+                .ok();
+            }
+            Ok(false) => {
+                tracing::warn!(session = %session.id, "handoff error cleanup no longer owned its transition");
+            }
+            Err(error) => {
+                tracing::warn!(session = %session.id, %error, "handoff error cleanup could not clear its transition");
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

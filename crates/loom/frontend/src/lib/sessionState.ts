@@ -247,7 +247,12 @@ export interface ConvState {
 export function conversationState(s: SessionSummary): ConvState {
   // Lifecycle first for the unambiguous mechanical states.
   if (s.transition) {
-    const label = s.transition.kind === 'archiving' ? 'Archiving' : 'Adopting';
+    const label =
+      s.transition.kind === 'archiving'
+        ? 'Archiving'
+        : s.transition.kind === 'handoff'
+          ? 'Handing off'
+          : 'Adopting';
     return {
       glyph: '▶',
       label: s.transition.step ? `${label} — ${s.transition.step}` : label,
