@@ -151,12 +151,12 @@ isn't automatically pre-existing — confirm it fails on `main` without your
 change first. Never silently absorb a failure.
 
 Once CI is green, address any comments already present. Fix clear comments in a
-new commit and reply in-thread; if one is genuinely unclear, raise `weaver
-status set --tag attention --message "<question>"`. Do not poll for future
+new commit and reply in-thread; if one is genuinely unclear, raise `loom status
+set --tag attention --message "<question>"`. Do not poll for future
 reviews or wait for them.
 
 Keep status `ok` while CI runs. Once CI is green and comments already present
-are handled, raise `weaver status set --tag attention --message "ready for review"` and hand off.
+are handled, raise `loom status set --tag attention --message "ready for review"` and hand off.
 Close the tracking issue when the PR is open and the work is genuinely done —
 not before.
 
