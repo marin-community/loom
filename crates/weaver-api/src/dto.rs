@@ -186,7 +186,7 @@ impl From<&BranchView> for BranchSummaryView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionTransitionView {
-    /// Stable operation name: currently `archiving` or `adopting`.
+    /// Stable operation name: `archiving`, `adopting`, or `handoff`.
     pub kind: String,
     /// Human-readable current stage, suitable for direct UI presentation.
     pub step: String,

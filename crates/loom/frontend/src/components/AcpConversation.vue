@@ -1750,6 +1750,28 @@ function goTo(anchor: string) {
       </div>
     </template>
 
+    <div
+      v-if="session.transition?.kind === 'handoff'"
+      class="mx-3 mb-3 flex shrink-0 items-center gap-3 rounded border border-info-line/40 bg-info-soft px-3 py-2 text-info"
+      data-testid="handoff-progress"
+      role="status"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <span class="relative flex h-3 w-3 shrink-0" aria-hidden="true">
+        <span
+          class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-40"
+        ></span>
+        <span class="relative inline-flex h-3 w-3 rounded-full bg-info"></span>
+      </span>
+      <span class="min-w-0">
+        <span class="block text-xs font-medium">Handoff in progress</span>
+        <span class="block truncate text-2xs">
+          {{ session.transition.step || 'Transferring session context' }} · Session paused
+        </span>
+      </span>
+    </div>
+
     <!-- Composer. -->
     <form
       v-if="composerVisible"

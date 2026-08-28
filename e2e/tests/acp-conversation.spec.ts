@@ -48,7 +48,11 @@ async function defineFakeAcpAgent(
   weaver: WeaverFixture,
   name: string,
   label: string,
+  options: { summaryDelay?: number } = {},
 ): Promise<void> {
+  const summaryEnv = options.summaryDelay
+    ? `FAKE_ACP_SUMMARY_OUTPUT_B64= FAKE_ACP_SUMMARY_DELAY=${options.summaryDelay} `
+    : '';
   const res = await fetch(`${weaver.baseUrl}/api/agents/custom/create`, {
     method: 'POST',
     headers: HEADERS,
@@ -56,7 +60,7 @@ async function defineFakeAcpAgent(
       name,
       label,
       setup: '',
-      launch: `node ${FAKE_AGENT}`,
+      launch: `${summaryEnv}node ${FAKE_AGENT}`,
       resume: '',
       reports_status: false,
       protocol: 'acp',
@@ -257,7 +261,9 @@ test.describe('acp conversation', () => {
     const conv = page.getByTestId('acp-conversation');
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-turn-rule')).toBeVisible();
-    await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next');
+    await defineFakeAcpAgent(weaver, 'acp-fake-next', 'ACP fake next', {
+      summaryDelay: 750,
+    });
     await fetch(`${weaver.baseUrl}/api/profiles/create`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -288,11 +294,17 @@ test.describe('acp conversation', () => {
     await expect(form.getByTestId('resolved-launch-summary')).toContainText('acp-fake-next');
     await form.getByRole('button', { name: 'Hand off now' }).click();
 
+    const progress = page.getByTestId('handoff-progress');
+    await expect(progress).toContainText('Handoff in progress');
+    await expect(progress).toContainText('Session paused');
+    await expect(page.getByTestId('acp-composer')).toHaveCount(0);
+
     // The stable session URL and earlier prose survive; only the provider and
     // its private ACP connection change. The journal makes that boundary clear.
     await expect(page).toHaveURL(new RegExp(`/s/${s.id}$`));
     await expect.poll(async () => (await weaver.getSession(s.id)).agent_kind).toBe('acp-fake-next');
     await expect(page.getByText('Handed off to acp-fake-next.')).toBeVisible();
+    await expect(progress).toHaveCount(0);
     await expect(conv.getByText('before handoff', { exact: true })).toBeVisible();
     await expect
       .poll(async () => {

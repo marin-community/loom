@@ -1000,9 +1000,15 @@ fn require_acp(session: &Session) -> ApiResult<()> {
     }
 }
 
-/// The live ACP task handle for a session, or 409 when no task is running (the
-/// session is idle/orphaned — nothing to drive over the protocol right now).
+/// The live ACP task handle for a session, or 409 while a lifecycle transition
+/// pauses input or when no task is running.
 fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::AcpHandle> {
+    if let Some(transition) = session.lifecycle_transition.as_deref() {
+        return Err(AppError::conflict(format!(
+            "session '{}' is paused for {transition}; wait for the transition to finish",
+            session.id
+        )));
+    }
     st.acp.get(&session.id).ok_or_else(|| {
         AppError::conflict(format!(
             "session '{}' has no live ACP task to drive",

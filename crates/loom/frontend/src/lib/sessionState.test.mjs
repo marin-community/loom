@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { effectiveAttention, messageOf } from './sessionState.ts';
+import { canSend, conversationState, effectiveAttention, messageOf } from './sessionState.ts';
 
 test('an orphaned ACP runtime surfaces Loom recovery guidance', () => {
   const session = {
@@ -28,5 +28,24 @@ test('an orphaned ACP runtime surfaces Loom recovery guidance', () => {
     raisedBy: 'watch',
     note: 'Loom lost its connection. Select Adopt to reconnect.',
     stale: false,
+  });
+});
+
+test('a handoff is presented as a paused lifecycle transition', () => {
+  const session = {
+    status: 'running',
+    transition: {
+      kind: 'handoff',
+      step: 'Transferring context to codex',
+      started_at: '2026-08-28T20:00:00Z',
+    },
+    branch: { tags: [] },
+  };
+
+  assert.equal(canSend(session), false);
+  assert.deepEqual(conversationState(session), {
+    glyph: '▶',
+    label: 'Handing off — Transferring context to codex',
+    tone: 'info',
   });
 });

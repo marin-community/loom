@@ -3338,7 +3338,7 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
         &ts,
         "fake-b",
         format!(
-            "FAKE_ACP_MODELS=luna FAKE_ACP_SUMMARY_OUTPUT_B64={encoded} {}",
+            "FAKE_ACP_MODELS=luna FAKE_ACP_SUMMARY_OUTPUT_B64={encoded} FAKE_ACP_SUMMARY_DELAY=750 {}",
             agent_cmd()
         ),
     )
@@ -3353,19 +3353,62 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     })
     .await;
 
-    let handed = ts
+    let url = format!("http://{}/api/sessions/handoff", ts.addr);
+    let handoff_id = id.clone();
+    let handoff = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(url)
+            .json(&json!({ "agent": "fake-b", "session": handoff_id }))
+            .send()
+            .await
+            .unwrap()
+    });
+    let paused = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let current = session_mod::get(&ts.state.db, &id).await.unwrap().unwrap();
+            if current.lifecycle_step.as_deref() == Some("Transferring context to fake-b") {
+                break current;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("handoff publishes progress while the request is running");
+    assert_eq!(
+        paused.status, "running",
+        "the stable lifecycle state is retained"
+    );
+    assert_eq!(paused.lifecycle_transition.as_deref(), Some("handoff"));
+    assert!(
+        !handoff.is_finished(),
+        "the progress state precedes completion"
+    );
+
+    let paused_send = ts
         .client
         .post(
-            "/api/sessions/handoff",
-            json!({ "agent": "fake-b", "session": id }),
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:too soon", "session": id }),
         )
         .await
-        .expect("handoff succeeds");
+        .expect_err("handoff pauses new prompts");
+    assert!(
+        paused_send.to_string().contains("paused for handoff"),
+        "{paused_send}"
+    );
+
+    let response = tokio::time::timeout(Duration::from_secs(15), handoff)
+        .await
+        .expect("handoff completes")
+        .unwrap();
+    assert!(response.status().is_success(), "{response:?}");
+    let handed: Value = response.json().await.unwrap();
     assert_eq!(handed["id"], id, "loom session id stays stable");
     assert_eq!(handed["branch"]["id"], branch_id);
     assert_eq!(handed["work_dir"], work_dir);
     assert_eq!(handed["agent_kind"], "fake-b");
     assert!(handed["acp_session_id"].as_str().is_some());
+    assert!(handed["transition"].is_null());
 
     let chat = poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
         blocks.iter().filter(|b| b["kind"] == "turn_end").count() >= 2
@@ -3900,6 +3943,7 @@ async fn handoff_failure_cleans_up_the_replacement() {
         .await
         .unwrap();
     assert_eq!(view["status"], "error");
+    assert!(view["transition"].is_null());
     assert_eq!(view["agent_kind"], "broken-acp");
     assert_eq!(view["acp_session_id"], Value::Null);
     assert!(!ts.state.acp.is_live(&id), "replacement task is gone");

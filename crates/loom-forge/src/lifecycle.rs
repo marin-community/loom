@@ -528,6 +528,34 @@ pub async fn reconcile_interrupted_transitions(state: &AppState) {
                     tracing::warn!(session = %session.id, %error, "transition recovery: could not release failed adoption");
                 }
             }
+            "handoff" => {
+                // A handoff keeps its source supervisor alive until the row is
+                // claimed as `handoff`, then replaces it. After an owner dies,
+                // a surviving supervisor is driveable again; a missing one is
+                // a recoverable error. Either way, release the durable pause so
+                // the operator can retry instead of leaving the session stuck.
+                let status = if backend::has_session(&session.term_session).await {
+                    if session.status == "handoff" {
+                        "running"
+                    } else {
+                        &session.status
+                    }
+                } else if session.status == "handoff" {
+                    "error"
+                } else {
+                    &session.status
+                };
+                if let Err(error) = session_mod::complete_interrupted_transition(
+                    &state.db,
+                    &session.id,
+                    "handoff",
+                    status,
+                )
+                .await
+                {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: could not release interrupted handoff");
+                }
+            }
             other => {
                 tracing::warn!(session = %session.id, transition = other, "transition recovery: unknown transition left intact");
             }
@@ -535,7 +563,7 @@ pub async fn reconcile_interrupted_transitions(state: &AppState) {
     }
 }
 
-async fn record_transition(st: &AppState, branch: &Branch, kind: &str, step: &str) {
+pub async fn record_transition(st: &AppState, branch: &Branch, kind: &str, step: &str) {
     events::record(
         &st.db,
         &st.bus,

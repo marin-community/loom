@@ -382,6 +382,7 @@ async function handlePrompt(id, params) {
     return;
   }
   if (summaryOutput !== undefined && text.startsWith("Summarize this coding session")) {
+    await sleepCancellable(Number(process.env.FAKE_ACP_SUMMARY_DELAY || "0"));
     if (summaryOutput.length > 0) {
       notify({
         sessionUpdate: "agent_message_chunk",
