@@ -1000,12 +1000,13 @@ fn require_acp(session: &Session) -> ApiResult<()> {
     }
 }
 
-/// The live ACP task handle for a session, or 409 while a lifecycle transition
-/// pauses input or when no task is running.
+/// The live ACP task handle for a session, or 409 while a provider handoff
+/// pauses input or when no task is running. Adoption deliberately remains
+/// driveable because setup-time permission requests must be answerable.
 fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::AcpHandle> {
-    if let Some(transition) = session.lifecycle_transition.as_deref() {
+    if session.lifecycle_transition.as_deref() == Some("handoff") {
         return Err(AppError::conflict(format!(
-            "session '{}' is paused for {transition}; wait for the transition to finish",
+            "session '{}' is paused for handoff; wait for the transition to finish",
             session.id
         )));
     }
