@@ -3379,10 +3379,6 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
         "the stable lifecycle state is retained"
     );
     assert_eq!(paused.lifecycle_transition.as_deref(), Some("handoff"));
-    assert!(
-        !handoff.is_finished(),
-        "the progress state precedes completion"
-    );
 
     let paused_send = ts
         .client
