@@ -267,10 +267,8 @@ flowchart TD
 
     EX --> T["tools()<br/>name · description · inputSchema"]
     EX --> CS["capability_sets()<br/>group exports by spec.grants"]
-    EX --> PR["is_permission_rule()<br/>mcp__loom_channel__send"]
+    EX --> PR["expand_tool_set()<br/>mcp__loom__channel_send"]
     EX --> CALL["call_tool()"]
-
-    CS --> AL["alias_capability_sets()<br/>republish renamed sets by membership,<br/>not by a frozen tool list"]
 
     CALL --> V["missing_required(schema, args)"]
     V --> DE["from_value into Input"]

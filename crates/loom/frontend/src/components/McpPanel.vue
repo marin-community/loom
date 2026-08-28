@@ -104,8 +104,8 @@ onMounted(() => void load().catch((e) => (error.value = (e as Error).message)));
       <div>
         <h3 class="text-sm font-semibold">MCP servers</h3>
         <p class="text-xs text-muted">
-          Builtins are trusted Loom adapters. Custom Python scripts are revisioned, run through
-          <code>uv</code>, and tested over real MCP stdio before profiles can use them.
+          Builtin domains share one trusted Loom server. Custom Python scripts are revisioned, run
+          through <code>uv</code>, and tested over real MCP stdio before profiles can use them.
         </p>
       </div>
       <button class="btn-secondary ml-auto px-2.5 py-1 text-xs" @click="add">Add custom MCP</button>

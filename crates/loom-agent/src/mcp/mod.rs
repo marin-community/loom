@@ -1,9 +1,9 @@
-//! Registry for Loom's built-in, restricted MCP adapters.
+//! Registry and aggregate server for Loom's built-in MCP tool domains.
 //!
-//! Profiles select reviewed capability sets such as `mcp/github/comment`.
+//! Profiles select reviewed capability sets such as `loom/github/comment@v1`.
 //! Loom expands those names into exact Claude permission rules when it stamps a
-//! session, then derives the required adapter processes from that immutable
-//! policy. Repositories can choose sets, but cannot inject executable adapter
+//! session, then exposes the selected domains through one built-in MCP server.
+//! Repositories can choose sets, but cannot inject executable adapter
 //! configuration.
 
 use anyhow::{bail, Context, Result};
@@ -15,12 +15,12 @@ use sqlx::FromRow;
 use std::{collections::HashSet, future::Future, pin::Pin};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use weaver_api::{
-    CustomMcpSnapshot, CustomMcpView, McpAdapterView, McpCapabilitySetView, McpRegistryView,
+    CustomMcpSnapshot, CustomMcpView, McpCapabilitySetView, McpDomainView, McpRegistryView,
 };
 
 // All six tools gate through one registered operation via a runtime
-// session-policy check, not a compile-time grant, so this adapter keeps its
-// own schemas and dispatch loop instead of `dispatch::bind`. See the module
+// session-policy check, not a compile-time grant, so this domain keeps its
+// own schemas and call handler instead of `dispatch::bind`. See the module
 // doc on `github` for the full reasoning.
 pub mod github;
 
@@ -32,35 +32,24 @@ pub(crate) mod permission;
 // These stay hand-written rather than bound via `dispatch::bind` — see each
 // module's own doc comment for exactly which tool and why (a response
 // enrichment the plain operation does not carry, or an operation that has no
-// registry entry under this adapter's own server name).
+// direct generic rendering path).
 pub(crate) mod artifact;
-pub(crate) mod history;
 pub(crate) mod messaging;
 pub(crate) mod session;
 
 pub(crate) mod dispatch;
 
-type ServeFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 pub(crate) type ToolFuture = Pin<Box<dyn Future<Output = Result<Value>> + Send>>;
 
 pub(crate) struct Adapter {
     name: &'static str,
-    server_name: &'static str,
     description: &'static str,
     capability_sets: fn() -> &'static [CapabilitySet],
     /// The tools this adapter exports and the operation each one is.
     exports: fn() -> &'static [dispatch::Export],
-    /// Old set names this adapter answers for, as `(old, current)`. The one
-    /// place a superseded name is written: it marks the old name deprecated in
-    /// the registry view and resolves it to the current set's grants. `old` may
-    /// be a name this adapter still publishes, one it renamed away from, or one
-    /// nothing publishes any more.
-    superseded: &'static [(&'static str, &'static str)],
     expand_tool_set: fn(&str) -> Option<Vec<String>>,
-    is_permission_rule: fn(&str) -> bool,
-    server_config: fn() -> Value,
     tools: fn() -> Value,
-    serve: fn() -> ServeFuture,
+    call: fn(&str, Value) -> ToolFuture,
 }
 
 /// A stable, provider-neutral set of MCP operations.  A set's digest is part
@@ -74,8 +63,19 @@ pub(crate) struct CapabilitySet {
     pub tools: &'static [&'static str],
 }
 
-pub(crate) fn builtin_server_config(adapter: &str) -> Value {
-    json!({ "type": "stdio", "command": "loom", "args": ["mcp", "serve", adapter] })
+fn builtin_tool_name(adapter: &str, tool: &str) -> String {
+    format!("{adapter}_{tool}")
+}
+
+fn builtin_permission_rule(adapter: &str, tool: &str) -> String {
+    format!(
+        "mcp__{BUILTIN_SERVER_NAME}__{}",
+        builtin_tool_name(adapter, tool)
+    )
+}
+
+fn rule_allows_builtin_tool(rule: &str, adapter: &Adapter, tool: &str) -> bool {
+    rule == builtin_permission_rule(adapter.name, tool)
 }
 
 pub(crate) fn string_argument<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>> {
@@ -97,7 +97,6 @@ const ADAPTERS: &[&Adapter] = &[
     &artifact::ADAPTER,
     &issue::ADAPTER,
     &session::ADAPTER,
-    &history::ADAPTER,
     &messaging::ADAPTER,
     &permission::ADAPTER,
 ];
@@ -108,21 +107,16 @@ fn adapters() -> impl Iterator<Item = &'static Adapter> {
 
 fn validate_adapters() {
     let mut names = std::collections::BTreeSet::new();
-    let mut servers = std::collections::BTreeSet::new();
     for adapter in adapters() {
         assert!(
             names.insert(adapter.name),
             "duplicate MCP adapter {}",
             adapter.name
         );
-        assert!(
-            servers.insert(adapter.server_name),
-            "duplicate MCP server {}",
-            adapter.server_name
-        );
     }
 }
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
+const BUILTIN_SERVER_NAME: &str = "loom";
 const BUILTIN_RUNTIME_ENV: [&str; 4] = [
     "WEAVER_API",
     "WEAVER_BRANCH",
@@ -232,7 +226,7 @@ pub fn is_builtin_group(group: &str) -> bool {
 
 pub fn registry() -> McpRegistryView {
     validate_adapters();
-    let mut adapter_views = Vec::new();
+    let mut domain_views = Vec::new();
     let mut capability_sets = Vec::new();
     for adapter in adapters() {
         let advertised = (adapter.tools)();
@@ -253,10 +247,10 @@ pub fn registry() -> McpRegistryView {
                 set.name
             );
         }
-        adapter_views.push(McpAdapterView {
+        domain_views.push(McpDomainView {
             name: adapter.name.to_string(),
             description: adapter.description.to_string(),
-            server_name: adapter.server_name.to_string(),
+            server_name: BUILTIN_SERVER_NAME.to_string(),
         });
         for set in (adapter.capability_sets)() {
             let tools = set.tools.iter().map(|tool| tool.to_string()).collect();
@@ -266,38 +260,23 @@ pub fn registry() -> McpRegistryView {
                 version: set.version.to_string(),
                 digest: capability_set_digest(adapter, set, &advertised),
                 description: set.description.to_string(),
-                adapter: adapter.name.to_string(),
+                domain: adapter.name.to_string(),
                 tools,
-                deprecated_by: canonical_capability_successor(set.name).map(str::to_string),
             });
         }
     }
     McpRegistryView {
-        adapters: adapter_views,
+        domains: domain_views,
         capability_sets,
         custom_servers: Vec::new(),
     }
 }
 
-/// The set that supersedes `name`, if some adapter declares one.
-fn canonical_capability_successor(name: &str) -> Option<&'static str> {
-    adapters().find_map(|adapter| {
-        adapter
-            .superseded
-            .iter()
-            .find(|(before, _)| *before == name)
-            .map(|(_, after)| *after)
-    })
-}
-
 /// The registry grants a capability set confers.
 ///
-/// A set is a name for some of an adapter's exports, so the grants it carries
-/// are the grants those operations declare. Superseded `mcp/*@v1` names need
-/// no translation table of their own: they name sets like any other, and a set
-/// resolves to grants the same way whatever it is called.
+/// A set is a name for some of a domain's exports, so the grants it carries are
+/// the grants those operations declare.
 fn capability_set_grants(name: &str) -> Vec<&'static str> {
-    let name = canonical_capability_successor(name).unwrap_or(name);
     let mut grants = Vec::new();
     for adapter in adapters() {
         let Some(set) = (adapter.capability_sets)()
@@ -354,12 +333,7 @@ pub fn session_capabilities<'a>(
 }
 
 fn selected_for_groups(set: &McpCapabilitySetView, groups: &[String]) -> bool {
-    if set.deprecated_by.is_some() {
-        return false;
-    }
     groups.iter().any(|group| group == &set.group)
-        || (set.name == "loom/sessions/read@v1" && groups.iter().any(|group| group == "history"))
-        || (set.name == "loom/sessions/write@v1" && groups.iter().any(|group| group == "messaging"))
 }
 
 pub async fn resolve_access(
@@ -371,11 +345,7 @@ pub async fn resolve_access(
     let ready_custom = ready_custom_snapshots(&custom);
     let capability_sets = match access.mode.as_str() {
         "none" => Vec::new(),
-        "all" => registry
-            .capability_sets
-            .into_iter()
-            .filter(|set| set.deprecated_by.is_none())
-            .collect(),
+        "all" => registry.capability_sets.into_iter().collect(),
         "groups" => {
             for group in &access.groups {
                 if !registry
@@ -415,6 +385,7 @@ pub fn rules_for_snapshot(snapshot: &weaver_api::McpPolicySnapshot) -> Result<Ve
     let names = snapshot
         .capability_sets
         .iter()
+        .filter(|set| is_tool_set(&set.name))
         .map(|set| set.name.clone())
         .collect::<Vec<_>>();
     let mut rules = expand_tool_sets(&names)?;
@@ -445,7 +416,7 @@ fn capability_set_digest(adapter: &Adapter, set: &CapabilitySet, advertised: &Va
     let mut hasher = Sha256::new();
     hasher.update(adapter.name);
     hasher.update([0]);
-    hasher.update(adapter.server_name);
+    hasher.update(BUILTIN_SERVER_NAME);
     hasher.update([0]);
     hasher.update(adapter.description);
     hasher.update([0]);
@@ -458,7 +429,7 @@ fn capability_set_digest(adapter: &Adapter, set: &CapabilitySet, advertised: &Va
     hasher.update(set.description);
     for tool in set.tools {
         hasher.update([0]);
-        hasher.update(tool);
+        hasher.update(builtin_tool_name(adapter.name, tool));
         if let Some(definition) = advertised
             .as_array()
             .and_then(|tools| tools.iter().find(|value| value["name"] == **tool))
@@ -485,7 +456,7 @@ pub fn expand_tool_sets(rules: &[String]) -> Result<Vec<String>> {
                 push_unique(&mut expanded, tool_rule);
             }
         } else if rule.starts_with("mcp/") || rule.starts_with("loom/") {
-            bail!("unknown built-in MCP tool set '{rule}'");
+            continue;
         } else {
             push_unique(&mut expanded, rule.clone());
         }
@@ -493,42 +464,42 @@ pub fn expand_tool_sets(rules: &[String]) -> Result<Vec<String>> {
     Ok(expanded)
 }
 
-/// Build only the MCP server definitions needed by the session's exact
-/// permission rules. Adapter commands come from this trusted registry, never
-/// from repository-controlled profile data.
+/// Build the one builtin MCP server definition when the session may use any
+/// builtin tool. Domain modules remain the registry and dispatch boundary;
+/// they share one stdio transport so an agent session pays one startup
+/// handshake rather than one per domain.
 pub(crate) fn server_configs(allowed_rules: &[String]) -> Map<String, Value> {
     let mut servers = Map::new();
+    let mut allowed_tools = Vec::new();
     for adapter in adapters() {
         let surface = (adapter.tools)();
-        let allowed_tools = surface
+        for tool in surface
             .as_array()
             .expect("builtin MCP tools must be an array")
             .iter()
             .filter_map(|tool| tool["name"].as_str())
-            .filter(|tool| {
-                allowed_rules
-                    .iter()
-                    .any(|rule| rule == &format!("mcp__{}__{tool}", adapter.server_name))
-            })
-            .collect::<Vec<_>>();
-        if !allowed_tools.is_empty()
-            && allowed_rules
-                .iter()
-                .any(|rule| (adapter.is_permission_rule)(rule))
         {
-            let mut config = (adapter.server_config)();
-            config
-                .as_object_mut()
-                .expect("builtin MCP server config must be an object")
-                .insert(
-                    "env".to_string(),
-                    serde_json::json!({
-                        "LOOM_MCP_ALLOWED_TOOLS": serde_json::to_string(&allowed_tools)
-                            .expect("builtin MCP allowed tool names must serialize")
-                    }),
-                );
-            servers.insert(adapter.server_name.to_string(), config);
+            if allowed_rules
+                .iter()
+                .any(|rule| rule_allows_builtin_tool(rule, adapter, tool))
+            {
+                allowed_tools.push(builtin_tool_name(adapter.name, tool));
+            }
         }
+    }
+    if !allowed_tools.is_empty() {
+        servers.insert(
+            BUILTIN_SERVER_NAME.to_string(),
+            json!({
+                "type": "stdio",
+                "command": "loom",
+                "args": ["mcp", "serve"],
+                "env": {
+                    "LOOM_MCP_ALLOWED_TOOLS": serde_json::to_string(&allowed_tools)
+                        .expect("builtin MCP allowed tool names must serialize")
+                }
+            }),
+        );
     }
     servers
 }
@@ -545,6 +516,11 @@ fn runtime_allowed_tools() -> Option<HashSet<String>> {
 
 pub fn runtime_tool_allowed(name: &str) -> bool {
     runtime_allowed_tools().is_none_or(|allowed| allowed.contains(name))
+}
+
+pub fn runtime_adapter_tool_allowed(adapter: &str, tool: &str) -> bool {
+    runtime_allowed_tools()
+        .is_none_or(|allowed| allowed.contains(&builtin_tool_name(adapter, tool)))
 }
 
 pub fn runtime_tools(tools: Value) -> Value {
@@ -566,7 +542,54 @@ pub fn runtime_tools(tools: Value) -> Value {
     )
 }
 
-/// Build the scoped REST client shared by Loom's resource adapters.
+fn builtin_tools() -> Value {
+    let mut tools = Vec::new();
+    for adapter in adapters() {
+        for mut tool in (adapter.tools)()
+            .as_array()
+            .expect("builtin MCP tools must be an array")
+            .iter()
+            .cloned()
+        {
+            let local_name = tool["name"]
+                .as_str()
+                .expect("builtin MCP tool must have a name");
+            tool["name"] = Value::String(builtin_tool_name(adapter.name, local_name));
+            tools.push(tool);
+        }
+    }
+    Value::Array(tools)
+}
+
+fn call_builtin_boxed(name: &str, arguments: Value) -> ToolFuture {
+    let name = name.to_string();
+    Box::pin(async move { call_builtin_tool(&name, arguments).await })
+}
+
+async fn call_builtin_tool(name: &str, arguments: Value) -> Result<Value> {
+    if !runtime_tool_allowed(name) {
+        bail!("builtin Loom tool '{name}' is not allowed by this session");
+    }
+    for adapter in adapters() {
+        let Some(local_name) = name
+            .strip_prefix(adapter.name)
+            .and_then(|suffix| suffix.strip_prefix('_'))
+        else {
+            continue;
+        };
+        let known = (adapter.tools)()
+            .as_array()
+            .expect("builtin MCP tools must be an array")
+            .iter()
+            .any(|tool| tool["name"].as_str() == Some(local_name));
+        if known {
+            return (adapter.call)(local_name, arguments).await;
+        }
+    }
+    bail!("unknown builtin Loom tool '{name}'")
+}
+
+/// Build the scoped REST client shared by Loom's resource domains.
 pub(crate) fn runtime_client(adapter: &str) -> Result<weaver_api::Client> {
     let token = weaver_api::endpoint::token_from_env()
         .with_context(|| format!("{adapter} MCP is missing its session-scoped LOOM_TOKEN"))?;
@@ -589,7 +612,7 @@ pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Resul
     }))
 }
 
-/// Shared JSON-RPC stdio loop for the resource adapters. Domain modules own
+/// Shared JSON-RPC stdio loop for the aggregate server. Domain modules own
 /// only their schemas and REST calls; framing stays consistent.
 pub(crate) async fn serve_stdio(
     server_name: &'static str,
@@ -724,7 +747,7 @@ pub fn acp_server_configs(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            if adapters().any(|adapter| adapter.server_name == name) {
+            if name == BUILTIN_SERVER_NAME {
                 for required in BUILTIN_RUNTIME_ENV {
                     if let Some((_, value)) =
                         runtime_env.iter().rev().find(|(key, _)| key == required)
@@ -743,11 +766,8 @@ pub fn acp_server_configs(
         .collect()
 }
 
-pub async fn serve(adapter: &str) -> Result<()> {
-    let adapter = adapters()
-        .find(|candidate| candidate.name == adapter)
-        .ok_or_else(|| anyhow::anyhow!("unknown built-in MCP adapter '{adapter}'"))?;
-    (adapter.serve)().await
+pub async fn serve() -> Result<()> {
+    serve_stdio(BUILTIN_SERVER_NAME, builtin_tools, call_builtin_boxed).await
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -758,37 +778,73 @@ fn push_unique(values: &mut Vec<String>, value: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_tool_sets, server_configs};
+    use super::{builtin_tools, expand_tool_sets, server_configs};
 
     #[test]
     fn expands_sets_and_preserves_ordinary_rules() {
         let rules = vec![
             "Read(./**)".to_string(),
-            "mcp/github/comment@v1".to_string(),
+            "loom/github/comment@v1".to_string(),
             "Read(./**)".to_string(),
         ];
         let expanded = expand_tool_sets(&rules).unwrap();
         assert_eq!(expanded[0], "Read(./**)");
         assert_eq!(expanded.len(), 7);
-        assert!(expanded.contains(&"mcp__loom_github__issue_edit".to_string()));
+        assert!(expanded.contains(&"mcp__loom__github_issue_edit".to_string()));
     }
 
     #[test]
-    fn rejects_unknown_namespaced_sets() {
-        let error = expand_tool_sets(&["mcp/github/admin".to_string()]).unwrap_err();
-        assert!(error.to_string().contains("unknown built-in MCP tool set"));
+    fn ignores_unknown_namespaced_sets() {
+        let expanded = expand_tool_sets(&[
+            "mcp/github/admin".to_string(),
+            "loom/retired/read@v1".to_string(),
+            "Read(./**)".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(expanded, ["Read(./**)".to_string()]);
     }
 
     #[test]
-    fn selects_servers_from_exact_session_permissions() {
+    fn ignores_removed_capabilities_in_stored_policy() {
+        let mut removed = super::registry().capability_sets[0].clone();
+        removed.name = "loom/retired/read@v1".to_string();
+        let snapshot = weaver_api::McpPolicySnapshot {
+            capability_sets: vec![removed],
+            ..Default::default()
+        };
+        assert!(super::rules_for_snapshot(&snapshot).unwrap().is_empty());
+    }
+
+    #[test]
+    fn selects_one_server_from_current_session_permissions() {
         assert!(server_configs(&["Read(./**)".to_string()]).is_empty());
-        let servers = server_configs(&["mcp__loom_github__issue_view".to_string()]);
+        assert!(server_configs(&["mcp__loom_channel__list".to_string()]).is_empty());
+        let servers = server_configs(&[
+            "mcp__loom__channel_list".to_string(),
+            "mcp__loom__github_issue_view".to_string(),
+        ]);
         assert_eq!(servers.len(), 1);
-        assert!(servers.contains_key("loom_github"));
+        assert!(servers.contains_key("loom"));
         assert_eq!(
-            servers["loom_github"]["env"]["LOOM_MCP_ALLOWED_TOOLS"],
-            "[\"issue_view\"]"
+            servers["loom"]["env"]["LOOM_MCP_ALLOWED_TOOLS"],
+            "[\"github_issue_view\",\"channel_list\"]"
         );
+        assert_eq!(servers["loom"]["args"], serde_json::json!(["mcp", "serve"]));
+    }
+
+    #[test]
+    fn aggregate_surface_names_every_tool_by_domain() {
+        let tools = builtin_tools();
+        let names = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names.len(), tools.as_array().unwrap().len());
+        assert!(names.contains("github_issue_view"));
+        assert!(names.contains("channel_send"));
+        assert!(names.contains("artifact_get"));
     }
 
     #[test]
@@ -798,12 +854,18 @@ mod tests {
         assert_eq!(set.name, "loom/github/comment@v1");
         assert!(set.digest.starts_with("sha256:"));
         assert_eq!(set.tools.len(), 6);
-        let legacy = registry
+        assert!(registry
             .capability_sets
             .iter()
-            .find(|set| set.name == "mcp/github/comment@v1")
-            .unwrap();
-        assert_eq!(legacy.deprecated_by.as_deref(), Some(set.name.as_str()));
+            .all(|set| set.name.starts_with("loom/")));
+        assert!(registry
+            .capability_sets
+            .iter()
+            .any(|set| set.name == "loom/messaging/slack@v1"));
+        assert!(registry
+            .domains
+            .iter()
+            .all(|adapter| adapter.server_name == "loom"));
     }
 
     #[test]
@@ -816,95 +878,55 @@ mod tests {
         let expected = [
             (
                 "loom/github/comment@v1",
-                "sha256:5566e4a295797b020dc93d4849168deca8470a43dd5186c0e0579902d5a99da4",
-            ),
-            (
-                "mcp/github/comment@v1",
-                "sha256:a3e83e7c3a3bc69cdabda0540b5fc31c0398ca24d41f310a225ba1e1117af1de",
+                "sha256:b05d602bb199e3ca1a0b8c807ecb3b84a0a1f7b673a080455b1822368a4b907e",
             ),
             (
                 "loom/context/read@v1",
-                "sha256:43b519dcce558f12d6d10afc0a9121fadecd888a61a19c93147ec07644893dc9",
-            ),
-            (
-                "mcp/context/read@v1",
-                "sha256:0a4807a5a163ebdbd66d52ca088150853ed3e005cc88e94ea7e58e4bfd7927ee",
+                "sha256:323c94d22bc51696bdedb4a84e4c04f174a46501beb2eb1ea8e19ca6ce349316",
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:d90f7358facdecea9a10fd2cff6f75ccec35a76b5d0dcb08e62ca0a71b35fa2b",
+                "sha256:f4d4f6a80605a8784b068dc286bfcccef63f55c0b451c00f9ac301d111f43cc0",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:95e0a083ba39bffb11d7157e3b8e11aab347e66b524f9cd86ac4db83cad65973",
-            ),
-            (
-                "mcp/channel/read@v1",
-                "sha256:4895ffaa5ba9f2f7d45b4ee66501d8c20f1770f861cf81fc4463c9686050725c",
-            ),
-            (
-                "mcp/channel/write@v1",
-                "sha256:8a018f5a160e9c06d94fcc24e0b5e732ef805076d859304acf5f05e7ccaaf10c",
+                "sha256:e928a720610385e4820bc5b5414b52e5a7a059c383bfd7ecc7c3fda88517da06",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:2a5902dfa1a0e095c325d378cb99db76a916adf9bb485575d435afa8998c0279",
+                "sha256:e2196b45b3727a2993f8c6fb29e1c28d067cbcd28236357b1120e88e175cb0c2",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:eb99a64c4ed0e1c0c6e9dd8205f7491c06871349c857563a78f1de83fc2cd5ab",
-            ),
-            (
-                "mcp/artifact/read@v1",
-                "sha256:1ee173fad1b1b4474e0f12715dfc65107d60bdd1a7452f3da1b3ae0c0374eb05",
-            ),
-            (
-                "mcp/artifact/write@v1",
-                "sha256:6c1bba5084c89410121584af895eb0bebe686ed0d6ee6d47ed578014fc504d9a",
+                "sha256:517436e95f976e259d652d3d969cf8f2312230223ba44a5c9f24e080643e370b",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:8584e4af702fa12f19a66987f59d140ca1878ad409fdc7b68e11d0041a70f2c9",
+                "sha256:37e9afd58241a3dc68edde6a4521b02afdd0f445d4eae6910da54fea05763803",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:302b931d0d3eb704983d5b5be6849dfc30628e0e6b212978746a53fc75af2a5f",
+                "sha256:1d3b61b7ef1f3e4f49ff403c1228cc2cab45c18d9108bb7cf1a76073701816fa",
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:f4b1830a82aa1e4e38bda28f432c666cd2b059a617ff3ae575408874b178e637",
+                "sha256:ea41b2aabb6a64e6a8738109c0d56b13363eb3e5d5f2c7aa44ce19e43e1b4752",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:2f26b50b697d9ae0e7a02c577ab5e5f90ead070016e59c78b228b7440442d589",
+                "sha256:021c51cdef86f5a7a718295d78417769756dc22f1a826636afa56e654a7d679d",
             ),
             (
-                "mcp/session/read@v1",
-                "sha256:5a088807c06cc31219544e04bee79bbd7ae57d3200fa54f2d9cce5d69e40c318",
-            ),
-            (
-                "mcp/session/status@v1",
-                "sha256:e9a555691d74aedd50894e7e1726ddbe0f778eb0b1b955a1b45f0d3f2b028067",
-            ),
-            (
-                "mcp/history/self@v1",
-                "sha256:57c6f4d3e48b93266ddf1ecd5c2ee60f68dd0c268a0682dba93a84fa4f57c0f4",
-            ),
-            (
-                "mcp/messaging/status@v1",
-                "sha256:1b133a74973b3b4b24efbae183cf55c59fb8d7e2010d044f3d955a0e663252cf",
-            ),
-            (
-                "mcp/slack/message@v1",
-                "sha256:e141c4a828f3d5bab35526b8cfcf54e61fcb89eeb3f99f65590a1e90ca707e3a",
+                "loom/messaging/slack@v1",
+                "sha256:89d1f86e4c28cf1c73287493609abbf347ff99a257e611107e62067840b854f4",
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:0ef454860ed512f07e563baca49c8941006e76e684e42b081058587ed7210d1b",
+                "sha256:2e789d878d398cc3711aa398c64bb312d449237ff3bd2c15a414239fd68058c7",
             ),
             (
                 "loom/permissions/request@v1",
-                "sha256:465e7053731ceb1b047001d79751825f83518a6fb60cdc65ec2dd0502acdc83d",
+                "sha256:e2d2e7c103d995b9d8a9374f77ba4e5f03d6ad34c26fd8478ff8c4ae3df1479d",
             ),
         ]
         .into_iter()
@@ -988,8 +1010,6 @@ mod tests {
                 .collect::<Vec<_>>();
             assert!(!names.is_empty(), "{} has no tools", adapter.name);
             for tool in names {
-                let permission = format!("mcp__{}__{tool}", adapter.server_name);
-                assert!((adapter.is_permission_rule)(&permission));
                 assert!(
                     (adapter.capability_sets)()
                         .iter()
@@ -998,9 +1018,6 @@ mod tests {
                     adapter.name
                 );
             }
-            let config = (adapter.server_config)();
-            assert_eq!(config["command"], "loom");
-            assert_eq!(config["args"][0], "mcp");
         }
     }
 }

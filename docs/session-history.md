@@ -48,8 +48,8 @@ REST owns session resolution, pagination, filters, search, and authorization.
 The normal session-token grant applies: a caller can read its bound session
 tree, but an unrelated sibling session receives `403`.
 
-The built-in `mcp/history/self@v1` capability set exposes `history` and `search`
-tools. Their schemas have no session selector. The stdio adapter resolves
+The built-in `loom/sessions/read@v1` capability set exposes `session_history`
+and `session_search` tools. Their schemas have no session selector. The aggregate stdio server resolves
 `LOOM_SESSION_ID`, uses the session-scoped `LOOM_TOKEN`, and calls the REST
-routes above. Profiles can select the `history` MCP group (or `all`); the
-session's pinned capability snapshot still determines the exact tools launched.
+routes above. Profiles can select the `session` MCP group (or `all`); missing
+capabilities in an older profile revision are ignored at launch.

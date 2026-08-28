@@ -564,14 +564,14 @@ async fn attach_to_existing_branch() {
         .unwrap();
 }
 
-/// The Slack reply route's destination is server-resolved. A thread the session
+/// The Slack send route's destination is server-resolved. A thread the session
 /// was never delivered is refused, so `thread` selects among the session's own
 /// alert threads rather than granting the agent the workspace. Both refusals
 /// land before any Slack call, so they hold on a server with no Slack
 /// configured — which is also what a leaked `LOOM_TOKEN` would face.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
+async fn slack_send_refuses_a_thread_the_session_was_not_delivered() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();
     let session = ts
@@ -583,11 +583,11 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
         .await
         .unwrap();
     let branch_id = session["branch"]["id"].as_str().unwrap().to_string();
-    let reply_url = format!("http://{}/api/branches/slack/reply", ts.addr);
+    let send_url = format!("http://{}/api/branches/slack/send", ts.addr);
 
     // An unrouted thread is forbidden even though it is well-formed.
     let unrouted = http
-        .post(&reply_url)
+        .post(&send_url)
         .json(&json!({
             "branch": branch_id,
             "text": "status update",
@@ -600,7 +600,7 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
 
     // A channel name is not an id: rejected as malformed, before any Slack call.
     let malformed = http
-        .post(&reply_url)
+        .post(&send_url)
         .json(&json!({
             "branch": branch_id,
             "text": "status update",
@@ -610,15 +610,6 @@ async fn slack_reply_refuses_a_thread_the_session_was_not_delivered() {
         .await
         .unwrap();
     assert_eq!(malformed.status(), StatusCode::BAD_REQUEST);
-
-    // Without `thread`, an unwired branch still reports that it has no thread.
-    let unwired = http
-        .post(&reply_url)
-        .json(&json!({ "branch": branch_id, "text": "status update" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unwired.status(), StatusCode::BAD_REQUEST);
 
     ts.client
         .post(

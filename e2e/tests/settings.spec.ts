@@ -166,7 +166,7 @@ for line in sys.stdin:
     await access.getByRole('radio', { name: 'groups' }).check();
     await access.getByLabel('docs').check();
     await expect(
-      access.getByLabel('docs').locator('..').getByText('1 service · 1 tool'),
+      access.getByLabel('docs').locator('..').getByText('1 capability set · 1 tool'),
     ).toBeVisible();
     await expect(access.getByText('New sessions get 1 tool')).toBeVisible();
     await page.getByTestId('profile-save').click();

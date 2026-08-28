@@ -98,33 +98,24 @@ pub mod list {
 }
 
 pub mod slack {
-    //! Posting back to Slack on behalf of a branch's session.
+    //! Explicit outbound messaging to a routed Slack thread.
     pub(super) use super::prelude;
-    pub mod reply {
+
+    pub mod send {
         use super::prelude::*;
 
-        /// Post a message from this branch's session back to a Slack thread.
-        ///
-        /// Without `thread`, replies to the branch's own Slack wiring; with `thread`,
-        /// targets a delivered thread.
-        // A grant of its own: this is the only branch write an agent reaches
-        // over MCP, matching what `mcp/slack/message@v1` tools claim. The broad
-        // `loom/branches/write@v1` would hand a session that only asked to post
-        // to Slack the whole of `branches.update`.
-        #[operation(id = "branches.slack.reply", actor = SessionSelf, scope = Branch,
+        /// Send a one-off message to a Slack thread routed to this session.
+        #[operation(id = "branches.slack.send", actor = SessionSelf, scope = Branch,
                     risk = ExternalWrite, grants = ["loom/branches/slack@v1"],
-                    cli = "branches slack reply")]
+                    cli = "branches slack send")]
         pub struct Input {
             /// The message text.
             #[operand(positional)]
             #[schemars(length(min = 1, max = 4000))]
             pub text: String,
-            /// Delivered thread to reply in (optional).
-            #[operand(json, default = None)]
-            pub thread: Option<SlackThreadRef>,
-            /// Dedupe key so a retried send doesn't double-post.
-            #[schemars(length(min = 1, max = 255))]
-            pub idempotency_key: Option<String>,
+            /// A Slack thread previously routed to this session.
+            #[operand(json)]
+            pub thread: SlackThreadRef,
             #[operand(context)]
             pub branch: String,
         }
@@ -243,7 +234,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     get::SPEC,
     update::SPEC,
     status::set::SPEC,
-    slack::reply::SPEC,
+    slack::send::SPEC,
     events::list::SPEC,
     events::create::SPEC,
     tags::set::SPEC,

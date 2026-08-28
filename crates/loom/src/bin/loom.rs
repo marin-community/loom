@@ -1174,12 +1174,12 @@ mod tests {
         assert!(parse_mcp_access("").is_err());
 
         let Cli { cmd, .. } =
-            Cli::try_parse_from(["loom", "mcp", "show", "mcp/github/comment@v1"]).unwrap();
+            Cli::try_parse_from(["loom", "mcp", "show", "loom/github/comment@v1"]).unwrap();
         assert!(matches!(
             cmd,
             Cmd::Host(HostCmd::Mcp {
                 cmd: McpCmd::Show { name }
-            }) if name == "mcp/github/comment@v1"
+            }) if name == "loom/github/comment@v1"
         ));
 
         let Cli { cmd, .. } = Cli::try_parse_from([

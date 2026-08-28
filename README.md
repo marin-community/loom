@@ -289,8 +289,8 @@ renders the same local log without contacting the server.
 Agents can page or literally search that same normalized history through
 session-scoped REST. ACP reads its durable journal; terminal agents normalize
 their native transcript on read and use the archived Iris capture as fallback.
-The `loom_session.history|search` tools are thin structured facades over those
-routes; `mcp/history/self@v1` remains compatible. See
+The aggregate MCP server exposes `loom.session_history` and
+`loom.session_search` as thin structured clients for those routes. See
 [Session history and search](docs/session-history.md) for the record, cursor,
 source, and authorization contract.
 
@@ -444,7 +444,7 @@ loom profiles ls
 loom profile show default
 loom profile show ops --effective
 loom mcps get
-loom mcp show mcp/github/comment@v1
+loom mcp show loom/github/comment@v1
 loom profile add ops --agent codex --mcp github,messaging
 loom mcp add /engineering/search/docs --label "Docs search" \
   --file server.py --tests test_mcp.py

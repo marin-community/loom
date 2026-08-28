@@ -1,7 +1,7 @@
 # MCP and profile control plane
 
 Profiles choose provider-neutral MCP capability groups. Loom resolves that
-selection into immutable, content-addressed policy before launch; agent adapters
+selection into content-addressed policy before launch; agent adapters
 translate the snapshot into provider-specific runtime configuration only at the
 final boundary.
 
@@ -9,7 +9,7 @@ final boundary.
 
 - **The registry describes capability.** Each builtin or custom entry has a
   stable identity, group, version or revision, content digest, exact tool names
-  and schemas, and an adapter launch descriptor.
+  and schemas. All builtin entries share Loom's aggregate server descriptor.
 - **A profile selects and pins policy.** `mcp_access` is `none`, `all`, or an
   explicit group list. Saving the profile resolves enabled registry content and
   pins the exact identities, digests, custom revisions, and tool schemas to that
@@ -19,9 +19,9 @@ final boundary.
   that profile. They are visible through the profile API and Settings UI and
   should contain organization workflow and response conventions, never secrets.
 - **A session owns launch history.** Launch copies the resolved profile and MCP
-  policy into the concrete snapshot stamped for that runtime launch. Recovery,
-  adoption, and an unchanged profile do not re-resolve the current registry;
-  an explicit handoff can replace the snapshot after resolving again.
+  policy into the concrete snapshot stamped for that runtime launch. Recovery
+  and adoption retain that selection, omitting capabilities that no longer
+  exist in the builtin registry.
 - **Adapters own translation.** Claude, Codex, and later runtimes receive their
   native `mcpServers` and permission representation from the same stamped
   provider-neutral policy.
@@ -34,17 +34,18 @@ name Loom integrations.
 
 Builtins are trusted code shipped with Loom. Their content digest covers the
 adapter identity, capability metadata, ordered tools, and advertised schemas.
-Builtins provide resource families for context, channel, artifact, and session,
-plus compatible fixed-repository GitHub, fixed-thread messaging, and
-self-history adapters. They call Loom's typed REST client and return
+Builtins provide resource families for context, channel, artifact, session,
+permissions, issues, fixed-repository GitHub, and routed-thread messaging.
+One `loom` stdio server exposes every selected tool under a domain-qualified
+name. The tools call Loom's typed REST client and return
 machine-readable `structuredContent`; service credentials and provider routing
 remain in the server.
 
-The exact resource families, tools, versioned bundles, digests, and canonical
-successors are code-registered. Inspect them with `loom mcp registry`, and join
+The exact resource families, tools, versioned bundles, and digests are
+code-registered. Inspect them with `loom mcp registry`, and join
 tools back to the transport-neutral contract with `loom help --json` or
-`GET /api/operations`. Compatibility `mcp/*` identities remain resolvable for
-pinned snapshots; new profile resolutions select their `loom/*` successors.
+`GET /api/operations`. Removed capability identities are ignored when an older
+profile or session is launched; they are not retained as registry aliases.
 
 `channel: "self"` and `session: "self"` resolve through `sessions.context`.
 Artifact writes are create-or-append operations and may supply `base_rev` for
@@ -86,8 +87,8 @@ Create must present those revisions. Drift returns a conflict with a fresh
 preview rather than silently changing the launch. The resulting
 `resolved_launch` and MCP snapshot are the auditable runtime contract.
 
-Registry edits do not widen sessions or saved profile revisions. Saving a
-profile again is the explicit reconciliation point. Loom refuses to remove a
+Registry edits do not widen sessions or saved profile revisions. A removed
+builtin capability is omitted on the next launch. Loom refuses to remove a
 server pinned by a profile, or the last server in a group still named by an
 explicit profile selection.
 
@@ -116,7 +117,7 @@ idempotency, and deployment boundaries.
 
 ```sh
 loom mcps get
-loom mcp show mcp/github/comment@v1
+loom mcp show loom/github/comment@v1
 loom mcp add /engineering/search/docs --file server.py --tests test_mcp.py
 loom profile add ops --agent codex --mcp github,messaging
 loom profile show ops --effective

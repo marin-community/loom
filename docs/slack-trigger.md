@@ -237,22 +237,18 @@ the branch, conversation, artifacts, and history recoverable. Set the value to
 `0` to disable Slack retention globally, or disable auto-archive on one session
 from its actions menu.
 
-## The reply route
+## Sending messages
 
-A session's own replies — a question, a design to review, the finished
-result — post back to the wired thread through `branches.slack.reply`
-(`POST /api/branches/slack/reply` with `{"text": "…"}`) and the session's
-`LOOM_TOKEN`; the branch is resolved from the calling session, never supplied
-by hand. loom resolves the destination channel and thread from the branch's
-`slack` wiring tag server-side; the bot token itself never reaches the agent,
-the same separation used by Loom's App-backed server-side GitHub tools.
+A session's own replies — a question, a design to review, or the finished
+result — are durable channel messages. Calling `loom.channel_send` with
+`channel: "self"` and `kind: "result"` delivers the item to the origin Slack
+thread without exposing the bot token to the agent.
 
-Adding `"thread": {"channel": "C…", "thread_ts": "…"}` posts to one of the
-session's *routed* threads instead (see [Automation-delivered
-threads](#automation-delivered-threads)). The route is the authorization: a
-thread that was never delivered to this branch is refused, so the field selects
-among the session's own threads rather than granting it the workspace. The
-`slack_reply` MCP tool takes the same optional `thread`.
+For a one-off message to a different thread already routed to the session, use
+`loom.messaging_slack_send` with an explicit
+`{"channel": "C…", "thread_ts": "…"}` target. The route is the authorization:
+a thread that was never delivered to this branch is refused, so this capability
+does not grant arbitrary workspace access.
 
 ## Automation-delivered threads
 
@@ -262,7 +258,7 @@ A `runs.create` (`POST /api/runs/create`) body may carry
 to whichever session the run lands on, and from then on the thread and the
 session are joined in both directions:
 
-- The session may reply into the thread (`thread` on the reply route above).
+- The session may send into the thread with `loom.messaging_slack_send`.
 - An `@marinbot` mention in the thread is delivered into that session's
   conversation and acknowledged with 👀, rather than launching a second session
   on top of it. A routed thread needs no repository: the session already exists,

@@ -84,7 +84,6 @@ export type {
   Log as IrisLog,
   LogLineView as LogLine,
   McpAccess,
-  McpAdapterView as McpAdapter,
   McpCapabilitySetView as McpCapabilitySet,
   McpRegistryView as McpRegistry,
   MeView as Me,

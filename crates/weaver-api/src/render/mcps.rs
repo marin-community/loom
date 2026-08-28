@@ -14,7 +14,7 @@ impl Render for mcps::get::Op {
         for set in &output.capability_sets {
             lines.push(format!(
                 "{:<30} {:<4} {:<12} {}",
-                set.name, set.version, set.adapter, set.description
+                set.name, set.version, set.domain, set.description
             ));
         }
         for server in &output.custom_servers {

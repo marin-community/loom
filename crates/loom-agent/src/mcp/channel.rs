@@ -16,9 +16,7 @@ use serde_json::Value;
 use weaver_api::operations::channels;
 
 use super::dispatch::{export, Export};
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
-
-const SERVER_NAME: &str = "loom_channel";
+use super::{Adapter, CapabilitySet, ToolFuture};
 
 /// The tools this server exports, in the order it advertises them.
 fn exports() -> &'static [Export] {
@@ -37,39 +35,21 @@ fn exports() -> &'static [Export] {
     })
 }
 
-// Old names for these sets; sessions pinned to one still resolve it.
-const SUPERSEDED: &[(&str, &str)] = &[
-    ("mcp/channel/read@v1", "loom/channels/read@v1"),
-    ("mcp/channel/write@v1", "loom/channels/write@v1"),
-];
-
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "channel",
-    server_name: SERVER_NAME,
     description: "Durable conversation streams, subscriptions, and delivery receipts.",
     capability_sets,
     exports,
-    superseded: &[
-        ("mcp/channel/read@v1", "loom/channels/read@v1"),
-        ("mcp/channel/write@v1", "loom/channels/write@v1"),
-    ],
     expand_tool_set,
-    is_permission_rule,
-    server_config,
     tools,
-    serve: serve_boxed,
+    call: call_boxed,
 };
 
 /// Capability sets are derived from the registry: every `channels.*` operation
-/// exported to this server contributes its tool to the set named by its
-/// grant, plus the same sets under the names they were superseded away from.
+/// exported to this server contributes its tool to the set named by its grant.
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
-    SETS.get_or_init(|| {
-        let mut sets = super::dispatch::capability_sets(exports(), "channel", describe_capability);
-        sets.extend(super::dispatch::alias_capability_sets(&sets, SUPERSEDED));
-        sets
-    })
+    SETS.get_or_init(|| super::dispatch::capability_sets(exports(), "channel", describe_capability))
 }
 
 fn describe_capability(grant: &str) -> &'static str {
@@ -80,16 +60,8 @@ fn describe_capability(grant: &str) -> &'static str {
     }
 }
 
-fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
-}
-
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
-}
-
-fn server_config() -> Value {
-    super::builtin_server_config("channel")
+    super::dispatch::expand_tool_set("channel", capability_sets(), name)
 }
 
 fn tools() -> Value {
@@ -99,13 +71,8 @@ fn tools() -> Value {
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("channel", SERVER_NAME, exports(), &name, arguments)
-            .await
+        super::dispatch::call_adapter_tool("channel", exports(), &name, arguments).await
     })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
 }
 
 #[cfg(test)]
@@ -116,15 +83,7 @@ mod tests {
     fn capability_sets_are_grouped_by_grant() {
         assert_eq!(expand_tool_set("loom/channels/read@v1").unwrap().len(), 4);
         assert_eq!(expand_tool_set("loom/channels/write@v1").unwrap().len(), 4);
-        assert_eq!(expand_tool_set("mcp/channel/read@v1").unwrap().len(), 4);
-        assert_eq!(expand_tool_set("mcp/channel/write@v1").unwrap().len(), 4);
+        assert!(expand_tool_set("mcp/channel/read@v1").is_none());
         assert!(expand_tool_set("loom/channels/nonexistent@v1").is_none());
-    }
-
-    #[test]
-    fn permission_rules_only_recognize_registered_tools() {
-        assert!(is_permission_rule("mcp__loom_channel__list"));
-        assert!(!is_permission_rule("mcp__loom_channel__bogus"));
-        assert!(!is_permission_rule("mcp__other_server__list"));
     }
 }

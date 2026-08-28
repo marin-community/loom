@@ -10,9 +10,7 @@ use serde_json::Value;
 use weaver_api::operations::issues;
 
 use super::dispatch::{export, Export};
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
-
-const SERVER_NAME: &str = "loom_issue";
+use super::{Adapter, CapabilitySet, ToolFuture};
 
 /// The tools this server exports, in the order it advertises them.
 fn exports() -> &'static [Export] {
@@ -35,19 +33,12 @@ fn exports() -> &'static [Export] {
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "issue",
-    server_name: SERVER_NAME,
     description: "Repository work items, lifecycle, and free-form tags.",
     capability_sets,
     exports,
-    superseded: &[
-        ("mcp/issue/read@v1", "loom/issues/read@v1"),
-        ("mcp/issue/write@v1", "loom/issues/write@v1"),
-    ],
     expand_tool_set,
-    is_permission_rule,
-    server_config,
     tools,
-    serve: serve_boxed,
+    call: call_boxed,
 };
 
 fn capability_sets() -> &'static [CapabilitySet] {
@@ -63,16 +54,8 @@ fn describe_capability(grant: &str) -> &'static str {
     }
 }
 
-fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
-}
-
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
-}
-
-fn server_config() -> Value {
-    super::builtin_server_config("issue")
+    super::dispatch::expand_tool_set("issue", capability_sets(), name)
 }
 
 fn tools() -> Value {
@@ -82,12 +65,8 @@ fn tools() -> Value {
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("issue", SERVER_NAME, exports(), &name, arguments).await
+        super::dispatch::call_adapter_tool("issue", exports(), &name, arguments).await
     })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
 }
 
 #[cfg(test)]
@@ -99,12 +78,5 @@ mod tests {
         assert_eq!(expand_tool_set("loom/issues/read@v1").unwrap().len(), 2);
         assert_eq!(expand_tool_set("loom/issues/write@v1").unwrap().len(), 8);
         assert!(expand_tool_set("loom/issues/nonexistent@v1").is_none());
-    }
-
-    #[test]
-    fn permission_rules_only_recognize_exported_tools() {
-        assert!(is_permission_rule("mcp__loom_issue__list"));
-        assert!(!is_permission_rule("mcp__loom_issue__bogus"));
-        assert!(!is_permission_rule("mcp__other_server__list"));
     }
 }

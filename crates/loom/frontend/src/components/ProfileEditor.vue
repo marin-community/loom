@@ -47,9 +47,8 @@ const mcpGroupDetails = computed(() =>
       (server) =>
         server.group === group.name && server.enabled && server.validation_state === 'ready',
     );
-    const adapters = new Set(capabilitySets.map((set) => set.adapter));
     const tools = new Set([
-      ...capabilitySets.flatMap((set) => set.tools.map((tool) => `${set.adapter}:${tool}`)),
+      ...capabilitySets.flatMap((set) => set.tools.map((tool) => `${set.domain}:${tool}`)),
       ...customServers.flatMap((server) =>
         server.tools.map((tool) => `${server.identity}:${tool}`),
       ),
@@ -57,23 +56,37 @@ const mcpGroupDetails = computed(() =>
     return {
       ...group,
       descriptions: capabilitySets.map((set) => set.description),
-      services: adapters.size + customServers.length,
+      capabilities: capabilitySets.length + customServers.length,
       tools: tools.size,
     };
   }),
 );
 const selectedMcpGroups = computed(() => {
   if (draft.value.mcp_access.mode === 'none') return [];
-  const available = mcpGroupDetails.value.filter((group) => group.services > 0);
+  const available = mcpGroupDetails.value.filter((group) => group.capabilities > 0);
   if (draft.value.mcp_access.mode === 'all') return available;
   const selected = new Set(draft.value.mcp_access.groups);
   return available.filter((group) => selected.has(group.name));
 });
-const selectedMcpSummary = computed(() => ({
-  groups: selectedMcpGroups.value.length,
-  services: selectedMcpGroups.value.reduce((count, group) => count + group.services, 0),
-  tools: selectedMcpGroups.value.reduce((count, group) => count + group.tools, 0),
-}));
+const selectedMcpSummary = computed(() => {
+  const groups = new Set(selectedMcpGroups.value.map((group) => group.name));
+  const hasBuiltins = (props.mcpRegistry?.capability_sets ?? []).some((set) =>
+    groups.has(set.group),
+  );
+  const customServers = new Set(
+    (props.mcpRegistry?.custom_servers ?? [])
+      .filter(
+        (server) =>
+          groups.has(server.group) && server.enabled && server.validation_state === 'ready',
+      )
+      .map((server) => server.identity),
+  );
+  return {
+    groups: groups.size,
+    servers: (hasBuiltins ? 1 : 0) + customServers.size,
+    tools: selectedMcpGroups.value.reduce((count, group) => count + group.tools, 0),
+  };
+});
 
 function normalizeAgentChoices(metadata = selectedAgent.value) {
   if (!metadata) return;
@@ -395,7 +408,7 @@ watch(
             {
               value: 'none' as const,
               title: 'No Loom tools',
-              detail: 'Start no profile-managed tool services.',
+              detail: 'Start no profile-managed MCP servers.',
             },
             {
               value: 'all' as const,
@@ -462,7 +475,8 @@ watch(
               <span v-if="!group.builtin" class="meta-chip">custom</span>
             </span>
             <span class="text-2xs text-muted">
-              {{ group.services }} {{ group.services === 1 ? 'service' : 'services' }} ·
+              {{ group.capabilities }}
+              {{ group.capabilities === 1 ? 'capability set' : 'capability sets' }} ·
               {{ group.tools }} {{ group.tools === 1 ? 'tool' : 'tools' }}
             </span>
             <span v-if="group.descriptions.length" class="text-2xs text-faint">
@@ -474,12 +488,12 @@ watch(
       <div class="rounded bg-input/60 px-2.5 py-2 text-xs">
         <template v-if="selectedMcpSummary.tools">
           New sessions get <strong>{{ selectedMcpSummary.tools }} tools</strong> from
-          {{ selectedMcpSummary.services }}
-          {{ selectedMcpSummary.services === 1 ? 'service' : 'services' }} across
+          {{ selectedMcpSummary.servers }}
+          {{ selectedMcpSummary.servers === 1 ? 'MCP server' : 'MCP servers' }} across
           {{ selectedMcpSummary.groups }}
-          {{ selectedMcpSummary.groups === 1 ? 'capability' : 'capabilities' }}.
+          {{ selectedMcpSummary.groups === 1 ? 'capability group' : 'capability groups' }}.
         </template>
-        <template v-else>No Loom tool services will start for new sessions.</template>
+        <template v-else>No MCP servers will start for new sessions.</template>
       </div>
       <p v-if="draft.restricted" class="text-xs text-muted">
         Restricted profiles can use explicitly selected trusted built-in capabilities only.

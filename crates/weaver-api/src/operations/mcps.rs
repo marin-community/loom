@@ -1,5 +1,5 @@
 //! Provider-neutral inspection and administration of Loom's MCP registry:
-//! built-in adapters, versioned capability sets, and operator-authored
+//! built-in domains, versioned capability sets, and operator-authored
 //! custom servers.
 
 use super::registry::OperationSpec;
@@ -8,7 +8,7 @@ use super::OperationBundle;
 pub(super) use super::prelude;
 pub mod custom {
     //! Operator-authored custom MCP servers: uv Python scripts Loom validates,
-    //! versions, and can launch alongside the built-in adapters.
+    //! versions, and can launch alongside the built-in aggregate server.
 
     pub(super) use super::prelude;
     pub mod create {
@@ -114,7 +114,7 @@ pub mod custom {
 pub mod get {
     use super::prelude::*;
 
-    /// The trusted MCP registry: built-in adapters, versioned capability sets,
+    /// The trusted MCP registry: built-in domains, versioned capability sets,
     /// and operator-authored custom servers.
     #[operation(id = "mcps.get", actor = User, scope = Global, risk = Read, cli = "mcps get",
                 cli_alias = "ls", render = custom)]

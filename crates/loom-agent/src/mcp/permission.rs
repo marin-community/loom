@@ -18,9 +18,7 @@ use serde_json::Value;
 use weaver_api::operations::permissions;
 
 use super::dispatch::{export, Export};
-use super::{Adapter, CapabilitySet, ServeFuture, ToolFuture};
-
-const SERVER_NAME: &str = "loom_permission";
+use super::{Adapter, CapabilitySet, ToolFuture};
 
 /// The tools this server exports, in the order it advertises them.
 fn exports() -> &'static [Export] {
@@ -37,16 +35,12 @@ fn exports() -> &'static [Export] {
 
 pub(super) const ADAPTER: Adapter = Adapter {
     name: "permission",
-    server_name: SERVER_NAME,
     description: "Effective operation grants and durable human approval requests.",
     capability_sets,
     exports,
-    superseded: &[],
     expand_tool_set,
-    is_permission_rule,
-    server_config,
     tools,
-    serve: serve_boxed,
+    call: call_boxed,
 };
 
 /// Capability sets are derived from the registry: every `permissions.*` operation
@@ -70,16 +64,8 @@ fn describe_capability(grant: &str) -> &'static str {
     }
 }
 
-fn is_permission_rule(rule: &str) -> bool {
-    super::dispatch::is_permission_rule(SERVER_NAME, exports(), rule)
-}
-
 fn expand_tool_set(name: &str) -> Option<Vec<String>> {
-    super::dispatch::expand_tool_set(SERVER_NAME, capability_sets(), name)
-}
-
-fn server_config() -> Value {
-    super::builtin_server_config("permission")
+    super::dispatch::expand_tool_set("permission", capability_sets(), name)
 }
 
 fn tools() -> Value {
@@ -89,23 +75,6 @@ fn tools() -> Value {
 fn call_boxed(name: &str, arguments: Value) -> ToolFuture {
     let name = name.to_string();
     Box::pin(async move {
-        super::dispatch::call_adapter_tool("permission", SERVER_NAME, exports(), &name, arguments)
-            .await
+        super::dispatch::call_adapter_tool("permission", exports(), &name, arguments).await
     })
-}
-
-fn serve_boxed() -> ServeFuture {
-    Box::pin(super::serve_stdio(SERVER_NAME, tools, call_boxed))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn permission_rules_only_recognize_registered_tools() {
-        assert!(is_permission_rule("mcp__loom_permission__show"));
-        assert!(!is_permission_rule("mcp__loom_permission__bogus"));
-        assert!(!is_permission_rule("mcp__other_server__show"));
-    }
 }

@@ -57,7 +57,7 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<branches::get::Op>(),
         bind::<branches::issues::list::Op>(),
         bind::<branches::list::Op>(),
-        bind::<branches::slack::reply::Op>(),
+        bind::<branches::slack::send::Op>(),
         bind::<branches::status::set::Op>(),
         bind::<branches::tags::delete::Op>(),
         bind::<branches::tags::set::Op>(),

@@ -1,4 +1,4 @@
-//! Real-process conformance for every trusted builtin MCP adapter.
+//! Real-process conformance for Loom's aggregate built-in MCP server.
 
 use std::process::Stdio;
 
@@ -17,14 +17,14 @@ fn loom_bin() -> &'static str {
     env!("CARGO_BIN_EXE_loom")
 }
 
-async fn run_adapter(adapter: &str) -> (Vec<Value>, std::process::ExitStatus) {
+async fn run_builtin() -> (Vec<Value>, std::process::ExitStatus) {
     // Its own home, so this cannot depend on which test ran last: the adapter
     // is a subprocess and inherits whatever `WEAVER_HOME` the process-global
     // env happens to hold.
     let home = tempfile::tempdir().unwrap();
     let mut child = Command::new(loom_bin())
         .env("WEAVER_HOME", home.path())
-        .args(["mcp", "serve", adapter])
+        .args(["mcp", "serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -53,9 +53,9 @@ async fn run_adapter(adapter: &str) -> (Vec<Value>, std::process::ExitStatus) {
     (values, status)
 }
 
-async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
+async fn run_filtered_builtin(tools: &[&str]) -> Vec<Value> {
     let mut child = Command::new(loom_bin())
-        .args(["mcp", "serve", adapter])
+        .args(["mcp", "serve"])
         .env(
             "LOOM_MCP_ALLOWED_TOOLS",
             serde_json::to_string(tools).unwrap(),
@@ -69,7 +69,7 @@ async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
         .take()
         .unwrap()
         .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"issue_edit\",\"arguments\":{}}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"github_issue_edit\",\"arguments\":{}}}\n",
         )
         .await
         .unwrap();
@@ -82,14 +82,9 @@ async fn run_filtered_adapter(adapter: &str, tools: &[&str]) -> Vec<Value> {
     values
 }
 
-async fn run_scoped_calls(
-    ts: &TestServer,
-    adapter: &str,
-    token: &str,
-    calls: &[Value],
-) -> Vec<Value> {
+async fn run_scoped_calls(ts: &TestServer, token: &str, calls: &[Value]) -> Vec<Value> {
     let mut child = Command::new(loom_bin())
-        .args(["mcp", "serve", adapter])
+        .args(["mcp", "serve"])
         .env("WEAVER_API", format!("http://{}", ts.addr))
         .env("LOOM_TOKEN", token)
         .stdin(Stdio::piped())
@@ -119,51 +114,34 @@ async fn run_scoped_calls(
 /// that home is being torn down, and fails on whatever error comes back.
 #[serial]
 #[tokio::test]
-async fn every_builtin_speaks_mcp_stdio() {
-    for (adapter, expected_tools) in [
-        ("github", 6),
-        ("context", 1),
-        ("channel", 8),
-        ("artifact", 8),
-        // `actions` (bulk apply) and `backlog_add` joined the registry-driven
-        // catalogue; the count is asserted so a tool cannot appear unnoticed.
-        ("issue", 10),
-        ("session", 7),
-        ("history", 2),
-        ("messaging", 2),
-        ("permission", 4),
-    ] {
-        let (values, status) = run_adapter(adapter).await;
-        assert!(status.success(), "{adapter} did not exit cleanly");
-        assert_eq!(values.len(), 4, "{adapter} replied to a notification");
-        assert_eq!(values[0]["id"], 1, "{adapter} initialize reply");
-        assert_eq!(values[1]["id"], 2, "{adapter} tools/list reply");
-        assert_eq!(
-            values[1]["result"]["tools"].as_array().unwrap().len(),
-            expected_tools,
-            "{adapter} tool count"
-        );
-        assert_eq!(
-            values[2],
-            json!({
-                "jsonrpc": "2.0",
-                "id": 3,
-                "error": { "code": -32601, "message": "method not found: unknown/method" }
-            })
-        );
-        assert_eq!(values[3]["id"], 4, "{adapter} unknown-tool reply id");
-        assert_eq!(
-            values[3]["result"]["isError"], true,
-            "{adapter} unknown-tool isError"
-        );
-        let text = values[3]["result"]["content"][0]["text"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            text.contains("unknown"),
-            "{adapter} should report an unknown tool, said: {text}"
-        );
-    }
+async fn builtin_server_speaks_mcp_stdio() {
+    let (values, status) = run_builtin().await;
+    assert!(status.success());
+    assert_eq!(values.len(), 4, "server replied to a notification");
+    assert_eq!(values[0]["id"], 1);
+    assert_eq!(values[0]["result"]["serverInfo"]["name"], "loom");
+    assert_eq!(values[1]["id"], 2);
+    let tools = values[1]["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 44);
+    assert!(tools.iter().any(|tool| tool["name"] == "channel_send"));
+    assert!(tools.iter().any(|tool| tool["name"] == "session_history"));
+    assert!(tools
+        .iter()
+        .any(|tool| tool["name"] == "messaging_slack_send"));
+    assert_eq!(
+        values[2],
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "error": { "code": -32601, "message": "method not found: unknown/method" }
+        })
+    );
+    assert_eq!(values[3]["id"], 4);
+    assert_eq!(values[3]["result"]["isError"], true);
+    assert!(values[3]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("unknown"));
 }
 
 #[serial]
@@ -198,7 +176,6 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
 
     let issue_responses = run_scoped_calls(
         &ts,
-        "issue",
         &token,
         &[
             json!({
@@ -206,7 +183,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "get",
+                    "name": "issue_get",
                     "arguments": { "id": issue.id, "schema_invisible": "ignored" }
                 }
             }),
@@ -216,7 +193,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
                 "method": "tools/call",
                 // `issues.close` applies atomically to a set; the single-id case is
                 // the one-element set.
-                "params": { "name": "close", "arguments": { "ids": [issue.id] } }
+                "params": { "name": "issue_close", "arguments": { "ids": [issue.id] } }
             }),
         ],
     )
@@ -235,21 +212,20 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
 
     let permission_responses = run_scoped_calls(
         &ts,
-        "permission",
         &token,
         &[
             json!({
                 "jsonrpc": "2.0",
                 "id": 3,
                 "method": "tools/call",
-                "params": { "name": "show", "arguments": {} }
+                "params": { "name": "permission_show", "arguments": {} }
             }),
             json!({
                 "jsonrpc": "2.0",
                 "id": 4,
                 "method": "tools/call",
                 "params": {
-                    "name": "explain",
+                    "name": "permission_explain",
                     "arguments": { "operation": "issues.close" }
                 }
             }),
@@ -275,7 +251,7 @@ async fn typed_issue_and_permission_projections_invoke_the_rest_contract() {
 #[tokio::test]
 async fn malformed_json_fails_closed_and_clean_eof_succeeds() {
     let clean = Command::new(loom_bin())
-        .args(["mcp", "serve", "github"])
+        .args(["mcp", "serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .status()
@@ -284,7 +260,7 @@ async fn malformed_json_fails_closed_and_clean_eof_succeeds() {
     assert!(clean.success());
 
     let mut malformed = Command::new(loom_bin())
-        .args(["mcp", "serve", "messaging"])
+        .args(["mcp", "serve"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -305,7 +281,7 @@ async fn malformed_json_fails_closed_and_clean_eof_succeeds() {
 
 #[tokio::test]
 async fn builtin_process_exposes_only_the_session_stamped_tools() {
-    let values = run_filtered_adapter("github", &["issue_view"]).await;
+    let values = run_filtered_builtin(&["github_issue_view"]).await;
     assert_eq!(
         values[0]["result"]["tools"]
             .as_array()
@@ -313,7 +289,7 @@ async fn builtin_process_exposes_only_the_session_stamped_tools() {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["issue_view"]
+        vec!["github_issue_view"]
     );
     assert_eq!(values[1]["result"]["isError"], true);
     assert!(values[1]["result"]["content"][0]["text"]
@@ -386,7 +362,7 @@ for line in sys.stdin:
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn messaging_status_tool_uses_the_session_scoped_status_route() {
+async fn session_status_tool_uses_the_session_scoped_status_route() {
     let ts = TestServer::start().await;
     let branch = weaver_core::branch::upsert(&ts.state.db, &ts.cwd(), "weaver/mcp-status", "main")
         .await
@@ -420,7 +396,7 @@ async fn messaging_status_tool_uses_the_session_scoped_status_route() {
             .unwrap();
 
     let mut child = Command::new(loom_bin())
-        .args(["mcp", "serve", "messaging"])
+        .args(["mcp", "serve"])
         .env("WEAVER_API", format!("http://{}", ts.addr))
         .env("LOOM_TOKEN", token)
         .env("LOOM_SESSION_ID", "mcpstatussession")
@@ -431,7 +407,7 @@ async fn messaging_status_tool_uses_the_session_scoped_status_route() {
     let mut stdin = child.stdin.take().unwrap();
     stdin
         .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"status_update\",\"arguments\":{\"level\":\"attention\",\"message\":\"review the MCP design\"}}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_status_set\",\"arguments\":{\"level\":\"attention\",\"message\":\"review the MCP design\"}}}\n",
         )
         .await
         .unwrap();
@@ -501,7 +477,7 @@ async fn history_tools_resolve_self_and_call_the_rest_contract() {
             .unwrap();
 
     let mut child = Command::new(loom_bin())
-        .args(["mcp", "serve", "history"])
+        .args(["mcp", "serve"])
         .env("WEAVER_API", format!("http://{}", ts.addr))
         .env("LOOM_TOKEN", token)
         .env("LOOM_SESSION_ID", "mcphistorysession")
@@ -514,7 +490,7 @@ async fn history_tools_resolve_self_and_call_the_rest_contract() {
         .take()
         .unwrap()
         .write_all(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"history\",\"arguments\":{\"limit\":1}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{\"q\":\"SEARCHABLE\",\"kinds\":[\"message\"]}}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"session_history\",\"arguments\":{\"limit\":1}}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"session_search\",\"arguments\":{\"q\":\"SEARCHABLE\",\"kinds\":[\"message\"]}}}\n",
         )
         .await
         .unwrap();
