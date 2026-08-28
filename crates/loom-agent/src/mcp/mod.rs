@@ -27,6 +27,7 @@ pub mod github;
 pub(crate) mod channel;
 pub(crate) mod context;
 pub(crate) mod issue;
+pub(crate) mod messaging;
 pub(crate) mod permission;
 
 // These stay hand-written rather than bound via `dispatch::bind` — see each
@@ -34,7 +35,6 @@ pub(crate) mod permission;
 // enrichment the plain operation does not carry, or an operation that has no
 // direct generic rendering path).
 pub(crate) mod artifact;
-pub(crate) mod messaging;
 pub(crate) mod session;
 
 pub(crate) mod dispatch;
@@ -67,7 +67,7 @@ fn builtin_tool_name(adapter: &str, tool: &str) -> String {
     format!("{adapter}_{tool}")
 }
 
-fn builtin_permission_rule(adapter: &str, tool: &str) -> String {
+pub(crate) fn builtin_permission_rule(adapter: &str, tool: &str) -> String {
     format!(
         "mcp__{BUILTIN_SERVER_NAME}__{}",
         builtin_tool_name(adapter, tool)

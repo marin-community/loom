@@ -87,17 +87,14 @@ async fn call_tool(name: &str, arguments: Value) -> Result<Value> {
     }
     let client = super::runtime_client("session")?;
     match name {
-        "status_set" => set_status(&client, name, arguments).await,
+        "status_set" => set_status(&client, arguments).await,
         _ => super::dispatch::call_tool(&client, "session", exports(), name, arguments).await,
     }
 }
 
 /// Applies the status update, then folds in the channel message it posted
 /// (which `sessions.status.set`'s own response omits).
-async fn set_status(client: &weaver_api::Client, name: &str, arguments: Value) -> Result<Value> {
-    if !super::runtime_adapter_tool_allowed("session", name) {
-        bail!("session tool '{name}' is not allowed by this session");
-    }
+async fn set_status(client: &weaver_api::Client, arguments: Value) -> Result<Value> {
     let level = super::string_argument(&arguments, "level")?.context("status requires level")?;
     if !matches!(level, "ok" | "attention" | "blocked") {
         bail!("level must be 'ok', 'attention', or 'blocked'");

@@ -216,7 +216,7 @@ pub(crate) fn expand_tool_set(
     sets.iter().find(|set| set.name == name).map(|set| {
         set.tools
             .iter()
-            .map(|tool| format!("mcp__loom__{domain}_{tool}"))
+            .map(|tool| super::builtin_permission_rule(domain, tool))
             .collect()
     })
 }
