@@ -679,6 +679,7 @@ pub struct McpCapabilitySetView {
     pub version: String,
     pub digest: String,
     pub description: String,
+    #[serde(alias = "adapter")]
     pub domain: String,
     pub tools: Vec<String>,
 }
@@ -2786,6 +2787,27 @@ pub struct SessionChatView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_mcp_policy_accepts_legacy_adapter_field() {
+        let snapshot: McpPolicySnapshot = serde_json::from_str(
+            r#"{
+                "selection":{"mode":"groups","groups":["github"]},
+                "capability_sets":[{
+                    "name":"loom/github/comment@v1",
+                    "group":"github",
+                    "version":"v1",
+                    "digest":"sha256:legacy",
+                    "description":"GitHub issue and pull request tools",
+                    "adapter":"github",
+                    "tools":["issue_view"]
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(snapshot.capability_sets[0].domain, "github");
+    }
 
     #[test]
     fn session_mcp_policy_redacts_custom_source_but_keeps_audit_identity() {
