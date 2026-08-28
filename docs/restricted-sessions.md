@@ -61,33 +61,34 @@ audience=$(jq -rn --arg value "$LOOM_URL" '$value|@uri')
 oidc_token=$(curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
   "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$audience" | jq -r .value)
-loom_token=$(curl --fail-with-body --silent --show-error \
-  -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg token "$oidc_token" '{token:$token}')" \
-  "$LOOM_URL/api/auth/federate" | jq -r .token)
+echo "::add-mask::$oidc_token"
+loom_token=$(printf '%s' "$oidc_token" |
+  WEAVER_API="$LOOM_URL" loom auth federate | jq -er .token)
+echo "::add-mask::$loom_token"
 
-request=$(jq -n \
+session=$(jq -cn \
   --arg repo "$GITHUB_REPOSITORY" \
   --arg title "Prose cleanup for #$NUMBER" \
-  --arg key "prose-cleanup:$KIND:$NUMBER:$BODY_HASH" \
   --rawfile goal "$prompt_file" \
   --argjson number "$NUMBER" \
   '{
-    profile: "github_comment",
-    idempotency_key: $key,
-    source: "actions",
-    session: {
-      repo: $repo,
-      title: $title,
-      goal: $goal,
-      github_issue: $number
-    }
+    repo: $repo,
+    title: $title,
+    goal: $goal,
+    github_issue: $number
   }')
-curl --fail-with-body --silent --show-error \
-  -H "Authorization: Bearer $loom_token" \
-  -H 'Content-Type: application/json' \
-  -d "$request" "$LOOM_URL/api/runs/create"
+WEAVER_API="$LOOM_URL" LOOM_TOKEN="$loom_token" loom runs create \
+  --profile github_comment \
+  --idempotency-key "prose-cleanup:$KIND:$NUMBER:$BODY_HASH" \
+  --session "$session"
 ```
+
+`loom auth federate` accepts an OIDC-token file as its optional positional
+argument; `-` or no argument reads stdin. The command prints the same JSON
+credential document as the API. Capture `.token`, mask the short-lived token
+immediately, and pass it to `loom runs create` through `LOOM_TOKEN` rather than
+a command argument. The only curl above is GitHub's runner-specific OIDC-token
+acquisition; both Loom requests use the supported CLI.
 
 GitHub caller keys accept up to 128 ASCII letters, digits, `.`, `_`, `:`, and
 `-`. Loom namespaces them by verified repository and subject. An empty key keeps
