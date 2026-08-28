@@ -5,13 +5,13 @@ description: Write and maintain artifacts — versioned documents you hand the u
 
 # Skill: Smartdoc
 
-An artifact is a document you write *to weaver*, not the repo: a design, a
+An artifact is a document you write *to Loom*, not the repo: a design, a
 report, a diagram, a plan. It is versioned, survives archive, and is rendered by
-loom for the user to read. `weaver artifact write <name> [<file>]` (stdin with
+Loom for the user to read. `loom artifacts write <name> [<file>]` (stdin with
 `-`) prints a dashboard URL — hand it to the user in your status or a PR comment.
 An image file (`.png`, `.jpg`, `.svg`, …) is auto-embedded as a base64 data-URI
 markdown doc so it renders inline — pass the image straight to `write`, no
-hand-rolled data URI. `weaver artifact rm <name>` removes one and its history.
+hand-rolled data URI. `loom artifacts delete <name>` removes one and its history.
 
 ## When to write one
 
@@ -20,14 +20,14 @@ hand-rolled data URI. `weaver artifact rm <name>` removes one and its history.
   wants to merge.
 - It is one command, not a ceremony. A small task stays goal-plus-issues; reach
   for an artifact only when there's a document worth reading.
-- A committed design doc is still a normal repo file on a normal PR. weaver just
+- A committed design doc is still a normal repo file on a normal PR. Loom just
   isn't its manager.
 - A design that turns on research or a tradeoff goes out for peer review before
-  it is built — the loop is in `weaver readme` ("Designing before you build").
+  it is built.
 
 ## The division of labor
 
-- **goal** — the charter: what to do. The `goal` artifact: `weaver artifact
+- **goal** — the charter: what to do. The `goal` artifact: `loom artifacts
   write goal <file|->`.
 - **issues** — the only task ledger: state lives here, nowhere else.
 - **artifacts** — documents for the user to read.
@@ -39,7 +39,7 @@ the goal to one line plus a reference and write the artifact.
 
 Author markdown; the render projects references against live state.
 
-- `#41` — references a weaver issue; renders as a live status chip
+- `#41` — references a Loom issue; renders as a live status chip
   (open / claimed / closed) read from the ledger, never from the text.
 - `artifact:<name>` — links another artifact.
 - Mermaid — author diagrams directly; the renderer draws them.
@@ -57,7 +57,7 @@ task list whose items reference issues you filed.
 - [ ] decide single-node vs distributed (open question, not yet an issue)
 ```
 
-File each task with `weaver issue add` (`--repo` for the shared backlog), then
+File each task with `loom issues add` (`--repo` for the shared backlog), then
 reference it. The doc references; the issue ledger owns state; the render joins
 them and stamps each `#41` live. The doc never says "done".
 
