@@ -126,6 +126,58 @@ async fn create_lists_and_tears_down() {
     assert_eq!(recent[0]["active_branches"], 0);
 }
 
+/// Explicit names are hints for readable branches and worktrees, not globally
+/// reserved identities. Reusing one gets the same suffixing as a derived name.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn duplicate_explicit_name_gets_unique_suffix() {
+    let ts = TestServer::start().await;
+
+    let first = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "first rollout",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "iris-rollout",
+            }),
+        )
+        .await
+        .unwrap();
+    let second = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "second rollout",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "name": "iris-rollout",
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first["branch"]["branch"], "weaver/iris-rollout");
+    assert_eq!(second["branch"]["branch"], "weaver/iris-rollout-2");
+    assert!(second["work_dir"]
+        .as_str()
+        .unwrap()
+        .ends_with("/.worktrees/iris-rollout-2"));
+
+    for session in [&first, &second] {
+        ts.client
+            .post(
+                "/api/sessions/delete",
+                json!({ "session": session["id"].as_str().unwrap() }),
+            )
+            .await
+            .unwrap();
+    }
+}
+
 /// New-session provisioning waits at the repository boundary before it fetches,
 /// selects a branch, or creates a worktree. Holding the same gate here gives the
 /// route a deterministic concurrency test without racing real git subprocesses.

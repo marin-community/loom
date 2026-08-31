@@ -960,8 +960,8 @@ async fn create_inner(
                 )));
             }
         }
-        let explicit = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
-        let base_slug = branch_mod::slugify(explicit.unwrap_or(title.as_str()));
+        let requested_name = req.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        let base_slug = branch_mod::slugify(requested_name.unwrap_or(title.as_str()));
         tracing::debug!(base_slug = %base_slug, base = %base, "creating new branch for session");
         let mut slug = base_slug.clone();
         let mut suffix = 2;
@@ -970,11 +970,6 @@ async fn create_inner(
             let dir = repo_root.join(".worktrees").join(&slug);
             if !git::branch_exists(&repo_root, &branch_name).await && !dir.exists() {
                 break;
-            }
-            if explicit.is_some() {
-                return Err(ProvisionError::conflict(format!(
-                    "a session named '{slug}' already exists — choose a different name"
-                )));
             }
             slug = format!("{base_slug}-{suffix}");
             suffix += 1;
