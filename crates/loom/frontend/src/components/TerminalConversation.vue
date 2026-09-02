@@ -15,6 +15,7 @@ import type { IrisLog, IrisBlock, Session } from '../types';
 import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
 import { useFollowFoot } from '../lib/followFoot';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
+import { localTime } from '../lib/time';
 import MarkdownView from './MarkdownView.vue';
 
 // The Conversation tab for a *terminal-backend* session (`protocol='terminal'`):
@@ -460,8 +461,7 @@ const banner = computed(() => {
 });
 
 function shortTime(ts?: string): string {
-  if (!ts) return '';
-  return ts.length >= 19 && ts[10] === 'T' ? ts.slice(11, 19) : ts;
+  return localTime(ts, { second: '2-digit' });
 }
 
 // A shell command (Bash `command`, Codex `cmd`) renders as the command itself;

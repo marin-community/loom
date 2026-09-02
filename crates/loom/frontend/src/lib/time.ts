@@ -32,3 +32,20 @@ export function exactTime(iso: string): string {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
 }
+
+/** Compact clock time in the viewer's browser timezone and locale. Server
+ * timestamps stay absolute/UTC; only the presentation is localized here. */
+export function localTime(
+  iso: string | null | undefined,
+  options: Intl.DateTimeFormatOptions = {},
+  locales?: Intl.LocalesArgument,
+): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleTimeString(locales, {
+    hour: 'numeric',
+    minute: '2-digit',
+    ...options,
+  });
+}
