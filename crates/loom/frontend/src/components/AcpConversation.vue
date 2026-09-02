@@ -53,6 +53,7 @@ import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
+import { localTime } from '../lib/time';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import ToolContentPreview from './ToolContentPreview.vue';
@@ -918,10 +919,6 @@ function titleOf(text: string): string {
   const f = firstLine(text) || '(no text)';
   return f.replace(/^[#>\-*`\s]+/, '').trim() || f;
 }
-function shortTime(ts: string): string {
-  return ts.length >= 16 && ts[10] === 'T' ? ts.slice(11, 16) : ts;
-}
-
 function usageFromPayload(payload: UsagePayload): AcpUsage | null {
   return typeof payload.used === 'number' && typeof payload.size === 'number' && payload.size > 0
     ? { used: payload.used, size: payload.size, cost: payload.cost ?? null }
@@ -1006,7 +1003,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           anchor,
           n,
           turn: b.turn,
-          time: shortTime(b.created_at),
+          time: localTime(b.created_at),
           text,
           steered,
         });
@@ -1028,7 +1025,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         rows.push({
           type: 'agent',
           key: k,
-          time: shortTime(b.created_at),
+          time: localTime(b.created_at),
           text,
           streaming: false,
         });
@@ -1601,7 +1598,7 @@ function goTo(anchor: string) {
                   data-testid="acp-permission-receipt"
                 >
                   {{ row.perm.outcome.cancelled ? 'cancelled' : row.perm.outcome.option_id }} ·
-                  {{ shortTime(row.perm.outcome.at) }}
+                  {{ localTime(row.perm.outcome.at) }}
                 </div>
                 <div v-else class="acp-perm-options">
                   <button
