@@ -11,6 +11,7 @@ import type {
   WeaverEvent,
 } from '../types';
 import { ApiError, handoffSession, listAgents, listProfiles, resolveSessionHandoff } from '../api';
+import { availableAgentKinds } from '../lib/agentAvailability';
 import {
   messageOf,
   conversationState,
@@ -223,6 +224,9 @@ const statusTrail = computed(() =>
 // still authoritative when a turn starts between paint and submit.
 const handoffOpen = ref(false);
 const handoffAgents = ref<AgentMetadata[]>([]);
+// Every agent kind whose harness is installed, whether or not it speaks ACP —
+// used to flag handoff-target profiles the host cannot currently launch.
+const handoffAvailableKinds = ref<Set<string>>(new Set());
 const handoffProfiles = ref<Profile[]>([]);
 const handoffProfile = ref('');
 const handoffOverrides = ref<LaunchOverrideValues>({});
@@ -258,6 +262,7 @@ function resetHandoff() {
   ++handoffResolveRequest;
   handoffOpen.value = false;
   handoffAgents.value = [];
+  handoffAvailableKinds.value = new Set();
   handoffProfiles.value = [];
   handoffProfile.value = '';
   handoffOverrides.value = {};
@@ -299,15 +304,19 @@ async function toggleHandoff() {
   handoffError.value = '';
   try {
     const [metadata, profiles] = await Promise.all([listAgents(), listProfiles()]);
-    handoffAgents.value = metadata.agents.filter(
-      (agent) => agent.supports_acp && agent.available !== false,
-    );
+    // LaunchOverrides filters its own list by availability and keeps the
+    // resolved agent visible, so pass every ACP-capable agent through.
+    handoffAgents.value = metadata.agents.filter((agent) => agent.supports_acp);
+    handoffAvailableKinds.value = availableAgentKinds(metadata.agents);
     handoffProfiles.value = profiles.filter((profile) => profile.class === props.ws.class);
+    const launchable = handoffProfiles.value.filter((profile) =>
+      handoffAvailableKinds.value.has(profile.agent_kind),
+    );
     handoffProfile.value = handoffProfiles.value.some(
       (profile) => profile.name === props.ws.profile,
     )
       ? props.ws.profile
-      : (handoffProfiles.value[0]?.name ?? '');
+      : (launchable[0]?.name ?? handoffProfiles.value[0]?.name ?? '');
     handoffOverrides.value = {};
     await resolveHandoff();
   } catch (cause) {
@@ -530,6 +539,7 @@ async function submitHandoff() {
                   <ProfileSelector
                     :profiles="handoffProfiles"
                     :model-value="handoffProfile"
+                    :available-agent-kinds="handoffAvailableKinds"
                     layout="list"
                     :disabled="handoffBusy"
                     @update:model-value="chooseHandoffProfile"

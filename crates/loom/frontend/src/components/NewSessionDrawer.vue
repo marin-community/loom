@@ -23,6 +23,7 @@ import type {
   ResolvedLaunch,
   Session,
 } from '../types';
+import { availableAgentKinds, profileAgentAvailable } from '../lib/agentAvailability';
 import LaunchOverrides from './LaunchOverrides.vue';
 import ScratchPicker from './ScratchPicker.vue';
 import { me } from '../auth';
@@ -50,14 +51,22 @@ const scratchError = ref('');
 const scratchPicker = ref<InstanceType<typeof ScratchPicker> | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const agents = ref<AgentMetadata[]>([]);
-const availableAgents = computed(() => agents.value.filter((agent) => agent.available !== false));
-const availableAgentKinds = computed(
-  () => new Set(availableAgents.value.map((agent) => agent.kind)),
-);
+const availableKinds = computed(() => availableAgentKinds(agents.value));
 const profiles = ref<Profile[]>([]);
-const visibleProfiles = computed(() =>
-  profiles.value.filter((p) => availableAgentKinds.value.has(p.agent_kind)),
+// Profiles bound to an installed harness, preferred when picking a default.
+// The picker still lists every profile (marking the rest) so the choice is
+// visible rather than hidden.
+const launchableProfiles = computed(() =>
+  profiles.value.filter((p) => profileAgentAvailable(p, availableKinds.value)),
 );
+function defaultProfileName(): string {
+  const pool = launchableProfiles.value.length ? launchableProfiles.value : profiles.value;
+  if (pool.some((item) => item.name === 'default')) return 'default';
+  return pool[0]?.name ?? 'default';
+}
+function profileOptionLabel(p: Profile): string {
+  return availableKinds.value.has(p.agent_kind) ? p.name : `${p.name} — agent unavailable`;
+}
 const profile = ref('default');
 const overrides = ref<LaunchOverrideValues>({});
 const resolved = ref<ResolvedLaunch | null>(null);
@@ -343,9 +352,7 @@ function resetForm() {
   repo.value = '';
   title.value = '';
   goal.value = '';
-  profile.value = visibleProfiles.value.some((item) => item.name === 'default')
-    ? 'default'
-    : (visibleProfiles.value[0]?.name ?? 'default');
+  profile.value = defaultProfileName();
   overrides.value = {};
   name.value = '';
   base.value = '';
@@ -443,10 +450,8 @@ async function refreshLaunchData() {
     managedRepos.value = managed;
     agents.value = metadata.agents;
     profiles.value = templates;
-    if (!visibleProfiles.value.some((item) => item.name === profile.value)) {
-      profile.value = visibleProfiles.value.some((item) => item.name === 'default')
-        ? 'default'
-        : (visibleProfiles.value[0]?.name ?? 'default');
+    if (!profiles.value.some((item) => item.name === profile.value)) {
+      profile.value = defaultProfileName();
       lastResolved.value = null;
     }
   } catch (cause) {
@@ -1038,14 +1043,16 @@ onActivated(() => void refreshLaunchData());
               :disabled="creating"
               @change="chooseProfile(($event.target as HTMLSelectElement).value)"
             >
-              <option
-                v-for="candidate in visibleProfiles"
-                :key="candidate.name"
-                :value="candidate.name"
-              >
-                {{ candidate.name }}
+              <option v-for="candidate in profiles" :key="candidate.name" :value="candidate.name">
+                {{ profileOptionLabel(candidate) }}
               </option>
             </select>
+            <p
+              v-if="selectedProfile && !availableKinds.has(selectedProfile.agent_kind)"
+              class="text-xs text-block"
+            >
+              This profile’s agent ({{ selectedProfile.agent_kind }}) isn’t installed on this host.
+            </p>
             <p v-if="selectedProfile?.description" class="text-xs text-muted">
               {{ selectedProfile.description }}
             </p>
@@ -1079,7 +1086,7 @@ onActivated(() => void refreshLaunchData());
           </div>
           <LaunchOverrides
             v-model="overrides"
-            :agents="availableAgents"
+            :agents="agents"
             :resolved="resolved"
             :fallback="lastResolved"
             :disabled="Boolean((resolved ?? lastResolved)?.policy.strict)"

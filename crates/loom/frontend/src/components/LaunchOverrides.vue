@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue';
 import type { AgentMetadata, LaunchOverrides, ResolvedLaunch } from '../types';
+import {
+  agentOptionsWithCurrent,
+  availableAgents,
+  isAgentAvailable,
+} from '../lib/agentAvailability';
 import ModelCombobox from './ModelCombobox.vue';
 
 const props = defineProps<{
@@ -16,10 +21,13 @@ const emit = defineEmits<{
 }>();
 const uid = useId();
 const settings = computed(() => props.resolved ?? props.fallback ?? null);
-const availableAgents = computed(() => props.agents.filter((agent) => agent.available !== false));
 const effectiveAgent = computed(
-  () => props.modelValue.agent ?? settings.value?.agent ?? availableAgents.value[0]?.kind ?? '',
+  () =>
+    props.modelValue.agent ?? settings.value?.agent ?? availableAgents(props.agents)[0]?.kind ?? '',
 );
+// The effective agent is always an option, marked when its harness is missing,
+// so the control can never display a different agent than the one in effect.
+const agentOptions = computed(() => agentOptionsWithCurrent(props.agents, effectiveAgent.value));
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
 
 function value(field: keyof LaunchOverrides): string {
@@ -64,8 +72,8 @@ function locked(field: keyof LaunchOverrides): boolean {
           class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
           @change="set('agent', ($event.target as HTMLSelectElement).value)"
         >
-          <option v-for="agent in availableAgents" :key="agent.kind" :value="agent.kind">
-            {{ agent.label }}
+          <option v-for="agent in agentOptions" :key="agent.kind" :value="agent.kind">
+            {{ agent.label }}{{ isAgentAvailable(agent) ? '' : ' — unavailable' }}
           </option>
         </select>
       </label>
