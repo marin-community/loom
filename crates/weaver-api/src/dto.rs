@@ -2504,6 +2504,9 @@ pub struct AgentMetadataView {
     pub supports_acp: bool,
     /// The agent's declared execution backend: `"terminal"` or `"acp"`.
     pub protocol: String,
+    /// Whether the agent binary is available on the system PATH. The UI hides
+    /// unavailable harnesses (e.g. when `codex` is not installed).
+    pub available: Option<bool>,
 }
 
 /// One operator-defined custom agent definition — a row of the

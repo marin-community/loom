@@ -60,6 +60,10 @@ pub struct AgentMetadata {
     /// A create request may override a builtin's default (`--protocol
     /// terminal` keeps the PTY); see [`resolve_protocol`].
     pub protocol: String,
+    /// Whether the agent binary is available on the system PATH. Used by the
+    /// UI to hide unavailable agent harnesses (e.g. when `codex` is not
+    /// installed).
+    pub available: Option<bool>,
 }
 
 pub struct AgentInstance {
@@ -205,6 +209,65 @@ async fn refresh_codex_metadata(metadata: &mut AgentMetadata) {
     apply_codex_catalog(metadata, &output.stdout);
 }
 
+pub async fn is_claude_available() -> bool {
+    binary_on_path("claude").await
+}
+
+pub async fn is_codex_available() -> bool {
+    binary_on_path("codex").await
+}
+
+/// Whether `bin` resolves to an executable file on `PATH`.
+///
+/// Reports presence, not health: a binary that exists but misbehaves still
+/// counts as available. On Windows every `PATHEXT` suffix is tried, since an
+/// npm-installed CLI ships as `bin.cmd`/`bin.ps1` and never `bin.exe`;
+/// elsewhere the file must be a regular file with an execute bit. The
+/// filesystem walk runs on a blocking thread so a slow `PATH` entry cannot
+/// stall the async runtime.
+async fn binary_on_path(bin: &str) -> bool {
+    let bin = bin.to_string();
+    tokio::task::spawn_blocking(move || {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        let names = candidate_names(&bin);
+        std::env::split_paths(&path)
+            .any(|dir| names.iter().any(|name| is_executable_file(&dir.join(name))))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn candidate_names(bin: &str) -> Vec<String> {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut names = vec![bin.to_string()];
+    for ext in exts.split(';').filter(|ext| !ext.is_empty()) {
+        names.push(format!("{bin}{}", ext.to_ascii_lowercase()));
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn candidate_names(bin: &str) -> [String; 1] {
+    [bin.to_string()]
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(not(windows))]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
 fn apply_codex_catalog(metadata: &mut AgentMetadata, bytes: &[u8]) {
     let Ok(catalog) = serde_json::from_slice::<CodexModelCatalog>(bytes) else {
         return;
@@ -282,12 +345,24 @@ pub async fn resolve(db: &Db, kind: &str) -> Result<Option<ResolvedAgent>> {
 /// Every agent's metadata — the builtins followed by the operator's custom agents
 /// (name order). What `GET /api/agents` lists and the picker renders.
 pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
+    let (claude_available, codex_available) =
+        tokio::join!(is_claude_available(), is_codex_available());
     let mut out = builtin_metadata();
+    for meta in &mut out {
+        if meta.kind == "claude" {
+            meta.available = Some(claude_available);
+        } else if meta.kind == "codex" {
+            meta.available = Some(codex_available);
+        }
+    }
     if let Some(codex) = out.iter_mut().find(|meta| meta.kind == "codex") {
         refresh_codex_metadata(codex).await;
     }
     for a in crate::custom_agents::list(db).await? {
-        out.push(CustomAgentType::new(a).metadata());
+        let mut meta = CustomAgentType::new(a).metadata();
+        // A custom agent is an operator-defined command, not a binary loom probes.
+        meta.available = Some(true);
+        out.push(meta);
     }
     Ok(out)
 }
@@ -519,6 +594,7 @@ impl AgentType for ClaudeAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
         }
     }
 
@@ -549,6 +625,7 @@ impl AgentType for CodexAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
         }
     }
 
@@ -579,6 +656,7 @@ impl AgentType for CustomAgentType {
             } else {
                 self.agent.protocol.clone()
             },
+            available: None,
         }
     }
 
@@ -2320,6 +2398,26 @@ mod tests {
         assert!(validate_model(&metadata, "claude-opus-4-8").is_ok());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_file_rejects_directories_and_unset_execute_bits() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!is_executable_file(&dir.path().join("missing")));
+
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        assert!(!is_executable_file(&subdir));
+
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert!(!is_executable_file(&plain));
+
+        let script = dir.path().join("script");
+        write_executable(&script, "#!/bin/sh\n");
+        assert!(is_executable_file(&script));
+    }
+
     fn custom_agent(name: &str, setup: &str, launch: &str, resume: &str) -> CustomAgent {
         CustomAgent {
             name: name.to_string(),
@@ -2758,6 +2856,7 @@ mod tests {
             builtin,
             supports_acp: builtin || protocol == "acp",
             protocol: protocol.to_string(),
+            available: None,
         }
     }
 
