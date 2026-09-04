@@ -202,11 +202,22 @@ impl GithubThreadKind {
 impl GithubApp {
     /// The production client for the real GitHub API.
     pub fn new(db: Db) -> Self {
-        Self::with_parts(db, DEFAULT_API_BASE.to_string())
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .build()
+            .expect("building the GitHub App HTTP client");
+        Self {
+            db,
+            http,
+            api_base: DEFAULT_API_BASE.to_string(),
+            tokens: Mutex::new(HashMap::new()),
+        }
     }
 
-    /// Construct with an explicit API base; tests point this at a mock GitHub.
-    pub fn with_parts(db: Db, api_base: String) -> Self {
+    /// Construct with an explicit API base for mock GitHub tests.
+    #[cfg(any(test, feature = "test-support"))]
+    fn with_parts(db: Db, api_base: String) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
