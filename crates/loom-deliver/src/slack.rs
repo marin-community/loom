@@ -4,7 +4,8 @@
 //! [`crate::github`]), but transport-inverted: loom is an **outbound websocket
 //! client** rather than an HMAC-verified inbound webhook. A background task
 //! ([`run`]) opens a [Socket Mode] connection with the app-level token, receives
-//! `slash_commands` / `app_mention` envelopes, and — for an authorized trigger —
+//! `slash_commands`, `app_mention`, and direct-message envelopes, and — for an
+//! authorized trigger —
 //! continues the session already wired to that thread or pulls the conversation
 //! and launches one, replying in-thread with a live "On it" card only for a
 //! launch. As the session reports `loom status`, [`sync_status_message`] edits
@@ -532,16 +533,17 @@ fn parse_history(v: &Value) -> Vec<HistMsg> {
 
 /// Where a trigger's session thread is anchored. Slack slash commands are
 /// *thread-blind* (their payload has no `ts`/`thread_ts`), so a slash command
-/// can only start a new root — the card's own `ts` becomes the thread. A mention
-/// anchors on the thread it was typed in, or on its own `ts` at top level.
+/// can only start a new root — the card's own `ts` becomes the thread. A Slack
+/// message anchors on the thread it was typed in, or on its own `ts` at top level.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Anchor {
     /// A `/marinbot` slash command — post the card as a new root message.
     Slash,
-    /// An `@marinbot` mention. `root_ts` is the thread to attach to (the
-    /// mention's own `ts` at top level, or its `thread_ts` inside a thread), and
-    /// `event_ts` is the mention message itself (what we 👀-react to as an ack).
-    Mention { root_ts: String, event_ts: String },
+    /// An `@marinbot` mention or direct message. `root_ts` is the thread to
+    /// attach to (the message's own `ts` at top level, or its `thread_ts` inside
+    /// a thread), and `event_ts` is the triggering message itself (what we
+    /// 👀-react to as an ack).
+    Message { root_ts: String, event_ts: String },
 }
 
 /// A parsed, deduped trigger ready to authorize and act on.
@@ -635,15 +637,20 @@ pub fn trigger_from_slash(payload: &Value) -> Option<Trigger> {
     })
 }
 
-/// Build a [`Trigger`] from an `events_api` payload, for `app_mention` only.
-/// Returns `None` for any other event type.
+/// Build a [`Trigger`] from an `events_api` payload. Channel messages trigger
+/// only through `app_mention`; plain `message` events trigger only in DMs.
+/// Returns `None` for any other event type or message subtype.
 ///
 /// Parsing is structural only — who may act on the result is
 /// [`authorize`]'s decision, so every rejection is one that can be logged and
 /// shown rather than a silent `None` here.
 pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
     let event = &payload["event"];
-    if event["type"].as_str() != Some("app_mention") {
+    let is_mention = event["type"].as_str() == Some("app_mention");
+    let is_direct_message = event["type"].as_str() == Some("message")
+        && event["channel_type"].as_str() == Some("im")
+        && event.get("subtype").is_none();
+    if !is_mention && !is_direct_message {
         return None;
     }
     let user_id = event["user"].as_str()?.to_string();
@@ -651,7 +658,11 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
     let channel_id = event["channel"].as_str()?.to_string();
     let event_ts = event["ts"].as_str()?.to_string();
     let root_ts = event["thread_ts"].as_str().unwrap_or(&event_ts).to_string();
-    let text = strip_leading_mention(event["text"].as_str().unwrap_or_default());
+    let text = if is_mention {
+        strip_leading_mention(event["text"].as_str().unwrap_or_default())
+    } else {
+        event["text"].as_str().unwrap_or_default().to_string()
+    };
     let dedupe_id = payload["event_id"]
         .as_str()
         .map(|e| format!("slack:{e}"))
@@ -661,7 +672,7 @@ pub fn trigger_from_event(payload: &Value) -> Option<Trigger> {
         channel_id,
         user_id,
         text,
-        anchor: Anchor::Mention { root_ts, event_ts },
+        anchor: Anchor::Message { root_ts, event_ts },
         dedupe_id,
         via_app: event.get("bot_id").is_some(),
     })
@@ -1158,7 +1169,7 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
     }
 }
 
-/// Deliver a mention into the session an automation run routed this thread to.
+/// Deliver a Slack message into the session an automation run routed this thread to.
 ///
 /// `None` means "not ours, carry on": the thread has no route, the trigger is a
 /// thread-blind slash command, or the routed session is no longer live (an
@@ -1171,7 +1182,7 @@ async fn forward_to_routed_session(
     trigger: &Trigger,
     instruction: &str,
 ) -> Option<Result<()>> {
-    let Anchor::Mention { event_ts, .. } = &trigger.anchor else {
+    let Anchor::Message { event_ts, .. } = &trigger.anchor else {
         return None;
     };
     let (route, session) = routed_session(&state.db, trigger).await?;
@@ -1215,15 +1226,15 @@ async fn forward_to_routed_session(
     Some(Ok(()))
 }
 
-/// Resolve a mention's thread to the live session an automation delivery routed
-/// it to. The whole routing decision, over `Db` alone: a lookup failure is
-/// treated as "no route" so a database hiccup falls back to the ordinary launch
-/// path rather than dropping the operator's message.
+/// Resolve a Slack message's thread to the live session an automation delivery
+/// routed it to. The whole routing decision, over `Db` alone: a lookup failure
+/// is treated as "no route" so a database hiccup falls back to the ordinary
+/// launch path rather than dropping the operator's message.
 async fn routed_session(
     db: &Db,
     trigger: &Trigger,
 ) -> Option<(crate::slack_routes::SlackRoute, crate::session::Session)> {
-    let Anchor::Mention { root_ts, .. } = &trigger.anchor else {
+    let Anchor::Message { root_ts, .. } = &trigger.anchor else {
         return None;
     };
     let route = match crate::slack_routes::for_thread(db, &trigger.channel_id, root_ts).await {
@@ -1252,10 +1263,10 @@ fn record_skip(reason: &str) {
 }
 
 /// Post a short message back to the trigger's thread (an error/ack). For a
-/// mention we thread under its root; a slash command posts a new message.
+/// message we thread under its root; a slash command posts a new message.
 async fn notify(web: &SlackWeb, trigger: &Trigger, text: &str) -> Result<()> {
     let thread = match &trigger.anchor {
-        Anchor::Mention { root_ts, .. } => Some(root_ts.as_str()),
+        Anchor::Message { root_ts, .. } => Some(root_ts.as_str()),
         Anchor::Slash => None,
     };
     web.post_message(&trigger.channel_id, thread, text).await?;
@@ -1296,7 +1307,7 @@ async fn launch_inner(
     let _guard = CREATE_LOCK.lock().await;
 
     // Establish the thread root. A slash command is thread-blind, so we post the
-    // card first and let its ts be the root; a mention already has one.
+    // card first and let its ts be the root; a Slack message already has one.
     let (root_ts, card_ts): (String, Option<String>) = match &trigger.anchor {
         Anchor::Slash => {
             let ts = web
@@ -1305,7 +1316,7 @@ async fn launch_inner(
                 .context("posting the slash-command card")?;
             (ts.clone(), Some(ts))
         }
-        Anchor::Mention { root_ts, .. } => (root_ts.clone(), None),
+        Anchor::Message { root_ts, .. } => (root_ts.clone(), None),
     };
 
     let wiring = format!("{}/{}/{}", bot.team_id, trigger.channel_id, root_ts);
@@ -1353,7 +1364,7 @@ async fn launch_inner(
                         );
                     }
                     // Ack only after the follow-up is accepted, not merely received.
-                    if let Anchor::Mention { event_ts, .. } = &trigger.anchor {
+                    if let Anchor::Message { event_ts, .. } = &trigger.anchor {
                         web.add_reaction(&trigger.channel_id, event_ts, "eyes")
                             .await
                             .ok();
@@ -1545,10 +1556,10 @@ enum HistoryTarget<'a> {
 
 fn history_target(trigger: &Trigger) -> HistoryTarget<'_> {
     match &trigger.anchor {
-        Anchor::Mention { root_ts, event_ts } if root_ts != event_ts => {
+        Anchor::Message { root_ts, event_ts } if root_ts != event_ts => {
             HistoryTarget::Thread(root_ts)
         }
-        Anchor::Mention { event_ts, .. } => HistoryTarget::Channel {
+        Anchor::Message { event_ts, .. } => HistoryTarget::Channel {
             before: Some(event_ts),
         },
         Anchor::Slash => HistoryTarget::Channel { before: None },
@@ -1556,8 +1567,8 @@ fn history_target(trigger: &Trigger) -> HistoryTarget<'_> {
 }
 
 /// Pull the conversation context to seed the session — the thread's replies for
-/// a mention inside an existing thread, or a small number of preceding channel
-/// messages for a top-level mention or slash command. Best-effort: a
+/// a message inside an existing thread, or a small number of preceding channel
+/// messages for a top-level message or slash command. Best-effort: a
 /// `not_in_channel` becomes a note in the seed rather than a hard failure.
 async fn pull_history(web: &SlackWeb, trigger: &Trigger) -> String {
     let result = match history_target(trigger) {
@@ -1584,10 +1595,10 @@ async fn pull_history(web: &SlackWeb, trigger: &Trigger) -> String {
 
 /// The `ts` of the message that summoned loom, when the pulled transcript
 /// contains it. A slash command has no message of its own, and a top-level
-/// mention is excluded from the channel history it reads.
+/// message is excluded from the channel history it reads.
 fn request_ts(trigger: &Trigger) -> Option<&str> {
     match (&trigger.anchor, history_target(trigger)) {
-        (Anchor::Mention { event_ts, .. }, HistoryTarget::Thread(_)) => Some(event_ts.as_str()),
+        (Anchor::Message { event_ts, .. }, HistoryTarget::Thread(_)) => Some(event_ts.as_str()),
         _ => None,
     }
 }
@@ -1900,7 +1911,7 @@ async fn connect_and_run(state: &AppState) -> Result<String> {
                         )));
                     }
                     // Slack delivers every subscribed event type, so this is the
-                    // ordinary case for anything that isn't an app_mention.
+                    // Ordinary case for unsupported event types and message subtypes.
                     None => {
                         tracing::debug!(kind = %kind, event = %event_type, "slack: not a trigger")
                     }
@@ -1930,7 +1941,7 @@ mod tests {
             channel_id: "C1".into(),
             user_id: user_id.into(),
             text: "do it".into(),
-            anchor: Anchor::Mention {
+            anchor: Anchor::Message {
                 root_ts: "1.1".into(),
                 event_ts: "1.1".into(),
             },
@@ -2000,7 +2011,7 @@ mod tests {
         let t = trigger_from_event(&payload).unwrap();
         assert_eq!(
             t.anchor,
-            Anchor::Mention {
+            Anchor::Message {
                 root_ts: "0.9".into(),
                 event_ts: "1.1".into()
             }
@@ -2017,12 +2028,38 @@ mod tests {
     }
 
     #[test]
-    fn only_app_mentions_parse_as_triggers() {
-        let payload = json!({
+    fn direct_message_parses_as_a_trigger_without_a_mention() {
+        let t = trigger_from_event(&json!({
             "team_id": "T1", "event_id": "Ev9",
-            "event": {"type": "message", "user": "U2", "channel": "C1", "ts": "1.1", "text": "hi"}
+            "event": {"type": "message", "channel_type": "im", "user": "U2",
+                      "channel": "D1", "ts": "1.1", "text": "fix the flake"}
+        }))
+        .unwrap();
+        assert_eq!(
+            t.anchor,
+            Anchor::Message {
+                root_ts: "1.1".into(),
+                event_ts: "1.1".into()
+            }
+        );
+        assert_eq!(t.channel_id, "D1");
+        assert_eq!(t.text, "fix the flake");
+        assert_eq!(t.dedupe_id, "slack:Ev9");
+    }
+
+    #[test]
+    fn channel_messages_and_message_subtypes_are_not_triggers() {
+        let channel_message = json!({
+            "team_id": "T1", "event_id": "Ev9",
+            "event": {"type": "message", "channel_type": "channel", "user": "U2",
+                      "channel": "C1", "ts": "1.1", "text": "hi"}
         });
-        assert!(trigger_from_event(&payload).is_none());
+        assert!(trigger_from_event(&channel_message).is_none());
+
+        let mut edited_direct_message = channel_message;
+        edited_direct_message["event"]["channel_type"] = json!("im");
+        edited_direct_message["event"]["subtype"] = json!("message_changed");
+        assert!(trigger_from_event(&edited_direct_message).is_none());
     }
 
     /// The default boundary: workspace membership plus the channel invite.
@@ -2113,7 +2150,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             t.anchor,
-            Anchor::Mention {
+            Anchor::Message {
                 root_ts: "5.5".into(),
                 event_ts: "5.5".into()
             }
@@ -2135,7 +2172,7 @@ mod tests {
     #[test]
     fn threaded_mention_reads_its_thread() {
         let mut t = trigger("U1", "T1", false);
-        t.anchor = Anchor::Mention {
+        t.anchor = Anchor::Message {
             root_ts: "4.4".into(),
             event_ts: "5.5".into(),
         };
@@ -2149,7 +2186,7 @@ mod tests {
     #[test]
     fn thread_context_keeps_the_newest_messages_and_marks_the_request() {
         let mut t = trigger("U1", "T1", false);
-        t.anchor = Anchor::Mention {
+        t.anchor = Anchor::Message {
             root_ts: "1.0".into(),
             event_ts: "20.0".into(),
         };
@@ -2232,7 +2269,7 @@ mod tests {
             channel_id: channel.into(),
             user_id: "U2".into(),
             text: "try restarting the controller".into(),
-            anchor: Anchor::Mention {
+            anchor: Anchor::Message {
                 root_ts: root_ts.into(),
                 event_ts: "1700.9".into(),
             },
