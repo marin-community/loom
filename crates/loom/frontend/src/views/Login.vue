@@ -18,6 +18,8 @@ const error = ref('');
 // Friendly text for the codes the GitHub callback redirects back with.
 const OAUTH_ERRORS: Record<string, string> = {
   'not-approved': 'That GitHub account is not on the approved list.',
+  'organization-verification-failed':
+    'GitHub organization membership could not be verified. Ask a Loom administrator to check the authentication configuration.',
   'state-mismatch': 'The sign-in attempt expired or could not be verified. Try again.',
   'missing-code': 'GitHub did not return an authorization code. Try again.',
 };

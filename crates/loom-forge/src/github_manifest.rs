@@ -95,6 +95,7 @@ pub fn manifest_json(input: &ManifestInput) -> Value {
             "actions": "write",
             "contents": "write",
             "issues": "write",
+            "members": "read",
             "metadata": "read",
             "pull_requests": "write",
             "workflows": "write"
@@ -365,6 +366,7 @@ mod tests {
                 "actions": "write",
                 "contents": "write",
                 "issues": "write",
+                "members": "read",
                 "metadata": "read",
                 "pull_requests": "write",
                 "workflows": "write"

@@ -10,6 +10,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::FromRow;
 
+/// GitHub account logins use ASCII letters, digits, and hyphens and are at
+/// most 39 characters. GitHub remains the authority on whether a valid-looking
+/// login exists.
+pub fn valid_login(login: &str) -> bool {
+    !login.is_empty()
+        && login.len() <= 39
+        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 /// A branch's pull-request snapshot, as stored and as served under
 /// `BranchView::github`. `pr_state` is `OPEN` / `CLOSED` / `MERGED`; `checks` is
 /// the rolled-up `passing` / `failing` / `pending` (or `null` when the PR has no

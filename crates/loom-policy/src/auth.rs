@@ -1057,6 +1057,9 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
 /// Settings keys (also overridable by the env vars in [`github_oauth`]).
 pub const GH_CLIENT_ID_KEY: &str = "auth.github.client_id";
 pub const GH_CLIENT_SECRET_KEY: &str = "auth.github.client_secret";
+pub const GH_AUTO_APPROVE_ORGANIZATIONS_KEY: &str = "auth.github_auto_approve_organizations";
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_API_VERSION: &str = "2022-11-28";
 
 /// A configured GitHub OAuth app.
 #[derive(Debug, Clone)]
@@ -1203,6 +1206,102 @@ pub struct GithubUser {
     pub name: Option<String>,
 }
 
+/// Resolve a GitHub identity to an approved Loom user. Explicit approvals win
+/// without another GitHub request. Otherwise, active membership in a configured
+/// auto-approve organization creates a normal user approval on first sign-in.
+pub async fn approved_github_user(
+    db: &Db,
+    access_token: &str,
+    login: &str,
+) -> Result<Option<User>> {
+    approved_github_user_at(db, access_token, login, GITHUB_API_BASE).await
+}
+
+async fn approved_github_user_at(
+    db: &Db,
+    access_token: &str,
+    login: &str,
+    api_base: &str,
+) -> Result<Option<User>> {
+    if let Some(user) = user_by_github(db, login).await? {
+        return Ok(Some(user));
+    }
+
+    let configured = crate::config::get(db, GH_AUTO_APPROVE_ORGANIZATIONS_KEY)
+        .await
+        .unwrap_or_default();
+    let organizations = crate::config::parse_github_organizations(&configured)
+        .map_err(|error| anyhow!("invalid {GH_AUTO_APPROVE_ORGANIZATIONS_KEY}: {error}"))?;
+    let http = reqwest::Client::new();
+    for organization in organizations {
+        if github_organization_member_at(&http, api_base, access_token, &organization).await? {
+            let inserted = sqlx::query(
+                "INSERT OR IGNORE INTO users (username, github_login, role) VALUES (?, ?, ?)",
+            )
+            .bind(login)
+            .bind(login)
+            .bind(UserRole::User)
+            .execute(db)
+            .await
+            .with_context(|| format!("auto-approving GitHub user '{login}'"))?;
+            let user = user_by_github(db, login).await?.ok_or_else(|| {
+                anyhow!("GitHub login '{login}' conflicts with an existing Loom username")
+            })?;
+            tracing::info!(
+                login,
+                organization,
+                created = inserted.rows_affected() == 1,
+                "approved GitHub organization member"
+            );
+            return Ok(Some(user));
+        }
+    }
+    Ok(None)
+}
+
+async fn github_organization_member_at(
+    http: &reqwest::Client,
+    api_base: &str,
+    access_token: &str,
+    organization: &str,
+) -> Result<bool> {
+    #[derive(Deserialize)]
+    struct Membership {
+        state: String,
+    }
+
+    let response = http
+        .get(format!(
+            "{}/user/memberships/orgs/{organization}",
+            api_base.trim_end_matches('/')
+        ))
+        .header(reqwest::header::USER_AGENT, "loom")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .with_context(|| format!("checking GitHub organization '{organization}' membership"))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        let detail = match response.text().await {
+            Ok(body) => redacted_snippet(&body),
+            Err(error) => format!("<failed to read response body: {error}>"),
+        };
+        return Err(anyhow!(
+            "GitHub organization '{organization}' membership request failed (HTTP {status}): {detail}"
+        ));
+    }
+    let membership: Membership = response
+        .json()
+        .await
+        .with_context(|| format!("decoding GitHub organization '{organization}' membership"))?;
+    Ok(membership.state.eq_ignore_ascii_case("active"))
+}
+
 /// Fetch the authenticated user's GitHub profile for `access_token`.
 pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
     #[derive(serde::Deserialize)]
@@ -1244,6 +1343,11 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
 mod tests {
     use super::*;
     use crate::db;
+    use axum::extract::Path as AxumPath;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::get;
+    use axum::{Json, Router};
 
     #[test]
     fn redact_secrets_masks_github_tokens_anywhere() {
@@ -1296,6 +1400,38 @@ mod tests {
         db
     }
 
+    async fn github_organization_api() -> String {
+        async fn membership(
+            AxumPath(organization): AxumPath<String>,
+            headers: HeaderMap,
+        ) -> Response {
+            assert_eq!(
+                headers
+                    .get(reqwest::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer github-user-token")
+            );
+            match organization.as_str() {
+                "Open-Athena" => Json(serde_json::json!({ "state": "active" })).into_response(),
+                "Pending" => Json(serde_json::json!({ "state": "pending" })).into_response(),
+                "Forbidden" => (StatusCode::FORBIDDEN, "App needs Members: read").into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/user/memberships/orgs/{organization}", get(membership)),
+            )
+            .await
+            .unwrap();
+        });
+        format!("http://{address}")
+    }
+
     #[tokio::test]
     #[serial_test::serial]
     async fn unset_owner_seeds_no_user_at_all() {
@@ -1314,6 +1450,75 @@ mod tests {
         let u = u.unwrap();
         assert_eq!(u.username, "rjpower");
         assert_eq!(u.role, UserRole::Admin);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn github_organization_members_can_approve_themselves_once() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let api = github_organization_api().await;
+        crate::config::apply(
+            &db,
+            &[(
+                GH_AUTO_APPROVE_ORGANIZATIONS_KEY.to_string(),
+                Some("Missing, Open-Athena".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+
+        let user = approved_github_user_at(&db, "github-user-token", "new-member", &api)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.username, "new-member");
+        assert_eq!(user.role, UserRole::User);
+
+        // Auto-approval creates a normal approved-person row. It remains valid
+        // until an administrator removes it, even if the organization setting
+        // later changes.
+        crate::config::apply(
+            &db,
+            &[(
+                GH_AUTO_APPROVE_ORGANIZATIONS_KEY.to_string(),
+                Some("Forbidden".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(approved_github_user_at(
+            &db,
+            "github-user-token",
+            "new-member",
+            "http://127.0.0.1:1",
+        )
+        .await
+        .unwrap()
+        .is_some());
+
+        assert!(
+            approved_github_user_at(&db, "github-user-token", "pending-member", &api,)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("HTTP 403")
+        );
+
+        crate::config::apply(
+            &db,
+            &[(
+                GH_AUTO_APPROVE_ORGANIZATIONS_KEY.to_string(),
+                Some("Pending".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(
+            approved_github_user_at(&db, "github-user-token", "pending-member", &api,)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

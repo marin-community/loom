@@ -456,8 +456,16 @@ pub(super) async fn github_callback(
     let redirect_uri = format!("{base}{GITHUB_CALLBACK_PATH}");
     let token = auth::exchange_code(&cfg, &code, &redirect_uri).await?;
     let gh = auth::fetch_github_user(&token).await?;
-    let Some(user) = auth::user_by_github(&st.db, &gh.login).await? else {
-        // Authenticated with GitHub, but not on the allowlist.
+    let user = match auth::approved_github_user(&st.db, &token, &gh.login).await {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::warn!(login = %gh.login, %error, "GitHub organization approval failed");
+            return Ok(login_error_redirect("organization-verification-failed"));
+        }
+    };
+    let Some(user) = user else {
+        // Authenticated with GitHub, but neither explicitly approved nor an
+        // active member of an auto-approved organization.
         return Ok(login_error_redirect("not-approved"));
     };
     // Record the profile for commit attribution (best-effort — a failure here

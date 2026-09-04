@@ -9,7 +9,7 @@ should apply:
 |---|---|---|
 | User | **Settings → Account** and **Preferences** | Personal sign-in, password, API tokens, optional interactive-session GitHub PAT, and terminal appearance |
 | Session profile | **Settings → Agents & profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, shared environment, and write-only session secrets |
-| Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
+| Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, GitHub organization admission, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
 | Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
 
 The Administration section is visible only to admins. Users can launch and
@@ -43,6 +43,26 @@ variables. An operator deployment may materialize them from its secret backend,
 but every session sharing that home can read them. Per-profile files require
 isolated session homes or mounts.
 
+## GitHub organization admission
+
+`auth.github_auto_approve_organizations` accepts space- or comma-separated
+GitHub organization logins. When an otherwise unknown GitHub identity signs in,
+Loom verifies that the identity has an active membership in one of those
+organizations and adds it to **Approved people** with the `user` role. The
+default is empty, which keeps approval manual.
+
+The GitHub App must be installed on the organization with its **Members**
+organization permission set to **Read-only**. A missing permission or another
+GitHub API failure denies the sign-in rather than treating an unverifiable
+membership as approval. Pending members and outside collaborators do not pass
+the active-membership check.
+
+Organization admission bootstraps an ordinary approval; it is not a live group
+sync. Removing an organization from the setting stops new automatic approvals,
+but people already added remain approved until an administrator removes them.
+This preserves the approved-user boundary shared by browser sign-in and the
+`@loom` trigger.
+
 ## Registered setting precedence
 
 Loom resolves every registered setting through one explicit precedence chain:
@@ -74,6 +94,7 @@ used by the runtime API and Settings UI:
 
 ```yaml
 settings:
+  auth.github_auto_approve_organizations: "acme"
   slack.status_updates: true
   slack.status_artifacts: false
   slack.status_header_template: "On it — <{session_url}>"

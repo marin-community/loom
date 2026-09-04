@@ -35,6 +35,9 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 /// Named launch profile selected by GitHub-triggered sessions.
 pub const DEFAULT_GITHUB_PROFILE: &str = "default";
+/// GitHub organizations whose active members may approve themselves on first
+/// sign-in. Empty by default: deployments opt into the broader trust boundary.
+pub const DEFAULT_GITHUB_AUTO_APPROVE_ORGANIZATIONS: &str = "";
 /// Reasoning effort for Slack-origin sessions. Slack conversations usually
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
@@ -331,6 +334,18 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Int,
         default: "86400",
         group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: "auth.github_auto_approve_organizations",
+        label: "Auto-approve GitHub organizations",
+        description: "Space- or comma-separated GitHub organization logins. On \
+            first GitHub sign-in, an active member is added to Approved people \
+            with the user role. Leave empty to require explicit approval. \
+            Existing approvals remain until an admin removes them.",
+        kind: SettingKind::String,
+        default: DEFAULT_GITHUB_AUTO_APPROVE_ORGANIZATIONS,
+        group: "Authentication",
         options: &[],
     },
     SettingSpec {
@@ -652,6 +667,30 @@ pub fn spec(key: &str) -> Option<&'static SettingSpec> {
     REGISTRY.iter().find(|s| s.key == key)
 }
 
+/// Parse the organization logins accepted by
+/// `auth.github_auto_approve_organizations`, preserving declaration order and
+/// removing case-insensitive duplicates.
+pub fn parse_github_organizations(value: &str) -> std::result::Result<Vec<String>, String> {
+    let mut organizations = Vec::new();
+    for organization in value
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|item| !item.is_empty())
+    {
+        if !crate::github::valid_login(organization) {
+            return Err(format!(
+                "contains invalid GitHub organization login '{organization}'"
+            ));
+        }
+        if !organizations
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(organization))
+        {
+            organizations.push(organization.to_string());
+        }
+    }
+    Ok(organizations)
+}
+
 /// Check that `value` is acceptable for `key`. Unregistered keys accept any
 /// value; registered keys are checked against their [`SettingKind`]. The error
 /// is a key-free reason (e.g. `expects an integer, got 'soon'`) so callers can
@@ -661,6 +700,9 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         return Ok(());
     };
     match key {
+        "auth.github_auto_approve_organizations" => {
+            parse_github_organizations(value).map(|_| ())?;
+        }
         "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
             return Err(format!(
                 "must be at most {MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES} bytes"
@@ -971,6 +1013,17 @@ mod tests {
             err.contains("light"),
             "error should list the options: {err}"
         );
+    }
+
+    #[test]
+    fn github_organization_list_is_validated_and_deduplicated() {
+        assert_eq!(
+            parse_github_organizations("Open-Athena, marin-community open-athena").unwrap(),
+            vec!["Open-Athena", "marin-community"]
+        );
+        assert!(validate("auth.github_auto_approve_organizations", "Open-Athena").is_ok());
+        assert!(validate("auth.github_auto_approve_organizations", "Open/Athena").is_err());
+        assert!(validate("auth.github_auto_approve_organizations", &"x".repeat(40)).is_err());
     }
 
     #[test]

@@ -545,14 +545,7 @@ pub async fn record_delivery(db: &Db, delivery_id: &str) -> Result<bool> {
 // Commenter authorization — the untrusted boundary.
 // ---------------------------------------------------------------------------
 
-/// A GitHub login is `[A-Za-z0-9-]`, at most 39 chars. We only enforce the
-/// charset and length — enough to keep junk out and to reject a login before it
-/// reaches a store lookup; GitHub is the authority on whether the account exists.
-pub fn valid_login(login: &str) -> bool {
-    !login.is_empty()
-        && login.len() <= 39
-        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
+pub use weaver_core::github::valid_login;
 
 /// Whether `login` may trigger a session. Authorized iff the login is an
 /// **approved loom user** — a row in the `users` table, the *same* allowlist that

@@ -386,7 +386,10 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   no owner is seeded, so GitHub sign-in won't work until it's set. Add more
   users and roles under **Settings → People & security**, set your password
   under **Settings → Account**, and configure GitHub sign-in under **Settings →
-  Integrations**.
+  Integrations**. A deployment can set
+  `auth.github_auto_approve_organizations` to let active members of named
+  GitHub organizations add themselves to Approved people on first sign-in; the
+  GitHub App needs the **Members: Read-only** organization permission.
 - **Personal API tokens** for remote CLIs and other trusted clients. Mint one
   under **Settings → Account** or from a locally authenticated CLI:
 

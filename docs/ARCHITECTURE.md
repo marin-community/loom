@@ -991,8 +991,13 @@ seeded with one owner — whichever GitHub login `LOOM_OWNER_GITHUB` names at
 first run. There is no default: leave it unset and no owner row is seeded at
 all, so GitHub login has no `users` row to match until it's set (fail closed,
 rather than seed a real maintainer login onto an internet-facing deploy).
-GitHub login only succeeds for a login that matches a `users` row; an unknown
-identity is authenticated by GitHub but rejected by loom. A user may have a
+GitHub login succeeds for a login that matches a `users` row. When
+`auth.github_auto_approve_organizations` is configured, an unknown identity may
+also enter by proving active membership in a named organization through the
+GitHub API; Loom then creates a normal `user` row. That approval persists until
+an administrator removes it, so the webhook trigger retains the same local
+approved-user check. Without the setting, an unknown identity is authenticated
+by GitHub but rejected by Loom. A user may have a
 `github_login`, a `password_hash` (argon2), or both. The persisted role is
 `admin` or `user`. Both roles operate normal Loom work, use per-session debug
 shells, and read diagnostics, watch activity, and redacted logs. Admins
@@ -1003,12 +1008,16 @@ newly approved users default to `user`. Browser sessions and personal tokens
 resolve the current role on every request, so role changes take effect
 immediately.
 
-**GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
+**GitHub OAuth** is configured per-deploy: register a GitHub App and set its id
 and secret via Settings → Integrations or the `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET` env vars. The callback is
 `<base>/api/auth/github/callback`, where `<base>` is the `auth.base_url` setting
 or, unset, `{X-Forwarded-Proto|http}://{Host}`. The login route sets a short
-CSRF `state` cookie the callback verifies. Until an app is configured the GitHub
+CSRF-state cookie, exchanges the callback code for a user access token, and
+fetches the authenticated profile. Organization auto-approval additionally
+calls `GET /user/memberships/orgs/{org}` with that token and requires an active
+membership; the App therefore needs the **Members: Read-only** organization
+permission. GitHub errors fail closed. Until an app is configured the GitHub
 button is hidden and `auth.me` reports `methods.github = false`.
 
 **The machine-local token.** On startup loom mints (and persists, 0600, at

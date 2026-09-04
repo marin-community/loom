@@ -152,10 +152,13 @@ curl -X POST {base}/api/auth/users/create -H 'Authorization: Bearer $LOOM_TOKEN'
   -d '{"username":"octocat","github_login":"octocat"}'
 ```
 
-> **Extending this later.** Today an approved user is an explicit login. A
-> role-scoped rule — e.g. "admins of org `acme`" — would slot into the same
-> authorization step ([`github_trigger::authorize`]), evaluated against the
-> GitHub API; it is not implemented yet.
+Set `auth.github_auto_approve_organizations` to a space- or comma-separated
+list when active organization members should approve themselves on first
+GitHub sign-in. Loom adds a matching identity to the same approved-user list
+with the `user` role, so subsequent `@loom` requests use the ordinary local
+authorization check. The approval remains until an administrator removes it;
+changing organization membership or the setting does not silently delete a
+Loom user.
 
 [`github_trigger::authorize`]: ../crates/loom-forge/src/github_trigger.rs
 
@@ -282,6 +285,9 @@ Apps → New GitHub App**:
   - **Metadata** — Read-only (mandatory; granted automatically).
   - **Pull requests** — Read & write (open and update pull requests).
   - **Workflows** — Read & write (push changes under `.github/workflows`).
+- **Organization permissions:**
+  - **Members** — Read-only (verify active membership when
+    `auth.github_auto_approve_organizations` is set).
 - **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
   review**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
