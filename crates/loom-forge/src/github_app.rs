@@ -411,6 +411,14 @@ impl GithubApp {
         build_app_jwt(app_id, &pem, Utc::now().timestamp())
     }
 
+    fn api_url<'a>(&self, segments: impl IntoIterator<Item = &'a str>) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&self.api_base).context("parsing GitHub API base URL")?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("GitHub API base URL cannot contain path segments"))?
+            .extend(segments);
+        Ok(url)
+    }
+
     // -- installation resolution + tokens -----------------------------------
 
     /// The installation id of the App on `owner/name`
@@ -541,9 +549,11 @@ impl GithubApp {
         }
 
         let token = self.installation_token(installation.id).await?;
+        let github_user_id_path = github_user_id.to_string();
+        let user_url = self.api_url(["user", github_user_id_path.as_str()])?;
         let user = check_status(
             self.http
-                .get(format!("{}/user/{github_user_id}", self.api_base))
+                .get(user_url)
                 .header(reqwest::header::ACCEPT, GH_ACCEPT)
                 .header("X-GitHub-Api-Version", GH_API_VERSION)
                 .bearer_auth(&token)
@@ -563,12 +573,15 @@ impl GithubApp {
                 github_user_id
             );
         }
+        let membership_url = self.api_url([
+            "orgs",
+            installation.account.login.as_str(),
+            "memberships",
+            user.login.as_str(),
+        ])?;
         let response = self
             .http
-            .get(format!(
-                "{}/orgs/{}/memberships/{}",
-                self.api_base, installation.account.login, user.login
-            ))
+            .get(membership_url)
             .header(reqwest::header::ACCEPT, GH_ACCEPT)
             .header("X-GitHub-Api-Version", GH_API_VERSION)
             .bearer_auth(token)
