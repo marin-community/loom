@@ -6,6 +6,7 @@
 use super::config::{default_config_path, ConfigPathOpts};
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
+use std::io::IsTerminal;
 use weaver_core::db::Db;
 
 /// Subcommands under `loom setup` — the guided credential wizards.
@@ -41,6 +42,10 @@ pub struct GithubAppOpts {
     /// confirms App creation).
     #[arg(long)]
     owner: Option<String>,
+    /// Immutable numeric GitHub id for `--owner`. Required when the App is
+    /// organization-owned; prompted for interactively if omitted.
+    #[arg(long)]
+    owner_id: Option<i64>,
     /// Local port for the manifest-flow confirmation callback. `0` (default)
     /// picks a free port; pin one when you're tunnelling in to a remote host
     /// (e.g. `ssh -L 8765:localhost:8765 …`, then `--port 8765`).
@@ -108,6 +113,9 @@ pub(crate) async fn cmd_setup_init() -> Result<()> {
         .as_ref()
         .and_then(|c| c.owner_github.clone())
         .or(crate::auth::primary_user(&db).await.ok().flatten());
+    let prefill_owner_id = existing_cfg
+        .as_ref()
+        .and_then(|config| config.owner_github_id.as_deref());
     let prefill_base_url = existing_cfg
         .as_ref()
         .and_then(|c| c.domain.as_deref())
@@ -124,19 +132,30 @@ pub(crate) async fn cmd_setup_init() -> Result<()> {
         }
         println!("  '{login}' isn't a valid GitHub login (letters, digits, and hyphens only).");
     };
+    let owner_id = prompt_positive_id("GitHub numeric user ID", prefill_owner_id)?;
     if crate::auth::get_user(&db, &owner).await?.is_none() {
         crate::auth::add_user(
             &db,
             &owner,
             Some(&owner),
+            Some(owner_id),
             None,
             crate::auth::UserRole::Admin,
         )
         .await
         .with_context(|| format!("seeding the bootstrap operator '{owner}'"))?;
+    } else {
+        crate::auth::set_manual_github_identity(&db, &owner, &owner, owner_id).await?;
     }
-    crate::loom_config::upsert(&config_path, &[("LOOM_OWNER_GITHUB", owner.as_str())])
-        .context("writing the operator into loom.toml")?;
+    let owner_id_string = owner_id.to_string();
+    crate::loom_config::upsert(
+        &config_path,
+        &[
+            ("LOOM_OWNER_GITHUB", owner.as_str()),
+            ("LOOM_OWNER_GITHUB_ID", owner_id_string.as_str()),
+        ],
+    )
+    .context("writing the operator into loom.toml")?;
     println!("  ✓ '{owner}' can sign in and trigger sessions by commenting.");
     println!();
 
@@ -178,6 +197,7 @@ pub(crate) async fn cmd_setup_init() -> Result<()> {
             name: None,
             org: None,
             owner: Some(owner.clone()),
+            owner_id: Some(owner_id),
             port: 0,
             timeout: 300,
             no_open: false,
@@ -238,6 +258,16 @@ pub(crate) fn prompt_line(label: &str, default: Option<&str>) -> Result<String> 
             return Ok(d.to_string());
         }
         println!("  (required)");
+    }
+}
+
+fn prompt_positive_id(label: &str, default: Option<&str>) -> Result<i64> {
+    loop {
+        let value = prompt_line(label, default)?;
+        if let Some(id) = value.parse::<i64>().ok().filter(|id| *id > 0) {
+            return Ok(id);
+        }
+        println!("  '{value}' is not a positive numeric GitHub id.");
     }
 }
 
@@ -469,6 +499,17 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         }
         (None, owner) => owner.map(str::to_string),
     };
+    let org_owner_id = if org_owner.is_some() {
+        match opts.owner_id.filter(|id| *id > 0) {
+            Some(id) => Some(id),
+            None if std::io::stdin().is_terminal() => {
+                Some(prompt_positive_id("Owner GitHub numeric user ID", None)?)
+            }
+            None => bail!("--owner needs --owner-id <numeric-github-user-id>"),
+        }
+    } else {
+        None
+    };
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", opts.port))
         .await
@@ -588,6 +629,7 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // install the confirming account (`conv.owner.login`); for an org install
     // `org_owner` (the org itself can't sign in, so an individual is required).
     let owner_login = org_owner.as_deref().unwrap_or(conv.owner.login.as_str());
+    let owner_id = org_owner_id.unwrap_or(conv.owner.id);
 
     // Approve that individual so they can sign in and trigger sessions. Written
     // live to the running daemon here, and to loom.toml (`LOOM_OWNER_GITHUB`)
@@ -598,17 +640,21 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
             &db,
             owner_login,
             Some(owner_login),
+            Some(owner_id),
             None,
             crate::auth::UserRole::Admin,
         )
         .await
         .context("approving the bootstrap operator")?;
+    } else {
+        crate::auth::set_manual_github_identity(&db, owner_login, owner_login, owner_id).await?;
     }
     println!(
         "Approved '{owner_login}' — they can sign in and trigger sessions. Add more in \
          Settings → People & security."
     );
 
+    let owner_id_string = owner_id.to_string();
     let updates: Vec<(&str, &str)> = vec![
         ("LOOM_GITHUB_APP_ID", app_id.as_str()),
         ("LOOM_GITHUB_APP_SLUG", conv.slug.as_str()),
@@ -618,6 +664,7 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
         ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
         ("LOOM_DOMAIN", domain),
         ("LOOM_OWNER_GITHUB", owner_login),
+        ("LOOM_OWNER_GITHUB_ID", owner_id_string.as_str()),
     ];
     crate::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the App credentials into loom.toml")?;

@@ -155,6 +155,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "acp-driver-epoch",
         include_str!("../migrations/0029_acp_driver_epoch.sql"),
     ),
+    (
+        30,
+        "user-authorization-source",
+        include_str!("../migrations/0030_user_authorization_source.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -345,12 +350,28 @@ async fn seed_owner(pool: &Db) -> Result<()> {
         );
         return Ok(());
     };
+    let owner_id = std::env::var("LOOM_OWNER_GITHUB_ID")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| anyhow::anyhow!("LOOM_OWNER_GITHUB_ID must be a positive integer"))
+        })
+        .transpose()?;
     sqlx::query(
-        "INSERT INTO users (username, github_login, role) VALUES (?, ?, 'admin')
-         ON CONFLICT DO NOTHING",
+        "INSERT INTO users (username, github_login, github_user_id, role)
+         VALUES (?, ?, ?, 'admin')
+         ON CONFLICT(username) DO UPDATE SET
+             github_user_id = excluded.github_user_id
+         WHERE users.github_user_id IS NULL AND excluded.github_user_id IS NOT NULL",
     )
     .bind(&owner)
     .bind(&owner)
+    .bind(owner_id)
     .execute(pool)
     .await
     .with_context(|| format!("seeding owner user '{owner}'"))?;
@@ -459,6 +480,35 @@ mod tests {
                 "{expected}"
             );
         }
+        let user_columns = table_columns(&db, "users").await.unwrap();
+        for expected in [
+            "authorization_kind",
+            "authorization_github_org_id",
+            "authorization_github_org_login",
+            "authorization_valid_until",
+        ] {
+            assert!(
+                user_columns.iter().any(|column| column == expected),
+                "missing users column {expected}"
+            );
+        }
+        sqlx::query("INSERT INTO users (username, github_user_id) VALUES ('manual-id', 101)")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(sqlx::query(
+            "INSERT INTO users (username, github_user_id) VALUES ('duplicate-id', 101)",
+        )
+        .execute(&db)
+        .await
+        .is_err());
+        assert!(sqlx::query(
+            "INSERT INTO users (username, authorization_kind)
+             VALUES ('incomplete-org', 'github_organization')",
+        )
+        .execute(&db)
+        .await
+        .is_err());
         let inbox_columns = table_columns(&db, "review_conversation_inbox")
             .await
             .unwrap();

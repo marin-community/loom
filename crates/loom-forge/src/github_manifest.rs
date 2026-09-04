@@ -277,6 +277,7 @@ pub struct AppManifestConversion {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Owner {
     pub login: String,
+    pub id: i64,
 }
 
 /// Exchange a manifest-flow `code` for the App's full credential set via the
@@ -533,7 +534,7 @@ mod tests {
             "client_secret": "secret-client",
             "webhook_secret": "secret-webhook",
             "pem": "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----",
-            "owner": {"login": "acme"},
+            "owner": {"login": "acme", "id": 303},
             "name": "loom-acme",
             "permissions": {},
             "events": []

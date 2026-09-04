@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::github_trigger::{GithubApi, PrHead};
 use crate::repo::RepoSlug;
+use weaver_core::config::GithubOrganization;
 use weaver_core::db::Db;
 
 /// Settings key (env-overridable) holding the App's numeric id.
@@ -56,6 +57,9 @@ const DEFAULT_API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "loom-github-app";
 const GH_ACCEPT: &str = "application/vnd.github+json";
 const GH_API_VERSION: &str = "2022-11-28";
+/// Bound every GitHub App API call so an authorization check fails closed
+/// promptly when GitHub is unavailable.
+const REQUEST_TIMEOUT_SECS: u64 = 10;
 
 /// JWT validity: GitHub caps an App JWT at 10 minutes; 9 leaves headroom.
 const JWT_TTL_SECS: i64 = 9 * 60;
@@ -178,6 +182,14 @@ pub enum GithubThreadKind {
     PullRequest,
 }
 
+/// An active organization membership verified against both immutable GitHub
+/// account ids. The current login is returned only as display/routing data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedOrganizationMembership {
+    pub github_login: String,
+    pub organization: GithubOrganization,
+}
+
 impl GithubThreadKind {
     fn resource(self) -> &'static str {
         match self {
@@ -197,6 +209,7 @@ impl GithubApp {
     pub fn with_parts(db: Db, api_base: String) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .expect("building the GitHub App HTTP client");
         Self {
@@ -444,6 +457,146 @@ impl GithubApp {
             .expect("token cache mutex poisoned")
             .insert(scope, fresh);
         Ok(token)
+    }
+
+    /// Check all configured organizations with their App installations. Active
+    /// membership in any one organization wins over inactive or failed checks;
+    /// without an active result, any failed check makes the aggregate fail
+    /// closed instead of being mistaken for definitive non-membership.
+    pub async fn active_organization_membership(
+        &self,
+        organizations: &[GithubOrganization],
+        github_user_id: i64,
+    ) -> Result<Option<VerifiedOrganizationMembership>> {
+        let mut indeterminate = Vec::new();
+        for organization in organizations {
+            match self
+                .organization_membership(organization, github_user_id)
+                .await
+            {
+                Ok(Some(github_login)) => {
+                    return Ok(Some(VerifiedOrganizationMembership {
+                        github_login,
+                        organization: organization.clone(),
+                    }));
+                }
+                Ok(None) => {}
+                Err(error) => indeterminate.push(format!("{}: {error}", organization.login)),
+            }
+        }
+        if indeterminate.is_empty() {
+            return Ok(None);
+        }
+        bail!(
+            "GitHub organization membership could not be verified: {}",
+            indeterminate.join("; ")
+        )
+    }
+
+    /// Resolve the current login for `github_user_id`, then check one active
+    /// organization membership. Both response objects must repeat the expected
+    /// numeric user id, preventing a reclaimed login from renewing another
+    /// account's authorization.
+    async fn organization_membership(
+        &self,
+        organization: &GithubOrganization,
+        github_user_id: i64,
+    ) -> Result<Option<String>> {
+        let jwt = self.current_jwt().await?;
+        let installation = self
+            .http
+            .get(format!(
+                "{}/orgs/{}/installation",
+                self.api_base, organization.login
+            ))
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(jwt)
+            .send()
+            .await
+            .context("requesting the organization installation")?;
+        let installation = check_status(installation, "resolving the organization installation")
+            .await?
+            .json::<OrganizationInstallationResponse>()
+            .await
+            .context("parsing the organization installation response")?;
+        if installation.account.id != organization.id {
+            bail!(
+                "GitHub organization '{}' resolved to id {}, expected {}",
+                organization.login,
+                installation.account.id,
+                organization.id
+            );
+        }
+
+        let token = self.installation_token(installation.id).await?;
+        let user = check_status(
+            self.http
+                .get(format!("{}/user/{github_user_id}", self.api_base))
+                .header(reqwest::header::ACCEPT, GH_ACCEPT)
+                .header("X-GitHub-Api-Version", GH_API_VERSION)
+                .bearer_auth(&token)
+                .send()
+                .await
+                .context("resolving the GitHub user by numeric id")?,
+            "resolving the GitHub user by numeric id",
+        )
+        .await?
+        .json::<GithubUserResponse>()
+        .await
+        .context("parsing the GitHub user response")?;
+        if user.id != github_user_id {
+            bail!(
+                "GitHub user lookup returned id {}, expected {}",
+                user.id,
+                github_user_id
+            );
+        }
+        let response = self
+            .http
+            .get(format!(
+                "{}/orgs/{}/memberships/{}",
+                self.api_base, installation.account.login, user.login
+            ))
+            .header(reqwest::header::ACCEPT, GH_ACCEPT)
+            .header("X-GitHub-Api-Version", GH_API_VERSION)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("checking GitHub organization membership")?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let membership = check_status(response, "checking GitHub organization membership")
+            .await?
+            .json::<OrganizationMembershipResponse>()
+            .await
+            .context("parsing GitHub organization membership")?;
+        if membership.organization.id != organization.id {
+            bail!(
+                "GitHub membership organization id {} did not match expected {}",
+                membership.organization.id,
+                organization.id
+            );
+        }
+        if membership.user.id != github_user_id {
+            bail!(
+                "GitHub membership user id {} did not match expected {}",
+                membership.user.id,
+                github_user_id
+            );
+        }
+        if !membership.user.login.eq_ignore_ascii_case(&user.login) {
+            bail!(
+                "GitHub membership login '{}' did not match resolved login '{}'",
+                membership.user.login,
+                user.login
+            );
+        }
+        Ok(membership
+            .state
+            .eq_ignore_ascii_case("active")
+            .then_some(user.login))
     }
 
     /// The cached token for `installation_id`, if one is present and still fresh.
@@ -762,6 +915,31 @@ struct InstallationResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct OrganizationInstallationResponse {
+    id: i64,
+    account: GithubOrganizationResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrganizationMembershipResponse {
+    state: String,
+    organization: GithubOrganizationResponse,
+    user: GithubUserResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubOrganizationResponse {
+    id: i64,
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubUserResponse {
+    id: i64,
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct InstallationTokenResponse {
     token: String,
     /// RFC 3339, e.g. `2016-07-11T22:14:10Z`.
@@ -964,6 +1142,65 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         Ok(Json(json!({ "id": 42 })))
     }
 
+    async fn mock_organization_installation(
+        State(s): State<Arc<MockState>>,
+        Path(organization): Path<String>,
+    ) -> Result<Json<Value>, StatusCode> {
+        s.installation_lookups.fetch_add(1, Ordering::SeqCst);
+        if organization == "broken" {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        let id = match organization.as_str() {
+            "wrong-id" => 999,
+            "Alternate" => 304,
+            _ => 303,
+        };
+        Ok(Json(json!({
+            "id": 42,
+            "account": { "id": id, "login": organization }
+        })))
+    }
+
+    async fn mock_user(Path(account_id): Path<i64>) -> Result<Json<Value>, StatusCode> {
+        let (id, login) = match account_id {
+            404 => (404, "member"),
+            405 => (405, "former-member"),
+            406 => (406, "invitee"),
+            505 => (505, "renamed-member"),
+            606 => (606, "departed-member"),
+            707 => (707, "mismatched-member"),
+            _ => return Err(StatusCode::NOT_FOUND),
+        };
+        Ok(Json(json!({ "id": id, "login": login })))
+    }
+
+    async fn mock_organization_membership(
+        Path((organization, username)): Path<(String, String)>,
+    ) -> Result<Json<Value>, StatusCode> {
+        let state = match username.as_str() {
+            "member" | "renamed-member" | "mismatched-member" => "active",
+            "invitee" => "pending",
+            _ => return Err(StatusCode::NOT_FOUND),
+        };
+        let organization_id = if organization == "Alternate" {
+            304
+        } else {
+            303
+        };
+        let user_id = match username.as_str() {
+            "member" => 404,
+            "renamed-member" => 505,
+            "mismatched-member" => 999,
+            "invitee" => 406,
+            _ => unreachable!(),
+        };
+        Ok(Json(json!({
+            "state": state,
+            "organization": { "id": organization_id, "login": organization },
+            "user": { "id": user_id, "login": username }
+        })))
+    }
+
     async fn mock_comments(
         State(s): State<Arc<MockState>>,
         Path((owner, name, issue)): Path<(String, String, i64)>,
@@ -1052,6 +1289,15 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 post(mock_access_tokens),
             )
             .route("/repos/{owner}/{name}/installation", get(mock_installation))
+            .route(
+                "/orgs/{organization}/installation",
+                get(mock_organization_installation),
+            )
+            .route(
+                "/orgs/{organization}/memberships/{username}",
+                get(mock_organization_membership),
+            )
+            .route("/user/{account_id}", get(mock_user))
             .route(
                 "/repos/{owner}/{name}/issues/{issue}/comments",
                 post(mock_comments),
@@ -1180,6 +1426,81 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             2,
             "an expired token is re-minted, not reused"
         );
+    }
+
+    #[tokio::test]
+    async fn organization_membership_uses_installation_and_immutable_id() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock).await;
+        let app = configured_app(base).await;
+
+        let organizations = vec![GithubOrganization {
+            login: "Acme".to_string(),
+            id: 303,
+        }];
+        assert_eq!(
+            app.active_organization_membership(&organizations, 404)
+                .await
+                .unwrap()
+                .unwrap()
+                .github_login,
+            "member"
+        );
+        assert!(app
+            .active_organization_membership(&organizations, 406)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(app
+            .active_organization_membership(&organizations, 405)
+            .await
+            .unwrap()
+            .is_none());
+
+        let renamed = app
+            .active_organization_membership(&organizations, 505)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(renamed.github_login, "renamed-member");
+        assert!(app
+            .active_organization_membership(&organizations, 606)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(app
+            .active_organization_membership(&organizations, 707)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("expected 707"));
+
+        let active_after_error = vec![
+            GithubOrganization {
+                login: "broken".to_string(),
+                id: 302,
+            },
+            GithubOrganization {
+                login: "Alternate".to_string(),
+                id: 304,
+            },
+        ];
+        assert!(app
+            .active_organization_membership(&active_after_error, 404)
+            .await
+            .unwrap()
+            .is_some());
+
+        let wrong_id = vec![GithubOrganization {
+            login: "wrong-id".to_string(),
+            id: 303,
+        }];
+        assert!(app
+            .active_organization_membership(&wrong_id, 404)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("expected 303"));
     }
 
     // -- REST gateway calls -------------------------------------------------

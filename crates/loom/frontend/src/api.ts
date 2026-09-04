@@ -875,12 +875,14 @@ export const listUsers = () => invokeOperation('auth.users.list', {});
 export const addUser = (
   username: string,
   githubLogin: string | undefined,
+  githubUserId: number | undefined,
   password: string | undefined,
   role: UserRole,
 ) =>
   invokeOperation('auth.users.create', {
     username,
     github_login: githubLogin || null,
+    github_user_id: githubUserId ?? null,
     password: password || null,
     role,
   });
@@ -888,6 +890,22 @@ export const addUser = (
 /** Change an approved user's role. */
 export const setUserRole = (username: string, role: UserRole) =>
   invokeOperation('auth.users.set_role', { username, role });
+
+/** Convert an organization-derived user to durable manual approval. */
+export const approveUserManually = (username: string) =>
+  invokeOperation('auth.users.approve_manually', { username });
+
+/** Bind an administrator-verified numeric GitHub identity to a manual user. */
+export const setUserGithubIdentity = (
+  username: string,
+  githubLogin: string,
+  githubUserId: number,
+) =>
+  invokeOperation('auth.users.set_github_identity', {
+    username,
+    github_login: githubLogin,
+    github_user_id: githubUserId,
+  });
 
 /** Remove an approved operator. */
 export const removeUser = (username: string) => invokeOperation('auth.users.remove', { username });

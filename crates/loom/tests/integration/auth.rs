@@ -21,6 +21,66 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
+async fn organization_revalidation_renews_only_active_members() {
+    let ts = TestServer::start_with_app().await;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::auth::GH_ORGANIZATIONS_KEY.to_string(),
+            Some("broken:302, Alternate:304".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+    for (username, github_login, github_user_id) in [
+        ("renamed-account", "old-name", 505),
+        ("reclaimed-name", "member", 606),
+        ("former-member", "former-member", 405),
+    ] {
+        sqlx::query(
+            "INSERT INTO users
+             (username, github_login, github_user_id, role, authorization_kind,
+              authorization_github_org_id, authorization_github_org_login,
+              authorization_valid_until)
+             VALUES (?, ?, ?, 'user', 'github_organization', 303, 'Acme',
+                     '2000-01-01T00:00:00.000Z')",
+        )
+        .bind(username)
+        .bind(github_login)
+        .bind(github_user_id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    }
+
+    loom::server::revalidate_github_authorizations_once(&ts.state).await;
+
+    let now = weaver_core::db::now_iso();
+    let active = loom::auth::get_user(&ts.state.db, "renamed-account")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.github_login.as_deref(), Some("renamed-member"));
+    assert!(active.authorization_valid_until.as_deref().unwrap() > now.as_str());
+    assert_eq!(active.authorization_github_org_id, Some(304));
+    assert_eq!(
+        active.authorization_github_org_login.as_deref(),
+        Some("Alternate")
+    );
+    let reclaimed = loom::auth::get_user(&ts.state.db, "reclaimed-name")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(reclaimed.authorization_valid_until.as_deref().unwrap() <= now.as_str());
+    let inactive = loom::auth::get_user(&ts.state.db, "former-member")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(inactive.authorization_valid_until.as_deref().unwrap() <= now.as_str());
+}
+
+#[tokio::test]
+#[serial]
 async fn personal_github_token_is_self_service_and_write_only() {
     let ts = TestServer::start().await;
     let http = reqwest::Client::new();
@@ -244,7 +304,11 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
     let http = reqwest::Client::new();
     let added: Value = http
         .post(url(&ts, "/api/auth/users/create"))
-        .json(&json!({ "username": "alice", "github_login": "alice-gh" }))
+        .json(&json!({
+            "username": "alice",
+            "github_login": "alice-gh",
+            "github_user_id": 101
+        }))
         .send()
         .await
         .unwrap()

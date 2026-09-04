@@ -323,8 +323,11 @@ pub mod users {
             pub username: String,
             /// The GitHub login allowed to sign in as this operator.
             pub github_login: Option<String>,
+            /// The administrator-verified immutable numeric GitHub user id for
+            /// `github_login`. Both fields are required together.
+            pub github_user_id: Option<i64>,
             /// A password, if this operator should also be able to sign in with one.
-            /// At least one of `github_login` or `password` is required.
+            /// At least one of the GitHub identity pair or `password` is required.
             pub password: Option<String>,
             /// `admin` or `user`.
             #[operand(json, default = UserRole::User)]
@@ -336,6 +339,7 @@ pub mod users {
                 Self {
                     username: String::new(),
                     github_login: None,
+                    github_user_id: None,
                     password: None,
                     role: UserRole::User,
                 }
@@ -354,6 +358,38 @@ pub mod users {
         pub struct Input {}
 
         pub type Output = Vec<UserView>;
+    }
+
+    pub mod approve_manually {
+        use super::prelude::*;
+
+        /// Convert an organization-derived operator to durable manual approval.
+        #[operation(id = "auth.users.approve_manually", actor = Admin, scope = Global,
+                    risk = Write, cli = "auth users approve-manually")]
+        pub struct Input {
+            #[operand(positional)]
+            pub username: String,
+        }
+
+        pub type Output = UserView;
+    }
+
+    pub mod set_github_identity {
+        use super::prelude::*;
+
+        /// Bind an administrator-verified immutable GitHub identity to a manual
+        /// operator. This is required before a login-only migrated row can use
+        /// GitHub sign-in.
+        #[operation(id = "auth.users.set_github_identity", actor = Admin, scope = Global,
+                    risk = Write, cli = "auth users github-identity")]
+        pub struct Input {
+            #[operand(positional)]
+            pub username: String,
+            pub github_login: String,
+            pub github_user_id: i64,
+        }
+
+        pub type Output = UserView;
     }
 
     pub mod remove {
@@ -413,6 +449,8 @@ static OPERATIONS: &[&OperationSpec] = &[
     federations::remove::SPEC,
     users::list::SPEC,
     users::create::SPEC,
+    users::approve_manually::SPEC,
+    users::set_github_identity::SPEC,
     users::set_role::SPEC,
     users::remove::SPEC,
     github_token::get::SPEC,

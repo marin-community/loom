@@ -20,6 +20,7 @@ use sha2::Sha256;
 use crate::fixtures::{sh, TestServer};
 
 const SECRET: &str = "test-webhook-secret";
+const ACTOR_ID: i64 = 4242;
 
 /// Forge the `X-Hub-Signature-256` value a genuine GitHub delivery carries for
 /// `(secret, body)`.
@@ -120,6 +121,11 @@ async fn boot() -> (TestServer, Arc<FakeGithub>) {
     std::env::set_var("LOOM_GITHUB_WEBHOOK_SECRET", SECRET);
     let fake = Arc::new(FakeGithub::default());
     let ts = TestServer::start_with_github(fake.clone()).await;
+    sqlx::query("UPDATE users SET github_user_id = ? WHERE username = 'rjpower'")
+        .bind(ACTOR_ID)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
     (ts, fake)
 }
 
@@ -205,9 +211,9 @@ fn trigger_body_with_id(login: &str, number: i64, comment: &str, comment_id: i64
     json!({
         "action": "created",
         "issue": {"number": number, "title": "Make it faster", "body": "perf please"},
-        "comment": {"id": comment_id, "body": comment, "user": {"login": login}},
+        "comment": {"id": comment_id, "body": comment, "user": {"login": login, "id": ACTOR_ID}},
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": login}
+        "sender": {"login": login, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
@@ -224,9 +230,9 @@ fn trigger_body_pr(login: &str, number: i64, comment: &str) -> Vec<u8> {
             "body": "they are red",
             "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7"}
         },
-        "comment": {"body": comment, "user": {"login": login}},
+        "comment": {"body": comment, "user": {"login": login, "id": ACTOR_ID}},
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": login}
+        "sender": {"login": login, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
@@ -245,10 +251,10 @@ fn submitted_review_event(login: &str, number: i64, review_body: &str) -> Vec<u8
             "id": 3001,
             "body": review_body,
             "state": "commented",
-            "user": {"login": login}
+            "user": {"login": login, "id": ACTOR_ID}
         },
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": login}
+        "sender": {"login": login, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
@@ -261,7 +267,7 @@ fn opened_issue_body_event(login: &str, number: i64, issue_body: &str) -> Vec<u8
         "action": "opened",
         "issue": {"number": number, "title": "Make it faster", "body": issue_body},
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": login}
+        "sender": {"login": login, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
@@ -273,7 +279,7 @@ fn edited_issue_body_event(editor: &str, number: i64, previous: &str, current: &
         "changes": {"body": {"from": previous}},
         "issue": {"number": number, "title": "Make it faster", "body": current},
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": editor}
+        "sender": {"login": editor, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
@@ -287,10 +293,10 @@ fn edited_comment_event(editor: &str, number: i64, previous: &str, current: &str
         "comment": {
             "id": 2001,
             "body": current,
-            "user": {"login": "original-author"}
+            "user": {"login": "original-author", "id": 2002}
         },
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": editor}
+        "sender": {"login": editor, "id": ACTOR_ID}
     })
     .to_string()
     .into_bytes()
