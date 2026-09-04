@@ -1,9 +1,10 @@
 # Slack trigger (`/marinbot`)
 
-loom turns a Slack slash command or mention into a session. Type **`/marinbot
-<prompt>`** anywhere, or **`@marinbot <prompt>`** in a channel or thread, and
-loom pulls the surrounding conversation, launches a session against a repo,
-and replies in-thread with a link to the live session (`On it — {base}/s/{id}`).
+loom turns a Slack slash command, mention, or direct message into a session.
+Type **`/marinbot <prompt>`** anywhere, **`@marinbot <prompt>`** in a channel or
+thread, or send the bot a direct message, and loom pulls the surrounding
+conversation, launches a session against a repo, and replies in-thread with a
+link to the live session (`On it — {base}/s/{id}`).
 That reply is the session's **status card**: as the agent reports progress
 with `loom status`, Loom edits the message in place into a live trail — the
 Slack analog of the [GitHub `@loom` trigger](github-trigger.md)'s status
@@ -32,9 +33,10 @@ frame it receives, in order:
    reason GitHub's webhook handler returns `200` before finishing a clone.
 2. **Parses the trigger.** A `slash_commands` payload becomes a thread-blind
    trigger (see [Anchor](#the-status-card)); an `events_api` payload is kept
-   only for `app_mention`. Parsing is structural — *who may act on the result*
-   is step 4's decision, so every rejection is one loom can log, count, and
-   show rather than a silent drop.
+   for `app_mention`, or for an ordinary `message` in a direct message. Channel
+   messages still require a mention. Parsing is structural — *who may act on
+   the result* is step 4's decision, so every rejection is one loom can log,
+   count, and show rather than a silent drop.
 3. **Dedupes.** Socket Mode delivery is *at-least-once* — a missed ACK or a
    reconnect boundary redelivers a frame — so loom records each delivery in
    the same `processed_deliveries` table the GitHub webhook uses, keyed on
@@ -121,11 +123,12 @@ terminal status and post a self-contained reply in the thread.
 ## Who can trigger
 
 By default the boundary is the one Slack already enforces: **anyone in the
-installed workspace, in a conversation the bot has been invited to.** Both
-halves are real grants — someone has an account in this workspace, and someone
-ran `/invite @marinbot` in that channel — and Socket Mode only delivers
-`app_mention` from channels the bot is in, so there is no second list of opaque
-user IDs to keep in sync with the team.
+installed workspace who can reach the bot.** Workspace membership is the first
+grant. For channels, someone must also run `/invite @marinbot`; for DMs, the
+person must open a direct conversation with it. Socket Mode delivers
+`app_mention` from joined channels and `message.im` from those direct
+conversations, so there is no second list of opaque user IDs to keep in sync
+with the team.
 
 Three rules hold regardless, and none of them is configurable:
 
@@ -295,19 +298,20 @@ Under **OAuth & Permissions → Bot Token Scopes**, add:
 
 - `commands` — receive the `/marinbot` slash command.
 - `app_mentions:read` — receive `@marinbot` mentions.
+- `im:history` — receive and read direct messages.
 - `chat:write` — post and edit the status card.
 - `reactions:write` — the 👀 acknowledgment on a reused thread.
-- History, per conversation type the bot should read: `channels:history`
-  (public), `groups:history` (private), `im:history` (DMs), `mpim:history`
+- Other history scopes, per conversation type the bot should read:
+  `channels:history` (public), `groups:history` (private), `mpim:history`
   (group DMs). Only add the types you intend to use it in.
 
 Under **Slash Commands**, create `/marinbot` — Socket Mode delivers it over
 the open connection, so it needs no Request URL.
 
-Under **Event Subscriptions**, subscribe to **`app_mention`** only.
-Subscribing to `message.*` as well is deliberately avoided: it would deliver
-every message in a watched conversation, including the bot's own status-card
-posts and edits, back over the same socket.
+Under **Event Subscriptions**, subscribe to **`app_mention`** and
+**`message.im`**. Loom accepts `message` events only from one-to-one DMs and
+ignores message subtypes, so channel traffic and bot status-card updates do not
+become triggers.
 
 Two things are easy to miss after any of the above:
 
