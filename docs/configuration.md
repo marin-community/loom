@@ -9,7 +9,7 @@ should apply:
 |---|---|---|
 | User | **Settings → Account** and **Preferences** | Personal sign-in, password, API tokens, optional interactive-session GitHub PAT, and terminal appearance |
 | Session profile | **Settings → Agents & profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, shared environment, and write-only session secrets |
-| Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
+| Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, GitHub organization admission, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
 | Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
 
 The Administration section is visible only to admins. Users can launch and
@@ -21,9 +21,11 @@ operator log, the host scratch shell, and access. Existing users become admins
 when the role migration is applied; newly approved users default to the `user`
 role.
 
-Loopback trust and the machine-local token resolve the primary user's current
-role. Demoting that user while another admin exists therefore removes local
-administrative authority; keep an intentional admin path before doing so.
+In single-user mode, loopback trust and the machine-local token resolve the
+primary user's current role. Demoting that user while another admin exists
+therefore removes local administrative authority. Organization authorization
+disables both implicit paths, so shared deployments require a manual user or a
+current organization authorization for every request.
 
 **Settings → Agents & profiles** contains the readable, non-secret environment
 on the `default` profile. Other profiles keep their write-only environment
@@ -42,6 +44,47 @@ Files under a shared session home are deployment resources, not environment
 variables. An operator deployment may materialize them from its secret backend,
 but every session sharing that home can read them. Per-profile files require
 isolated session homes or mounts.
+
+## GitHub organization admission
+
+`auth.github_organizations` accepts space- or comma-separated
+`login:numeric-id` pairs. For example, `acme:12345` binds the readable login to
+GitHub's immutable organization id. When a GitHub identity signs in, Loom
+requires an active membership in one configured organization and grants the
+`user` role for one hour. The default is empty, which keeps authorization
+manual.
+
+The GitHub App must be installed on the organization with its **Members**
+organization permission set to **Read-only**. The callback checks membership
+with the user's OAuth token. Before the one-hour authorization expires, the
+server resolves the user's current login from their immutable numeric id and
+checks every configured organization with a short-lived GitHub App installation
+token. An active result from any organization wins. It also revalidates an
+expired authorization when that identity sends `@loom`.
+
+Only an active membership renews authorization. A missing permission, timeout,
+GitHub outage, malformed response, pending membership, or absent membership
+fails closed. Loom immediately invalidates that user's browser, personal, and
+session credentials and closes their active sessions. The periodic check tries
+again while the authorization remains derived.
+
+Loom retains the user and GitHub identity rows after authorization expires for
+audit history and later re-admission; retained identity is not access. An admin
+can select **Approve manually** to replace the renewable organization source
+with a durable manual grant. Clearing the setting prevents new sign-ins and
+causes existing derived grants to fail their next revalidation. The first
+nonempty organization configuration permanently latches the database into
+shared-deployment mode: clearing settings, removing users, or completing
+workloads never restores implicit loopback or machine-token administration.
+Returning the database to single-user trust requires a separate, deliberate
+recovery procedure; Loom does not expose one automatically. Removing a user
+synchronously closes sessions they own.
+
+Manual GitHub approvals require both the current login and the account's
+immutable numeric user id. Existing login-only rows retain password access, but
+GitHub sign-in remains disabled until an administrator binds the verified id in
+**People & security**. The setup wizard records the bootstrap operator's id as
+`LOOM_OWNER_GITHUB_ID`.
 
 ## Registered setting precedence
 
@@ -74,6 +117,7 @@ used by the runtime API and Settings UI:
 
 ```yaml
 settings:
+  auth.github_organizations: "acme:12345"
   slack.status_updates: true
   slack.status_artifacts: false
   slack.status_header_template: "On it — <{session_url}>"

@@ -987,12 +987,18 @@ A request that resolves to none of these gets `401`; the SPA's router guard
 turns that into the login screen.
 
 **Users and roles.** `users` rows are approved human users. A fresh database is
-seeded with one owner — whichever GitHub login `LOOM_OWNER_GITHUB` names at
-first run. There is no default: leave it unset and no owner row is seeded at
-all, so GitHub login has no `users` row to match until it's set (fail closed,
-rather than seed a real maintainer login onto an internet-facing deploy).
-GitHub login only succeeds for a login that matches a `users` row; an unknown
-identity is authenticated by GitHub but rejected by loom. A user may have a
+seeded with one owner — whichever GitHub login and immutable numeric id
+`LOOM_OWNER_GITHUB` and `LOOM_OWNER_GITHUB_ID` name at first run. There is no
+default: leave the login unset and no owner row is seeded at all. A login-only
+migrated row cannot use GitHub sign-in until an admin binds its verified numeric
+id in **People & security**.
+GitHub login succeeds for a manual user whose immutable GitHub id matches. When
+`auth.github_organizations` is configured, an identity may also enter by
+proving active membership in a `login:numeric-id` organization through the
+GitHub API. Loom creates a retained `user` row whose authorization source is
+`github_organization` and whose one-hour deadline is checked by every browser,
+personal-token, and session-token lookup. Without the setting, an unknown
+identity is authenticated by GitHub but rejected by Loom. A user may have a
 `github_login`, a `password_hash` (argon2), or both. The persisted role is
 `admin` or `user`. Both roles operate normal Loom work, use per-session debug
 shells, and read diagnostics, watch activity, and redacted logs. Admins
@@ -1001,15 +1007,29 @@ shared environment, watches, and user access; they can use the host scratch
 shell and read the raw operator log. Existing rows migrate to `admin`, while
 newly approved users default to `user`. Browser sessions and personal tokens
 resolve the current role on every request, so role changes take effect
-immediately.
+immediately. Organization-derived users remain fixed at the `user` role unless
+an admin converts the authorization source to `manual`.
 
-**GitHub OAuth** is configured per-deploy: register an OAuth app and set its id
+**GitHub OAuth** is configured per-deploy: register a GitHub App and set its id
 and secret via Settings → Integrations or the `LOOM_GITHUB_CLIENT_ID` /
 `LOOM_GITHUB_CLIENT_SECRET` env vars. The callback is
 `<base>/api/auth/github/callback`, where `<base>` is the `auth.base_url` setting
 or, unset, `{X-Forwarded-Proto|http}://{Host}`. The login route sets a short
-CSRF `state` cookie the callback verifies. Until an app is configured the GitHub
-button is hidden and `auth.me` reports `methods.github = false`.
+CSRF-state cookie, exchanges the callback code for a user access token, and
+fetches the authenticated profile. Organization authorization additionally
+calls `GET /user/memberships/orgs/{org}` with that token and requires an active
+membership. Before the one-hour lease expires, the background revalidator mints
+a short-lived token for each configured organization's GitHub App installation,
+resolves the account's current login with `GET /user/{id}`, and calls
+`GET /orgs/{org}/memberships/{login}`. It verifies the configured immutable
+organization id and expected immutable user id in the responses. Active
+membership in any configured organization wins. The same path revalidates an expired lease
+at the `@loom` webhook boundary. Only `state = active` renews the lease; inactive
+and indeterminate results expire it immediately and close the user's active
+sessions. Identity and session history remain stored. The App therefore needs
+the **Members: Read-only** organization permission. Until an OAuth app is
+configured the GitHub button is hidden and `auth.me` reports
+`methods.github = false`.
 
 **The machine-local token.** On startup loom mints (and persists, 0600, at
 `$WEAVER_HOME/loom-token`) a `kind = 'local'` `api_tokens` row owned by the
@@ -1019,7 +1039,15 @@ CLI reads it. This makes `auth.trust_loopback = false` a fully working mode:
 behind a **same-host reverse proxy** (where forwarded requests look like
 loopback and so trust must be off) local automation still authenticates via this
 token, while remote callers must present their own. The local token is hidden
-from the token list and is not revocable from the UI.
+from the token list and is not revocable from the UI. Once
+`auth.github_organizations` puts Loom in shared mode, authorization ignores the
+machine token and loopback trust so neither can bypass the per-user lease. That
+shared-mode latch is written durably when the organization setting first becomes
+nonempty and is never cleared by configuration reconciliation, user removal, or
+session lifecycle. Configuration loss, failed workload teardown, and an
+in-flight launch therefore cannot reopen local admin authority. Loom exposes no
+automatic transition back to single-user trust; that would require a separate,
+audited recovery procedure. Removing a user still closes their sessions.
 
 **CLI contexts.** The `loom` CLI stores named server URLs in
 `$XDG_CONFIG_HOME/loom/config.toml` and their personal API tokens in a separate
@@ -1217,6 +1245,7 @@ builtins are stdlib-only and need neither).
 | `WEAVER_BRANCH` | compatibility branch key set by `loom sessions launch` in the worktree for branch-relative commands | — |
 | `LOOM_TOKEN` | explicit bearer token for Loom CLI/MCP and automation; `loom` otherwise uses its selected context credential or a loopback-only machine token | — |
 | `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database; unset seeds no owner at all | — |
+| `LOOM_OWNER_GITHUB_ID` | Immutable numeric GitHub id bound to the seeded owner | — |
 | `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |

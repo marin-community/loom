@@ -6,6 +6,7 @@ use std::process::Command;
 
 use serde_json::json;
 use serial_test::serial;
+use weaver_api::operations::auth::users;
 
 use loom::backend;
 
@@ -946,6 +947,146 @@ async fn session_records_its_creating_principal() {
         .post("/api/sessions/delete", json!({ "session": id }))
         .await
         .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authorization_revocation_closes_only_the_users_active_sessions() {
+    let ts = TestServer::start().await;
+    let username = loom::auth::primary_user(&ts.state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let cwd = ts.cwd();
+    for (id, branch_name, created_by) in [
+        ("owned-session", "weaver/owned", username.as_str()),
+        ("unrelated-session", "weaver/unrelated", "another-user"),
+    ] {
+        let branch = weaver_core::branch::upsert(&ts.state.db, &cwd, branch_name, "main")
+            .await
+            .unwrap();
+        loom::session::insert(
+            &ts.state.db,
+            &loom::session::NewSession {
+                id: id.to_string(),
+                branch_id: branch.id,
+                work_dir: format!("{cwd}/missing-{id}"),
+                term_session: format!("missing-{id}"),
+                agent_kind: "shell".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: "running".to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: Some(created_by.to_string()),
+                protocol: "terminal".to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    loom::lifecycle::close_sessions_created_by(&ts.state, &username).await;
+
+    let owned = loom::session::get(&ts.state.db, "owned-session")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(owned.status, "archived");
+    let unrelated = loom::session::get(&ts.state.db, "unrelated-session")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!loom::session::is_terminal(&unrelated.status));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_mode_latch_survives_failed_workload_teardown_and_user_removal() {
+    let ts = TestServer::start().await;
+    let cwd = ts.cwd();
+    let (admin_token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "admin-api", None)
+        .await
+        .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::auth::GH_ORGANIZATIONS_KEY.to_string(),
+            Some("Acme:303".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::auth::GH_ORGANIZATIONS_KEY.to_string(),
+            Some(String::new()),
+        )],
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO users
+         (username, github_login, github_user_id, role, authorization_kind,
+          authorization_github_org_id, authorization_github_org_login,
+          authorization_valid_until)
+         VALUES ('derived', 'derived', 404, 'user', 'github_organization', 303, 'Acme',
+                 '2000-01-01T00:00:00.000Z')",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let branch = weaver_core::branch::upsert(&ts.state.db, &cwd, "weaver/removed", "main")
+        .await
+        .unwrap();
+    loom::session::insert(
+        &ts.state.db,
+        &loom::session::NewSession {
+            id: "removed-user-session".to_string(),
+            branch_id: branch.id,
+            work_dir: format!("{cwd}/missing-removed"),
+            term_session: "missing-removed".to_string(),
+            agent_kind: "shell".to_string(),
+            model: String::new(),
+            effort: String::new(),
+            status: "running".to_string(),
+            github_repo: None,
+            parent_branch_id: None,
+            managed_by: None,
+            created_by: Some("derived".to_string()),
+            protocol: "terminal".to_string(),
+            origin: "user".to_string(),
+            class: "interactive".to_string(),
+            tracking_issue_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let admin =
+        weaver_api::Client::new(format!("http://{}", ts.addr)).with_token(Some(admin_token));
+    let removed = admin
+        .invoke::<users::remove::Op>(&users::remove::Input {
+            username: "derived".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(removed.removed);
+
+    let session = loom::session::get(&ts.state.db, "removed-user-session")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.status, "archived");
+    assert!(loom::auth::loopback_principal(&ts.state.db)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// A delegated launch records its launcher as the session's tree parent

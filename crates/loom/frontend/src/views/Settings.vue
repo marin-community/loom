@@ -363,7 +363,7 @@ onMounted(() => {
           </template>
           <template v-if="category === 'account'">
             <AccountPanel />
-            <TokensPanel />
+            <TokensPanel v-if="me.authorization_kind === 'manual'" />
           </template>
           <AppearancePanel v-if="category === 'preferences'" />
           <UsersPanel v-if="category === 'people'" />

@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use serde::Serialize;
-use sqlx::Row;
+use sqlx::{Row, SqliteConnection};
 
 use crate::db::{now_iso, Db};
 
@@ -35,6 +35,18 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 /// Named launch profile selected by GitHub-triggered sessions.
 pub const DEFAULT_GITHUB_PROFILE: &str = "default";
+/// GitHub organizations whose active members receive renewable Loom access.
+/// Empty by default: deployments opt into the broader trust boundary.
+pub const DEFAULT_GITHUB_ORGANIZATIONS: &str = "";
+/// Public setting that grants renewable access to active GitHub organization
+/// members.
+pub const GITHUB_ORGANIZATIONS_KEY: &str = "auth.github_organizations";
+/// Internal marker recording that this database has entered shared-deployment
+/// mode. It is intentionally not registered or automatically cleared: once
+/// untrusted workloads may have run, implicit machine-owner authority must not
+/// reappear because configuration or teardown state changed.
+pub const GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY: &str =
+    "auth.github_organization_shared_mode_latched";
 /// Reasoning effort for Slack-origin sessions. Slack conversations usually
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
@@ -331,6 +343,18 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Int,
         default: "86400",
         group: "Slack",
+        options: &[],
+    },
+    SettingSpec {
+        key: GITHUB_ORGANIZATIONS_KEY,
+        label: "GitHub organizations",
+        description: "Space- or comma-separated login:numeric-id pairs. Active \
+            members receive the user role for one hour after each GitHub \
+            sign-in. Clear to stop renewal. Once enabled, shared-deployment \
+            mode stays latched and implicit local admin remains disabled.",
+        kind: SettingKind::String,
+        default: DEFAULT_GITHUB_ORGANIZATIONS,
+        group: "Authentication",
         options: &[],
     },
     SettingSpec {
@@ -652,6 +676,51 @@ pub fn spec(key: &str) -> Option<&'static SettingSpec> {
     REGISTRY.iter().find(|s| s.key == key)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GithubOrganization {
+    pub login: String,
+    pub id: i64,
+}
+
+/// Parse the immutable organization identities accepted by
+/// [`GITHUB_ORGANIZATIONS_KEY`], preserving declaration order and removing
+/// duplicate numeric ids.
+pub fn parse_github_organizations(
+    value: &str,
+) -> std::result::Result<Vec<GithubOrganization>, String> {
+    let mut organizations = Vec::new();
+    for entry in value
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|item| !item.is_empty())
+    {
+        let Some((login, id)) = entry.rsplit_once(':') else {
+            return Err(format!(
+                "GitHub organization '{entry}' must use login:numeric-id"
+            ));
+        };
+        if !crate::github::valid_login(login) {
+            return Err(format!(
+                "contains invalid GitHub organization login '{login}'"
+            ));
+        }
+        let id =
+            id.parse::<i64>().ok().filter(|id| *id > 0).ok_or_else(|| {
+                format!("GitHub organization '{login}' has an invalid numeric id")
+            })?;
+        if organizations
+            .iter()
+            .any(|existing: &GithubOrganization| existing.id == id)
+        {
+            continue;
+        }
+        organizations.push(GithubOrganization {
+            login: login.to_string(),
+            id,
+        });
+    }
+    Ok(organizations)
+}
+
 /// Check that `value` is acceptable for `key`. Unregistered keys accept any
 /// value; registered keys are checked against their [`SettingKind`]. The error
 /// is a key-free reason (e.g. `expects an integer, got 'soon'`) so callers can
@@ -661,6 +730,9 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         return Ok(());
     };
     match key {
+        GITHUB_ORGANIZATIONS_KEY => {
+            parse_github_organizations(value).map(|_| ())?;
+        }
         "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
             return Err(format!(
                 "must be at most {MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES} bytes"
@@ -764,24 +836,22 @@ pub async fn describe(db: &Db) -> Result<Vec<SettingView>> {
 // Raw key/value access
 // ---------------------------------------------------------------------------
 
-pub async fn get(db: &Db, key: &str) -> Option<String> {
+/// Read a setting while preserving database failures for security-sensitive
+/// callers that cannot safely treat an unreadable value as absent.
+pub async fn try_get(db: &Db, key: &str) -> anyhow::Result<Option<String>> {
     let runtime = sqlx::query("SELECT value FROM settings WHERE key = ?")
         .bind(key)
         .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
+        .await?
         .map(|r| r.get::<String, _>("value"));
     if runtime.is_some() {
         tracing::debug!(key, source = "runtime", "config get");
-        return runtime;
+        return Ok(runtime);
     }
     let deployment = sqlx::query("SELECT value FROM deployment_settings WHERE key = ?")
         .bind(key)
         .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
+        .await?
         .map(|r| r.get::<String, _>("value"));
     tracing::debug!(
         key,
@@ -790,7 +860,11 @@ pub async fn get(db: &Db, key: &str) -> Option<String> {
             .map_or("built-in default", |_| "deployment"),
         "config get"
     );
-    deployment
+    Ok(deployment)
+}
+
+pub async fn get(db: &Db, key: &str) -> Option<String> {
+    try_get(db, key).await.ok().flatten()
 }
 
 pub async fn get_or(db: &Db, key: &str, default: &str) -> String {
@@ -815,12 +889,65 @@ pub async fn get_bool(db: &Db, key: &str, default: bool) -> bool {
 /// (so the key falls back to its deployment value, then its registered default).
 pub type Change = (String, Option<String>);
 
+async fn effective_github_organizations(
+    connection: &mut SqliteConnection,
+) -> Result<Option<String>> {
+    let runtime = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+        .bind(GITHUB_ORGANIZATIONS_KEY)
+        .fetch_optional(&mut *connection)
+        .await?;
+    if runtime.is_some() {
+        return Ok(runtime);
+    }
+    sqlx::query_scalar("SELECT value FROM deployment_settings WHERE key = ?")
+        .bind(GITHUB_ORGANIZATIONS_KEY)
+        .fetch_optional(connection)
+        .await
+        .map_err(Into::into)
+}
+
+async fn latch_github_organization_shared_mode_if_configured(
+    connection: &mut SqliteConnection,
+    now: &str,
+) -> Result<()> {
+    let configured = effective_github_organizations(connection).await?;
+    if configured.is_none_or(|value| value.trim().is_empty()) {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, 'latched', ?)
+         ON CONFLICT(key) DO NOTHING",
+    )
+    .bind(GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+    .bind(now)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+/// Permanently enter shared-deployment mode for this database.
+pub async fn latch_github_organization_shared_mode(db: &Db) -> Result<()> {
+    let now = now_iso();
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, 'latched', ?)
+         ON CONFLICT(key) DO NOTHING",
+    )
+    .bind(GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+    .bind(now)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Apply a batch of [`Change`]s atomically — either all writes land or none do.
 /// Callers are expected to [`validate`] each value first; `apply` itself only
 /// touches the database.
 pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let now = now_iso();
+    // Preserve shared mode even when this batch clears a pre-existing
+    // organization setting.
+    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
     for (key, value) in changes {
         match value {
             Some(value) => {
@@ -845,6 +972,7 @@ pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
             }
         }
     }
+    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -878,6 +1006,9 @@ pub async fn list_deployment(db: &Db) -> Result<Vec<(String, String)>> {
 pub async fn reconcile_deployment(db: &Db, values: &[(String, String)], prune: bool) -> Result<()> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let now = now_iso();
+    // A deployment prune must not make implicit machine-owner authority
+    // reappear after shared access was enabled.
+    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
     for (key, value) in values {
         sqlx::query(
             "INSERT INTO deployment_settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -906,6 +1037,7 @@ pub async fn reconcile_deployment(db: &Db, values: &[(String, String)], prune: b
             }
         }
     }
+    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -971,6 +1103,30 @@ mod tests {
             err.contains("light"),
             "error should list the options: {err}"
         );
+    }
+
+    #[test]
+    fn github_organization_list_is_validated_and_deduplicated() {
+        assert_eq!(
+            parse_github_organizations(
+                "Open-Athena:188075292, marin-community:123 OpenAthena:188075292"
+            )
+            .unwrap(),
+            vec![
+                GithubOrganization {
+                    login: "Open-Athena".to_string(),
+                    id: 188075292
+                },
+                GithubOrganization {
+                    login: "marin-community".to_string(),
+                    id: 123
+                },
+            ]
+        );
+        assert!(validate("auth.github_organizations", "Open-Athena:188075292").is_ok());
+        assert!(validate("auth.github_organizations", "Open-Athena").is_err());
+        assert!(validate("auth.github_organizations", "Open/Athena:1").is_err());
+        assert!(validate("auth.github_organizations", "Open-Athena:0").is_err());
     }
 
     #[test]
@@ -1096,6 +1252,63 @@ mod tests {
         assert_eq!(reset.source, SettingSource::Default);
         assert_eq!(reset.deployment_value, None);
         assert!(reset.is_default);
+    }
+
+    #[tokio::test]
+    async fn github_organization_shared_mode_latches_across_runtime_clear() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        apply(
+            &db,
+            &[(
+                GITHUB_ORGANIZATIONS_KEY.into(),
+                Some("Open-Athena:188075292".into()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get(&db, GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+                .await
+                .as_deref(),
+            Some("latched")
+        );
+
+        apply(
+            &db,
+            &[(GITHUB_ORGANIZATIONS_KEY.into(), Some(String::new()))],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            get(&db, GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+                .await
+                .as_deref(),
+            Some("latched")
+        );
+    }
+
+    #[tokio::test]
+    async fn github_organization_shared_mode_latches_across_deployment_prune() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        reconcile_deployment(
+            &db,
+            &[(
+                GITHUB_ORGANIZATIONS_KEY.into(),
+                "Open-Athena:188075292".into(),
+            )],
+            false,
+        )
+        .await
+        .unwrap();
+
+        reconcile_deployment(&db, &[], true).await.unwrap();
+        assert_eq!(get(&db, GITHUB_ORGANIZATIONS_KEY).await, None);
+        assert_eq!(
+            get(&db, GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+                .await
+                .as_deref(),
+            Some("latched")
+        );
     }
 
     #[tokio::test]
