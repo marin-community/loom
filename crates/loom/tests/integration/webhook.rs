@@ -21,6 +21,7 @@ use crate::fixtures::{sh, TestServer};
 
 const SECRET: &str = "test-webhook-secret";
 const ACTOR_ID: i64 = 4242;
+const UNAUTHORIZED_ACTOR_ID: i64 = 4243;
 
 /// Forge the `X-Hub-Signature-256` value a genuine GitHub delivery carries for
 /// `(secret, body)`.
@@ -202,18 +203,23 @@ async fn prepare_repo(ts: &TestServer) -> tempfile::TempDir {
 /// The raw JSON body of an `issue_comment.created` carrying `comment` from
 /// `login` on issue `number` of `acme/widgets`.
 fn trigger_body(login: &str, number: i64, comment: &str) -> Vec<u8> {
-    trigger_body_with_id(login, number, comment, 1001)
+    trigger_body_with_ids(login, ACTOR_ID, number, comment, 1001)
 }
 
-/// Like [`trigger_body`], with an explicit comment id — for tests that follow a
-/// reaction back to the comment it acknowledges.
-fn trigger_body_with_id(login: &str, number: i64, comment: &str, comment_id: i64) -> Vec<u8> {
+/// Like [`trigger_body`], with explicit GitHub actor and comment ids.
+fn trigger_body_with_ids(
+    login: &str,
+    actor_id: i64,
+    number: i64,
+    comment: &str,
+    comment_id: i64,
+) -> Vec<u8> {
     json!({
         "action": "created",
         "issue": {"number": number, "title": "Make it faster", "body": "perf please"},
-        "comment": {"id": comment_id, "body": comment, "user": {"login": login, "id": ACTOR_ID}},
+        "comment": {"id": comment_id, "body": comment, "user": {"login": login, "id": actor_id}},
         "repository": {"full_name": "acme/widgets"},
-        "sender": {"login": login, "id": ACTOR_ID}
+        "sender": {"login": login, "id": actor_id}
     })
     .to_string()
     .into_bytes()
@@ -495,7 +501,13 @@ async fn unauthorized_commenter_gets_access_reply() {
     let (ts, fake) = boot().await;
     let _remotes = prepare_repo(&ts).await;
 
-    let body = trigger_body("stranger", 5, "@loom work on this");
+    let body = trigger_body_with_ids(
+        "stranger",
+        UNAUTHORIZED_ACTOR_ID,
+        5,
+        "@loom work on this",
+        1001,
+    );
     let resp = post(&ts, "d-stranger", Some(sign(SECRET, &body)), &body).await;
     assert_eq!(
         resp.status(),
@@ -948,7 +960,13 @@ async fn repeat_trigger_forwards_to_active_session() {
     wait_for_comments(&fake, 1).await;
 
     // A second @loom on the same issue (new delivery) is forwarded, not forked.
-    let body2 = trigger_body_with_id("rjpower", 42, "@loom also handle the edge case", 2002);
+    let body2 = trigger_body_with_ids(
+        "rjpower",
+        ACTOR_ID,
+        42,
+        "@loom also handle the edge case",
+        2002,
+    );
     assert_eq!(
         post(&ts, "d-second", Some(sign(SECRET, &body2)), &body2)
             .await
