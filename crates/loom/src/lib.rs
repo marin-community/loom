@@ -30,7 +30,7 @@ pub use loom_forge::{
     github, github_app, github_manifest, github_trigger, lifecycle, repo, runtime, user_token,
 };
 pub use loom_launch::{handoff, metadata_assist, provision, setup};
-pub use loom_policy::{auth, automation, custom_mcp, db, profile};
+pub use loom_policy::{auth, automation, custom_mcp, db, profile, remote_mcp};
 pub use loom_store::{
     agent_env, channels, chat, chatlog, github_access, history, permission_requests, profile_data,
     repo_env, review_inbox, runs, session, session_layout, slack_routes, status,

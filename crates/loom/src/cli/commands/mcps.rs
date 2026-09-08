@@ -1,6 +1,7 @@
-//! `loom mcp` — custom MCP servers and the capability registry.
+//! `loom mcp` — MCP servers and the capability registry.
 //!
-//! `show` searches one response for a custom server *or* a capability set, so
+//! `show` searches one response for a custom server, remote server, or
+//! capability set, so
 //! the answer depends on which collection holds the name. `add` reads a script
 //! and its tests off disk, then chooses create or update from what the registry
 //! already holds. `serve` and `serve-custom` are long-running stdio servers.
@@ -56,6 +57,14 @@ pub async fn run_mcp(cmd: McpCmd) -> Result<()> {
                 .await?;
             if let Some(server) = registry
                 .custom_servers
+                .iter()
+                .find(|server| server.identity == name)
+            {
+                println!("{}", serde_json::to_string_pretty(server)?);
+                return Ok(());
+            }
+            if let Some(server) = registry
+                .remote_servers
                 .iter()
                 .find(|server| server.identity == name)
             {

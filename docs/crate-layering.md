@@ -176,9 +176,9 @@ profile policy during migration.
 
 Session insertion owns its initial layout placement, layout revision bump, and
 default channel/subscription writes. The layout and channel modules own later
-user-driven mutations. Trusted MCP owns the custom-MCP read/snapshot/rule
-helpers used to resolve a policy; `custom_mcp` re-exports those helpers for its
-administrative API.
+user-driven mutations. Trusted MCP owns custom and remote MCP
+read/snapshot/rule helpers used to resolve a policy; `custom_mcp` and
+`remote_mcp` re-export those helpers for their administrative APIs.
 
 ## Why not traits
 

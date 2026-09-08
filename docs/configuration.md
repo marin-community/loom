@@ -89,7 +89,23 @@ profiles:
       protocol: acp
       instructions: |
         Follow the organization's repository and landing conventions.
+      mcp_access:
+        mode: groups
+        groups:
+          - marina
     env: []
+remote_mcps:
+  - identity: /marina/api
+    label: Marina API
+    description: Search and call Marina API operations.
+    url: https://marina.example.com/api/marina/mcp/
+    auth:
+      type: iap
+      audience: IAP_CLIENT_ID
+    tools:
+      - find_tool
+      - call_tool
+    enabled: true
 federations: []
 prune: true
 ```
@@ -148,8 +164,9 @@ Apply it through the authenticated local CLI:
 loom deployment apply --file loom-deployment.yaml
 ```
 
-With `prune: true`, deployment-managed settings, profiles, and federation
-mappings omitted from the manifest are removed from the deployment layer.
+With `prune: true`, deployment-managed settings, remote MCP servers, profiles,
+and federation mappings omitted from the manifest are removed from the
+deployment layer.
 Runtime setting overrides are never pruned. A full desired-state manifest
 should use `prune: true`; a partial update should use `false`.
 

@@ -1,8 +1,7 @@
 use axum::http::StatusCode;
 use weaver_api::operations::profiles as profiles_operations;
 use weaver_api::{
-    EffectiveProfileView, LaunchSelection, McpServerProcessView, ProfileDeleteResult,
-    ProfileEnvView, ProfileView,
+    EffectiveProfileView, LaunchSelection, ProfileDeleteResult, ProfileEnvView, ProfileView,
 };
 
 use crate::profile::{self, Profile, ProfileInput};
@@ -175,21 +174,8 @@ async fn effective(st: &AppState, item: Profile) -> ApiResult<EffectiveProfileVi
         .map_err(|error| AppError::bad_request(error.to_string()))?;
     let runtime_permissions = profile::effective_allowed_tool_rules_for(&item, &mcp_policy)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
-    let mcp_servers = crate::mcp::acp_server_configs(&runtime_permissions, Some(&mcp_policy), &[])
-        .into_iter()
-        .map(|config| McpServerProcessView {
-            name: config["name"].as_str().unwrap_or_default().to_string(),
-            command: config["command"].as_str().unwrap_or_default().to_string(),
-            args: config["args"]
-                .as_array()
-                .map(|args| {
-                    args.iter()
-                        .filter_map(|arg| arg.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        })
-        .collect();
+    let mcp_servers = crate::mcp::server_views(&runtime_permissions, Some(&mcp_policy))
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
     Ok(EffectiveProfileView {
         profile: view(st, item).await?,
         mcp_policy,

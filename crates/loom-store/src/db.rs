@@ -155,6 +155,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "acp-driver-epoch",
         include_str!("../migrations/0029_acp_driver_epoch.sql"),
     ),
+    (
+        30,
+        "remote-mcp",
+        include_str!("../migrations/0030_remote_mcp.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
