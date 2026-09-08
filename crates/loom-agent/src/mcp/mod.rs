@@ -118,6 +118,8 @@ fn validate_adapters() {
 }
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
 const BUILTIN_SERVER_NAME: &str = "loom";
+// Compute Engine's HTTP metadata endpoint is host-local and available on every
+// VM type; its HTTPS alternative is limited to Shielded VMs.
 const GCP_IDENTITY_ENDPOINT: &str =
     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity";
 const BUILTIN_RUNTIME_ENV: [&str; 4] = [
