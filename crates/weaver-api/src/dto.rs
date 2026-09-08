@@ -840,7 +840,7 @@ pub enum RemoteMcpAuth {
         #[serde(default)]
         prefix: String,
     },
-    GcpIdentityToken {
+    Iap {
         audience: String,
     },
 }

@@ -840,26 +840,23 @@ pub fn server_configs_for_snapshot(
     servers
 }
 
-async fn gcp_identity_token(audience: &str) -> Result<String> {
-    gcp_identity_token_from(GCP_IDENTITY_ENDPOINT, audience).await
+async fn iap_token(audience: &str) -> Result<String> {
+    iap_token_from(GCP_IDENTITY_ENDPOINT, audience).await
 }
 
-async fn gcp_identity_token_from(endpoint: &str, audience: &str) -> Result<String> {
+async fn iap_token_from(endpoint: &str, audience: &str) -> Result<String> {
     let response = reqwest::Client::new()
         .get(endpoint)
         .query(&[("audience", audience), ("format", "full")])
         .header("Metadata-Flavor", "Google")
         .send()
         .await
-        .context("requesting a GCP workload identity token for remote MCP")?
+        .context("requesting an IAP token for remote MCP")?
         .error_for_status()
-        .context("the GCP workload identity token request was rejected")?;
-    let token = response
-        .text()
-        .await
-        .context("reading the GCP workload identity token")?;
+        .context("the IAP token request was rejected")?;
+    let token = response.text().await.context("reading the IAP token")?;
     if token.trim().is_empty() {
-        bail!("the GCP workload identity endpoint returned an empty token");
+        bail!("the IAP token endpoint returned an empty token");
     }
     Ok(token)
 }
@@ -907,7 +904,7 @@ pub fn server_views(
                 {
                     RemoteMcpAuth::None => Vec::new(),
                     RemoteMcpAuth::Environment { header, .. } => vec![header],
-                    RemoteMcpAuth::GcpIdentityToken { .. } => {
+                    RemoteMcpAuth::Iap { .. } => {
                         vec!["Authorization".to_string()]
                     }
                 }
@@ -957,9 +954,9 @@ pub async fn acp_server_configs(
                     &environment,
                     &prefix,
                 )?],
-                RemoteMcpAuth::GcpIdentityToken { audience } => vec![serde_json::json!({
+                RemoteMcpAuth::Iap { audience } => vec![serde_json::json!({
                     "name": "Authorization",
-                    "value": format!("Bearer {}", gcp_identity_token(&audience).await?),
+                    "value": format!("Bearer {}", iap_token(&audience).await?),
                 })],
             };
             servers.push(serde_json::json!({
@@ -1118,7 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gcp_identity_auth_uses_the_metadata_endpoint() {
+    async fn iap_auth_uses_the_metadata_endpoint() {
         use axum::extract::Query;
         use axum::http::HeaderMap;
         use axum::routing::get;
@@ -1145,10 +1142,9 @@ mod tests {
             .unwrap();
         });
 
-        let token =
-            super::gcp_identity_token_from(&format!("http://{address}/identity"), "iap-client-id")
-                .await
-                .unwrap();
+        let token = super::iap_token_from(&format!("http://{address}/identity"), "iap-client-id")
+            .await
+            .unwrap();
         assert_eq!(token, "signed-token");
     }
 

@@ -100,7 +100,7 @@ remote_mcps:
     description: Search and call Marina API operations.
     url: https://marina.example.com/api/marina/mcp/
     auth:
-      type: gcp_identity_token
+      type: iap
       audience: IAP_CLIENT_ID
     tools:
       - find_tool

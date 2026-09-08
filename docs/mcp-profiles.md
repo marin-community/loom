@@ -76,10 +76,11 @@ profiles and sessions pin the complete revision. It passes selected remotes to
 ACP agents as native `type: http` server descriptors. No local proxy process is
 started.
 
-Remote authentication is either absent, read from one launch-environment
-variable, or minted from the host's GCP workload identity for a configured
-audience. Registry and session views expose only header names and credential
-sources. GCP identity tokens are minted when an ACP process starts, including
+Remote authentication is explicitly configured as absent, read from one
+launch-environment variable, or protected by Google Cloud IAP. For IAP, Loom
+mints an identity token from the host workload identity for the configured
+OAuth audience. Registry and session views expose only header names and
+credential sources. IAP tokens are minted when an ACP process starts, including
 recovery; ACP does not provide a mid-session header-refresh callback, so a
 continuously running process may need recovery after the token expires.
 
@@ -143,7 +144,7 @@ loom mcp show loom/github/comment@v1
 loom mcp add /engineering/search/docs --file server.py --tests test_mcp.py
 loom mcps remote create /marina/api --label "Marina API" \
   --url https://marina.example.com/api/marina/mcp/ \
-  --auth '{"type":"gcp_identity_token","audience":"IAP_CLIENT_ID"}' \
+  --auth '{"type":"iap","audience":"IAP_CLIENT_ID"}' \
   --tools '["find_tool","call_tool"]'
 loom profile add ops --agent codex --mcp github,messaging
 loom profile show ops --effective

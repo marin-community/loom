@@ -36,12 +36,12 @@ fn validate_auth(auth: &RemoteMcpAuth) -> Result<()> {
             }
             Ok(())
         }
-        RemoteMcpAuth::GcpIdentityToken { audience } => {
+        RemoteMcpAuth::Iap { audience } => {
             if audience.trim().is_empty()
                 || audience.len() > 2048
                 || audience.contains(['\r', '\n', '\0'])
             {
-                bail!("remote MCP GCP identity-token audience must contain 1 to 2048 bytes");
+                bail!("remote MCP IAP audience must contain 1 to 2048 bytes");
             }
             Ok(())
         }
@@ -250,5 +250,25 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_request(&req).is_err());
+    }
+
+    #[test]
+    fn iap_auth_has_an_explicit_wire_variant() {
+        let req: RemoteMcpReq = serde_json::from_value(serde_json::json!({
+            "identity": "/ops/api",
+            "label": "API",
+            "url": "https://example.com/mcp",
+            "auth": {"type": "iap", "audience": "iap-client-id"},
+            "tools": ["read"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            req.auth,
+            RemoteMcpAuth::Iap {
+                audience: "iap-client-id".to_string()
+            }
+        );
+        validate_request(&req).unwrap();
     }
 }
