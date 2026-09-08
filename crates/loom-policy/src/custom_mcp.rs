@@ -307,6 +307,16 @@ async fn validate_source(source: &str, test_source: &str) -> (String, Vec<String
 pub async fn upsert(db: &Db, req: &CustomMcpReq) -> Result<CustomMcpView> {
     let group = validate_request(req)?;
     let existing = get(db, &req.identity).await?;
+    if existing.is_none()
+        && crate::remote_mcp::get(db, req.identity.trim())
+            .await?
+            .is_some()
+    {
+        bail!(
+            "MCP identity '{}' is already registered as remote",
+            req.identity.trim()
+        );
+    }
     if let Some(existing) = &existing {
         if existing.source == req.source
             && existing.test_source == req.test_source
@@ -388,7 +398,11 @@ pub async fn remove(db: &Db, identity: &str) -> Result<bool> {
     let group_has_other_server = list(db)
         .await?
         .iter()
-        .any(|server| server.identity != identity && server.group == target.group);
+        .any(|server| server.identity != identity && server.group == target.group)
+        || crate::remote_mcp::list(db)
+            .await?
+            .iter()
+            .any(|server| server.group == target.group);
     if !group_has_other_server {
         for profile in crate::profile::list(db).await? {
             let access = profile.mcp_access()?;

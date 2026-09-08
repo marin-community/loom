@@ -193,6 +193,11 @@ async fn validate_input(
             || (input.mcp_access.mode == "groups"
                 && input.mcp_access.groups.contains(&server.group))
     });
+    let remote_selected = crate::mcp::list_remote(db).await?.iter().any(|server| {
+        input.mcp_access.mode == "all"
+            || (input.mcp_access.mode == "groups"
+                && input.mcp_access.groups.contains(&server.group))
+    });
     if input.mcp_access.mode != "groups" && !input.mcp_access.groups.is_empty() {
         bail!("MCP groups may only be set when MCP access mode is 'groups'");
     }
@@ -253,6 +258,7 @@ async fn validate_input(
             || input.mcp_access.mode == "all"
             || (input.allowed_tools.is_empty() && mcp_snapshot.capability_sets.is_empty())
             || custom_selected
+            || remote_selected
             || input
                 .allowed_tools
                 .iter()

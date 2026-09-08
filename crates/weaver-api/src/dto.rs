@@ -691,6 +691,8 @@ pub struct McpRegistryView {
     pub capability_sets: Vec<McpCapabilitySetView>,
     #[serde(default)]
     pub custom_servers: Vec<CustomMcpView>,
+    #[serde(default)]
+    pub remote_servers: Vec<RemoteMcpView>,
 }
 
 /// Provider-neutral MCP selection carried by a profile.
@@ -719,6 +721,8 @@ pub struct McpPolicySnapshot {
     pub capability_sets: Vec<McpCapabilitySetView>,
     #[serde(default)]
     pub custom_servers: Vec<CustomMcpSnapshot>,
+    #[serde(default)]
+    pub remote_servers: Vec<RemoteMcpSnapshot>,
 }
 
 /// Source-redacted MCP audit policy returned on ordinary session views.
@@ -729,6 +733,8 @@ pub struct SessionMcpPolicyView {
     pub capability_sets: Vec<McpCapabilitySetView>,
     #[serde(default)]
     pub custom_servers: Vec<SessionCustomMcpView>,
+    #[serde(default)]
+    pub remote_servers: Vec<RemoteMcpSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -758,6 +764,7 @@ impl From<&McpPolicySnapshot> for SessionMcpPolicyView {
                     tools: server.tools.clone(),
                 })
                 .collect(),
+            remote_servers: snapshot.remote_servers.clone(),
         }
     }
 }
@@ -820,11 +827,89 @@ pub struct CustomMcpDeleteResult {
     pub identity: String,
 }
 
+/// Credential material Loom resolves when launching a remote HTTP MCP server.
+/// The registry stores only the source, never the resulting secret or token.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RemoteMcpAuth {
+    #[default]
+    None,
+    Environment {
+        header: String,
+        environment: String,
+        #[serde(default)]
+        prefix: String,
+    },
+    GcpIdentityToken {
+        audience: String,
+    },
+}
+
+/// Body for creating or updating a remote Streamable HTTP MCP server.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteMcpReq {
+    pub identity: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+    pub url: String,
+    #[serde(default)]
+    pub auth: RemoteMcpAuth,
+    pub tools: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Latest remote MCP definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteMcpView {
+    pub identity: String,
+    pub group: String,
+    pub label: String,
+    pub description: String,
+    pub enabled: bool,
+    pub revision: i64,
+    pub digest: String,
+    pub server_name: String,
+    pub url: String,
+    pub auth: RemoteMcpAuth,
+    pub tools: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Exact remote server revision stamped onto a profile and session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteMcpSnapshot {
+    pub identity: String,
+    pub group: String,
+    pub revision: i64,
+    pub digest: String,
+    pub server_name: String,
+    pub url: String,
+    pub auth: RemoteMcpAuth,
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoteMcpDeleteResult {
+    pub deleted: bool,
+    pub identity: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct McpServerProcessView {
+pub struct McpServerView {
     pub name: String,
+    #[serde(rename = "type")]
+    pub transport: String,
+    #[serde(default)]
     pub command: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub headers: Vec<String>,
 }
 
 /// Fully resolved non-secret profile policy without launching a session.
@@ -833,7 +918,7 @@ pub struct EffectiveProfileView {
     pub profile: ProfileView,
     pub mcp_policy: McpPolicySnapshot,
     pub runtime_permissions: Vec<String>,
-    pub mcp_servers: Vec<McpServerProcessView>,
+    pub mcp_servers: Vec<McpServerView>,
 }
 
 /// Response from the scalar `profiles.delete` operation.
@@ -1165,6 +1250,7 @@ impl DeploymentSettingValue {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentView {
     pub settings: Vec<SettingView>,
+    pub remote_mcps: Vec<RemoteMcpView>,
     pub profiles: Vec<ProfileView>,
     pub federations: Vec<FederationView>,
 }

@@ -5,7 +5,7 @@ use crate::operations::mcps;
 use crate::operations::{NoView, Render};
 
 impl Render for mcps::get::Op {
-    /// The builtin capability sets, then the custom servers. One table, because
+    /// The builtin capability sets, then custom and remote servers. One table, because
     /// what an operator is choosing between is a capability, and where it came
     /// from is a column: a builtin carries a version, a custom server a
     /// revision and the validation state that decides whether it may run.
@@ -21,6 +21,12 @@ impl Render for mcps::get::Op {
             lines.push(format!(
                 "{:<30} r{:<3} {:<12} {}",
                 server.identity, server.revision, server.validation_state, server.description
+            ));
+        }
+        for server in &output.remote_servers {
+            lines.push(format!(
+                "{:<30} r{:<3} {:<12} {}",
+                server.identity, server.revision, "remote", server.description
             ));
         }
         if lines.is_empty() {

@@ -29,6 +29,15 @@ async fn reconcile_deployment_core(
     }
 
     let mut profile_names = BTreeSet::new();
+    let mut remote_mcp_identities = BTreeSet::new();
+    for remote in &req.remote_mcps {
+        let identity = remote.identity.trim();
+        if !remote_mcp_identities.insert(identity.to_string()) {
+            return Err(AppError::bad_request(format!(
+                "remote MCP '{identity}' is declared more than once"
+            )));
+        }
+    }
     for declared in &req.profiles {
         let name = declared.profile.name.trim();
         if !profile_names.insert(name.to_string()) {
@@ -74,6 +83,13 @@ async fn reconcile_deployment_core(
     let _resolver_permit = st.launch_gate.acquire_resolver().await;
 
     config::reconcile_deployment(&st.db, &setting_values, req.prune).await?;
+
+    for remote in &req.remote_mcps {
+        let saved = crate::remote_mcp::upsert(&st.db, remote)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?;
+        crate::remote_mcp::mark_deployment_managed(&st.db, &saved.identity).await?;
+    }
 
     for declared in &req.profiles {
         let input = super::profiles::input(
@@ -136,6 +152,13 @@ async fn reconcile_deployment_core(
                     .map_err(|error| AppError::bad_request(error.to_string()))?;
             }
         }
+        for identity in crate::remote_mcp::deployment_managed_identities(&st.db).await? {
+            if !remote_mcp_identities.contains(&identity) {
+                crate::remote_mcp::remove(&st.db, &identity)
+                    .await
+                    .map_err(|error| AppError::bad_request(error.to_string()))?;
+            }
+        }
     }
 
     let mut profile_views = Vec::new();
@@ -157,8 +180,14 @@ async fn reconcile_deployment_core(
         .filter(|setting| setting_names.contains(setting.spec.key))
         .map(Into::into)
         .collect();
+    let remote_mcps = crate::remote_mcp::list(&st.db)
+        .await?
+        .into_iter()
+        .filter(|server| remote_mcp_identities.contains(&server.identity))
+        .collect();
     Ok(DeploymentView {
         settings,
+        remote_mcps,
         profiles: profile_views,
         federations: mappings,
     })

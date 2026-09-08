@@ -63,6 +63,7 @@ and the rule for placing a new module.
 | `crates/loom-agent/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agents/oneshot` |
 | `crates/loom-agent/src/mcp/` | trusted builtin MCP registry and stdio adapters: provider-neutral versioned capability sets, exact permission translation, and the fixed GitHub/messaging/self-history bridges |
 | `crates/loom-policy/src/custom_mcp.rs` | operator-authored MCP definitions: grouped path identities, immutable sqlite revisions, bounded `uv` validation, and exact session-snapshot execution |
+| `crates/loom-policy/src/remote_mcp.rs` | operator-registered Streamable HTTP MCP definitions: grouped identities, immutable URL/auth/tool revisions, deployment ownership, and profile pinning |
 | `crates/loom-policy/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom-core/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
 | `crates/loom-launch/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
@@ -1101,12 +1102,13 @@ selection and credentials remain Loom-owned policy; the image registration
 only teaches stock `git` and `gh` how to ask for them.
 
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
-or an explicit group list. Saving resolves the trusted builtin registry and
-enabled, validated custom definitions and pins the exact result to that profile
-revision. Launch copies the capability
-identities/digests and custom source revisions into
-`sessions.policy_mcp_access`, and gives every ACP runtime native `mcpServers`
-descriptors whose exposed tools are filtered to the stamped rules.
+or an explicit group list. Saving resolves the trusted builtin registry,
+enabled validated custom definitions, and enabled remote definitions, then pins
+the exact result to that profile revision. Launch copies capability identities,
+digests, custom source revisions, and remote HTTP descriptors into
+`sessions.policy_mcp_access`. Every ACP runtime receives native `mcpServers`
+descriptors whose exposed tools are filtered to the stamped rules; remote
+servers use ACP's HTTP transport directly rather than a Loom proxy process.
 One built-in `loom` MCP server exposes namespaced context, channel, artifact,
 session, messaging, permission, issue, and fixed-repository GitHub tools.
 Resource tools return concise text plus

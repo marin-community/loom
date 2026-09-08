@@ -409,6 +409,14 @@ pub struct InitializeResult {
 pub struct AgentCapabilities {
     #[serde(default)]
     pub load_session: bool,
+    #[serde(default)]
+    pub mcp_capabilities: McpCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct McpCapabilities {
+    #[serde(default)]
+    pub http: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

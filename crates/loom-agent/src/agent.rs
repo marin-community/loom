@@ -1202,7 +1202,8 @@ pub async fn build_acp_launch(
         configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
     }
-    let mcp_servers = crate::mcp::acp_server_configs(&allowed_tools, Some(&mcp_snapshot), &env);
+    let mcp_servers =
+        crate::mcp::acp_server_configs(&allowed_tools, Some(&mcp_snapshot), &env).await?;
 
     let (new_or_load, goal) = match open {
         AcpOpen::Fresh => (

@@ -50,6 +50,98 @@ fn interactive_shell_profile(name: &str) -> serde_json::Value {
     })
 }
 
+#[tokio::test]
+async fn remote_mcp_profile_pins_revisions_and_renders_http() {
+    let ts = TestServer::start_api_only().await;
+    let server = json!({
+        "identity": "/marina/api",
+        "label": "Marina API",
+        "description": "Search and call Marina API operations.",
+        "url": "https://marina.example.com/api/marina/mcp/",
+        "auth": {
+            "type": "environment",
+            "header": "Authorization",
+            "environment": "MARINA_MCP_TOKEN",
+            "prefix": "Bearer "
+        },
+        "tools": ["find_tool", "call_tool"],
+        "enabled": true
+    });
+    let created = ts
+        .client
+        .post("/api/mcps/remote/create", server.clone())
+        .await
+        .unwrap();
+    assert_eq!(created["revision"], 1);
+    assert!(created["digest"].as_str().unwrap().starts_with("sha256:"));
+
+    let profile = json!({
+        "name": "marina-tools",
+        "description": "Marina agent",
+        "agent_kind": "codex",
+        "protocol": "acp",
+        "mcp_access": {"mode": "groups", "groups": ["marina"]}
+    });
+    ts.client
+        .post("/api/profiles/create", profile.clone())
+        .await
+        .unwrap();
+    let effective = ts
+        .client
+        .post("/api/profiles/effective", json!({"name": "marina-tools"}))
+        .await
+        .unwrap();
+    assert_eq!(effective["mcp_policy"]["remote_servers"][0]["revision"], 1);
+    assert_eq!(effective["mcp_servers"][0]["type"], "http");
+    assert_eq!(
+        effective["mcp_servers"][0]["url"],
+        "https://marina.example.com/api/marina/mcp/"
+    );
+    assert_eq!(
+        effective["mcp_servers"][0]["headers"],
+        json!(["Authorization"])
+    );
+    assert!(effective["mcp_servers"][0]["command"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    assert!(effective["runtime_permissions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|rule| rule.as_str().unwrap().ends_with("__find_tool")));
+
+    let mut changed = server;
+    changed["url"] = json!("https://marina.example.com/api/marina/mcp/v2/");
+    let updated = ts
+        .client
+        .post("/api/mcps/remote/update", changed)
+        .await
+        .unwrap();
+    assert_eq!(updated["revision"], 2);
+    let pinned = ts
+        .client
+        .post("/api/profiles/effective", json!({"name": "marina-tools"}))
+        .await
+        .unwrap();
+    assert_eq!(pinned["mcp_policy"]["remote_servers"][0]["revision"], 1);
+    assert_eq!(
+        pinned["mcp_policy"]["remote_servers"][0]["url"],
+        "https://marina.example.com/api/marina/mcp/"
+    );
+
+    ts.client
+        .post("/api/profiles/update", profile)
+        .await
+        .unwrap();
+    let repinned = ts
+        .client
+        .post("/api/profiles/effective", json!({"name": "marina-tools"}))
+        .await
+        .unwrap();
+    assert_eq!(repinned["mcp_policy"]["remote_servers"][0]["revision"], 2);
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn profile_capacity_admission_is_serialized_across_repositories() {
@@ -843,6 +935,20 @@ async fn deployment_reconcile_rest_journey() {
             "slack.status_updates": false,
             "slack.prompt_instructions": "Use the Marin response style."
         },
+        "remote_mcps": [{
+            "identity": "/marina/api",
+            "label": "Marina API",
+            "description": "Search and call Marina API operations.",
+            "url": "https://marina.example.com/api/marina/mcp/",
+            "auth": {
+                "type": "environment",
+                "header": "Authorization",
+                "environment": "MARINA_MCP_TOKEN",
+                "prefix": "Bearer "
+            },
+            "tools": ["find_tool", "call_tool"],
+            "enabled": true
+        }],
         "profiles": [{
             "profile": {
                 "name": "ops",
@@ -856,7 +962,7 @@ async fn deployment_reconcile_rest_journey() {
                 "max_concurrent": 1,
                 "turn_budget": 20,
                 "instructions": "Follow the deployment-owned incident workflow.",
-                "mcp_access": {"mode": "groups", "groups": ["messaging"]}
+                "mcp_access": {"mode": "groups", "groups": ["marina", "messaging"]}
             },
             "env": [{
                 "name": "KUBECONFIG",
@@ -903,8 +1009,15 @@ async fn deployment_reconcile_rest_journey() {
     );
     assert_eq!(
         first["profiles"][0]["mcp_access"],
-        json!({"mode": "groups", "groups": ["messaging"]})
+        json!({"mode": "groups", "groups": ["marina", "messaging"]})
     );
+    assert_eq!(first["remote_mcps"][0]["identity"], "/marina/api");
+    assert_eq!(first["remote_mcps"][0]["revision"], 1);
+    assert_eq!(
+        first["remote_mcps"][0]["tools"],
+        json!(["find_tool", "call_tool"])
+    );
+    assert_eq!(first["remote_mcps"][0]["auth"]["type"], "environment");
     assert_eq!(first["profiles"][0]["env"][0]["source"], "gcp_secret");
     assert_eq!(
         first["profiles"][0]["env"][0]["secret_ref"],
@@ -956,11 +1069,18 @@ async fn deployment_reconcile_rest_journey() {
         .unwrap();
     assert_eq!(second["profiles"][0]["revision"], 2);
     assert_eq!(second["federations"][0]["id"], mapping_id);
+    assert_eq!(second["remote_mcps"][0]["revision"], 1);
 
     ts.client
         .post(
             "/api/deployment/reconcile",
-            json!({ "settings": {}, "profiles": [], "federations": [], "prune": true }),
+            json!({
+                "settings": {},
+                "remote_mcps": [],
+                "profiles": [],
+                "federations": [],
+                "prune": true
+            }),
         )
         .await
         .unwrap();
@@ -984,6 +1104,10 @@ async fn deployment_reconcile_rest_journey() {
         .await
         .unwrap();
     assert_eq!(profile.status(), StatusCode::NOT_FOUND);
+    assert!(loom::remote_mcp::get(&ts.state.db, "/marina/api")
+        .await
+        .unwrap()
+        .is_none());
 
     let resolver = ts.state.launch_gate.acquire_resolver().await;
     let reconcile_url = format!("http://{}/api/deployment/reconcile", ts.addr);

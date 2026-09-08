@@ -34,8 +34,9 @@ pub async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
                 .invoke::<deployment::reconcile::Op>(&request)
                 .await?;
             println!(
-                "reconciled {} settings, {} profiles, and {} federation mappings",
+                "reconciled {} settings, {} remote MCP servers, {} profiles, and {} federation mappings",
                 result.settings.len(),
+                result.remote_mcps.len(),
                 result.profiles.len(),
                 result.federations.len()
             );
