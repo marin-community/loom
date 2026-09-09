@@ -374,6 +374,15 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "browser.allowed_origins",
+        label: "Embedded browser origins",
+        description: "Comma-separated exact origins allowed to call the small browser-embedding API with Loom's login cookie. Leave blank to disable cross-origin browser access.",
+        kind: SettingKind::String,
+        default: "",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
         key: "terminal.theme",
         label: "Terminal theme",
         description: "Colour palette for the in-browser terminal. `dark` is \

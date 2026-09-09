@@ -125,8 +125,8 @@ use std::path::PathBuf;
 
 use axum::{
     body::HttpBody as _,
-    extract::{DefaultBodyLimit, Request},
-    http::{header, StatusCode},
+    extract::{DefaultBodyLimit, Request, State},
+    http::{header, HeaderValue, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -138,6 +138,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::Instrument;
 
+use crate::config;
 use crate::db::Db;
 use crate::github;
 use crate::session::{self as session_mod, Session};
@@ -714,6 +715,125 @@ fn static_dir() -> PathBuf {
         .join("dist")
 }
 
+const BROWSER_API_PATHS: &[&str] = &[
+    "/api/auth/me",
+    "/api/sessions/launch",
+    "/api/sessions/get",
+    "/api/sessions/url",
+    "/api/sessions/chat",
+    "/api/sessions/chat/stream",
+    "/api/sessions/prompt/create",
+    "/api/sessions/interrupt",
+    "/api/sessions/recover",
+    "/api/sessions/permissions/answer",
+];
+
+fn browser_origin_allowed(configured: &str, origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    configured
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .any(|candidate| candidate == origin && browser_origin_is_safe(candidate))
+}
+
+fn browser_origin_is_safe(origin: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(origin) else {
+        return false;
+    };
+    if parsed.origin().ascii_serialization() != origin
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return false;
+    }
+    match parsed.scheme() {
+        "https" => true,
+        "http" => {
+            parsed.port().is_some()
+                && matches!(parsed.host_str(), Some("127.0.0.1" | "[::1]" | "::1"))
+        }
+        _ => false,
+    }
+}
+
+fn browser_request_headers_allowed(value: Option<&HeaderValue>) -> bool {
+    value.is_none_or(|value| {
+        value.to_str().is_ok_and(|headers| {
+            headers
+                .split(',')
+                .map(str::trim)
+                .all(|name| name.eq_ignore_ascii_case("content-type"))
+        })
+    })
+}
+
+fn add_browser_cors_headers(response: &mut Response, origin: HeaderValue, preflight: bool) {
+    response
+        .headers_mut()
+        .insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        HeaderValue::from_static("true"),
+    );
+    response
+        .headers_mut()
+        .append(header::VARY, HeaderValue::from_static("Origin"));
+    if preflight {
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST"),
+        );
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("Content-Type"),
+        );
+    }
+}
+
+async fn browser_cors(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if !BROWSER_API_PATHS.contains(&request.uri().path()) {
+        return next.run(request).await;
+    }
+    let Some(origin) = request.headers().get(header::ORIGIN).cloned() else {
+        return next.run(request).await;
+    };
+    let configured = config::get(&state.db, "browser.allowed_origins")
+        .await
+        .unwrap_or_default();
+    if !browser_origin_allowed(&configured, &origin) {
+        return next.run(request).await;
+    }
+    if request.method() == Method::OPTIONS {
+        let requested_method = request
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+            .and_then(|value| value.to_str().ok());
+        let requested_headers = request
+            .headers()
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS);
+        if !matches!(requested_method, Some("GET" | "POST"))
+            || !browser_request_headers_allowed(requested_headers)
+        {
+            return next.run(request).await;
+        }
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        add_browser_cors_headers(&mut response, origin, true);
+        return response;
+    }
+    if request.method() != Method::GET && request.method() != Method::POST {
+        return next.run(request).await;
+    }
+    let mut response = next.run(request).await;
+    add_browser_cors_headers(&mut response, origin, false);
+    response
+}
+
 fn registered_api_router() -> Router<AppState> {
     // Declarations and handlers must be the same set, and the moment to find
     // out is boot — not the first request to a descriptor nothing serves.
@@ -812,7 +932,14 @@ pub fn router(state: AppState) -> Router {
         .fallback_service(ServeDir::new(static_dir()).fallback(ServeFile::new(index)))
         .layer(axum::middleware::from_fn(static_cache_middleware))
         .layer(CompressionLayer::new())
+        // Preserve Loom's existing non-credentialed wildcard CORS behavior.
+        // The outer browser_cors layer replaces those headers with an exact
+        // origin only for the explicitly configured embedding surface.
         .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            browser_cors,
+        ))
         // Outermost, so it wraps auth and every other layer: tag each request's log
         // lines with its method + path (see `request_context_span`).
         .layer(axum::middleware::from_fn(request_context_span))
@@ -840,6 +967,28 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("docker removal failed"));
+    }
+
+    #[test]
+    fn embedded_browser_origins_require_https_or_loopback_http() {
+        for origin in [
+            "https://marina.example",
+            "https://marina.example:8443",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(browser_origin_is_safe(origin), "{origin}");
+        }
+        for origin in [
+            "null",
+            "*",
+            "http://marina.example",
+            "https://marina.example/",
+            "https://marina.example/path",
+            "https://user@marina.example",
+        ] {
+            assert!(!browser_origin_is_safe(origin), "{origin}");
+        }
     }
 
     #[test]
