@@ -64,7 +64,6 @@ async fn remote_mcp_profile_pins_revisions_and_renders_http() {
             "environment": "MARINA_MCP_TOKEN",
             "prefix": "Bearer "
         },
-        "tools": ["find_tool", "call_tool"],
         "enabled": true
     });
     let created = ts
@@ -109,7 +108,7 @@ async fn remote_mcp_profile_pins_revisions_and_renders_http() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|rule| rule.as_str().unwrap().ends_with("__find_tool")));
+        .any(|rule| rule.as_str().unwrap().ends_with("__*")));
 
     let mut changed = server;
     changed["url"] = json!("https://marina.example.com/api/marina/mcp/v2/");
@@ -946,7 +945,6 @@ async fn deployment_reconcile_rest_journey() {
                 "environment": "MARINA_MCP_TOKEN",
                 "prefix": "Bearer "
             },
-            "tools": ["find_tool", "call_tool"],
             "enabled": true
         }],
         "profiles": [{
@@ -1013,10 +1011,6 @@ async fn deployment_reconcile_rest_journey() {
     );
     assert_eq!(first["remote_mcps"][0]["identity"], "/marina/api");
     assert_eq!(first["remote_mcps"][0]["revision"], 1);
-    assert_eq!(
-        first["remote_mcps"][0]["tools"],
-        json!(["find_tool", "call_tool"])
-    );
     assert_eq!(first["remote_mcps"][0]["auth"]["type"], "environment");
     assert_eq!(first["profiles"][0]["env"][0]["source"], "gcp_secret");
     assert_eq!(

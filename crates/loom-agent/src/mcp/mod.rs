@@ -158,14 +158,13 @@ struct RemoteMcpRow {
     url: String,
     auth_json: String,
     digest: String,
-    tools_json: String,
     created_at: String,
     updated_at: String,
 }
 
 fn remote_mcp_query() -> &'static str {
     "SELECT s.identity, s.group_name, s.label, s.description, s.enabled,
-            s.current_revision, r.url, r.auth_json, r.digest, r.tools_json,
+            s.current_revision, r.url, r.auth_json, r.digest,
             s.created_at, s.updated_at
      FROM remote_mcp_servers s
      JOIN remote_mcp_revisions r
@@ -184,7 +183,6 @@ fn remote_mcp_view(row: RemoteMcpRow) -> Result<RemoteMcpView> {
         digest: row.digest,
         url: row.url,
         auth: serde_json::from_str(&row.auth_json).context("invalid remote MCP auth")?,
-        tools: serde_json::from_str(&row.tools_json).context("invalid remote MCP tools")?,
         created_at: row.created_at,
         updated_at: row.updated_at,
     })
@@ -219,7 +217,6 @@ pub fn ready_remote_snapshots(items: &[RemoteMcpView]) -> Vec<RemoteMcpSnapshot>
             server_name: item.server_name.clone(),
             url: item.url.clone(),
             auth: item.auth.clone(),
-            tools: item.tools.clone(),
         })
         .collect()
 }
@@ -499,12 +496,7 @@ pub fn rules_for_snapshot(snapshot: &weaver_api::McpPolicySnapshot) -> Result<Ve
         }
     }
     for server in &snapshot.remote_servers {
-        for tool in &server.tools {
-            push_unique(
-                &mut rules,
-                custom_permission_rule(&server.server_name, tool),
-            );
-        }
+        push_unique(&mut rules, custom_permission_rule(&server.server_name, "*"));
     }
     Ok(rules)
 }
@@ -1082,12 +1074,11 @@ mod tests {
                     environment: "MARINA_TOKEN".to_string(),
                     prefix: "Bearer ".to_string(),
                 },
-                tools: vec!["find_tool".to_string(), "call_tool".to_string()],
             }],
             ..Default::default()
         };
         let servers = super::acp_server_configs(
-            &["mcp__loom_remote_test__find_tool".to_string()],
+            &["mcp__loom_remote_test__*".to_string()],
             Some(&snapshot),
             &[("MARINA_TOKEN".to_string(), "secret".to_string())],
         )
@@ -1105,7 +1096,7 @@ mod tests {
         );
 
         let error = super::acp_server_configs(
-            &["mcp__loom_remote_test__find_tool".to_string()],
+            &["mcp__loom_remote_test__*".to_string()],
             Some(&snapshot),
             &[],
         )

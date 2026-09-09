@@ -102,9 +102,6 @@ remote_mcps:
     auth:
       type: iap
       audience: IAP_CLIENT_ID
-    tools:
-      - find_tool
-      - call_tool
     enabled: true
 federations: []
 prune: true

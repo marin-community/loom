@@ -26,8 +26,6 @@ pub mod remote {
             pub url: String,
             #[operand(json, default = RemoteMcpAuth::default())]
             pub auth: RemoteMcpAuth,
-            #[operand(json)]
-            pub tools: Vec<String>,
             #[operand(default = true)]
             pub enabled: bool,
         }
@@ -89,8 +87,6 @@ pub mod remote {
             pub url: String,
             #[operand(json, default = RemoteMcpAuth::default())]
             pub auth: RemoteMcpAuth,
-            #[operand(json)]
-            pub tools: Vec<String>,
             #[operand(default = true)]
             pub enabled: bool,
         }
