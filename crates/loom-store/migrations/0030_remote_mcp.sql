@@ -16,7 +16,6 @@ CREATE TABLE remote_mcp_revisions (
     url         TEXT NOT NULL,
     auth_json   TEXT NOT NULL,
     digest      TEXT NOT NULL,
-    tools_json  TEXT NOT NULL,
     created_at  TEXT NOT NULL,
     PRIMARY KEY (identity, revision)
 );

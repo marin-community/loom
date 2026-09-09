@@ -38,7 +38,6 @@ pub(super) async fn create_remote_mcp_operation(
         description: input.description,
         url: input.url,
         auth: input.auth,
-        tools: input.tools,
         enabled: input.enabled,
     };
     let st = &context.state;
@@ -76,7 +75,6 @@ pub(super) async fn update_remote_mcp_operation(
         description: input.description,
         url: input.url,
         auth: input.auth,
-        tools: input.tools,
         enabled: input.enabled,
     };
     let st = &context.state;

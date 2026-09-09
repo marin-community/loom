@@ -8,8 +8,8 @@ final boundary.
 ## Ownership
 
 - **The registry describes capability.** Each builtin, custom, or remote entry
-  has a stable identity, group, version or revision, content digest, and exact
-  tool names. Builtin and custom entries also pin advertised schemas. All
+  has a stable identity, group, version or revision, and content digest.
+  Builtin and custom entries also pin exact tool names and advertised schemas. All
   builtin entries share Loom's aggregate server descriptor.
 - **A profile selects and pins policy.** `mcp_access` is `none`, `all`, or an
   explicit group list. Saving the profile resolves enabled registry content and
@@ -69,10 +69,10 @@ restricted profile.
 Custom code is dependency-contained operator code, not an operating-system
 sandbox. Repository content cannot provide executable MCP configuration.
 
-Remote definitions register an HTTPS Streamable HTTP endpoint, its exact tool
-names, and a credential source under the same absolute grouped identities as
-custom definitions. Loom versions the URL, authentication policy, and tools;
-profiles and sessions pin the complete revision. It passes selected remotes to
+Remote definitions register an HTTPS Streamable HTTP endpoint and a credential
+source under the same absolute grouped identities as custom definitions. Loom
+versions the URL and authentication policy; profiles and sessions pin that
+revision. It passes selected remotes to
 ACP agents as native `type: http` server descriptors. No local proxy process is
 started.
 
@@ -84,12 +84,11 @@ credential sources. IAP tokens are minted when an ACP process starts, including
 recovery; ACP does not provide a mid-session header-refresh callback, so a
 continuously running process may need recovery after the token expires.
 
-The remote endpoint is the execution trust boundary. Loom pins the declared
-tool names for policy and audit, but direct ACP transport does not interpose on
-`tools/list` or calls and therefore cannot suppress an unexpected tool exposed
-later at the same URL. Register endpoints whose exposed inventory is itself
-controlled and versioned; use a proxy transport if runtime filtering or
-credential refresh becomes a requirement.
+The remote endpoint is the execution trust boundary. The ACP provider discovers
+its current inventory with MCP `tools/list`; Loom grants the selected server as
+a whole and does not hard-code or proxy its tools. Register endpoints whose
+exposed inventory is itself controlled and versioned; use a proxy transport if
+runtime filtering or credential refresh becomes a requirement.
 
 ## Revisions and resolution
 
@@ -144,8 +143,7 @@ loom mcp show loom/github/comment@v1
 loom mcp add /engineering/search/docs --file server.py --tests test_mcp.py
 loom mcps remote create /marina/api --label "Marina API" \
   --url https://marina.example.com/api/marina/mcp/ \
-  --auth '{"type":"iap","audience":"IAP_CLIENT_ID"}' \
-  --tools '["find_tool","call_tool"]'
+  --auth '{"type":"iap","audience":"IAP_CLIENT_ID"}'
 loom profile add ops --agent codex --mcp github,messaging
 loom profile show ops --effective
 ```

@@ -7,8 +7,6 @@ use weaver_api::{RemoteMcpAuth, RemoteMcpReq, RemoteMcpView};
 use crate::db::{now_iso, Db};
 pub use crate::mcp::{get_remote as get, list_remote as list, remote_server_name as server_name};
 
-const TOOL_MAX_COUNT: usize = 256;
-
 fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -79,29 +77,14 @@ fn validate_request(req: &RemoteMcpReq) -> Result<(String, String)> {
         bail!("remote MCP description must be at most 4096 bytes");
     }
     validate_auth(&req.auth)?;
-    if req.tools.is_empty() || req.tools.len() > TOOL_MAX_COUNT {
-        bail!("remote MCP must declare 1 to {TOOL_MAX_COUNT} tools");
-    }
-    let mut unique = std::collections::HashSet::new();
-    if req
-        .tools
-        .iter()
-        .any(|tool| !valid_name(tool) || !unique.insert(tool))
-    {
-        bail!("remote MCP tool names must be unique and use letters, digits, '-' or '_'");
-    }
     Ok((group, normalized_url(&req.url)?))
 }
 
-fn digest(url: &str, auth: &RemoteMcpAuth, tools: &[String]) -> Result<String> {
+fn digest(url: &str, auth: &RemoteMcpAuth) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(url);
     hasher.update([0]);
     hasher.update(serde_json::to_vec(auth)?);
-    for tool in tools {
-        hasher.update([0]);
-        hasher.update(tool);
-    }
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
@@ -121,7 +104,6 @@ pub async fn upsert(db: &Db, req: &RemoteMcpReq) -> Result<RemoteMcpView> {
     if let Some(existing) = &existing {
         if existing.url == url
             && existing.auth == req.auth
-            && existing.tools == req.tools
             && existing.label == req.label.trim()
             && existing.description == req.description.trim()
             && existing.enabled == req.enabled
@@ -153,15 +135,14 @@ pub async fn upsert(db: &Db, req: &RemoteMcpReq) -> Result<RemoteMcpView> {
     .await?;
     sqlx::query(
         "INSERT INTO remote_mcp_revisions
-         (identity, revision, url, auth_json, digest, tools_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         (identity, revision, url, auth_json, digest, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(req.identity.trim())
     .bind(revision)
     .bind(&url)
     .bind(serde_json::to_string(&req.auth)?)
-    .bind(digest(&url, &req.auth, &req.tools)?)
-    .bind(serde_json::to_string(&req.tools)?)
+    .bind(digest(&url, &req.auth)?)
     .bind(&now)
     .execute(&mut *tx)
     .await?;
@@ -246,7 +227,6 @@ mod tests {
             identity: "/ops/api".to_string(),
             label: "API".to_string(),
             url: "http://example.com/mcp".to_string(),
-            tools: vec!["read".to_string()],
             ..Default::default()
         };
         assert!(validate_request(&req).is_err());
@@ -258,8 +238,7 @@ mod tests {
             "identity": "/ops/api",
             "label": "API",
             "url": "https://example.com/mcp",
-            "auth": {"type": "iap", "audience": "iap-client-id"},
-            "tools": ["read"]
+            "auth": {"type": "iap", "audience": "iap-client-id"}
         }))
         .unwrap();
 
