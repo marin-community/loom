@@ -612,6 +612,69 @@ async fn health_is_public_but_protected_routes_are_not() {
 
 #[tokio::test]
 #[serial]
+async fn embedded_browser_cors_is_credentialed_and_route_scoped() {
+    let ts = TestServer::start_api_only().await;
+    ts.client
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "browser.allowed_origins": "https://marina.example" } }),
+        )
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+
+    let preflight = http
+        .request(reqwest::Method::OPTIONS, url(&ts, "/api/sessions/launch"))
+        .header("Origin", "https://marina.example")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "Content-Type")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        preflight.headers()["access-control-allow-origin"],
+        "https://marina.example"
+    );
+    assert_eq!(
+        preflight.headers()["access-control-allow-credentials"],
+        "true"
+    );
+
+    let actual = http
+        .post(url(&ts, "/api/auth/me"))
+        .header("Origin", "https://marina.example")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(actual.status(), StatusCode::OK);
+    assert_eq!(
+        actual.headers()["access-control-allow-origin"],
+        "https://marina.example"
+    );
+
+    for (origin, path) in [
+        ("https://other.example", "/api/sessions/launch"),
+        ("https://marina.example", "/api/settings/get"),
+    ] {
+        let response = http
+            .request(reqwest::Method::OPTIONS, url(&ts, path))
+            .header("Origin", origin)
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert!(response
+            .headers()
+            .get("access-control-allow-credentials")
+            .is_none());
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn registered_and_custom_api_routes_are_both_protected() {
     let ts = TestServer::start().await;
     ts.client

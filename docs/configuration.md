@@ -167,6 +167,25 @@ deployment layer.
 Runtime setting overrides are never pruned. A full desired-state manifest
 should use `prune: true`; a partial update should use `false`.
 
+### Browser embeddings
+
+`browser.allowed_origins` is a comma-separated list of exact origins that may
+use Loom's login cookie from an embedded browser client. The built-in value is
+empty, which disables credentialed cross-origin access. For example:
+
+```yaml
+settings:
+  browser.allowed_origins: https://marina.example.com
+```
+
+Loom returns credentialed CORS headers only for the session operations needed
+by an embedded conversation: identity, launch, session state and URL, chat
+snapshot and stream, prompt, interrupt, recovery, and permission answers. Loom
+does not return credentialed CORS headers for administration, settings, GitHub,
+issue, or other operations; those retain Loom's existing non-credentialed
+wildcard policy. The origin setting grants browser transport; normal Loom
+authentication and operation authorization still apply.
+
 Infrastructure tooling may instead send the same document as JSON to the
 admin-only `POST /api/deployment/reconcile` route. Reconciliation is
 idempotent, so the normal deployment loop can apply it on every rollout.
