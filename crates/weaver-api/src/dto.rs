@@ -855,7 +855,6 @@ pub struct RemoteMcpReq {
     pub url: String,
     #[serde(default)]
     pub auth: RemoteMcpAuth,
-    pub tools: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -873,7 +872,6 @@ pub struct RemoteMcpView {
     pub server_name: String,
     pub url: String,
     pub auth: RemoteMcpAuth,
-    pub tools: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -888,7 +886,6 @@ pub struct RemoteMcpSnapshot {
     pub server_name: String,
     pub url: String,
     pub auth: RemoteMcpAuth,
-    pub tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
