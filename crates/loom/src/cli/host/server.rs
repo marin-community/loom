@@ -70,6 +70,12 @@ pub async fn run_server(cmd: ServerCmd) -> Result<()> {
     match cmd {
         ServerCmd::Run { addr } => {
             init_tracing();
+            if !crate::agent::is_claude_available().await {
+                tracing::warn!("claude agent harness not available at startup");
+            }
+            if !crate::agent::is_codex_available().await {
+                tracing::warn!("codex agent harness not available at startup");
+            }
             let addr = crate::endpoint::bind_addr(addr.as_deref());
             crate::server::run(&addr).await
         }

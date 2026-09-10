@@ -6,14 +6,22 @@ const props = withDefaults(
   defineProps<{
     profiles: Profile[];
     modelValue: string;
+    /** Agent kinds whose harness is installed. When given, a profile bound to
+     *  any other kind is flagged as unlaunchable on this host. */
+    availableAgentKinds?: Set<string>;
     layout?: 'cards' | 'list';
     disabled?: boolean;
   }>(),
   {
+    availableAgentKinds: undefined,
     layout: 'cards',
     disabled: false,
   },
 );
+
+function agentUnavailable(profile: Profile): boolean {
+  return props.availableAgentKinds ? !props.availableAgentKinds.has(profile.agent_kind) : false;
+}
 
 const emit = defineEmits<{
   'update:modelValue': [string];
@@ -67,6 +75,12 @@ const classes = computed(() =>
         <span v-if="profile.strict" class="rounded bg-subtle px-1.5 py-0.5">strict policy</span>
         <span v-if="profile.restricted" class="rounded bg-block-soft px-1.5 py-0.5 text-block">
           restricted
+        </span>
+        <span
+          v-if="agentUnavailable(profile)"
+          class="rounded bg-block-soft px-1.5 py-0.5 text-block"
+        >
+          agent unavailable
         </span>
       </span>
     </label>

@@ -7,6 +7,7 @@ import type {
   ProfileEnv,
   ProfileInput,
 } from '../types';
+import { agentOptionsWithCurrent, isAgentAvailable } from '../lib/agentAvailability';
 import ModelCombobox from './ModelCombobox.vue';
 
 const props = withDefaults(
@@ -26,6 +27,9 @@ const envName = ref('');
 const envValue = ref('');
 const envKind = ref<'literal' | 'gcp_secret'>('literal');
 
+// The profile's own agent stays selectable even when its harness is missing,
+// so opening an existing profile never silently rewrites its agent.
+const agentOptions = computed(() => agentOptionsWithCurrent(props.agents, draft.value.agent_kind));
 const selectedAgent = computed(() =>
   props.agents.find((agent) => agent.kind === draft.value.agent_kind),
 );
@@ -180,8 +184,8 @@ watch(
         :disabled="disabled"
         class="min-w-0 rounded bg-input px-2 py-1.5"
       >
-        <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
-          {{ agent.label }}
+        <option v-for="agent in agentOptions" :key="agent.kind" :value="agent.kind">
+          {{ agent.label }}{{ isAgentAvailable(agent) ? '' : ' — unavailable' }}
         </option>
       </select>
     </div>
