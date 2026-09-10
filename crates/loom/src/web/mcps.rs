@@ -2,7 +2,10 @@
 
 use axum::http::StatusCode;
 use weaver_api::operations::mcps as mcps_operations;
-use weaver_api::{CustomMcpDeleteResult, CustomMcpReq, CustomMcpView, McpRegistryView};
+use weaver_api::{
+    CustomMcpDeleteResult, CustomMcpReq, CustomMcpView, McpRegistryView, RemoteMcpDeleteResult,
+    RemoteMcpReq, RemoteMcpView,
+};
 
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError};
@@ -14,7 +17,91 @@ pub(super) async fn get_mcp_registry_operation(
     let st = &context.state;
     let mut registry = crate::mcp::registry();
     registry.custom_servers = crate::custom_mcp::list(&st.db).await?;
+    registry.remote_servers = crate::remote_mcp::list(&st.db).await?;
     Ok(registry)
+}
+
+pub(super) async fn list_remote_mcps_operation(
+    context: OperationContext,
+    _input: mcps_operations::remote::list::Input,
+) -> ApiResult<Vec<RemoteMcpView>> {
+    Ok(crate::remote_mcp::list(&context.state.db).await?)
+}
+
+pub(super) async fn create_remote_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::remote::create::Input,
+) -> ApiResult<RemoteMcpView> {
+    let req = RemoteMcpReq {
+        identity: input.identity,
+        label: input.label,
+        description: input.description,
+        url: input.url,
+        auth: input.auth,
+        enabled: input.enabled,
+    };
+    let st = &context.state;
+    let _resolver = st.launch_gate.acquire_resolver().await;
+    if crate::remote_mcp::get(&st.db, req.identity.trim())
+        .await?
+        .is_some()
+    {
+        return Err(AppError::new(
+            StatusCode::CONFLICT,
+            format!("remote MCP '{}' already exists", req.identity.trim()),
+        ));
+    }
+    crate::remote_mcp::upsert(&st.db, &req)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+pub(super) async fn get_remote_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::remote::get::Input,
+) -> ApiResult<RemoteMcpView> {
+    crate::remote_mcp::get(&context.state.db, &input.identity)
+        .await?
+        .ok_or_else(|| AppError::not_found("remote MCP"))
+}
+
+pub(super) async fn update_remote_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::remote::update::Input,
+) -> ApiResult<RemoteMcpView> {
+    let req = RemoteMcpReq {
+        identity: input.identity,
+        label: input.label,
+        description: input.description,
+        url: input.url,
+        auth: input.auth,
+        enabled: input.enabled,
+    };
+    let st = &context.state;
+    let _resolver = st.launch_gate.acquire_resolver().await;
+    crate::remote_mcp::upsert(&st.db, &req)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))
+}
+
+pub(super) async fn delete_remote_mcp_operation(
+    context: OperationContext,
+    input: mcps_operations::remote::delete::Input,
+) -> ApiResult<RemoteMcpDeleteResult> {
+    let st = &context.state;
+    let identity = input.identity;
+    let _resolver = st.launch_gate.acquire_resolver().await;
+    if crate::remote_mcp::remove(&st.db, &identity)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?
+    {
+        Ok(RemoteMcpDeleteResult {
+            deleted: true,
+            identity,
+        })
+    } else {
+        Err(AppError::not_found("remote MCP"))
+    }
 }
 
 pub(super) async fn list_custom_mcps_operation(
@@ -116,6 +203,11 @@ pub(super) async fn delete_custom_mcp_operation(
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<mcps_operations::get::Op, _, _>(get_mcp_registry_operation),
+        register::<mcps_operations::remote::list::Op, _, _>(list_remote_mcps_operation),
+        register::<mcps_operations::remote::get::Op, _, _>(get_remote_mcp_operation),
+        register::<mcps_operations::remote::create::Op, _, _>(create_remote_mcp_operation),
+        register::<mcps_operations::remote::update::Op, _, _>(update_remote_mcp_operation),
+        register::<mcps_operations::remote::delete::Op, _, _>(delete_remote_mcp_operation),
         register::<mcps_operations::custom::list::Op, _, _>(list_custom_mcps_operation),
         register::<mcps_operations::custom::get::Op, _, _>(get_custom_mcp_operation),
         register::<mcps_operations::custom::create::Op, _, _>(create_custom_mcp_operation),

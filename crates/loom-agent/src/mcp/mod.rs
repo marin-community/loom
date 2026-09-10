@@ -1,4 +1,4 @@
-//! Registry and aggregate server for Loom's built-in MCP tool domains.
+//! Registry and runtime configuration for Loom's MCP tool domains.
 //!
 //! Profiles select reviewed capability sets such as `loom/github/comment@v1`.
 //! Loom expands those names into exact Claude permission rules when it stamps a
@@ -16,6 +16,7 @@ use std::{collections::HashSet, future::Future, pin::Pin};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use weaver_api::{
     CustomMcpSnapshot, CustomMcpView, McpCapabilitySetView, McpDomainView, McpRegistryView,
+    McpServerView, RemoteMcpAuth, RemoteMcpSnapshot, RemoteMcpView,
 };
 
 // All six tools gate through one registered operation via a runtime
@@ -117,6 +118,10 @@ fn validate_adapters() {
 }
 pub(crate) const ALLOWED_TOOLS_ENV: &str = "LOOM_MCP_ALLOWED_TOOLS";
 const BUILTIN_SERVER_NAME: &str = "loom";
+// Compute Engine's HTTP metadata endpoint is host-local and available on every
+// VM type; its HTTPS alternative is limited to Shielded VMs.
+const GCP_IDENTITY_ENDPOINT: &str =
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity";
 const BUILTIN_RUNTIME_ENV: [&str; 4] = [
     "WEAVER_API",
     "WEAVER_BRANCH",
@@ -140,6 +145,85 @@ struct CustomMcpRow {
     validation_message: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, FromRow)]
+struct RemoteMcpRow {
+    identity: String,
+    group_name: String,
+    label: String,
+    description: String,
+    enabled: bool,
+    current_revision: i64,
+    url: String,
+    auth_json: String,
+    digest: String,
+    created_at: String,
+    updated_at: String,
+}
+
+fn remote_mcp_query() -> &'static str {
+    "SELECT s.identity, s.group_name, s.label, s.description, s.enabled,
+            s.current_revision, r.url, r.auth_json, r.digest,
+            s.created_at, s.updated_at
+     FROM remote_mcp_servers s
+     JOIN remote_mcp_revisions r
+       ON r.identity = s.identity AND r.revision = s.current_revision"
+}
+
+fn remote_mcp_view(row: RemoteMcpRow) -> Result<RemoteMcpView> {
+    Ok(RemoteMcpView {
+        server_name: remote_server_name(&row.identity),
+        identity: row.identity,
+        group: row.group_name,
+        label: row.label,
+        description: row.description,
+        enabled: row.enabled,
+        revision: row.current_revision,
+        digest: row.digest,
+        url: row.url,
+        auth: serde_json::from_str(&row.auth_json).context("invalid remote MCP auth")?,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+pub async fn list_remote(db: &crate::Db) -> Result<Vec<RemoteMcpView>> {
+    let rows =
+        sqlx::query_as::<_, RemoteMcpRow>(&format!("{} ORDER BY s.identity", remote_mcp_query()))
+            .fetch_all(db)
+            .await?;
+    rows.into_iter().map(remote_mcp_view).collect()
+}
+
+pub async fn get_remote(db: &crate::Db, identity: &str) -> Result<Option<RemoteMcpView>> {
+    let row =
+        sqlx::query_as::<_, RemoteMcpRow>(&format!("{} WHERE s.identity = ?", remote_mcp_query()))
+            .bind(identity)
+            .fetch_optional(db)
+            .await?;
+    row.map(remote_mcp_view).transpose()
+}
+
+pub fn ready_remote_snapshots(items: &[RemoteMcpView]) -> Vec<RemoteMcpSnapshot> {
+    items
+        .iter()
+        .filter(|item| item.enabled)
+        .map(|item| RemoteMcpSnapshot {
+            identity: item.identity.clone(),
+            group: item.group.clone(),
+            revision: item.revision,
+            digest: item.digest.clone(),
+            server_name: item.server_name.clone(),
+            url: item.url.clone(),
+            auth: item.auth.clone(),
+        })
+        .collect()
+}
+
+pub fn remote_server_name(identity: &str) -> String {
+    let digest = Sha256::digest(identity.as_bytes());
+    format!("loom_remote_{}", &hex::encode(digest)[..12])
 }
 
 fn custom_mcp_query() -> &'static str {
@@ -269,6 +353,7 @@ pub fn registry() -> McpRegistryView {
         domains: domain_views,
         capability_sets,
         custom_servers: Vec::new(),
+        remote_servers: Vec::new(),
     }
 }
 
@@ -342,7 +427,9 @@ pub async fn resolve_access(
 ) -> Result<weaver_api::McpPolicySnapshot> {
     let registry = registry();
     let custom = list_custom(db).await?;
+    let remote = list_remote(db).await?;
     let ready_custom = ready_custom_snapshots(&custom);
+    let ready_remote = ready_remote_snapshots(&remote);
     let capability_sets = match access.mode.as_str() {
         "none" => Vec::new(),
         "all" => registry.capability_sets.into_iter().collect(),
@@ -353,6 +440,7 @@ pub async fn resolve_access(
                     .iter()
                     .any(|set| &set.group == group)
                     && !custom.iter().any(|server| &server.group == group)
+                    && !remote.iter().any(|server| &server.group == group)
                 {
                     bail!("unknown MCP group '{group}'");
                 }
@@ -374,10 +462,20 @@ pub async fn resolve_access(
             .collect(),
         _ => unreachable!(),
     };
+    let remote_servers = match access.mode.as_str() {
+        "none" => Vec::new(),
+        "all" => ready_remote,
+        "groups" => ready_remote
+            .into_iter()
+            .filter(|server| access.groups.contains(&server.group))
+            .collect(),
+        _ => unreachable!(),
+    };
     Ok(weaver_api::McpPolicySnapshot {
         selection: access.clone(),
         capability_sets,
         custom_servers,
+        remote_servers,
     })
 }
 
@@ -396,6 +494,9 @@ pub fn rules_for_snapshot(snapshot: &weaver_api::McpPolicySnapshot) -> Result<Ve
                 custom_permission_rule(&server.server_name, tool),
             );
         }
+    }
+    for server in &snapshot.remote_servers {
+        push_unique(&mut rules, custom_permission_rule(&server.server_name, "*"));
     }
     Ok(rules)
 }
@@ -688,7 +789,7 @@ pub(crate) async fn serve_stdio(
     Ok(())
 }
 
-pub(crate) fn server_configs_for_snapshot(
+pub fn server_configs_for_snapshot(
     allowed_rules: &[String],
     snapshot: Option<&weaver_api::McpPolicySnapshot>,
 ) -> Map<String, Value> {
@@ -714,56 +815,182 @@ pub(crate) fn server_configs_for_snapshot(
                 );
             }
         }
+        for remote in &snapshot.remote_servers {
+            let prefix = format!("mcp__{}__", remote.server_name);
+            if allowed_rules.iter().any(|rule| rule.starts_with(&prefix)) {
+                servers.insert(
+                    remote.server_name.clone(),
+                    serde_json::json!({
+                        "type": "http",
+                        "url": remote.url,
+                        "auth": remote.auth,
+                    }),
+                );
+            }
+        }
     }
     servers
 }
 
-/// Convert Loom's trusted server map to ACP v1's provider-neutral stdio config.
-pub fn acp_server_configs(
-    allowed_rules: &[String],
-    snapshot: Option<&weaver_api::McpPolicySnapshot>,
+async fn iap_token(audience: &str) -> Result<String> {
+    iap_token_from(GCP_IDENTITY_ENDPOINT, audience).await
+}
+
+async fn iap_token_from(endpoint: &str, audience: &str) -> Result<String> {
+    let response = reqwest::Client::new()
+        .get(endpoint)
+        .query(&[("audience", audience), ("format", "full")])
+        .header("Metadata-Flavor", "Google")
+        .send()
+        .await
+        .context("requesting an IAP token for remote MCP")?
+        .error_for_status()
+        .context("the IAP token request was rejected")?;
+    let token = response.text().await.context("reading the IAP token")?;
+    if token.trim().is_empty() {
+        bail!("the IAP token endpoint returned an empty token");
+    }
+    Ok(token)
+}
+
+fn environment_header(
     runtime_env: &[(String, String)],
-) -> Vec<Value> {
-    let loom_command = std::env::current_exe()
+    header: &str,
+    environment: &str,
+    prefix: &str,
+) -> Result<Value> {
+    let value = runtime_env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == environment)
+        .map(|(_, value)| value)
+        .with_context(|| {
+            format!("remote MCP header '{header}' requires environment variable {environment}")
+        })?;
+    Ok(serde_json::json!({ "name": header, "value": format!("{prefix}{value}") }))
+}
+
+fn loom_command() -> String {
+    std::env::current_exe()
         .ok()
         .and_then(|path| path.to_str().map(str::to_string))
-        .unwrap_or_else(|| "loom".to_string());
+        .unwrap_or_else(|| "loom".to_string())
+}
+
+/// Describe resolved MCP transports without materializing credential values.
+pub fn server_views(
+    allowed_rules: &[String],
+    snapshot: Option<&weaver_api::McpPolicySnapshot>,
+) -> Result<Vec<McpServerView>> {
+    let loom_command = loom_command();
     server_configs_for_snapshot(allowed_rules, snapshot)
         .into_iter()
-        .map(|(name, config)| {
+        .map(|(name, config)| -> Result<McpServerView> {
             let command = match config["command"].as_str().unwrap_or_default() {
                 "loom" => loom_command.clone(),
                 command => command.to_string(),
             };
-            let mut env = config["env"]
-                .as_object()
-                .map(|env| {
-                    env.iter()
-                        .filter_map(|(name, value)| {
-                            value
-                                .as_str()
-                                .map(|value| serde_json::json!({ "name": name, "value": value }))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if name == BUILTIN_SERVER_NAME {
-                for required in BUILTIN_RUNTIME_ENV {
-                    if let Some((_, value)) =
-                        runtime_env.iter().rev().find(|(key, _)| key == required)
-                    {
-                        env.push(serde_json::json!({ "name": required, "value": value }));
+            let headers = if config["type"] == "http" {
+                match serde_json::from_value::<RemoteMcpAuth>(config["auth"].clone())
+                    .context("invalid stamped remote MCP auth")?
+                {
+                    RemoteMcpAuth::None => Vec::new(),
+                    RemoteMcpAuth::Environment { header, .. } => vec![header],
+                    RemoteMcpAuth::Iap { .. } => {
+                        vec!["Authorization".to_string()]
                     }
                 }
-            }
-            serde_json::json!({
-                "name": name,
-                "command": command,
-                "args": config["args"].as_array().cloned().unwrap_or_default(),
-                "env": env,
+            } else {
+                Vec::new()
+            };
+            Ok(McpServerView {
+                name,
+                transport: config["type"].as_str().unwrap_or("stdio").to_string(),
+                command,
+                args: config["args"]
+                    .as_array()
+                    .map(|args| {
+                        args.iter()
+                            .filter_map(|arg| arg.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                url: config["url"].as_str().unwrap_or_default().to_string(),
+                headers,
             })
         })
         .collect()
+}
+
+/// Convert Loom's trusted server map to ACP v1's provider-neutral descriptors.
+pub async fn acp_server_configs(
+    allowed_rules: &[String],
+    snapshot: Option<&weaver_api::McpPolicySnapshot>,
+    runtime_env: &[(String, String)],
+) -> Result<Vec<Value>> {
+    let loom_command = loom_command();
+    let mut servers = Vec::new();
+    for (name, config) in server_configs_for_snapshot(allowed_rules, snapshot) {
+        if config["type"] == "http" {
+            let auth: RemoteMcpAuth = serde_json::from_value(config["auth"].clone())
+                .context("invalid stamped remote MCP auth")?;
+            let headers = match auth {
+                RemoteMcpAuth::None => Vec::new(),
+                RemoteMcpAuth::Environment {
+                    header,
+                    environment,
+                    prefix,
+                } => vec![environment_header(
+                    runtime_env,
+                    &header,
+                    &environment,
+                    &prefix,
+                )?],
+                RemoteMcpAuth::Iap { audience } => vec![serde_json::json!({
+                    "name": "Authorization",
+                    "value": format!("Bearer {}", iap_token(&audience).await?),
+                })],
+            };
+            servers.push(serde_json::json!({
+                "type": "http",
+                "name": name,
+                "url": config["url"],
+                "headers": headers,
+            }));
+            continue;
+        }
+        let command = match config["command"].as_str().unwrap_or_default() {
+            "loom" => loom_command.clone(),
+            command => command.to_string(),
+        };
+        let mut env = config["env"]
+            .as_object()
+            .map(|env| {
+                env.iter()
+                    .filter_map(|(name, value)| {
+                        value
+                            .as_str()
+                            .map(|value| serde_json::json!({ "name": name, "value": value }))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if name == BUILTIN_SERVER_NAME {
+            for required in BUILTIN_RUNTIME_ENV {
+                if let Some((_, value)) = runtime_env.iter().rev().find(|(key, _)| key == required)
+                {
+                    env.push(serde_json::json!({ "name": required, "value": value }));
+                }
+            }
+        }
+        servers.push(serde_json::json!({
+            "name": name,
+            "command": command,
+            "args": config["args"].as_array().cloned().unwrap_or_default(),
+            "env": env,
+        }));
+    }
+    Ok(servers)
 }
 
 pub async fn serve() -> Result<()> {
@@ -830,6 +1057,86 @@ mod tests {
             "[\"github_issue_view\",\"channel_list\"]"
         );
         assert_eq!(servers["loom"]["args"], serde_json::json!(["mcp", "serve"]));
+    }
+
+    #[tokio::test]
+    async fn remote_servers_use_native_acp_http_descriptors() {
+        let snapshot = weaver_api::McpPolicySnapshot {
+            remote_servers: vec![weaver_api::RemoteMcpSnapshot {
+                identity: "/marina/api".to_string(),
+                group: "marina".to_string(),
+                revision: 1,
+                digest: "sha256:test".to_string(),
+                server_name: "loom_remote_test".to_string(),
+                url: "https://marina.example.com/api/marina/mcp/".to_string(),
+                auth: weaver_api::RemoteMcpAuth::Environment {
+                    header: "Authorization".to_string(),
+                    environment: "MARINA_TOKEN".to_string(),
+                    prefix: "Bearer ".to_string(),
+                },
+            }],
+            ..Default::default()
+        };
+        let servers = super::acp_server_configs(
+            &["mcp__loom_remote_test__*".to_string()],
+            Some(&snapshot),
+            &[("MARINA_TOKEN".to_string(), "secret".to_string())],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            servers,
+            [serde_json::json!({
+                "type": "http",
+                "name": "loom_remote_test",
+                "url": "https://marina.example.com/api/marina/mcp/",
+                "headers": [{"name": "Authorization", "value": "Bearer secret"}],
+            })]
+        );
+
+        let error = super::acp_server_configs(
+            &["mcp__loom_remote_test__*".to_string()],
+            Some(&snapshot),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("MARINA_TOKEN"));
+    }
+
+    #[tokio::test]
+    async fn iap_auth_uses_the_metadata_endpoint() {
+        use axum::extract::Query;
+        use axum::http::HeaderMap;
+        use axum::routing::get;
+        use std::collections::HashMap;
+
+        async fn identity(
+            headers: HeaderMap,
+            Query(query): Query<HashMap<String, String>>,
+        ) -> &'static str {
+            assert_eq!(headers["Metadata-Flavor"], "Google");
+            assert_eq!(query["audience"], "iap-client-id");
+            assert_eq!(query["format"], "full");
+            "signed-token"
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route("/identity", get(identity)),
+            )
+            .await
+            .unwrap();
+        });
+
+        let token = super::iap_token_from(&format!("http://{address}/identity"), "iap-client-id")
+            .await
+            .unwrap();
+        assert_eq!(token, "signed-token");
     }
 
     #[test]

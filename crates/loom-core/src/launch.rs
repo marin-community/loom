@@ -190,6 +190,7 @@ async fn resolver_revision(
     // source; only the server computes it.
     let mut mcp_registry = crate::mcp::registry();
     mcp_registry.custom_servers = crate::custom_mcp::list(db).await?;
+    mcp_registry.remote_servers = crate::remote_mcp::list(db).await?;
     let payload = serde_json::to_vec(&(
         RESOLVER_SCHEMA_VERSION,
         metadata,

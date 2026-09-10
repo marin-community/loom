@@ -1,11 +1,100 @@
 //! Provider-neutral inspection and administration of Loom's MCP registry:
-//! built-in domains, versioned capability sets, and operator-authored
-//! custom servers.
+//! built-in domains, versioned capability sets, operator-authored custom
+//! servers, and registered remote servers.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
+pub mod remote {
+    //! Operator-registered remote Streamable HTTP MCP servers.
+
+    pub(super) use super::prelude;
+
+    pub mod create {
+        use super::prelude::*;
+
+        /// Register a remote Streamable HTTP MCP server.
+        #[operation(id = "mcps.remote.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "mcps remote create")]
+        pub struct Input {
+            #[operand(positional)]
+            pub identity: String,
+            pub label: String,
+            #[operand(default = String::new())]
+            pub description: String,
+            pub url: String,
+            #[operand(json, default = RemoteMcpAuth::default())]
+            pub auth: RemoteMcpAuth,
+            #[operand(default = true)]
+            pub enabled: bool,
+        }
+
+        pub type Output = RemoteMcpView;
+    }
+
+    pub mod delete {
+        use super::prelude::*;
+
+        /// Remove a remote MCP server that no profile pins.
+        #[operation(id = "mcps.remote.delete", actor = Admin, scope = Global, risk = Destructive,
+                    cli = "mcps remote delete", cli_alias = "rm")]
+        pub struct Input {
+            #[operand(positional)]
+            pub identity: String,
+        }
+
+        pub type Output = RemoteMcpDeleteResult;
+    }
+
+    pub mod get {
+        use super::prelude::*;
+
+        /// Show one remote MCP server.
+        #[operation(id = "mcps.remote.get", actor = User, scope = Global, risk = Read,
+                    cli = "mcps remote get")]
+        pub struct Input {
+            #[operand(positional)]
+            pub identity: String,
+        }
+
+        pub type Output = RemoteMcpView;
+    }
+
+    pub mod list {
+        use super::prelude::*;
+
+        /// List registered remote MCP servers.
+        #[operation(id = "mcps.remote.list", actor = User, scope = Global, risk = Read,
+                    cli = "mcps remote list", cli_alias = "ls")]
+        pub struct Input {}
+
+        pub type Output = Vec<RemoteMcpView>;
+    }
+
+    pub mod update {
+        use super::prelude::*;
+
+        /// Replace a remote MCP definition and create a new pinned revision.
+        #[operation(id = "mcps.remote.update", actor = Admin, scope = Global, risk = Write,
+                    cli = "mcps remote update")]
+        pub struct Input {
+            #[operand(positional)]
+            pub identity: String,
+            pub label: String,
+            #[operand(default = String::new())]
+            pub description: String,
+            pub url: String,
+            #[operand(json, default = RemoteMcpAuth::default())]
+            pub auth: RemoteMcpAuth,
+            #[operand(default = true)]
+            pub enabled: bool,
+        }
+
+        pub type Output = RemoteMcpView;
+    }
+}
+
 pub mod custom {
     //! Operator-authored custom MCP servers: uv Python scripts Loom validates,
     //! versions, and can launch alongside the built-in aggregate server.
@@ -125,6 +214,11 @@ pub mod get {
 
 static OPERATIONS: &[&OperationSpec] = &[
     get::SPEC,
+    remote::list::SPEC,
+    remote::get::SPEC,
+    remote::create::SPEC,
+    remote::update::SPEC,
+    remote::delete::SPEC,
     custom::list::SPEC,
     custom::get::SPEC,
     custom::create::SPEC,

@@ -11,7 +11,7 @@ pub mod reconcile {
     use super::prelude::*;
 
     /// Reconcile the runtime resources declared by a deployment stack: settings,
-    /// launch profiles, and federation mappings.
+    /// remote MCP servers, launch profiles, and federation mappings.
     ///
     /// The manifest carries references and policy, never secret values.
     #[operation(id = "deployment.reconcile", actor = Admin, scope = Global, risk = ExternalWrite,
@@ -21,6 +21,9 @@ pub mod reconcile {
         /// values remain a higher-precedence override.
         #[operand(json, default = BTreeMap::new())]
         pub settings: BTreeMap<String, DeploymentSettingValue>,
+        /// Remote Streamable HTTP MCP servers available to profile groups.
+        #[operand(json, default = Vec::new())]
+        pub remote_mcps: Vec<RemoteMcpReq>,
         /// Named profiles this stack declares, each with its write-only
         /// environment.
         #[operand(json, default = Vec::new())]

@@ -293,6 +293,20 @@ struct AcpPromptClient {
     output_oversized: bool,
 }
 
+fn validate_mcp_capabilities(
+    launch: &AcpLaunch,
+    capabilities: &wire::AgentCapabilities,
+) -> Result<()> {
+    let needs_http = launch
+        .mcp_servers
+        .iter()
+        .any(|server| server["type"] == "http");
+    if needs_http && !capabilities.mcp_capabilities.http {
+        bail!("the ACP agent does not advertise remote HTTP MCP support");
+    }
+    Ok(())
+}
+
 impl AcpPromptClient {
     fn new(stream: tapestry::RelayStream) -> Self {
         Self {
@@ -305,8 +319,12 @@ impl AcpPromptClient {
     }
 
     async fn open_new_session(&mut self, launch: &AcpLaunch) -> Result<wire::NewSessionResult> {
-        self.request(method::INITIALIZE, wire::initialize_params())
+        let initialized = self
+            .request(method::INITIALIZE, wire::initialize_params())
             .await?;
+        let initialized: wire::InitializeResult =
+            serde_json::from_value(initialized).context("invalid ACP initialize response")?;
+        validate_mcp_capabilities(launch, &initialized.agent_capabilities)?;
         let (cwd, meta) = match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
             NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
@@ -1989,10 +2007,11 @@ impl Task {
             .recv_until_response(id, method::INITIALIZE, launch.setup_timeout, cmd_rx)
             .await?;
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
-        if let Ok(init) = serde_json::from_value::<wire::InitializeResult>(res) {
-            self.load_session_cap = init.agent_capabilities.load_session;
-            self.metadata.lock().unwrap().steering_supported = init.meta.steering.supported;
-        }
+        let init: wire::InitializeResult =
+            serde_json::from_value(res).context("invalid ACP initialize response")?;
+        validate_mcp_capabilities(launch, &init.agent_capabilities)?;
+        self.load_session_cap = init.agent_capabilities.load_session;
+        self.metadata.lock().unwrap().steering_supported = init.meta.steering.supported;
 
         match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => {

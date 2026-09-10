@@ -157,8 +157,13 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         30,
+        "remote-mcp",
+        include_str!("../migrations/0030_remote_mcp.sql"),
+    ),
+    (
+        31,
         "user-authorization-source",
-        include_str!("../migrations/0030_user_authorization_source.sql"),
+        include_str!("../migrations/0031_user_authorization_source.sql"),
     ),
 ];
 
