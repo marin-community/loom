@@ -13,6 +13,7 @@ const EMPTY: Me = {
   github_login: null,
   via: null,
   role: null,
+  authorization_kind: null,
   methods: { password: true, github: false },
 };
 

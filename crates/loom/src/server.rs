@@ -377,6 +377,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     }
     weaver_core::spawn_boxed(Box::pin(monitor::run(state.clone())));
     weaver_core::spawn_boxed(Box::pin(repair_acp_sessions_loop(state.clone())));
+    weaver_core::spawn_boxed(Box::pin(reap_expired_github_authorizations(state.clone())));
     weaver_core::spawn_boxed(Box::pin(session_manager::run(
         state.db.clone(),
         state.acp.clone(),
@@ -397,7 +398,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // here cheaply.
     weaver_core::spawn_boxed(Box::pin(crate::slack::run(state.clone())));
     tracing::debug!(
-        "background tasks spawned (monitor, ACP repair, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
+        "background tasks spawned (monitor, ACP repair, authorization reaper, session reconciler, review delivery, github poll, watch, ide reaper, slack)"
     );
     // `into_make_service_with_connect_info` surfaces the peer `SocketAddr` to the
     // auth middleware, which uses it to recognise (and optionally trust) loopback.
@@ -408,6 +409,85 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     .with_graceful_shutdown(shutdown_signal())
     .await?;
     Ok(())
+}
+
+async fn reap_expired_github_authorizations(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        revalidate_github_authorizations_once(&state).await;
+    }
+}
+
+/// Revalidate every organization authorization due within the next minute.
+/// A non-active result expires the conditional lease and closes owned sessions.
+pub async fn revalidate_github_authorizations_once(state: &AppState) {
+    let authorizations = match crate::auth::github_organization_authorizations_due(&state.db).await
+    {
+        Ok(authorizations) => authorizations,
+        Err(error) => {
+            tracing::warn!(%error, "authorization reaper could not list users due for revalidation");
+            return;
+        }
+    };
+    for authorization in authorizations {
+        let organizations = crate::auth::configured_github_organizations(&state.db).await;
+        let membership = match (state.trigger.app(), organizations.as_ref()) {
+            (Some(app), Ok(organizations)) => {
+                app.active_organization_membership(organizations, authorization.github_user_id)
+                    .await
+            }
+            (None, _) => Err(anyhow::anyhow!(
+                "GitHub App is unavailable for organization revalidation"
+            )),
+            (_, Err(error)) => Err(anyhow::anyhow!(error.to_string())),
+        };
+        if let Ok(Some(membership)) = &membership {
+            match crate::auth::renew_github_organization_authorization(
+                &state.db,
+                &authorization,
+                &membership.github_login,
+                &membership.organization,
+            )
+            .await
+            {
+                Ok(true) => continue,
+                // A concurrent sign-in or manual conversion supersedes this
+                // check and owns the current authorization state.
+                Ok(false) => continue,
+                Err(error) => tracing::warn!(
+                    %error,
+                    username = %authorization.username,
+                    "authorization reaper could not renew confirmed membership"
+                ),
+            }
+        } else if let Err(error) = &membership {
+            tracing::warn!(
+                %error,
+                username = %authorization.username,
+                "authorization reaper could not verify GitHub membership"
+            );
+        } else {
+            tracing::info!(
+                username = %authorization.username,
+                "authorization reaper found inactive GitHub membership"
+            );
+        }
+
+        match crate::auth::expire_github_organization_authorization(&state.db, &authorization).await
+        {
+            Ok(true) => {
+                crate::lifecycle::close_sessions_created_by(state, &authorization.username).await;
+            }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                %error,
+                username = %authorization.username,
+                "authorization reaper could not expire failed membership check"
+            ),
+        }
+    }
 }
 
 async fn shutdown_signal() {
@@ -466,6 +546,7 @@ mod tests {
             &db,
             "alice",
             Some("alice"),
+            Some(101),
             None,
             crate::auth::UserRole::Admin,
         )

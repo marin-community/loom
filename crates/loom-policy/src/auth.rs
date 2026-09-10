@@ -45,6 +45,12 @@ const PREFIX_KEEP: usize = 12;
 /// Browser login lifetime, in days. Shared by the stored-session expiry and the
 /// `Max-Age` on the login cookie so the two can't drift.
 pub const SESSION_TTL_DAYS: i64 = 30;
+/// Maximum accepted stale GitHub organization membership after a successful
+/// OAuth sign-in.
+pub const GITHUB_ORGANIZATION_LEASE_HOURS: i64 = 1;
+/// Revalidate shortly before the lease expires so a successful check extends
+/// access without an avoidable gap.
+pub const GITHUB_ORGANIZATION_REVALIDATION_LEAD_MINUTES: i64 = 1;
 /// The cookie a browser login is carried in.
 pub const SESSION_COOKIE: &str = "loom_session";
 /// The reserved [`TokenKind::Local`] token name.
@@ -250,14 +256,68 @@ impl UserRole {
     }
 }
 
+/// Where a user's current Loom authorization comes from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum UserAuthorizationKind {
+    #[default]
+    Manual,
+    GithubOrganization,
+}
+
+impl UserAuthorizationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::GithubOrganization => "github_organization",
+        }
+    }
+}
+
 /// One approved Loom user.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub username: String,
     pub github_login: Option<String>,
+    pub github_user_id: Option<i64>,
     pub password_hash: Option<String>,
     pub role: UserRole,
+    pub authorization_kind: UserAuthorizationKind,
+    pub authorization_github_org_id: Option<i64>,
+    pub authorization_github_org_login: Option<String>,
+    pub authorization_valid_until: Option<String>,
     pub created_at: String,
+}
+
+/// The durable identity and source of an organization-derived authorization
+/// that can be revalidated with the GitHub App.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct GithubOrganizationAuthorization {
+    pub username: String,
+    pub github_user_id: i64,
+    pub organization_id: i64,
+    pub valid_until: String,
+}
+
+fn github_organization_authorization_from_user(
+    user: &User,
+    github_user_id: i64,
+) -> Result<Option<GithubOrganizationAuthorization>> {
+    if user.is_manually_authorized() {
+        return Ok(None);
+    }
+    Ok(Some(GithubOrganizationAuthorization {
+        username: user.username.clone(),
+        github_user_id,
+        organization_id: user
+            .authorization_github_org_id
+            .ok_or_else(|| anyhow!("organization authorization has no organization id"))?,
+        valid_until: user
+            .authorization_valid_until
+            .clone()
+            .ok_or_else(|| anyhow!("organization authorization has no deadline"))?,
+    }))
 }
 
 impl User {
@@ -265,11 +325,26 @@ impl User {
     pub fn has_password(&self) -> bool {
         self.password_hash.is_some()
     }
+
+    pub fn is_manually_authorized(&self) -> bool {
+        self.authorization_kind == UserAuthorizationKind::Manual
+    }
+
+    fn is_authorized_at(&self, now: &str) -> bool {
+        self.is_manually_authorized()
+            || self
+                .authorization_valid_until
+                .as_deref()
+                .is_some_and(|valid_until| valid_until > now)
+    }
 }
 
 pub async fn get_user(db: &Db, username: &str) -> Result<Option<User>> {
     let row = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, role, created_at FROM users WHERE username = ?",
+        "SELECT username, github_login, github_user_id, password_hash, role, authorization_kind,
+                authorization_github_org_id, authorization_github_org_login,
+                authorization_valid_until, created_at
+         FROM users WHERE username = ?",
     )
     .bind(username)
     .fetch_optional(db)
@@ -277,12 +352,14 @@ pub async fn get_user(db: &Db, username: &str) -> Result<Option<User>> {
     Ok(row)
 }
 
-/// The approved user whose `github_login` matches (case-insensitively — GitHub
-/// logins are case-insensitive), if any. This is the allowlist check the OAuth
-/// callback runs: an unknown GitHub identity has no row and is rejected.
+/// The user whose display `github_login` matches case-insensitively. OAuth
+/// authorization uses only the numeric GitHub id; login-only lookup remains
+/// for display-oriented administration and explicit migration errors.
 pub async fn user_by_github(db: &Db, login: &str) -> Result<Option<User>> {
     let row = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, role, created_at FROM users
+        "SELECT username, github_login, github_user_id, password_hash, role, authorization_kind,
+                authorization_github_org_id, authorization_github_org_login,
+                authorization_valid_until, created_at FROM users
          WHERE github_login IS NOT NULL AND lower(github_login) = lower(?)",
     )
     .bind(login)
@@ -291,26 +368,159 @@ pub async fn user_by_github(db: &Db, login: &str) -> Result<Option<User>> {
     Ok(row)
 }
 
-/// Record the GitHub profile (numeric id + display name) captured at sign-in,
-/// keyed by the login already matched to a user row. Best-effort attribution
-/// data: it updates the existing allowlist row in place and never creates one,
-/// so a not-approved login (rejected before this is called) leaves no trace.
-pub async fn update_github_profile(
+/// A GitHub identity whose immutable id matches and whose manual grant or
+/// organization lease is currently valid. A signed webhook's current login is
+/// display data, so it is refreshed only after the durable id matches.
+pub async fn authorized_github_identity(
     db: &Db,
     login: &str,
     github_user_id: i64,
-    display_name: Option<&str>,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE users SET github_user_id = ?, display_name = ?
-         WHERE github_login IS NOT NULL AND lower(github_login) = lower(?)",
+) -> Result<Option<User>> {
+    let updated = sqlx::query(
+        "UPDATE users SET github_login = ?
+         WHERE github_user_id = ?
+           AND (authorization_kind = 'manual' OR authorization_valid_until > ?)",
     )
-    .bind(github_user_id)
-    .bind(display_name)
     .bind(login)
+    .bind(github_user_id)
+    .bind(now_iso())
     .execute(db)
     .await?;
-    Ok(())
+    if updated.rows_affected() == 0 {
+        return Ok(None);
+    }
+    sqlx::query_as::<_, User>(
+        "SELECT username, github_login, github_user_id, password_hash, role, authorization_kind,
+                authorization_github_org_id, authorization_github_org_login,
+                authorization_valid_until, created_at FROM users
+         WHERE github_user_id = ?
+           AND (authorization_kind = 'manual' OR authorization_valid_until > ?)",
+    )
+    .bind(github_user_id)
+    .bind(now_iso())
+    .fetch_optional(db)
+    .await
+    .map_err(Into::into)
+}
+
+/// Organization-derived authorization for a durable GitHub identity,
+/// including an expired lease. Used for point-of-use revalidation of webhook
+/// actors.
+pub async fn github_organization_authorization_for_identity(
+    db: &Db,
+    github_user_id: i64,
+) -> Result<Option<GithubOrganizationAuthorization>> {
+    sqlx::query_as(
+        "SELECT username, github_user_id,
+                authorization_github_org_id AS organization_id,
+                authorization_valid_until AS valid_until
+         FROM users
+         WHERE github_user_id = ? AND authorization_kind = 'github_organization'",
+    )
+    .bind(github_user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(Into::into)
+}
+
+/// Organization authorizations whose one-hour lease is about to expire.
+pub async fn github_organization_authorizations_due(
+    db: &Db,
+) -> Result<Vec<GithubOrganizationAuthorization>> {
+    let revalidate_before = chrono::Utc::now()
+        .checked_add_signed(chrono::TimeDelta::minutes(
+            GITHUB_ORGANIZATION_REVALIDATION_LEAD_MINUTES,
+        ))
+        .ok_or_else(|| anyhow!("GitHub organization revalidation deadline overflowed"))?
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
+    sqlx::query_as(
+        "SELECT username, github_user_id,
+                authorization_github_org_id AS organization_id,
+                authorization_valid_until AS valid_until
+         FROM users
+         WHERE authorization_kind = 'github_organization'
+           AND authorization_valid_until <= ?",
+    )
+    .bind(revalidate_before)
+    .fetch_all(db)
+    .await
+    .map_err(Into::into)
+}
+
+/// Extend a still-current organization authorization after GitHub confirms
+/// membership. The previous deadline is part of the compare-and-swap so a
+/// stale check cannot overwrite a newer sign-in or an administrator's manual
+/// conversion.
+pub async fn renew_github_organization_authorization(
+    db: &Db,
+    authorization: &GithubOrganizationAuthorization,
+    github_login: &str,
+    organization: &crate::config::GithubOrganization,
+) -> Result<bool> {
+    let valid_until = github_organization_valid_until()?;
+    let updated = sqlx::query(
+        "UPDATE users
+         SET github_login = ?, role = 'user', authorization_github_org_id = ?,
+             authorization_github_org_login = ?, authorization_valid_until = ?
+         WHERE username = ? AND github_user_id = ?
+           AND authorization_kind = 'github_organization'
+           AND authorization_github_org_id = ?
+           AND authorization_valid_until = ?",
+    )
+    .bind(github_login)
+    .bind(organization.id)
+    .bind(&organization.login)
+    .bind(valid_until)
+    .bind(&authorization.username)
+    .bind(authorization.github_user_id)
+    .bind(authorization.organization_id)
+    .bind(&authorization.valid_until)
+    .execute(db)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Revoke a still-current organization authorization after an inactive or
+/// indeterminate GitHub result. Returns false when a concurrent sign-in or
+/// manual conversion already changed the grant.
+pub async fn expire_github_organization_authorization(
+    db: &Db,
+    authorization: &GithubOrganizationAuthorization,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        "UPDATE users SET authorization_valid_until = ?
+         WHERE username = ? AND github_user_id = ?
+           AND authorization_kind = 'github_organization'
+           AND authorization_github_org_id = ?
+           AND authorization_valid_until = ?",
+    )
+    .bind(now_iso())
+    .bind(&authorization.username)
+    .bind(authorization.github_user_id)
+    .bind(authorization.organization_id)
+    .bind(&authorization.valid_until)
+    .execute(db)
+    .await?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// The derived username for a GitHub identity whose authorization lease is
+/// expired. Used to close the sessions it owns after failed revalidation.
+pub async fn expired_github_organization_username(
+    db: &Db,
+    github_user_id: i64,
+) -> Result<Option<String>> {
+    sqlx::query_scalar(
+        "SELECT username FROM users
+         WHERE github_user_id = ? AND authorization_kind = 'github_organization'
+           AND authorization_valid_until <= ?",
+    )
+    .bind(github_user_id)
+    .bind(now_iso())
+    .fetch_optional(db)
+    .await
+    .map_err(Into::into)
 }
 
 /// The git author/committer identity to attribute a user's commits to.
@@ -324,9 +534,9 @@ pub struct CommitIdentity {
 /// login on file (a password-only operator — nothing to attribute to). The
 /// email is GitHub's stable `<id>+<login>@users.noreply.github.com` form, which
 /// links the commit to the account without exposing a private address; it falls
-/// back to the id-less `<login>@…` form for a user who hasn't signed in via
-/// GitHub since [`update_github_profile`] began recording the id. The name is
-/// the captured display name, else the login.
+/// back to the id-less `<login>@…` form for a legacy manual user who has not
+/// completed GitHub sign-in since durable identity binding was introduced.
+/// The name is the captured display name, else the login.
 pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIdentity>> {
     let Some(row) = sqlx::query(
         "SELECT github_login, github_user_id, display_name FROM users WHERE username = ?",
@@ -352,7 +562,10 @@ pub async fn commit_identity(db: &Db, username: &str) -> Result<Option<CommitIde
 
 pub async fn list_users(db: &Db) -> Result<Vec<User>> {
     let rows = sqlx::query_as::<_, User>(
-        "SELECT username, github_login, password_hash, role, created_at FROM users ORDER BY created_at, username",
+        "SELECT username, github_login, github_user_id, password_hash, role, authorization_kind,
+                authorization_github_org_id, authorization_github_org_login,
+                authorization_valid_until, created_at
+         FROM users ORDER BY created_at, username",
     )
     .fetch_all(db)
     .await?;
@@ -362,31 +575,45 @@ pub async fn list_users(db: &Db) -> Result<Vec<User>> {
 /// The primary (owner) user: the earliest-created row. Loopback requests and the
 /// machine token are attributed to them. `None` only on an unseeded database.
 pub async fn primary_user(db: &Db) -> Result<Option<String>> {
-    let row = sqlx::query("SELECT username FROM users ORDER BY created_at, username LIMIT 1")
-        .fetch_optional(db)
-        .await?;
+    let row = sqlx::query(
+        "SELECT username FROM users WHERE authorization_kind = 'manual'
+         ORDER BY created_at, username LIMIT 1",
+    )
+    .fetch_optional(db)
+    .await?;
     Ok(row.map(|r| r.get::<String, _>("username")))
 }
 
-/// Add an approved user. `github_login` enables GitHub login; `password` (when
-/// given) enables password login. At least one should be set or the user can
-/// never authenticate, but that is the caller's policy to enforce.
+/// Add an approved user. `github_login` and `github_user_id` together enable
+/// GitHub login; `password` enables password login. At least one method should
+/// be set or the user can never authenticate, but that is the caller's policy.
 pub async fn add_user(
     db: &Db,
     username: &str,
     github_login: Option<&str>,
+    github_user_id: Option<i64>,
     password: Option<&str>,
     role: UserRole,
 ) -> Result<()> {
+    if github_login.is_some() != github_user_id.is_some() {
+        return Err(anyhow!(
+            "a GitHub login and trusted numeric user id must be supplied together"
+        ));
+    }
+    if github_user_id.is_some_and(|id| id <= 0) {
+        return Err(anyhow!("GitHub user id must be positive"));
+    }
     let password_hash = match password {
         Some(p) => Some(hash_password(p)?),
         None => None,
     };
     sqlx::query(
-        "INSERT INTO users (username, github_login, password_hash, role) VALUES (?, ?, ?, ?)",
+        "INSERT INTO users (username, github_login, github_user_id, password_hash, role)
+         VALUES (?, ?, ?, ?, ?)",
     )
     .bind(username)
     .bind(github_login)
+    .bind(github_user_id)
     .bind(password_hash)
     .bind(role)
     .execute(db)
@@ -395,17 +622,53 @@ pub async fn add_user(
     Ok(())
 }
 
+/// Bind an administrator-confirmed immutable GitHub identity to a manual user.
+/// OAuth never performs this transition from a mutable login on its own.
+pub async fn set_manual_github_identity(
+    db: &Db,
+    username: &str,
+    github_login: &str,
+    github_user_id: i64,
+) -> Result<()> {
+    if !weaver_core::github::valid_login(github_login) || github_user_id <= 0 {
+        return Err(anyhow!(
+            "a valid GitHub login and positive numeric id are required"
+        ));
+    }
+    let updated = sqlx::query(
+        "UPDATE users SET github_login = ?, github_user_id = ?
+         WHERE username = ? AND authorization_kind = 'manual'",
+    )
+    .bind(github_login)
+    .bind(github_user_id)
+    .bind(username)
+    .execute(db)
+    .await
+    .with_context(|| format!("binding GitHub identity for '{username}'"))?;
+    if updated.rows_affected() != 1 {
+        return Err(anyhow!("no manually authorized user '{username}'"));
+    }
+    Ok(())
+}
+
 /// Change one user's human role without allowing the deployment to lose its
 /// last administrator. Browser sessions and personal tokens resolve this row
 /// on every request, so the new grant takes effect immediately.
 pub async fn set_user_role(db: &Db, username: &str, role: UserRole) -> Result<()> {
     let mut tx = db.begin().await?;
-    let current = sqlx::query_scalar::<_, UserRole>("SELECT role FROM users WHERE username = ?")
+    let current = sqlx::query("SELECT role, authorization_kind FROM users WHERE username = ?")
         .bind(username)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow!("no such user '{username}'"))?;
-    if current == UserRole::Admin && role != UserRole::Admin {
+    let current_role = current.get::<UserRole, _>("role");
+    let authorization_kind = current.get::<UserAuthorizationKind, _>("authorization_kind");
+    if authorization_kind != UserAuthorizationKind::Manual {
+        return Err(anyhow!(
+            "organization-authorized users must be approved manually before their role can change"
+        ));
+    }
+    if current_role == UserRole::Admin && role != UserRole::Admin {
         let admins =
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin'")
                 .fetch_one(&mut *tx)
@@ -421,6 +684,35 @@ pub async fn set_user_role(db: &Db, username: &str, role: UserRole) -> Result<()
         .await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Permanently convert an organization-derived user to manual authorization.
+/// The conditional update prevents an in-flight membership result from
+/// overwriting an administrator's decision.
+pub async fn approve_user_manually(db: &Db, username: &str) -> Result<User> {
+    let updated = sqlx::query(
+        "UPDATE users
+         SET authorization_kind = 'manual',
+             authorization_github_org_id = NULL,
+             authorization_github_org_login = NULL,
+             authorization_valid_until = NULL
+         WHERE username = ? AND authorization_kind = 'github_organization'",
+    )
+    .bind(username)
+    .execute(db)
+    .await?;
+    if updated.rows_affected() == 0 {
+        let user = get_user(db, username)
+            .await?
+            .ok_or_else(|| anyhow!("no such user '{username}'"))?;
+        if user.is_manually_authorized() {
+            return Ok(user);
+        }
+        return Err(anyhow!("could not approve user '{username}' manually"));
+    }
+    get_user(db, username)
+        .await?
+        .ok_or_else(|| anyhow!("user '{username}' vanished after manual approval"))
 }
 
 pub async fn user_preferences(db: &Db, username: &str) -> Result<HashMap<String, String>> {
@@ -502,13 +794,18 @@ pub async fn set_password(db: &Db, username: &str, password: Option<&str>) -> Re
         Some(p) => Some(hash_password(p)?),
         None => None,
     };
-    let res = sqlx::query("UPDATE users SET password_hash = ? WHERE username = ?")
-        .bind(hash)
-        .bind(username)
-        .execute(db)
-        .await?;
+    let res = sqlx::query(
+        "UPDATE users SET password_hash = ?
+         WHERE username = ? AND authorization_kind = 'manual'",
+    )
+    .bind(hash)
+    .bind(username)
+    .execute(db)
+    .await?;
     if res.rows_affected() == 0 {
-        return Err(anyhow!("no such user '{username}'"));
+        return Err(anyhow!(
+            "no manually authorized user '{username}'; organization-authorized users cannot set passwords"
+        ));
     }
     Ok(())
 }
@@ -520,6 +817,9 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
     let Some(user) = get_user(db, username).await? else {
         return Ok(None);
     };
+    if !user.is_manually_authorized() {
+        return Ok(None);
+    }
     let Some(stored) = user.password_hash.as_deref() else {
         return Ok(None);
     };
@@ -538,6 +838,9 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
 
 /// Build the loopback [`Principal`] — the primary user, marked [`AuthVia::Loopback`].
 pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
+    if github_organization_authorization_enabled(db).await? {
+        return Ok(None);
+    }
     let Some(username) = primary_user(db).await? else {
         return Ok(None);
     };
@@ -556,6 +859,13 @@ pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
 
 /// Open a browser session for `username`, returning the opaque cookie value.
 pub async fn create_session(db: &Db, username: &str) -> Result<String> {
+    let user = get_user(db, username)
+        .await?
+        .ok_or_else(|| anyhow!("no such user '{username}'"))?;
+    let now = now_iso();
+    if !user.is_authorized_at(&now) {
+        return Err(anyhow!("authorization for user '{username}' has expired"));
+    }
     let (plain, hash, _) = mint_token();
     let expires_at = iso_in_days(SESSION_TTL_DAYS)
         .ok_or_else(|| anyhow!("browser session expiry is outside the supported range"))?;
@@ -575,9 +885,11 @@ pub async fn lookup_session(db: &Db, cookie: &str) -> Result<Option<Principal>> 
     let row = sqlx::query(
         "SELECT s.username AS username, u.github_login AS github_login, u.role AS role
          FROM auth_sessions s JOIN users u ON u.username = s.username
-         WHERE s.token_hash = ? AND s.expires_at > ?",
+         WHERE s.token_hash = ? AND s.expires_at > ?
+           AND (u.authorization_kind = 'manual' OR u.authorization_valid_until > ?)",
     )
     .bind(&hash)
+    .bind(now_iso())
     .bind(now_iso())
     .fetch_optional(db)
     .await?;
@@ -649,6 +961,14 @@ async fn create_token_kind(
     expires_in_days: Option<i64>,
     kind: TokenKind,
 ) -> Result<(String, TokenInfo)> {
+    let user = get_user(db, username)
+        .await?
+        .ok_or_else(|| anyhow!("no such user '{username}'"))?;
+    if kind == TokenKind::Pat && !user.is_manually_authorized() {
+        return Err(anyhow!(
+            "organization-authorized users cannot create personal Loom API tokens"
+        ));
+    }
     let (plain, hash, prefix) = mint_token();
     let id = random_id();
     // A positive `expires_in_days` sets the expiry; anything else leaves the
@@ -740,11 +1060,13 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
          JOIN users u ON u.username = t.username
          LEFT JOIN sessions s ON s.id = t.bound_session_id
          WHERE t.token_hash = ? AND (t.expires_at IS NULL OR t.expires_at > ?)
+           AND (u.authorization_kind = 'manual' OR u.authorization_valid_until > ?)
            AND (
              t.kind != 'session' OR s.status NOT IN ('done', 'error', 'archived')
            )",
     )
     .bind(&hash)
+    .bind(now_iso())
     .bind(now_iso())
     .fetch_optional(db)
     .await?;
@@ -753,6 +1075,9 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     };
     let id: String = row.get("id");
     let kind: String = row.get("kind");
+    if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
+        return Ok(None);
+    }
     let mut grant = if kind == TokenKind::Pat.as_str() || kind == TokenKind::Local.as_str() {
         row.get::<UserRole, _>("role").grant()
     } else {
@@ -851,7 +1176,18 @@ async fn mint_staged_session_token(
     capabilities: Option<Vec<String>>,
 ) -> Result<StagedSessionToken> {
     let username = match owner {
-        Some(username) if get_user(db, username).await?.is_some() => username.to_string(),
+        Some(username)
+            if get_user(db, username)
+                .await?
+                .is_some_and(|user| user.is_authorized_at(&now_iso())) =>
+        {
+            username.to_string()
+        }
+        Some(username) => {
+            return Err(anyhow!(
+                "cannot mint a session credential for unauthorized user '{username}'"
+            ));
+        }
         _ => primary_user(db)
             .await?
             .ok_or_else(|| anyhow!("no primary user for session token"))?,
@@ -1057,6 +1393,10 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
 /// Settings keys (also overridable by the env vars in [`github_oauth`]).
 pub const GH_CLIENT_ID_KEY: &str = "auth.github.client_id";
 pub const GH_CLIENT_SECRET_KEY: &str = "auth.github.client_secret";
+pub const GH_ORGANIZATIONS_KEY: &str = weaver_core::config::GITHUB_ORGANIZATIONS_KEY;
+const GITHUB_API_BASE: &str = "https://api.github.com";
+const GITHUB_API_VERSION: &str = "2022-11-28";
+const GITHUB_MEMBERSHIP_TIMEOUT_SECONDS: u64 = 10;
 
 /// A configured GitHub OAuth app.
 #[derive(Debug, Clone)]
@@ -1203,6 +1543,336 @@ pub struct GithubUser {
     pub name: Option<String>,
 }
 
+/// Whether external GitHub organization authorization puts this Loom instance
+/// in shared-deployment mode.
+pub async fn github_organization_authorization_enabled(db: &Db) -> Result<bool> {
+    if crate::config::try_get(
+        db,
+        weaver_core::config::GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY,
+    )
+    .await?
+    .is_some()
+    {
+        return Ok(true);
+    }
+    let configured = crate::config::try_get(db, GH_ORGANIZATIONS_KEY)
+        .await?
+        .unwrap_or_default();
+    let organizations = crate::config::parse_github_organizations(&configured)
+        .map_err(|error| anyhow!("invalid {GH_ORGANIZATIONS_KEY}: {error}"))?;
+    if !organizations.is_empty() {
+        crate::config::latch_github_organization_shared_mode(db).await?;
+        return Ok(true);
+    }
+    let derived_authority = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM users WHERE authorization_kind = 'github_organization'
+         )",
+    )
+    .fetch_one(db)
+    .await?;
+    if derived_authority {
+        crate::config::latch_github_organization_shared_mode(db).await?;
+    }
+    Ok(derived_authority)
+}
+
+/// Every currently configured organization. Authorization is the union of
+/// these memberships; callers must check all entries because a user can move
+/// between configured organizations without signing in again.
+pub async fn configured_github_organizations(
+    db: &Db,
+) -> Result<Vec<crate::config::GithubOrganization>> {
+    let configured = crate::config::try_get(db, GH_ORGANIZATIONS_KEY)
+        .await?
+        .unwrap_or_default();
+    crate::config::parse_github_organizations(&configured)
+        .map_err(|error| anyhow!("invalid {GH_ORGANIZATIONS_KEY}: {error}"))
+}
+
+async fn user_by_github_id(db: &Db, github_user_id: i64) -> Result<Option<User>> {
+    sqlx::query_as::<_, User>(
+        "SELECT username, github_login, github_user_id, password_hash, role, authorization_kind,
+                authorization_github_org_id, authorization_github_org_login,
+                authorization_valid_until, created_at
+         FROM users WHERE github_user_id = ?",
+    )
+    .bind(github_user_id)
+    .fetch_optional(db)
+    .await
+    .map_err(Into::into)
+}
+
+/// Match an authenticated GitHub profile only by its durable numeric id.
+/// A login-only manual row is never converted into authority because GitHub
+/// permits renamed logins to be reclaimed by a different account.
+async fn bind_github_identity(db: &Db, github: &GithubUser) -> Result<Option<User>> {
+    if user_by_github_id(db, github.id).await?.is_some() {
+        sqlx::query("UPDATE users SET github_login = ?, display_name = ? WHERE github_user_id = ?")
+            .bind(&github.login)
+            .bind(&github.name)
+            .bind(github.id)
+            .execute(db)
+            .await?;
+        return user_by_github_id(db, github.id).await;
+    }
+
+    let login_binding = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT github_user_id FROM users
+         WHERE github_login IS NOT NULL AND lower(github_login) = lower(?)",
+    )
+    .bind(&github.login)
+    .fetch_optional(db)
+    .await?;
+    if let Some(binding) = login_binding {
+        if let Some(bound_id) = binding {
+            return Err(anyhow!(
+                "GitHub login '{}' belongs to id {}, but Loom bound it to id {}",
+                github.login,
+                github.id,
+                bound_id
+            ));
+        }
+        return Err(anyhow!(
+            "GitHub login '{}' has no trusted numeric id; an administrator must bind the identity before it can sign in",
+            github.login
+        ));
+    }
+    Ok(None)
+}
+
+fn github_organization_valid_until() -> Result<String> {
+    let delta = chrono::TimeDelta::try_hours(GITHUB_ORGANIZATION_LEASE_HOURS)
+        .ok_or_else(|| anyhow!("GitHub organization lease is outside the supported range"))?;
+    chrono::Utc::now()
+        .checked_add_signed(delta)
+        .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+        .ok_or_else(|| anyhow!("GitHub organization lease expiry is outside the supported range"))
+}
+
+#[derive(Debug)]
+enum GithubMembership {
+    Active,
+    Inactive,
+    Indeterminate(String),
+}
+
+/// Resolve a GitHub identity to a currently authorized Loom user. Manual
+/// approvals win without an organization request. Organization-derived users
+/// receive a one-hour lease that every Loom credential lookup enforces.
+pub async fn approved_github_user(
+    db: &Db,
+    access_token: &str,
+    github: &GithubUser,
+) -> Result<Option<User>> {
+    approved_github_user_at(db, access_token, github, GITHUB_API_BASE).await
+}
+
+async fn approved_github_user_at(
+    db: &Db,
+    access_token: &str,
+    github: &GithubUser,
+    api_base: &str,
+) -> Result<Option<User>> {
+    let existing = bind_github_identity(db, github).await?;
+    if existing.as_ref().is_some_and(User::is_manually_authorized) {
+        return Ok(existing);
+    }
+    let previous_authorization = existing
+        .as_ref()
+        .map(|user| github_organization_authorization_from_user(user, github.id))
+        .transpose()?
+        .flatten();
+
+    let organizations = configured_github_organizations(db).await?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(
+            GITHUB_MEMBERSHIP_TIMEOUT_SECONDS,
+        ))
+        .build()?;
+    let mut indeterminate = Vec::new();
+    let mut active = None;
+    for organization in organizations {
+        match github_organization_membership_at(&http, api_base, access_token, &organization).await
+        {
+            GithubMembership::Active => {
+                active = Some(organization);
+                break;
+            }
+            GithubMembership::Inactive => {}
+            GithubMembership::Indeterminate(reason) => indeterminate.push(reason),
+        }
+    }
+
+    if let Some(organization) = active {
+        if let Some(previous_authorization) = previous_authorization.as_ref() {
+            let renewed = renew_github_organization_authorization(
+                db,
+                previous_authorization,
+                &github.login,
+                &organization,
+            )
+            .await?;
+            if !renewed {
+                let current = user_by_github_id(db, github.id).await?;
+                if current
+                    .as_ref()
+                    .is_some_and(|user| user.is_authorized_at(&now_iso()))
+                {
+                    return Ok(current);
+                }
+                return Err(anyhow!(
+                    "GitHub identity '{}' changed while its organization lease was refreshed",
+                    github.login
+                ));
+            }
+        } else {
+            let valid_until = github_organization_valid_until()?;
+            sqlx::query(
+                "INSERT INTO users
+                 (username, github_login, github_user_id, display_name, role,
+                  authorization_kind, authorization_github_org_id,
+                  authorization_github_org_login, authorization_valid_until)
+                 VALUES (?, ?, ?, ?, 'user', 'github_organization', ?, ?, ?)",
+            )
+            .bind(&github.login)
+            .bind(&github.login)
+            .bind(github.id)
+            .bind(&github.name)
+            .bind(organization.id)
+            .bind(&organization.login)
+            .bind(&valid_until)
+            .execute(db)
+            .await
+            .with_context(|| {
+                format!(
+                    "creating GitHub organization-authorized user '{}'",
+                    github.login
+                )
+            })?;
+        }
+        let user = user_by_github_id(db, github.id).await?.ok_or_else(|| {
+            anyhow!(
+                "GitHub user '{}' vanished after authorization",
+                github.login
+            )
+        })?;
+        tracing::info!(
+            login = %github.login,
+            github_user_id = github.id,
+            organization = %organization.login,
+            github_organization_id = organization.id,
+            valid_until = ?user.authorization_valid_until,
+            "renewed GitHub organization authorization"
+        );
+        return Ok(Some(user));
+    }
+
+    if let Some(previous_authorization) = previous_authorization.as_ref() {
+        let expired = expire_github_organization_authorization(db, previous_authorization).await?;
+        if !expired {
+            let current = user_by_github_id(db, github.id).await?;
+            if current
+                .as_ref()
+                .is_some_and(|user| user.is_authorized_at(&now_iso()))
+            {
+                return Ok(current);
+            }
+        }
+    }
+    if !indeterminate.is_empty() {
+        return Err(anyhow!(
+            "GitHub organization membership could not be verified: {}",
+            indeterminate.join("; ")
+        ));
+    }
+    Ok(None)
+}
+
+async fn github_organization_membership_at(
+    http: &reqwest::Client,
+    api_base: &str,
+    access_token: &str,
+    organization: &crate::config::GithubOrganization,
+) -> GithubMembership {
+    #[derive(Deserialize)]
+    struct Membership {
+        state: String,
+        organization: MembershipOrganization,
+    }
+    #[derive(Deserialize)]
+    struct MembershipOrganization {
+        id: i64,
+        login: String,
+    }
+
+    let response = match http
+        .get(format!(
+            "{}/user/memberships/orgs/{}",
+            api_base.trim_end_matches('/'),
+            organization.login
+        ))
+        .header(reqwest::header::USER_AGENT, "loom")
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", GITHUB_API_VERSION)
+        .bearer_auth(access_token)
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return GithubMembership::Indeterminate(format!(
+                "{} request failed: {error}",
+                organization.login
+            ));
+        }
+    };
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return GithubMembership::Inactive;
+    }
+    if !status.is_success() {
+        let detail = match response.text().await {
+            Ok(body) => redacted_snippet(&body),
+            Err(error) => format!("<failed to read response body: {error}>"),
+        };
+        return GithubMembership::Indeterminate(format!(
+            "{} returned HTTP {status}: {detail}",
+            organization.login
+        ));
+    }
+    let membership: Membership = match response.json().await {
+        Ok(membership) => membership,
+        Err(error) => {
+            return GithubMembership::Indeterminate(format!(
+                "{} returned malformed membership data: {error}",
+                organization.login
+            ));
+        }
+    };
+    if membership.organization.id != organization.id {
+        return GithubMembership::Indeterminate(format!(
+            "{} resolved to GitHub organization id {}, expected {}",
+            organization.login, membership.organization.id, organization.id
+        ));
+    }
+    if !membership
+        .organization
+        .login
+        .eq_ignore_ascii_case(&organization.login)
+    {
+        return GithubMembership::Indeterminate(format!(
+            "GitHub returned organization login '{}' for configured login '{}'",
+            membership.organization.login, organization.login
+        ));
+    }
+    if membership.state.eq_ignore_ascii_case("active") {
+        GithubMembership::Active
+    } else {
+        GithubMembership::Inactive
+    }
+}
+
 /// Fetch the authenticated user's GitHub profile for `access_token`.
 pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
     #[derive(serde::Deserialize)]
@@ -1244,6 +1914,11 @@ pub async fn fetch_github_user(access_token: &str) -> Result<GithubUser> {
 mod tests {
     use super::*;
     use crate::db;
+    use axum::extract::Path as AxumPath;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::get;
+    use axum::{Json, Router};
 
     #[test]
     fn redact_secrets_masks_github_tokens_anywhere() {
@@ -1291,15 +1966,66 @@ mod tests {
     /// one explicitly. The caller must be `#[serial]`: the env var is global.
     async fn connect_in_memory_with_owner(owner: &str) -> Db {
         std::env::set_var("LOOM_OWNER_GITHUB", owner);
+        std::env::set_var("LOOM_OWNER_GITHUB_ID", "4242");
         let db = db::connect_in_memory().await.unwrap();
         std::env::remove_var("LOOM_OWNER_GITHUB");
+        std::env::remove_var("LOOM_OWNER_GITHUB_ID");
         db
+    }
+
+    async fn github_organization_api() -> String {
+        async fn membership(
+            AxumPath(organization): AxumPath<String>,
+            headers: HeaderMap,
+        ) -> Response {
+            assert_eq!(
+                headers
+                    .get(reqwest::header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer github-user-token")
+            );
+            match organization.as_str() {
+                "Open-Athena" => Json(serde_json::json!({
+                    "state": "active",
+                    "organization": {"id": 188075292, "login": "Open-Athena"}
+                }))
+                .into_response(),
+                "Pending" => Json(serde_json::json!({
+                    "state": "pending",
+                    "organization": {"id": 200, "login": "Pending"}
+                }))
+                .into_response(),
+                "WrongId" => Json(serde_json::json!({
+                    "state": "active",
+                    "organization": {"id": 999, "login": "WrongId"}
+                }))
+                .into_response(),
+                "Malformed" => (StatusCode::OK, "not-json").into_response(),
+                "Forbidden" => (StatusCode::FORBIDDEN, "App needs Members: read").into_response(),
+                "RateLimited" => StatusCode::TOO_MANY_REQUESTS.into_response(),
+                "Error" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route("/user/memberships/orgs/{organization}", get(membership)),
+            )
+            .await
+            .unwrap();
+        });
+        format!("http://{address}")
     }
 
     #[tokio::test]
     #[serial_test::serial]
     async fn unset_owner_seeds_no_user_at_all() {
         std::env::remove_var("LOOM_OWNER_GITHUB");
+        std::env::remove_var("LOOM_OWNER_GITHUB_ID");
         let db = db::connect_in_memory().await.unwrap();
         assert_eq!(primary_user(&db).await.unwrap(), None);
         assert!(list_users(&db).await.unwrap().is_empty());
@@ -1313,7 +2039,312 @@ mod tests {
         let u = user_by_github(&db, "RJPower").await.unwrap();
         let u = u.unwrap();
         assert_eq!(u.username, "rjpower");
+        assert_eq!(u.github_user_id, Some(4242));
         assert_eq!(u.role, UserRole::Admin);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn github_organization_members_receive_a_renewable_lease() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let api = github_organization_api().await;
+        crate::config::apply(
+            &db,
+            &[(
+                GH_ORGANIZATIONS_KEY.to_string(),
+                Some("Missing:1, Open-Athena:188075292".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        let (local_token, _) =
+            create_token_kind(&db, "rjpower", LOCAL_TOKEN_NAME, None, TokenKind::Local)
+                .await
+                .unwrap();
+        assert!(lookup_token(&db, &local_token).await.unwrap().is_none());
+        assert!(loopback_principal(&db).await.unwrap().is_none());
+
+        let github = GithubUser {
+            login: "new-member".to_string(),
+            id: 42,
+            name: Some("New Member".to_string()),
+        };
+        let user = approved_github_user_at(&db, "github-user-token", &github, &api)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.username, "new-member");
+        assert_eq!(user.role, UserRole::User);
+        assert_eq!(
+            user.authorization_kind,
+            UserAuthorizationKind::GithubOrganization
+        );
+        assert_eq!(user.authorization_github_org_id, Some(188075292));
+        assert!(user.is_authorized_at(&now_iso()));
+
+        crate::config::apply(
+            &db,
+            &[(GH_ORGANIZATIONS_KEY.to_string(), Some(String::new()))],
+        )
+        .await
+        .unwrap();
+        assert!(github_organization_authorization_enabled(&db)
+            .await
+            .unwrap());
+        assert!(lookup_token(&db, &local_token).await.unwrap().is_none());
+        assert!(loopback_principal(&db).await.unwrap().is_none());
+
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/org", "main")
+            .await
+            .unwrap();
+        crate::session::insert(
+            &db,
+            &crate::session::NewSession {
+                id: "session-id".to_string(),
+                branch_id: branch.id.clone(),
+                work_dir: "/worktree".to_string(),
+                term_session: "term-session".to_string(),
+                agent_kind: "shell".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: "running".to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: Some(user.username.clone()),
+                protocol: "terminal".to_string(),
+                origin: "user".to_string(),
+                class: "interactive".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let cookie = create_session(&db, &user.username).await.unwrap();
+        let session_token =
+            mint_staged_session_token(&db, Some(&user.username), "session-id", &branch.id, None)
+                .await
+                .unwrap();
+        assert!(lookup_session(&db, &cookie).await.unwrap().is_some());
+        assert!(lookup_token(&db, &session_token.value)
+            .await
+            .unwrap()
+            .is_some());
+        assert!(create_token(&db, &user.username, "bypass", None)
+            .await
+            .is_err());
+        assert!(set_password(&db, &user.username, Some("password"))
+            .await
+            .is_err());
+
+        sqlx::query(
+            "UPDATE users SET authorization_valid_until = '2000-01-01T00:00:00.000Z'
+             WHERE github_user_id = 42",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(lookup_session(&db, &cookie).await.unwrap().is_none());
+        assert!(lookup_token(&db, &session_token.value)
+            .await
+            .unwrap()
+            .is_none());
+
+        let due = github_organization_authorizations_due(&db).await.unwrap();
+        assert_eq!(due.len(), 1);
+        let stale_authorization = due[0].clone();
+        assert!(renew_github_organization_authorization(
+            &db,
+            &stale_authorization,
+            "renamed-member",
+            &crate::config::GithubOrganization {
+                login: "Open-Athena".to_string(),
+                id: 188075292,
+            }
+        )
+        .await
+        .unwrap());
+        assert!(lookup_session(&db, &cookie).await.unwrap().is_some());
+        assert!(
+            !expire_github_organization_authorization(&db, &stale_authorization)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            user_by_github_id(&db, github.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .github_login
+                .as_deref(),
+            Some("renamed-member")
+        );
+        sqlx::query(
+            "UPDATE users SET authorization_valid_until = '2000-01-01T00:00:00.000Z'
+             WHERE github_user_id = 42",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        // A later active organization still wins over an earlier indeterminate
+        // result; a no-active outcome then leaves the lease expired.
+        crate::config::apply(
+            &db,
+            &[(
+                GH_ORGANIZATIONS_KEY.to_string(),
+                Some("Forbidden:300, Open-Athena:188075292".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(
+            approved_github_user_at(&db, "github-user-token", &github, &api)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        crate::config::apply(
+            &db,
+            &[(
+                GH_ORGANIZATIONS_KEY.to_string(),
+                Some("WrongId:400, Forbidden:300".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(
+            approved_github_user_at(&db, "github-user-token", &github, &api)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("expected 400")
+        );
+        assert_eq!(
+            expired_github_organization_username(&db, github.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("new-member")
+        );
+
+        let manual = approve_user_manually(&db, &user.username).await.unwrap();
+        assert!(manual.is_manually_authorized());
+        set_user_role(&db, &user.username, UserRole::Admin)
+            .await
+            .unwrap();
+        assert!(set_password(&db, &user.username, Some("password"))
+            .await
+            .is_ok());
+        crate::config::apply(
+            &db,
+            &[(GH_ORGANIZATIONS_KEY.to_string(), Some(String::new()))],
+        )
+        .await
+        .unwrap();
+        assert!(github_organization_authorization_enabled(&db)
+            .await
+            .unwrap());
+        assert!(lookup_token(&db, &local_token).await.unwrap().is_none());
+        assert!(loopback_principal(&db).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn github_identity_uses_numeric_id_across_login_changes() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let original = GithubUser {
+            login: "rjpower".to_string(),
+            id: 4242,
+            name: None,
+        };
+        let user = approved_github_user_at(&db, "unused", &original, "http://127.0.0.1:1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(user.is_manually_authorized());
+
+        let renamed = GithubUser {
+            login: "new-login".to_string(),
+            ..original
+        };
+        let user = approved_github_user_at(&db, "unused", &renamed, "http://127.0.0.1:1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(user.username, "rjpower");
+        assert_eq!(user.github_login.as_deref(), Some("new-login"));
+
+        let reclaimed = GithubUser {
+            login: "rjpower".to_string(),
+            id: 9999,
+            name: None,
+        };
+        assert!(
+            approved_github_user_at(&db, "unused", &reclaimed, "http://127.0.0.1:1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn login_only_manual_approval_never_binds_during_oauth() {
+        let db = db::connect_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (username, github_login, role) VALUES ('old-login', 'old-login', 'admin')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let reclaimed = GithubUser {
+            login: "old-login".to_string(),
+            id: 9999,
+            name: None,
+        };
+        assert!(
+            approved_github_user_at(&db, "unused", &reclaimed, "http://127.0.0.1:1")
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("trusted numeric id")
+        );
+        let id = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT github_user_id FROM users WHERE username = 'old-login'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(id, None);
+        set_manual_github_identity(&db, "old-login", "old-login", 42)
+            .await
+            .unwrap();
+        let intended = GithubUser {
+            login: "old-login".to_string(),
+            id: 42,
+            name: None,
+        };
+        assert!(
+            approved_github_user_at(&db, "unused", &intended, "http://127.0.0.1:1")
+                .await
+                .unwrap()
+                .unwrap()
+                .is_manually_authorized()
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_organization_config_never_enables_local_trust() {
+        let db = db::connect_in_memory().await.unwrap();
+        sqlx::query("DROP TABLE settings")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(github_organization_authorization_enabled(&db)
+            .await
+            .is_err());
+        assert!(loopback_principal(&db).await.is_err());
     }
 
     #[tokio::test]
@@ -1321,22 +2352,30 @@ mod tests {
     async fn commit_identity_derives_noreply_email() {
         let db = connect_in_memory_with_owner("rjpower").await;
 
-        // Before any profile is captured: id-less noreply email, login as name.
+        // Before a display name is captured, the trusted numeric id still
+        // produces the stable account-linked noreply email.
         let id = commit_identity(&db, "rjpower").await.unwrap().unwrap();
         assert_eq!(id.name, "rjpower");
-        assert_eq!(id.email, "rjpower@users.noreply.github.com");
+        assert_eq!(id.email, "4242+rjpower@users.noreply.github.com");
 
         // After sign-in records the numeric id + display name: the stable
         // account-linked noreply email, and the display name as the git author.
-        update_github_profile(&db, "RJPower", 4242, Some("Russell Power"))
-            .await
-            .unwrap();
+        bind_github_identity(
+            &db,
+            &GithubUser {
+                login: "RJPower".to_string(),
+                id: 4242,
+                name: Some("Russell Power".to_string()),
+            },
+        )
+        .await
+        .unwrap();
         let id = commit_identity(&db, "rjpower").await.unwrap().unwrap();
         assert_eq!(id.name, "Russell Power");
-        assert_eq!(id.email, "4242+rjpower@users.noreply.github.com");
+        assert_eq!(id.email, "4242+RJPower@users.noreply.github.com");
 
         // A password-only operator has no GitHub identity to attribute to.
-        add_user(&db, "localonly", None, Some("pw"), UserRole::User)
+        add_user(&db, "localonly", None, None, Some("pw"), UserRole::User)
             .await
             .unwrap();
         assert!(commit_identity(&db, "localonly").await.unwrap().is_none());
@@ -1369,6 +2408,7 @@ mod tests {
             &db,
             "alice",
             Some("alice-gh"),
+            Some(101),
             Some("alice-password"),
             UserRole::User,
         )
@@ -1419,7 +2459,7 @@ mod tests {
     #[serial_test::serial]
     async fn personal_preferences_apply_and_reset_per_user() {
         let db = connect_in_memory_with_owner("rjpower").await;
-        add_user(&db, "alice", None, None, UserRole::User)
+        add_user(&db, "alice", None, None, None, UserRole::User)
             .await
             .unwrap();
         apply_user_preferences(
@@ -1595,9 +2635,16 @@ mod tests {
             .unwrap()
             .is_none());
 
-        add_user(&db, "alice", Some("alice-gh"), None, UserRole::User)
-            .await
-            .unwrap();
+        add_user(
+            &db,
+            "alice",
+            Some("alice-gh"),
+            Some(101),
+            None,
+            UserRole::User,
+        )
+        .await
+        .unwrap();
         assert_eq!(list_users(&db).await.unwrap().len(), 2);
         assert!(remove_user(&db, "rjpower").await.is_err());
         assert!(remove_user(&db, "alice").await.unwrap());

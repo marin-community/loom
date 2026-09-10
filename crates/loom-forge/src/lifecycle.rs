@@ -174,6 +174,47 @@ pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Resu
         .map_err(|_| anyhow!("archive task stopped before reporting its result"))?
 }
 
+/// Close every active session owned by `username` after their access is
+/// revoked. Failures are logged; organization-derived users are retried by the
+/// periodic authorization reaper while their lease remains expired.
+pub async fn close_sessions_created_by(st: &AppState, username: &str) {
+    let sessions = match session_mod::list(&st.db).await {
+        Ok(sessions) => sessions,
+        Err(error) => {
+            tracing::warn!(%error, username, "could not list sessions while closing user access");
+            return;
+        }
+    };
+    for session in sessions {
+        if session.created_by.as_deref() != Some(username)
+            || session_mod::is_terminal(&session.status)
+        {
+            continue;
+        }
+        let Some(branch) = (match branch_mod::get(&st.db, &session.branch_id).await {
+            Ok(branch) => branch,
+            Err(error) => {
+                tracing::warn!(%error, username, session = %session.id, "could not load branch while closing user access");
+                continue;
+            }
+        }) else {
+            tracing::warn!(username, session = %session.id, "session had no branch while closing user access");
+            continue;
+        };
+        match archive(st, &session, &branch).await {
+            Ok(warnings) if warnings.is_empty() => {
+                tracing::info!(username, session = %session.id, "closed session after authorization expired");
+            }
+            Ok(warnings) => {
+                tracing::warn!(username, session = %session.id, ?warnings, "closed session with warnings after authorization expired");
+            }
+            Err(error) => {
+                tracing::warn!(%error, username, session = %session.id, "could not close session after authorization expired");
+            }
+        }
+    }
+}
+
 pub fn require_no_transition(session: &Session) -> Result<()> {
     if let Some(transition) = session.lifecycle_transition.as_deref() {
         return Err(anyhow!(Refusal::Conflict(format!(

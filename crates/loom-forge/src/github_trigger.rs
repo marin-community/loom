@@ -387,6 +387,8 @@ pub struct CommentPayload {
 pub struct UserPayload {
     #[serde(default)]
     pub login: String,
+    #[serde(default)]
+    pub id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -486,6 +488,10 @@ impl TriggerEvent {
         &self.request.user.login
     }
 
+    pub fn author_id(&self) -> i64 {
+        self.request.user.id
+    }
+
     pub fn request_body(&self) -> &str {
         &self.request.body
     }
@@ -545,37 +551,108 @@ pub async fn record_delivery(db: &Db, delivery_id: &str) -> Result<bool> {
 // Commenter authorization — the untrusted boundary.
 // ---------------------------------------------------------------------------
 
-/// A GitHub login is `[A-Za-z0-9-]`, at most 39 chars. We only enforce the
-/// charset and length — enough to keep junk out and to reject a login before it
-/// reaches a store lookup; GitHub is the authority on whether the account exists.
-pub fn valid_login(login: &str) -> bool {
-    !login.is_empty()
-        && login.len() <= 39
-        && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
+pub use weaver_core::github::valid_login;
 
-/// Whether `login` may trigger a session. Authorized iff the login is an
-/// **approved loom user** — a row in the `users` table, the *same* allowlist that
-/// gates signing in to the app (checked with no GitHub call). Fails **closed**: a
-/// malformed login, an unknown user, or a store error all deny.
+/// Whether a GitHub identity may trigger a session. A manual grant is durable;
+/// a current organization lease is accepted without a GitHub round trip. An
+/// expired lease is revalidated with the App installation before the trigger
+/// proceeds, and every non-active result fails closed.
 ///
-/// Having write access to the repo is *not* by itself a grant. (Extension
-/// point: a future org-scoped rule such as "admins of org X" would be
-/// evaluated here, consulting the GitHub API; deliberately not implemented
-/// yet.)
-pub async fn authorize(db: &Db, login: &str) -> bool {
-    if !valid_login(login) {
+/// Having write access to the repository is not itself a grant.
+pub async fn authorize(
+    db: &Db,
+    app: Option<&crate::github_app::GithubApp>,
+    login: &str,
+    github_user_id: i64,
+) -> bool {
+    if !valid_login(login) || github_user_id <= 0 {
         tracing::warn!(login, "rejecting trigger from a malformed GitHub login");
         return false;
     }
-    match auth::user_by_github(db, login).await {
-        Ok(Some(_)) => true,
+    match auth::authorized_github_identity(db, login, github_user_id).await {
+        Ok(Some(_)) => return true,
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, login, "trigger denied: approved-user lookup failed");
+            return false;
+        }
+    }
+
+    let authorization = match auth::github_organization_authorization_for_identity(
+        db,
+        github_user_id,
+    )
+    .await
+    {
+        Ok(Some(authorization)) => authorization,
         Ok(None) => {
             tracing::info!(login, "trigger denied: not an approved loom user");
-            false
+            return false;
         }
-        Err(e) => {
-            tracing::warn!(error = %e, login, "trigger denied: approved-user lookup failed");
+        Err(error) => {
+            tracing::warn!(%error, login, "trigger denied: organization authorization lookup failed");
+            return false;
+        }
+    };
+
+    let organizations = match auth::configured_github_organizations(db).await {
+        Ok(organizations) => organizations,
+        Err(error) => {
+            tracing::warn!(%error, login, "trigger denied: GitHub organization configuration is invalid");
+            Vec::new()
+        }
+    };
+    let membership = match app {
+        Some(app) if !organizations.is_empty() => {
+            app.active_organization_membership(&organizations, github_user_id)
+                .await
+        }
+        None => Err(anyhow::anyhow!(
+            "GitHub App is unavailable for organization revalidation"
+        )),
+        Some(_) => Err(anyhow::anyhow!(
+            "no GitHub organizations are configured for authorization"
+        )),
+    };
+    if let Ok(Some(membership)) = &membership {
+        return match auth::renew_github_organization_authorization(
+            db,
+            &authorization,
+            &membership.github_login,
+            &membership.organization,
+        )
+        .await
+        {
+            Ok(true) => true,
+            Ok(false) => auth::authorized_github_identity(db, login, github_user_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some(),
+            Err(error) => {
+                tracing::warn!(%error, login, "trigger denied: could not renew organization authorization");
+                false
+            }
+        };
+    }
+
+    if let Err(error) = &membership {
+        tracing::warn!(%error, login, "trigger denied: GitHub organization membership could not be verified");
+    } else {
+        tracing::info!(
+            login,
+            "trigger denied: GitHub organization membership is inactive"
+        );
+    }
+    match auth::expire_github_organization_authorization(db, &authorization).await {
+        Ok(true) => false,
+        Ok(false) => auth::authorized_github_identity(db, login, github_user_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some(),
+        Err(error) => {
+            tracing::warn!(%error, login, "trigger denied: could not expire organization authorization");
             false
         }
     }
@@ -852,13 +929,14 @@ mod tests {
         let raw = br#"{
             "action": "created",
             "issue": {"number": 7, "title": "Fix the bug", "body": "It crashes"},
-            "comment": {"id": 17, "body": "@loom work on this", "user": {"login": "alice"}},
+            "comment": {"id": 17, "body": "@loom work on this", "user": {"login": "alice", "id": 101}},
             "repository": {"full_name": "acme/widgets"},
             "sender": {"login": "alice"}
         }"#;
         let ev = TriggerEvent::parse("issue_comment", raw).unwrap().unwrap();
         assert_eq!(ev.issue.number, 7);
         assert_eq!(ev.author(), "alice");
+        assert_eq!(ev.author_id(), 101);
         assert_eq!(ev.request_body(), "@loom work on this");
         assert_eq!(ev.comment_id(), Some(17));
         assert_eq!(ev.source(), TriggerSource::CommentCreated);
@@ -1031,18 +1109,83 @@ mod tests {
         let db = crate::db::connect_in_memory().await.unwrap();
         // An approved loom user (their GitHub login is on the `users` allowlist —
         // the same one that gates sign-in) may trigger, with no GitHub call.
-        auth::add_user(&db, "alice", Some("alice-gh"), None, auth::UserRole::Admin)
-            .await
-            .unwrap();
-        assert!(authorize(&db, "alice-gh").await);
+        auth::add_user(
+            &db,
+            "alice",
+            Some("alice-gh"),
+            Some(101),
+            None,
+            auth::UserRole::Admin,
+        )
+        .await
+        .unwrap();
+        assert!(authorize(&db, None, "alice-gh", 101).await);
         // Case-insensitive, like GitHub logins and the sign-in check.
-        assert!(authorize(&db, "ALICE-GH").await);
+        assert!(authorize(&db, None, "ALICE-GH", 101).await);
+        assert!(!authorize(&db, None, "alice-gh", 202).await);
+
+        let valid_until = weaver_core::db::iso_in_days(1).unwrap();
+        sqlx::query(
+            "INSERT INTO users
+             (username, github_login, github_user_id, role, authorization_kind,
+              authorization_github_org_id, authorization_github_org_login,
+              authorization_valid_until)
+             VALUES ('bob', 'bob-gh', 202, 'user', 'github_organization', 303, 'Acme', ?)",
+        )
+        .bind(valid_until)
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(authorize(&db, None, "bob-gh", 202).await);
+        sqlx::query(
+            "UPDATE users SET authorization_valid_until = '2000-01-01T00:00:00.000Z'
+             WHERE username = 'bob'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(!authorize(&db, None, "bob-gh", 202).await);
+
+        sqlx::query(
+            "INSERT INTO users
+             (username, github_login, github_user_id, role, authorization_kind,
+              authorization_github_org_id, authorization_github_org_login,
+              authorization_valid_until)
+             VALUES ('member', 'member', 404, 'user', 'github_organization', 303, 'Acme',
+                     '2000-01-01T00:00:00.000Z')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        config::apply(
+            &db,
+            &[(
+                auth::GH_ORGANIZATIONS_KEY.to_string(),
+                Some("broken:302, Alternate:304".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+        let app = crate::github_app::tests::configured_test_app(db.clone()).await;
+        assert!(authorize(&db, Some(&app), "member", 404).await);
+        assert!(auth::authorized_github_identity(&db, "member", 404)
+            .await
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            auth::get_user(&db, "member")
+                .await
+                .unwrap()
+                .unwrap()
+                .authorization_github_org_id,
+            Some(304)
+        );
 
         // Anyone not on the allowlist is denied — write access to the repo is not
         // itself a grant.
-        assert!(!authorize(&db, "stranger").await);
+        assert!(!authorize(&db, None, "stranger", 303).await);
         // A malformed login is denied before any lookup.
-        assert!(!authorize(&db, "../etc").await);
+        assert!(!authorize(&db, None, "../etc", 101).await);
     }
 
     #[test]

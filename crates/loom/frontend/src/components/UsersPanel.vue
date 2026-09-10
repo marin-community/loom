@@ -8,11 +8,13 @@ import { confirmAction } from '../lib/confirmation';
 const users = ref<User[]>([]);
 const newUser = ref('');
 const newUserGithub = ref('');
+const newUserGithubId = ref('');
 const newUserPassword = ref('');
 const newUserRole = ref<UserRole>('user');
 const busy = ref('');
 const error = ref('');
 const notice = ref('');
+const githubIdentityIds = ref<Record<string, string>>({});
 
 async function load() {
   try {
@@ -33,11 +35,13 @@ async function add() {
     await api.addUser(
       username,
       newUserGithub.value.trim() || undefined,
+      newUserGithubId.value ? Number(newUserGithubId.value) : undefined,
       newUserPassword.value || undefined,
       newUserRole.value,
     );
     newUser.value = '';
     newUserGithub.value = '';
+    newUserGithubId.value = '';
     newUserPassword.value = '';
     newUserRole.value = 'user';
     notice.value = `${username} approved.`;
@@ -68,10 +72,51 @@ async function changeRole(user: User, role: UserRole) {
   }
 }
 
+async function approveManually(user: User) {
+  if (busy.value) return;
+  busy.value = `approve:${user.username}`;
+  error.value = '';
+  notice.value = '';
+  try {
+    const updated = await api.approveUserManually(user.username);
+    users.value = users.value.map((entry) =>
+      entry.username === updated.username ? updated : entry,
+    );
+    notice.value = `${user.username} is now approved manually.`;
+  } catch (cause) {
+    error.value = (cause as Error).message;
+  } finally {
+    busy.value = '';
+  }
+}
+
+async function bindGithubIdentity(user: User) {
+  const id = Number(githubIdentityIds.value[user.username]);
+  if (!user.github_login || !Number.isInteger(id) || id <= 0 || busy.value) return;
+  busy.value = `identity:${user.username}`;
+  error.value = '';
+  notice.value = '';
+  try {
+    const updated = await api.setUserGithubIdentity(user.username, user.github_login, id);
+    users.value = users.value.map((entry) =>
+      entry.username === updated.username ? updated : entry,
+    );
+    delete githubIdentityIds.value[user.username];
+    notice.value = `${user.username}'s GitHub identity is bound.`;
+  } catch (cause) {
+    error.value = (cause as Error).message;
+  } finally {
+    busy.value = '';
+  }
+}
+
 async function remove(user: User) {
   await confirmAction({
     title: `Remove approved user "${user.username}"?`,
-    description: 'They will lose dashboard and API access immediately.',
+    description:
+      user.authorization_kind === 'github_organization'
+        ? 'Their Loom credentials will stop working, but active organization membership lets them sign in again.'
+        : 'They will lose dashboard and API access immediately.',
     confirmLabel: 'Remove user',
     danger: true,
     action: async () => {
@@ -123,10 +168,36 @@ onMounted(load);
             {{ user.github_login ? `GitHub: ${user.github_login}` : 'no GitHub login' }} ·
             {{ user.has_password ? 'password set' : 'no password' }}
           </p>
+          <p v-if="user.authorization_kind === 'github_organization'" class="text-2xs text-faint">
+            Organization: {{ user.authorization_github_org_login }} · access through
+            {{ new Date(user.authorization_valid_until!).toLocaleString() }}
+          </p>
+          <p v-else class="text-2xs text-faint">Manually approved</p>
+          <div
+            v-if="user.authorization_kind === 'manual' && user.github_login && !user.github_user_id"
+            class="mt-2 flex max-w-md items-end gap-2"
+          >
+            <label class="flex-1 text-2xs text-muted">
+              Numeric GitHub user ID required before GitHub sign-in
+              <input
+                v-model="githubIdentityIds[user.username]"
+                type="number"
+                min="1"
+                class="mt-1 w-full rounded bg-input px-2 py-1 text-xs"
+              />
+            </label>
+            <button
+              class="btn-secondary px-2.5 py-1 text-xs"
+              :disabled="Boolean(busy) || !githubIdentityIds[user.username]"
+              @click="bindGithubIdentity(user)"
+            >
+              Bind identity
+            </button>
+          </div>
         </div>
         <select
           :value="user.role"
-          :disabled="Boolean(busy)"
+          :disabled="Boolean(busy) || user.authorization_kind === 'github_organization'"
           :aria-label="`Role for ${user.username}`"
           class="rounded bg-input px-2 py-1 text-xs"
           @change="changeRole(user, ($event.target as HTMLSelectElement).value as UserRole)"
@@ -134,6 +205,14 @@ onMounted(load);
           <option value="user">User</option>
           <option value="admin">Admin</option>
         </select>
+        <button
+          v-if="user.authorization_kind === 'github_organization'"
+          class="btn-secondary px-2.5 py-1 text-xs"
+          :disabled="Boolean(busy)"
+          @click="approveManually(user)"
+        >
+          Approve manually
+        </button>
         <button
           v-if="user.username !== me.username"
           class="btn-secondary px-2.5 py-1 text-xs"
@@ -159,6 +238,16 @@ onMounted(load);
         <input
           v-model="newUserGithub"
           placeholder="Optional"
+          class="mt-1 w-full rounded bg-input px-2 py-1.5 text-sm"
+        />
+      </label>
+      <label class="text-2xs text-muted">
+        GitHub numeric user ID
+        <input
+          v-model="newUserGithubId"
+          type="number"
+          min="1"
+          placeholder="Required with a GitHub login"
           class="mt-1 w-full rounded bg-input px-2 py-1.5 text-sm"
         />
       </label>

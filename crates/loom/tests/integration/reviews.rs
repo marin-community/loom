@@ -224,9 +224,16 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
         "a same-owner session credential must not inherit the operator's draft"
     );
 
-    loom::auth::add_user(&ts.state.db, "bob", None, None, loom::auth::UserRole::Admin)
-        .await
-        .unwrap();
+    loom::auth::add_user(
+        &ts.state.db,
+        "bob",
+        None,
+        None,
+        None,
+        loom::auth::UserRole::Admin,
+    )
+    .await
+    .unwrap();
     let (token, _) = loom::auth::create_token(&ts.state.db, "bob", "reviewer", None)
         .await
         .unwrap();

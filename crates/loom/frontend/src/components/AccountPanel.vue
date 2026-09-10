@@ -131,7 +131,7 @@ onMounted(loadMyGithubToken);
     </section>
 
     <!-- Password -->
-    <section>
+    <section v-if="me.authorization_kind === 'manual'">
       <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">Password</h2>
       <div class="rounded-md border border-line bg-surface px-3 py-2.5">
         <p class="text-xs text-muted mb-2">

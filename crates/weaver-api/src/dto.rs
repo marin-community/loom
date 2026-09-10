@@ -2637,6 +2637,11 @@ wire_enum!(UserRole {
     User => "user",
 });
 
+wire_enum!(UserAuthorizationKind {
+    Manual => "manual",
+    GithubOrganization => "github_organization",
+});
+
 /// Which sign-in methods the server currently offers — what the login screen
 /// renders. `password` is always available (any user can be given one);
 /// `github` is true only once an OAuth app is configured.
@@ -2659,6 +2664,8 @@ pub struct MeView {
     pub via: Option<String>,
     /// Persisted human role. Scoped automation/session principals have no role.
     pub role: Option<UserRole>,
+    /// Where the current human user's authorization comes from.
+    pub authorization_kind: Option<UserAuthorizationKind>,
     /// The sign-in methods on offer (for the login screen).
     pub methods: AuthMethods,
 }
@@ -2699,8 +2706,13 @@ pub struct LoginReq {
 pub struct UserView {
     pub username: String,
     pub github_login: Option<String>,
+    pub github_user_id: Option<i64>,
     pub has_password: bool,
     pub role: UserRole,
+    pub authorization_kind: UserAuthorizationKind,
+    pub authorization_github_org_id: Option<i64>,
+    pub authorization_github_org_login: Option<String>,
+    pub authorization_valid_until: Option<String>,
     pub created_at: String,
 }
 

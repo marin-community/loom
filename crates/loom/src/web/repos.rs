@@ -108,6 +108,7 @@ pub(super) async fn github_webhook(
     // 4. Ignore the bot's own requests (no self-trigger loop), then require the
     //    configured trigger phrase.
     let author = event.author().trim().to_string();
+    let author_id = event.author_id();
     if let Some(bot) = github_trigger::bot_login(&st.db).await {
         if author.eq_ignore_ascii_case(&bot) {
             return ok();
@@ -142,7 +143,15 @@ pub(super) async fn github_webhook(
     //    user knows to ask rather than assume loom is broken. The per-repo rate
     //    limit above bounds this against a trigger flood; the reply is spawned (a
     //    comment post is a round-trip) and tracked so the attempt shows on Debug.
-    if !github_trigger::authorize(&st.db, &author).await {
+    if !github_trigger::authorize(&st.db, st.trigger.app(), &author, author_id).await {
+        if let Ok(Some(username)) =
+            crate::auth::expired_github_organization_username(&st.db, author_id).await
+        {
+            let state = st.clone();
+            weaver_core::spawn_boxed(Box::pin(async move {
+                crate::lifecycle::close_sessions_created_by(&state, &username).await;
+            }));
+        }
         tracing::info!(login = %author, repo = %slug.slug(), "github webhook: requester not authorized; replying with access info");
         let number = event.issue.number;
         let slug_str = slug.slug();

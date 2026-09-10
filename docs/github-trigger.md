@@ -135,13 +135,15 @@ not retry a delivery loom handled without launching.
 ## Who can trigger
 
 The people who can trigger `@loom` are exactly the people who can sign in to
-loom: the **approved users** (the `users` table). One allowlist governs both: being approved lets someone sign in *and* drive the trigger from an
+Loom: manually approved users and organization users with a current membership
+authorization. One policy governs both: authorization lets someone sign in and drive the trigger from an
 issue body, comment, or submitted review, including by editing a body to add the
 mention; no one else can do either. Write access to the repo is **not** by itself
 a grant, so opening a repo to loom never hands the trigger to everyone who can
 push to it.
 
-The first approved user is seeded from `LOOM_OWNER_GITHUB` on a fresh database.
+The first approved user is seeded from `LOOM_OWNER_GITHUB` and
+`LOOM_OWNER_GITHUB_ID` on a fresh database.
 Manage the rest in **Settings → People & security** or over the API (set
 `github_login` so the person can both sign in with GitHub and trigger; new
 users default to the normal `user` role):
@@ -149,13 +151,17 @@ users default to the normal `user` role):
 ```sh
 curl -X POST {base}/api/auth/users/create -H 'Authorization: Bearer $LOOM_TOKEN' \
   -H 'content-type: application/json' \
-  -d '{"username":"octocat","github_login":"octocat"}'
+  -d '{"username":"octocat","github_login":"octocat","github_user_id":583231}'
 ```
 
-> **Extending this later.** Today an approved user is an explicit login. A
-> role-scoped rule — e.g. "admins of org `acme`" — would slot into the same
-> authorization step ([`github_trigger::authorize`]), evaluated against the
-> GitHub API; it is not implemented yet.
+Set `auth.github_organizations` to a space- or comma-separated list of
+`login:numeric-id` pairs when active organization members should receive the
+`user` role at GitHub sign-in. The authorization is renewed hourly through the
+GitHub App. A signed `@loom` webhook uses the actor's immutable GitHub id and a
+current lease; if the lease is stale, Loom resolves the current login by that id
+and checks every configured organization before launching.
+Inactive membership or any inability to verify it fails closed and closes the
+user's active sessions. The retained user row is history, not authorization.
 
 [`github_trigger::authorize`]: ../crates/loom-forge/src/github_trigger.rs
 
@@ -282,6 +288,9 @@ Apps → New GitHub App**:
   - **Metadata** — Read-only (mandatory; granted automatically).
   - **Pull requests** — Read & write (open and update pull requests).
   - **Workflows** — Read & write (push changes under `.github/workflows`).
+- **Organization permissions:**
+  - **Members** — Read-only (verify active membership when
+    `auth.github_organizations` is set).
 - **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
   review**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the

@@ -15,7 +15,7 @@ use weaver_api::operations::auth::{
 use weaver_api::{
     AuthMethods, AutomationTokenView, CreatedTokenView, FederationReq, FederationView,
     GithubConfigView, GithubTokenStatusView, LoginReq, MeView, RemoveFederationResult,
-    RemoveUserResult, RevokeTokenResult, TokenView, UserRole, UserView,
+    RemoveUserResult, RevokeTokenResult, TokenView, UserAuthorizationKind, UserRole, UserView,
 };
 
 use crate::auth::{self, Grant, Principal};
@@ -432,6 +432,21 @@ pub(super) struct GithubCallbackQuery {
     state: Option<String>,
 }
 
+async fn close_sessions_for_expired_github_user(st: &AppState, github_user_id: i64) {
+    match auth::expired_github_organization_username(&st.db, github_user_id).await {
+        Ok(Some(username)) => {
+            let state = st.clone();
+            weaver_core::spawn_boxed(Box::pin(async move {
+                crate::lifecycle::close_sessions_created_by(&state, &username).await;
+            }));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(%error, github_user_id, "could not schedule expired user's session closure");
+        }
+    }
+}
+
 /// `GET /api/auth/github/callback` — finish the dance: verify state, exchange the
 /// code, check the GitHub login against the allowlist, open a session.
 pub(super) async fn github_callback(
@@ -456,16 +471,20 @@ pub(super) async fn github_callback(
     let redirect_uri = format!("{base}{GITHUB_CALLBACK_PATH}");
     let token = auth::exchange_code(&cfg, &code, &redirect_uri).await?;
     let gh = auth::fetch_github_user(&token).await?;
-    let Some(user) = auth::user_by_github(&st.db, &gh.login).await? else {
-        // Authenticated with GitHub, but not on the allowlist.
+    let user = match auth::approved_github_user(&st.db, &token, &gh).await {
+        Ok(user) => user,
+        Err(error) => {
+            tracing::warn!(login = %gh.login, %error, "GitHub organization approval failed");
+            close_sessions_for_expired_github_user(&st, gh.id).await;
+            return Ok(login_error_redirect("organization-verification-failed"));
+        }
+    };
+    let Some(user) = user else {
+        // Authenticated with GitHub, but neither explicitly approved nor an
+        // active member of a configured organization.
+        close_sessions_for_expired_github_user(&st, gh.id).await;
         return Ok(login_error_redirect("not-approved"));
     };
-    // Record the profile for commit attribution (best-effort — a failure here
-    // must not block a valid sign-in).
-    if let Err(e) = auth::update_github_profile(&st.db, &gh.login, gh.id, gh.name.as_deref()).await
-    {
-        tracing::warn!(login = %gh.login, "failed to record GitHub profile: {e}");
-    }
     let cookie = auth::create_session(&st.db, &user.username).await?;
     tracing::info!(username = %user.username, method = "github", "signed in");
     Ok(redirect_with_cookies(
@@ -503,9 +522,23 @@ fn user_view(u: auth::User) -> UserView {
     UserView {
         username: u.username,
         github_login: u.github_login,
+        github_user_id: u.github_user_id,
         has_password,
         role: user_role_view(u.role),
+        authorization_kind: user_authorization_kind_view(u.authorization_kind),
+        authorization_github_org_id: u.authorization_github_org_id,
+        authorization_github_org_login: u.authorization_github_org_login,
+        authorization_valid_until: u.authorization_valid_until,
         created_at: u.created_at,
+    }
+}
+
+fn user_authorization_kind_view(kind: auth::UserAuthorizationKind) -> UserAuthorizationKind {
+    match kind {
+        auth::UserAuthorizationKind::Manual => UserAuthorizationKind::Manual,
+        auth::UserAuthorizationKind::GithubOrganization => {
+            UserAuthorizationKind::GithubOrganization
+        }
     }
 }
 
@@ -572,15 +605,24 @@ async fn me_op(context: OperationContext, _input: me::Input) -> ApiResult<MeView
             username: None,
             github_login: None,
             via: None,
+            authorization_kind: None,
             methods,
         });
     }
+    let authorization_kind = if p.is_human() {
+        auth::get_user(&context.state.db, &p.username)
+            .await?
+            .map(|user| user_authorization_kind_view(user.authorization_kind))
+    } else {
+        None
+    };
     Ok(MeView {
         authenticated: true,
         role: p.user_role().map(user_role_view),
         username: Some(p.username),
         github_login: p.github_login,
         via: Some(p.via.as_str().to_string()),
+        authorization_kind,
         methods,
     })
 }
@@ -621,7 +663,8 @@ async fn set_password_op(
         &context.principal.username,
         Some(&input.new_password),
     )
-    .await?;
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
     let user = auth::get_user(&context.state.db, &context.principal.username)
         .await?
         .ok_or_else(|| AppError::not_found("user"))?;
@@ -662,7 +705,8 @@ async fn create_token_op(
         name,
         input.expires_in_days,
     )
-    .await?;
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
     tracing::info!(username = %context.principal.username, id = %info.id, name = %info.name, "api token created");
     Ok(CreatedTokenView {
         token,
@@ -797,6 +841,11 @@ async fn add_user_op(
         .map(str::trim)
         .filter(|s| !s.is_empty());
     let password = input.password.as_deref().filter(|s| !s.is_empty());
+    if github.is_some() != input.github_user_id.is_some() {
+        return Err(AppError::bad_request(
+            "set both the GitHub login and its numeric user id",
+        ));
+    }
     if github.is_none() && password.is_none() {
         return Err(AppError::bad_request(
             "set a GitHub login or a password so the user can sign in",
@@ -813,6 +862,7 @@ async fn add_user_op(
         &context.state.db,
         username,
         github,
+        input.github_user_id,
         password,
         user_role_input(input.role),
     )
@@ -847,6 +897,37 @@ async fn set_user_role_op(
     Ok(user_view(user))
 }
 
+/// `auth.users.approve_manually` — make an external organization grant a
+/// durable local approval before any role or password changes are allowed.
+async fn approve_user_manually_op(
+    context: OperationContext,
+    input: users::approve_manually::Input,
+) -> ApiResult<UserView> {
+    let user = auth::approve_user_manually(&context.state.db, &input.username)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+    tracing::info!(username = %input.username, "user approved manually");
+    Ok(user_view(user))
+}
+
+async fn set_github_identity_op(
+    context: OperationContext,
+    input: users::set_github_identity::Input,
+) -> ApiResult<UserView> {
+    auth::set_manual_github_identity(
+        &context.state.db,
+        &input.username,
+        &input.github_login,
+        input.github_user_id,
+    )
+    .await
+    .map_err(|error| AppError::bad_request(error.to_string()))?;
+    let user = auth::get_user(&context.state.db, &input.username)
+        .await?
+        .ok_or_else(|| AppError::not_found("user"))?;
+    Ok(user_view(user))
+}
+
 /// `auth.users.remove` — remove an approved operator. The "you cannot remove
 /// yourself" check guards business state — self-removal could strand the
 /// last admin — which `authorize()` has no way to express, so the handler
@@ -860,6 +941,7 @@ async fn remove_user_op(
     }
     match auth::remove_user(&context.state.db, &input.username).await {
         Ok(true) => {
+            crate::lifecycle::close_sessions_created_by(&context.state, &input.username).await;
             tracing::info!(username = %input.username, "operator removed");
             Ok(RemoveUserResult {
                 removed: true,
@@ -960,6 +1042,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<federations::remove::Op, _, _>(remove_federation_op),
         register::<users::list::Op, _, _>(list_users_op),
         register::<users::create::Op, _, _>(add_user_op),
+        register::<users::approve_manually::Op, _, _>(approve_user_manually_op),
+        register::<users::set_github_identity::Op, _, _>(set_github_identity_op),
         register::<users::set_role::Op, _, _>(set_user_role_op),
         register::<users::remove::Op, _, _>(remove_user_op),
         register::<github_token::get::Op, _, _>(get_github_token_op),

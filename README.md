@@ -375,18 +375,23 @@ loom can be exposed off `127.0.0.1` so the dashboard and the API are reachable
 without an SSH tunnel — `loom server run --addr 0.0.0.0:7878`, ideally behind a
 TLS-terminating reverse proxy. Access is then gated three ways:
 
-- **Local use needs nothing.** Requests from the loopback interface are trusted
-  as the machine owner, so the local `loom` CLI, the agent, and watch
-  scripts keep working with zero configuration. (Turn this off with
-  `auth.trust_loopback false` behind a *same-host* proxy — see below.)
+- **Local use needs nothing in single-user mode.** Requests from the loopback
+  interface are trusted as the machine owner, so the local `loom` CLI, the
+  agent, and watch scripts work with zero configuration. Organization
+  authorization disables loopback and machine-token impersonation; local
+  callers then use an ordinary user or session credential.
 - **GitHub or password login** for the web UI. The login screen offers
   "Continue with GitHub" once an OAuth app is configured, plus username/password.
-  A fresh install approves exactly one user — whichever GitHub login you set as
-  `LOOM_OWNER_GITHUB` before first run. There is no default; leave it unset and
-  no owner is seeded, so GitHub sign-in won't work until it's set. Add more
+  A fresh install approves exactly one user — whichever GitHub login and
+  immutable numeric id you set as `LOOM_OWNER_GITHUB` and
+  `LOOM_OWNER_GITHUB_ID` before first run. There is no default; leave the login
+  unset and no owner is seeded, so GitHub sign-in won't work until it's set. Add more
   users and roles under **Settings → People & security**, set your password
   under **Settings → Account**, and configure GitHub sign-in under **Settings →
-  Integrations**.
+  Integrations**. A deployment can set
+  `auth.github_organizations` to let active members of named GitHub
+  organizations sign in with a renewable one-hour authorization; the GitHub
+  App needs the **Members: Read-only** organization permission.
 - **Personal API tokens** for remote CLIs and other trusted clients. Mint one
   under **Settings → Account** or from a locally authenticated CLI:
 
@@ -446,7 +451,11 @@ Behind a **same-host reverse proxy** the proxy's forwarded requests appear to
 come from loopback, so set `auth.trust_loopback false` and `auth.cookie_secure
 true`. Local automation keeps working: loom mints a machine-local token (at
 `~/.weaver/loom-token`, mode 0600) and hands it to its own subprocesses, so only
-genuinely remote callers need to present a token or log in.
+genuinely remote callers need to present a token or log in. Once
+`auth.github_organizations` has been enabled, Loom permanently latches that
+database into shared-deployment mode and ignores both loopback trust and the
+machine-local token; every request instead resolves to a manual user or an
+organization-authorized user with a current lease.
 
 ## Configuration
 
