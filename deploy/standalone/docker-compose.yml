@@ -142,12 +142,19 @@ services:
       # Consumed by the Caddyfile. Fails fast if LOOM_DOMAIN is unset.
       LOOM_DOMAIN: ${LOOM_DOMAIN:?set LOOM_DOMAIN in deploy/standalone/.env}
       LOOM_TLS_EMAIL: ${LOOM_TLS_EMAIL:-}
+      # The Caddyfile's whole `tls` line
+      LOOM_TLS_DIRECTIVE: ${LOOM_TLS_CERT_FILE:+tls /certs/cert.pem /certs/key.pem}
     ports:
       - "80:80"     # ACME HTTP-01 challenge + the HTTP->HTTPS redirect
       - "443:443"   # HTTPS
       - "443:443/udp" # HTTP/3 (QUIC)
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Fall back to bind-mounting the Caddyfile itself (inert — nothing ever
+      # reads it as a cert) when LOOM_TLS_CERT_FILE/_KEY_FILE are unset, since
+      # a bind mount's source must exist either way.
+      - ${LOOM_TLS_CERT_FILE:-./Caddyfile}:/certs/cert.pem:ro
+      - ${LOOM_TLS_KEY_FILE:-./Caddyfile}:/certs/key.pem:ro
       - caddy_data:/data     # issued certs + ACME account — survive a recreate
       - caddy_config:/config
     depends_on:

@@ -118,6 +118,17 @@ pub(crate) fn warn_shadowed_env(shadowed: &[&str], config_path: &std::path::Path
     }
 }
 
+/// Warn to stderr when exactly one of `LOOM_TLS_CERT_FILE` / `LOOM_TLS_KEY_FILE`
+/// is set — Caddy needs both or neither.
+pub(crate) fn warn_asymmetric_tls_files(config: &crate::loom_config::LoomConfig) {
+    if config.tls_cert_file.is_some() != config.tls_key_file.is_some() {
+        eprintln!(
+            "warning: only one of LOOM_TLS_CERT_FILE / LOOM_TLS_KEY_FILE is set — set both or \
+             neither, or Caddy will fail to start trying to load the other as a cert/key."
+        );
+    }
+}
+
 /// `loom config render-env` — resolve `loom.toml` (plus any ambient env
 /// override) and write it out as a dotenv file, the only place the
 /// field→`ENV_NAME` mapping is applied.
@@ -125,6 +136,7 @@ pub(crate) fn cmd_config_render_env(opts: RenderEnvOpts) -> Result<()> {
     let (config, shadowed) = crate::loom_config::resolve_reporting_shadows(&opts.config.config)
         .with_context(|| format!("loading {}", opts.config.config.display()))?;
     warn_shadowed_env(&shadowed, &opts.config.config);
+    warn_asymmetric_tls_files(&config);
     let rendered = crate::loom_config::render_env(&config);
     if opts.out == "-" {
         print!("{rendered}");
