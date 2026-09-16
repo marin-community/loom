@@ -64,7 +64,7 @@ services:
       LOOM_SESSION_IMAGE: ${LOOM_IMAGE:-loom:latest}
       LOOM_SESSION_HOME_VOLUME: loom_loom_home
       LOOM_SESSION_UV_VOLUME: loom_uv
-      LOOM_SESSION_DOCKER_GID: ${DOCKER_GID:-999}
+      LOOM_SESSION_DOCKER_GID: ${DOCKER_GID:?set DOCKER_GID — see deploy/README.md "Agent runtime & client packages"}
       LOOM_SESSION_NETWORK: loom_default
       LOOM_SESSION_API_URL: http://loom:7878
     depends_on:
@@ -79,18 +79,21 @@ services:
     # Docker-out-of-Docker: a session's `docker build`/`docker compose` talks to
     # the HOST's Docker daemon over its bind-mounted socket (volumes, below), so
     # builds run on the host — reusing its layer cache and writing images/layers
-    # to the host data root, not into
-    # the container. The non-root app user reaches the root-owned socket by joining
-    # the host `docker` group via its numeric gid: run.py derives it and appends
-    # DOCKER_GID to .env;
-    # the 999 fallback is the usual Debian docker gid for a hand-run `compose up`.
+    # to the host data root, not into the container. The non-root app user reaches
+    # the root-owned socket by joining the host `docker` group via its numeric
+    # gid: run.py derives it and appends  DOCKER_GID to .env, explicitly passing 0
+    # (root group) when no host `docker` group exists at all (e.g. Docker Desktop
+    # on MacOS or Windows). loom-entrypoint's loom-docker-socket-init chmods the
+    # socket world-accessible when DOCKER_GID is 0 to make it reachable regardless
+    # of uid/gid ownership. DOCKER_GID has no default here deliberately so a user
+    # can't accidentally chmod a real Linux host's docker.sock world-writable.
     # SECURITY: this is the SAME daemon that runs this stack, so a session's docker
     # commands can see and mutate loom's own containers/volumes (the DB included) —
     # and socket access is root-equivalent on the host. Acceptable only because
     # this is a single-tenant box running the owner's own agents (see ../README.md
     # "Security posture").
     group_add:
-      - "${DOCKER_GID:-999}"
+      - "${DOCKER_GID:?set DOCKER_GID — see deploy/README.md \"Agent runtime & client packages\"}"
     # Per-session memory limits (`session.memory_max_gb`): at boot the
     # entrypoint runs loom-cgroup-init (see the Dockerfile), which remounts the
     # container's own cgroup-v2 tree read-write and delegates an agents/
