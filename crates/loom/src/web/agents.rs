@@ -39,6 +39,7 @@ fn agent_metadata_view(m: crate::agent::AgentMetadata) -> AgentMetadataView {
         builtin: m.builtin,
         supports_acp: m.supports_acp,
         protocol: m.protocol,
+        available: m.available,
     }
 }
 

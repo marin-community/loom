@@ -2,6 +2,10 @@
 import { computed, onMounted, ref } from 'vue';
 import * as api from '../api';
 import type { AgentMetadata, McpRegistry, Profile, ProfileInput } from '../types';
+import {
+  availableAgents as filterAvailableAgents,
+  availableAgentKinds,
+} from '../lib/agentAvailability';
 import InlineConfirm from './InlineConfirm.vue';
 import ProfileEditor from './ProfileEditor.vue';
 
@@ -17,7 +21,20 @@ const notice = ref('');
 const envName = ref('');
 const envValue = ref('');
 
+// Only for defaulting a brand-new profile — the management list itself shows
+// every profile so an operator can always edit or delete one whose harness is
+// not installed on this host.
+const availableAgents = computed(() => filterAvailableAgents(agents.value));
+const availableKinds = computed(() => availableAgentKinds(agents.value));
+
 const current = computed(() => profiles.value.find((profile) => profile.name === selected.value));
+
+function profileOptionLabel(profile: Profile): string {
+  const agent = availableKinds.value.has(profile.agent_kind)
+    ? profile.agent_kind
+    : `${profile.agent_kind} (unavailable)`;
+  return `${profile.name} · ${agent} · ${profile.model || 'default model'}`;
+}
 
 function editable(profile: Profile): ProfileInput {
   const {
@@ -57,9 +74,9 @@ async function load() {
     agents.value = metadata.agents;
     mcpRegistry.value = registry;
     choose(
-      items.some((item) => item.name === selected.value)
+      profiles.value.some((item) => item.name === selected.value)
         ? selected.value
-        : (items[0]?.name ?? 'default'),
+        : (profiles.value[0]?.name ?? 'default'),
     );
   } catch (cause) {
     error.value = (cause as Error).message;
@@ -74,7 +91,7 @@ function add() {
     expected_revision: null,
     name: '',
     description: '',
-    agent_kind: agents.value[0]?.kind ?? 'claude',
+    agent_kind: availableAgents.value[0]?.kind ?? 'claude',
     model: '',
     effort: '',
     protocol: '',
@@ -169,8 +186,7 @@ onMounted(load);
         >
           <option v-if="creating" value="">New profile</option>
           <option v-for="profile in profiles" :key="profile.name" :value="profile.name">
-            {{ profile.name }} · {{ profile.agent_kind }} ·
-            {{ profile.model || 'default model' }}
+            {{ profileOptionLabel(profile) }}
           </option>
         </select>
       </label>
@@ -183,6 +199,9 @@ onMounted(load);
       data-testid="profile-summary"
     >
       <span class="font-mono text-fg">{{ current.agent_kind }}</span>
+      <span v-if="!availableKinds.has(current.agent_kind)" class="meta-chip text-block">
+        agent unavailable on this host
+      </span>
       <span>· {{ current.model || 'default model' }}</span>
       <span>· {{ current.effort || 'default effort' }}</span>
       <span>· {{ current.mode }}</span>
