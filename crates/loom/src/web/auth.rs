@@ -957,12 +957,13 @@ fn token_status_view(status: user_token::TokenStatus) -> GithubTokenStatusView {
     GithubTokenStatusView {
         set: status.set,
         updated_at: status.updated_at,
+        last8: status.last8,
     }
 }
 
 /// `auth.github_token.get` — whether the caller has a personal GitHub token
-/// on file. Scoped to `context.principal.username`; the value itself is
-/// never returned by this or any other operation.
+/// on file. Scoped to `context.principal.username`; the full value is
+/// never returned by this or any other operation, only its last 8 characters.
 async fn get_github_token_op(
     context: OperationContext,
     _input: github_token::get::Input,

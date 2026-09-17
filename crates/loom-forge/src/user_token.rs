@@ -6,10 +6,11 @@
 //! Account PAT is not selected. Restricted sessions use Loom's App-backed fixed
 //! GitHub tools.
 //!
-//! The value is **write-only** over the API: callers learn only *that* a token is
-//! set and when it changed, never the token itself. Export into ordinary shared
-//! sessions is blast-radius reduction rather than isolation; restricted
-//! sessions avoid that export entirely.
+//! The value is **near write-only** over the API: callers learn only *that* a
+//! token is set, when it changed, and its last 8 characters (enough to tell
+//! tokens apart, not enough to reconstruct one), never the token itself.
+//! Export into ordinary shared sessions is blast-radius reduction rather than
+//! isolation; restricted sessions avoid that export entirely.
 
 use anyhow::Result;
 use serde::Serialize;
@@ -17,12 +18,14 @@ use sqlx::Row;
 
 use crate::db::{now_iso, Db};
 
-/// Whether a user has a token set, and when it last changed — the write-only
-/// status the account pane renders and the API returns. Never the token.
+/// Whether a user has a token set, when it last changed, and its last 8
+/// characters — the near write-only status the account pane renders and the
+/// API returns. Never the full token.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TokenStatus {
     pub set: bool,
     pub updated_at: Option<String>,
+    pub last8: Option<String>,
 }
 
 /// The stored token for `username`, if any. Used only while assembling the
@@ -35,20 +38,26 @@ pub async fn get(db: &Db, username: &str) -> Result<Option<String>> {
     Ok(row.map(|r| r.get::<String, _>("token")))
 }
 
-/// Whether `username` has a token set, plus its timestamp — the write-only view.
+/// Whether `username` has a token set, plus its timestamp and last 8
+/// characters — the near write-only view. The full token never leaves the
+/// database: `SUBSTR` computes the suffix in the query itself.
 pub async fn status(db: &Db, username: &str) -> Result<TokenStatus> {
-    let row = sqlx::query("SELECT updated_at FROM user_github_tokens WHERE username = ?")
-        .bind(username)
-        .fetch_optional(db)
-        .await?;
+    let row = sqlx::query(
+        "SELECT SUBSTR(token, -8) AS last8, updated_at FROM user_github_tokens WHERE username = ?",
+    )
+    .bind(username)
+    .fetch_optional(db)
+    .await?;
     Ok(match row {
         Some(r) => TokenStatus {
             set: true,
             updated_at: Some(r.get::<String, _>("updated_at")),
+            last8: Some(r.get::<String, _>("last8")),
         },
         None => TokenStatus {
             set: false,
             updated_at: None,
+            last8: None,
         },
     })
 }
@@ -102,7 +111,8 @@ mod tests {
             status(&db, "alice").await.unwrap(),
             TokenStatus {
                 set: false,
-                updated_at: None
+                updated_at: None,
+                last8: None,
             }
         );
         assert!(get(&db, "alice").await.unwrap().is_none());
@@ -115,6 +125,7 @@ mod tests {
         let status = status(&db, "alice").await.unwrap();
         assert!(status.set);
         assert!(status.updated_at.is_some());
+        assert_eq!(status.last8.as_deref(), Some("_pat_abc"));
 
         set(&db, "alice", "github_pat_rotated").await.unwrap();
         assert_eq!(

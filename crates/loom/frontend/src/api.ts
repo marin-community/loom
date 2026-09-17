@@ -385,10 +385,11 @@ export const validateRepoRevision = (cwd: string, revision: string) =>
 
 // --- Your GitHub token (per-user) ------------------------------------------
 
-/** Write-only status for the signed-in user's Loom-stored GitHub PAT. */
+/** Status of the signed-in user's Loom-stored GitHub PAT, including its last8. */
 export interface GithubTokenStatus {
   set: boolean;
   updated_at: string | null;
+  last8: string | null;
 }
 
 export const getMyGithubToken = () => invokeOperation('auth.github_token.get', {});

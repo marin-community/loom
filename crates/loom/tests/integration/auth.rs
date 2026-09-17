@@ -97,7 +97,10 @@ async fn personal_github_token_is_self_service_and_write_only() {
         .json()
         .await
         .unwrap();
-    assert_eq!(initial, json!({ "set": false, "updated_at": null }));
+    assert_eq!(
+        initial,
+        json!({ "set": false, "updated_at": null, "last8": null })
+    );
 
     let stored: Value = http
         .post(&set_endpoint)
@@ -110,6 +113,7 @@ async fn personal_github_token_is_self_service_and_write_only() {
         .unwrap();
     assert_eq!(stored["set"], true);
     assert!(stored["updated_at"].is_string());
+    assert_eq!(stored["last8"], "ite_only");
     assert!(!stored.to_string().contains("github_pat_write_only"));
     assert_eq!(
         loom::user_token::get(&ts.state.db, "rjpower")
@@ -127,7 +131,10 @@ async fn personal_github_token_is_self_service_and_write_only() {
         .unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
     let deleted: Value = deleted.json().await.unwrap();
-    assert_eq!(deleted, json!({ "set": false, "updated_at": null }));
+    assert_eq!(
+        deleted,
+        json!({ "set": false, "updated_at": null, "last8": null })
+    );
     assert!(loom::user_token::get(&ts.state.db, "rjpower")
         .await
         .unwrap()
