@@ -2745,12 +2745,13 @@ pub struct GithubConfigView {
 }
 
 /// Whether the caller has a personal GitHub token on file, and when it last
-/// changed (`auth.github_token.get`/`.set`/`.remove`). Write-only: the
-/// value itself is never returned, only this status.
+/// changed (`auth.github_token.get`/`.set`/`.remove`). The full value is
+/// never returned, only this status and the token's last 8 characters.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GithubTokenStatusView {
     pub set: bool,
     pub updated_at: Option<String>,
+    pub last8: Option<String>,
 }
 
 /// Result of `auth.tokens.revoke`.

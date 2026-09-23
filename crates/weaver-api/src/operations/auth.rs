@@ -164,8 +164,9 @@ pub mod github_config {
 
 pub mod github_token {
     //! The caller's own GitHub personal-access token, injected into their
-    //! ordinary interactive sessions. Write-only: no operation here ever returns
-    //! the token value, only whether one is set.
+    //! ordinary interactive sessions. Near write-only: no operation here ever
+    //! returns the full token value, only whether one is set and its last 8
+    //! characters.
     pub(super) use super::prelude;
     pub mod get {
         use super::prelude::*;

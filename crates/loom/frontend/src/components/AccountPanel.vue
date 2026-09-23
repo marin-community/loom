@@ -80,6 +80,12 @@ async function saveMyGithubToken() {
   }
 }
 
+function daysAgo(iso: string): string {
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / (24 * 60 * 60 * 1000));
+  if (days <= 0) return 'today';
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
 async function clearMyGithubToken() {
   await confirmAction({
     title: 'Remove your personal GitHub token?',
@@ -91,7 +97,7 @@ async function clearMyGithubToken() {
       busy.value = true;
       try {
         await api.deleteMyGithubToken();
-        ghTokenStatus.value = { set: false, updated_at: null };
+        ghTokenStatus.value = { set: false, updated_at: null, last8: null };
         ok('GitHub token removed.');
       } finally {
         busy.value = false;
@@ -181,10 +187,63 @@ onMounted(loadMyGithubToken);
           permissions are separate; choose the repositories your sessions use. Add
           <span class="font-medium">Workflows</span> read/write only when sessions must edit
           <code class="font-mono">.github/workflows</code>.
-          <span :class="ghTokenStatus?.set ? 'text-accent' : 'text-faint'">
-            {{ ghTokenStatus?.set ? 'Set.' : 'Not set — using GitHub App access.' }}
+          <span v-if="!ghTokenStatus?.set" class="text-faint">
+            Not set — using GitHub App access.
           </span>
         </p>
+        <div
+          v-if="ghTokenStatus?.set"
+          class="mb-2 flex items-center gap-2 rounded bg-input px-2 py-1"
+          data-testid="github-token-current"
+        >
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+            class="shrink-0 text-faint"
+          >
+            <path
+              d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"
+            ></path>
+          </svg>
+          <span class="font-mono text-xs text-accent">*****{{ ghTokenStatus.last8 }}</span>
+          <span v-if="ghTokenStatus.updated_at" class="text-2xs text-faint">
+            (Added {{ daysAgo(ghTokenStatus.updated_at) }})
+          </span>
+          <button
+            type="button"
+            class="ml-auto text-faint hover:text-block disabled:opacity-50"
+            :disabled="busy"
+            title="Remove GitHub token"
+            aria-label="Remove GitHub token"
+            data-testid="github-token-delete"
+            @click="clearMyGithubToken"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
+              <path d="M10 11v6"></path>
+              <path d="M14 11v6"></path>
+              <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"></path>
+            </svg>
+          </button>
+        </div>
         <div class="flex flex-wrap items-center gap-2">
           <input
             v-model="ghToken"
@@ -199,15 +258,7 @@ onMounted(loadMyGithubToken);
             :disabled="busy || !ghToken.trim()"
             @click="saveMyGithubToken"
           >
-            Save
-          </button>
-          <button
-            v-if="ghTokenStatus?.set"
-            class="btn-secondary px-2.5 py-1 text-xs"
-            :disabled="busy"
-            @click="clearMyGithubToken"
-          >
-            Clear
+            {{ ghTokenStatus?.set ? 'Replace' : 'Save' }}
           </button>
         </div>
       </div>
