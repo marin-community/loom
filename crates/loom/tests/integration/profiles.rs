@@ -534,7 +534,10 @@ print("custom tests passed")
 async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
     let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
-        &crate::fixtures::fake_acp_agent_cmd(),
+        &format!(
+            "FAKE_ACP_MODELS=claude-opus-5-5,fake-fast,fake-deep {}",
+            crate::fixtures::fake_acp_agent_cmd()
+        ),
     );
     let ts = TestServer::start_with_app().await;
     let goal = "say:ready";
@@ -713,7 +716,10 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
 async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries() {
     let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",
-        &crate::fixtures::fake_acp_agent_cmd(),
+        &format!(
+            "FAKE_ACP_MODELS=claude-opus-5-5,fake-fast,fake-deep {}",
+            crate::fixtures::fake_acp_agent_cmd()
+        ),
     );
     let ts = TestServer::start().await;
     ts.client

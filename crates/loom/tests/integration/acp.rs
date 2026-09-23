@@ -3024,7 +3024,13 @@ async fn rest_create_vets_builtin_profile_before_provisioning() {
     let before = backend::list_sessions().await.unwrap();
     weaver_core::config::apply(
         &ts.state.db,
-        &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
+        &[(
+            "acp.claude_cmd".to_string(),
+            Some(format!(
+                "FAKE_ACP_MODELS=claude-opus-5-5,fake-fast,fake-deep {}",
+                agent_cmd()
+            )),
+        )],
     )
     .await
     .unwrap();
@@ -3448,6 +3454,86 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     assert!(chat["blocks"].as_array().unwrap().iter().any(|b| {
         b["kind"] == "user_message" && b["turn"] == 2 && b["payload"]["text"] == "say:after"
     }));
+}
+
+/// The no-profile handoff still used by the CLI must select the same Claude
+/// default as a new launch, while passing an explicit model through unchanged.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_handoff_to_claude_uses_explicit_default_or_override() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "handoff-source").await;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            "acp.claude_cmd".to_string(),
+            Some(format!(
+                "FAKE_ACP_MODELS=claude-opus-5-5,claude-sonnet-4-5 {}",
+                agent_cmd()
+            )),
+        )],
+    )
+    .await
+    .unwrap();
+
+    for (goal, requested_model, expected_model) in [
+        ("say:default handoff", None, "claude-opus-5-5"),
+        (
+            "say:explicit handoff",
+            Some("claude-sonnet-4-5"),
+            "claude-sonnet-4-5",
+        ),
+    ] {
+        let created = rest_create(&ts, "handoff-source", goal).await;
+        let id = created["id"].as_str().unwrap();
+        poll_chat(&ts, id, Duration::from_secs(15), |blocks| {
+            blocks.iter().any(|block| block["kind"] == "turn_end")
+        })
+        .await;
+
+        let mut request = json!({ "agent": "claude", "session": id });
+        if let Some(model) = requested_model {
+            request["model"] = json!(model);
+        }
+        let handed = ts
+            .client
+            .post("/api/sessions/handoff", request)
+            .await
+            .expect("legacy handoff to Claude succeeds");
+        assert_eq!(handed["model"], expected_model);
+        let stored = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+        let snapshot = loom::launch::deserialize_snapshot(&stored.launch_snapshot).unwrap();
+        assert_eq!(snapshot.view.model, expected_model);
+        assert_eq!(
+            snapshot.view.provenance.model,
+            if requested_model.is_some() {
+                "launch_override"
+            } else {
+                "agent_default"
+            }
+        );
+        assert_eq!(
+            snapshot.view.selection.overrides.model.as_deref(),
+            requested_model
+        );
+
+        let chat = poll_chat(&ts, id, Duration::from_secs(15), |blocks| {
+            blocks
+                .iter()
+                .filter(|block| block["kind"] == "turn_end")
+                .count()
+                >= 2
+        })
+        .await;
+        assert!(
+            chat["metadata"]["config_options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|option| option["id"] == "model" && option["currentValue"] == expected_model),
+            "the adapter received {expected_model}: {chat}"
+        );
+    }
 }
 
 #[serial]

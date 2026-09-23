@@ -403,24 +403,21 @@ volume would mount root-owned. To put repos on their own disk, point
 
 The agent tooling the image ships splits by how it updates:
 
-- **The agent runtimes install at first boot, no image rebuild.** The container
+- **The agent runtimes install into the persistent home volume.** The container
   runs as a non-root user, so a runtime installed into the read-only system dirs
   could neither self-update (Claude reports "installed in a read-only location")
-  nor be bumped live. Instead, the first time the daemon starts it installs both
-  native CLIs into the persisted `loom_home` volume (`~/.local/bin`), where
-  updates land without a rebuild and survive `up`/`down`/recreate. That first
-  install needs network (the deploy needs it anyway); if it fails loom still
-  comes up and installs on a later boot.
-  - **Claude Code** auto-updates itself in place. Pin the tracked build with
-    `CLAUDE_CODE_VERSION` (`stable` — the default — `latest`, or an exact version
-    like `2.1.198`); force one live with
-    `docker compose exec loom claude install <version> --force`.
-  - **Codex CLI** updates on demand rather than automatically. Bump one live
-    with `docker compose exec loom codex update`, or remove
-    `~/.local/bin/codex` and restart the service to rerun the native installer.
+  nor be bumped live. The daemon installs both native CLIs into the persisted
+  `loom_home` volume (`~/.local/bin`). Updates survive `up`/`down`/recreate.
+  On every server start, the entrypoint
+  checks the installed versions against `CLAUDE_CODE_VERSION` (default
+  `2.1.280`) and `CODEX_CLI_VERSION` (default `0.156.1`). It installs a
+  mismatched version before starting Loom and fails startup if either pinned
+  version is unavailable. The ACP adapters are checked and installed the same
+  way, at `CLAUDE_ACP_VERSION=0.81.1` and `CODEX_ACP_VERSION=1.13.1` by default.
+  This makes a new image update existing installations on the volume too.
 
-  Set the Claude pin in the `loom` service's `environment:` in
-  [`docker-compose.yml`](standalone/docker-compose.yml).
+  To override a version in a standalone deployment, set it in the `loom`
+  service's `environment:` in [`docker-compose.yml`](standalone/docker-compose.yml).
 
 - **Command sandboxing.** The image ships `bubblewrap` + `socat`, the sandbox
   the runtimes reach for on Linux: Claude Code's sandboxed Bash runs commands

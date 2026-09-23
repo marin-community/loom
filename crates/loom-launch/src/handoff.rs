@@ -213,6 +213,7 @@ fn legacy_handoff_snapshot(
     session: &Session,
     target: &str,
     model: &str,
+    model_overridden: bool,
     effort: &str,
     mode: &str,
     custom_agent: Option<&custom_agents::CustomAgent>,
@@ -229,14 +230,14 @@ fn legacy_handoff_snapshot(
     snapshot.view.mode = mode.to_string();
     snapshot.custom_agent = custom_agent.cloned();
     snapshot.view.selection.overrides.agent = Some(target.to_string());
-    snapshot.view.selection.overrides.model = Some(model.to_string());
+    snapshot.view.selection.overrides.model = model_overridden.then(|| model.to_string());
     snapshot.view.selection.overrides.effort = Some(effort.to_string());
     snapshot.view.selection.overrides.mode = Some(mode.to_string());
     snapshot.view.provenance.agent = "launch_override".to_string();
-    snapshot.view.provenance.model = if model.is_empty() {
-        "agent_default"
-    } else {
+    snapshot.view.provenance.model = if model_overridden {
         "launch_override"
+    } else {
+        "agent_default"
     }
     .to_string();
     snapshot.view.provenance.effort = if effort.is_empty() {
@@ -275,11 +276,17 @@ async fn legacy_handoff_plan(
             .await?
             .ok_or_else(|| HandoffError::bad_request(format!("unknown agent '{target}'")))?,
     };
-    let model = req
+    let model_override = req
         .model
         .as_deref()
         .map(str::trim)
-        .unwrap_or_default()
+        .filter(|model| !model.is_empty());
+    let model = model_override
+        .unwrap_or(if target == "claude" {
+            crate::launch::DEFAULT_CLAUDE_MODEL
+        } else {
+            ""
+        })
         .to_string();
     let effort = req
         .effort
@@ -363,6 +370,7 @@ async fn legacy_handoff_plan(
             session,
             target,
             &model,
+            model_override.is_some(),
             &effort,
             &mode,
             custom_agent.as_ref(),

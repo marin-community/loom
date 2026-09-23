@@ -447,7 +447,7 @@ pub mod handoff {
         /// Runtime selector (deprecated; use `selection` instead).
         #[operand(default = String::new())]
         pub agent: String,
-        /// Blank/absent uses the target runtime's default.
+        /// Blank/absent uses the agent default (Opus 5.5 for Claude).
         pub model: Option<String>,
         /// Blank/absent uses the target runtime's default.
         pub effort: Option<String>,
