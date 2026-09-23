@@ -21,6 +21,87 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
+async fn deployment_token_reconciles_in_shared_mode_without_admin_access() {
+    let ts = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let response = http
+        .post(url(&ts, "/api/deployment/tokens/create"))
+        .json(&json!({ "name": "production" }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let created: Value = serde_json::from_str(&body).unwrap();
+    let token = created["token"].as_str().unwrap();
+    let token_id = created["id"].as_str().unwrap();
+    let listed: Value = http
+        .post(url(&ts, "/api/deployment/tokens/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed[0]["id"], token_id);
+    assert!(listed.to_string().find(token).is_none());
+    let (admin_token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "admin", None)
+        .await
+        .unwrap();
+
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::auth::GH_ORGANIZATIONS_KEY.to_string(),
+            Some("Open-Athena:188075292".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+
+    let reconciled = http
+        .post(url(&ts, "/api/deployment/reconcile"))
+        .bearer_auth(token)
+        .json(&json!({ "settings": { "slack.status_updates": false } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reconciled.status(), StatusCode::OK);
+
+    let denied = http
+        .post(url(&ts, "/api/deployment/tokens/create"))
+        .bearer_auth(token)
+        .json(&json!({ "name": "another" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let revoked: Value = http
+        .post(url(&ts, "/api/deployment/tokens/revoke"))
+        .bearer_auth(&admin_token)
+        .json(&json!({ "id": token_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(revoked["revoked"], true);
+    let revoked = http
+        .post(url(&ts, "/api/deployment/reconcile"))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial]
 async fn organization_revalidation_renews_only_active_members() {
     let ts = TestServer::start_with_app().await;
     weaver_core::config::apply(

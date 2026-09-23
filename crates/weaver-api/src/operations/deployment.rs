@@ -40,7 +40,56 @@ pub mod reconcile {
     pub type Output = DeploymentView;
 }
 
-static OPERATIONS: &[&OperationSpec] = &[reconcile::SPEC];
+pub mod tokens {
+    pub(super) use super::prelude;
+
+    pub mod create {
+        use super::prelude::*;
+
+        /// Mint a credential that can only reconcile deployment configuration.
+        #[operation(id = "deployment.tokens.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "deployment token add")]
+        pub struct Input {
+            #[operand(positional)]
+            pub name: String,
+            pub expires_in_days: Option<i64>,
+        }
+
+        pub type Output = CreatedTokenView;
+    }
+
+    pub mod list {
+        use super::prelude::*;
+
+        /// List deployment credentials without revealing their secrets.
+        #[operation(id = "deployment.tokens.list", actor = Admin, scope = Global, risk = Read,
+                    cli = "deployment token ls")]
+        pub struct Input {}
+
+        pub type Output = Vec<TokenView>;
+    }
+
+    pub mod revoke {
+        use super::prelude::*;
+
+        /// Revoke a deployment credential by id.
+        #[operation(id = "deployment.tokens.revoke", actor = Admin, scope = Global, risk = Write,
+                    cli = "deployment token rm")]
+        pub struct Input {
+            #[operand(positional)]
+            pub id: String,
+        }
+
+        pub type Output = RevokeTokenResult;
+    }
+}
+
+static OPERATIONS: &[&OperationSpec] = &[
+    reconcile::SPEC,
+    tokens::create::SPEC,
+    tokens::list::SPEC,
+    tokens::revoke::SPEC,
+];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

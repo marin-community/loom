@@ -30,7 +30,7 @@ pub(super) fn principal_subject(principal: &Principal) -> Subject {
         // `Anonymous` reaches nothing that authors or reads a channel — every
         // `channels.*` operation declares an actor policy that excludes it
         // (see `operations::actor_allows`) — but the match must stay total.
-        Grant::Admin | Grant::User | Grant::Anonymous => {
+        Grant::Admin | Grant::User | Grant::Deployment | Grant::Anonymous => {
             Subject::new(SubjectKind::User, &principal.username)
         }
     }

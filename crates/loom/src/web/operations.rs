@@ -181,6 +181,7 @@ fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
     match &principal.grant {
         Grant::Anonymous => false,
         Grant::Admin => operation.actor != ActorPolicy::SessionOnly,
+        Grant::Deployment => operation.id == weaver_api::operations::deployment::reconcile::SPEC.id,
         // A human may stand in for a session on `SessionSelf`, but never on
         // `SessionOnly` — see that variant's doc comment.
         Grant::User => matches!(

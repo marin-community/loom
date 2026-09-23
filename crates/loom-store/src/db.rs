@@ -165,6 +165,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "user-authorization-source",
         include_str!("../migrations/0031_user_authorization_source.sql"),
     ),
+    (
+        32,
+        "deployment-tokens",
+        include_str!("../migrations/0032_deployment_tokens.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

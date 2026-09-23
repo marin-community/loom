@@ -205,6 +205,17 @@ Apply it through the authenticated local CLI:
 loom deployment apply --file loom-deployment.yaml
 ```
 
+In a shared deployment, the machine-local token cannot apply the manifest. An
+admin can mint a deployment credential in **Settings → Account → Deployment
+tokens** or with `loom deployment token add production`.
+The command prints the secret once. Store it outside Loom's database and pass it
+as `LOOM_TOKEN` when running `loom deployment apply`. Deployment credentials can
+only call `deployment.reconcile`; they cannot manage users, tokens, sessions, or
+other settings endpoints. Use `loom deployment token ls` to find a token id and
+`loom deployment token rm <id>` to revoke it. These commands require an admin
+session or personal token, while applying the manifest requires only the
+deployment credential.
+
 With `prune: true`, deployment-managed settings, remote MCP servers, profiles,
 and federation mappings omitted from the manifest are removed from the
 deployment layer.

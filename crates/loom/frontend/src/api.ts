@@ -865,6 +865,17 @@ export const createToken = (name: string, expiresInDays?: number | null) =>
 /** Revoke a token by id. */
 export const revokeToken = (id: string) => invokeOperation('auth.tokens.revoke', { id });
 
+export const listDeploymentTokens = () => invokeOperation('deployment.tokens.list', {});
+
+export const createDeploymentToken = (name: string, expiresInDays?: number | null) =>
+  invokeOperation('deployment.tokens.create', {
+    name,
+    expires_in_days: expiresInDays ?? null,
+  });
+
+export const revokeDeploymentToken = (id: string) =>
+  invokeOperation('deployment.tokens.revoke', { id });
+
 /** Set/change the caller's own password. */
 export const setPassword = (newPassword: string) =>
   invokeOperation('auth.set_password', { new_password: newPassword });

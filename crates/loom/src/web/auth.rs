@@ -120,7 +120,7 @@ pub(super) async fn grant_allows(
         && (matches!(path, "/meta" | "/operations" | "/openapi.json")
             || path.starts_with("/operations/"));
     match &principal.grant {
-        Grant::Anonymous => false,
+        Grant::Anonymous | Grant::Deployment => false,
         Grant::Admin => true,
         Grant::User => discovery || super::is_ide_proxy_path(path),
         // An automation credential exists to report runs (`runs.create`,
@@ -162,6 +162,7 @@ pub(super) fn operation_grant_allows(
     match &principal.grant {
         Grant::Anonymous => false,
         Grant::Admin => operation.actor != weaver_api::ActorPolicy::SessionOnly,
+        Grant::Deployment => operation.id == weaver_api::operations::deployment::reconcile::SPEC.id,
         Grant::User => matches!(
             operation.actor,
             weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
@@ -498,7 +499,7 @@ pub(super) async fn github_callback(
 
 // -- API tokens --------------------------------------------------------------
 
-fn token_view(info: auth::TokenInfo) -> TokenView {
+pub(super) fn token_view(info: auth::TokenInfo) -> TokenView {
     TokenView {
         id: info.id,
         name: info.name,
