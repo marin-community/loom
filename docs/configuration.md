@@ -24,8 +24,11 @@ role.
 In single-user mode, loopback trust and the machine-local token resolve the
 primary user's current role. Demoting that user while another admin exists
 therefore removes local administrative authority. Organization authorization
-disables both implicit paths, so shared deployments require a manual user or a
-current organization authorization for every request.
+disables both implicit paths for general API access. The deployment reconcile
+operation also accepts a request from the server container's own loopback
+listener, provided it has no proxy marker or credential.
+Requests marked `X-Loom-Forwarded` never receive loopback trust, even if the
+proxy connects from a loopback address.
 
 **Settings → Agents & profiles** contains the readable, non-secret environment
 on the `default` profile. Other profiles keep their write-only environment
@@ -75,7 +78,8 @@ with a durable manual grant. Clearing the setting prevents new sign-ins and
 causes existing derived grants to fail their next revalidation. The first
 nonempty organization configuration permanently latches the database into
 shared-deployment mode: clearing settings, removing users, or completing
-workloads never restores implicit loopback or machine-token administration.
+workloads never restores implicit loopback or machine-token administration. The
+local deployment reconcile path remains available to the host operator.
 Returning the database to single-user trust requires a separate, deliberate
 recovery procedure; Loom does not expose one automatically. Removing a user
 synchronously closes sessions they own.
@@ -204,6 +208,13 @@ Apply it through the authenticated local CLI:
 ```sh
 loom deployment apply --file loom-deployment.yaml
 ```
+
+In shared deployments, the host can apply the same JSON manifest without a
+standing credential by running `curl` inside the Loom container against
+`127.0.0.1`. The local exception is limited to `POST
+/api/deployment/reconcile`. Public requests must pass through a proxy that
+overwrites `X-Loom-Forwarded`; other containers cannot use the exception by
+calling Loom over the Docker network.
 
 With `prune: true`, deployment-managed settings, remote MCP servers, profiles,
 and federation mappings omitted from the manifest are removed from the

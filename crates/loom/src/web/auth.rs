@@ -2,7 +2,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use axum::{
     extract::{ConnectInfo, Query, Request, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
@@ -46,6 +46,7 @@ const OAUTH_STATE_COOKIE: &str = "loom_oauth_state";
 /// The GitHub OAuth callback path — the redirect URI registered on the app and
 /// reported to the settings UI.
 const GITHUB_CALLBACK_PATH: &str = "/api/auth/github/callback";
+const FORWARDED_HEADER: &str = "x-loom-forwarded";
 
 fn unauthorized(message: &str) -> AppError {
     AppError::new(StatusCode::UNAUTHORIZED, message)
@@ -202,7 +203,13 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 
 /// Resolve the caller to an authenticated [`Principal`], or `None`. Order: a
 /// bearer token, a session cookie, then loopback trust.
-async fn resolve_principal(st: &AppState, headers: &HeaderMap, peer: IpAddr) -> Option<Principal> {
+async fn resolve_principal(
+    st: &AppState,
+    headers: &HeaderMap,
+    peer: IpAddr,
+    method: &Method,
+    path: &str,
+) -> Option<Principal> {
     // An explicit bearer credential is authoritative. Invalid, expired,
     // revoked, or malformed bearer input must not fall through to a valid
     // browser cookie or loopback trust, otherwise revoking a scoped token has
@@ -216,7 +223,19 @@ async fn resolve_principal(st: &AppState, headers: &HeaderMap, peer: IpAddr) -> 
             return Some(p);
         }
     }
+    // The host runs reconciliation inside the Loom container. Caddy marks
+    // forwarded requests, and session containers have a non-loopback peer.
+    if is_local_deployment_request(headers, peer, method, path) {
+        return Some(Principal {
+            username: "deployment".to_string(),
+            github_login: None,
+            via: auth::AuthVia::Loopback,
+            grant: Grant::Admin,
+            automation_context: None,
+        });
+    }
     if peer.is_loopback()
+        && !headers.contains_key(FORWARDED_HEADER)
         && config::get_bool(
             &st.db,
             "auth.trust_loopback",
@@ -231,6 +250,21 @@ async fn resolve_principal(st: &AppState, headers: &HeaderMap, peer: IpAddr) -> 
     None
 }
 
+fn is_local_deployment_request(
+    headers: &HeaderMap,
+    peer: IpAddr,
+    method: &Method,
+    path: &str,
+) -> bool {
+    peer.is_loopback()
+        && weaver_api::operation_for_request(method.as_str(), path).is_some_and(|operation| {
+            operation.id == weaver_api::operations::deployment::reconcile::SPEC.id
+        })
+        && !headers.contains_key(FORWARDED_HEADER)
+        && !headers.contains_key(header::AUTHORIZATION)
+        && !headers.contains_key(header::COOKIE)
+}
+
 /// Middleware: reject any request that doesn't resolve to a [`Principal`],
 /// otherwise stash it in the request extensions for the handler.
 pub(super) async fn require_auth(
@@ -240,7 +274,7 @@ pub(super) async fn require_auth(
     next: Next,
 ) -> Response {
     let headers = req.headers().clone();
-    match resolve_principal(&st, &headers, peer.ip()).await {
+    match resolve_principal(&st, &headers, peer.ip(), req.method(), req.uri().path()).await {
         Some(principal) => {
             if !grant_allows(&st, &principal, req.method(), req.uri().path()).await {
                 let message =
@@ -1057,8 +1091,51 @@ pub(super) fn bound_operations() -> Vec<Bound> {
 
 #[cfg(test)]
 mod tests {
-    use super::{dialable_host, operation_grant_allows};
+    use super::{
+        dialable_host, is_local_deployment_request, operation_grant_allows, FORWARDED_HEADER,
+    };
     use crate::auth::{AuthVia, Grant, Principal};
+    use axum::http::{HeaderMap, Method};
+
+    #[test]
+    fn local_deployment_requires_loopback_without_proxy_or_credentials() {
+        let mut headers = HeaderMap::new();
+        let local = "127.0.0.1".parse().unwrap();
+        assert!(is_local_deployment_request(
+            &headers,
+            local,
+            &Method::POST,
+            "/api/deployment/reconcile"
+        ));
+        assert!(!is_local_deployment_request(
+            &headers,
+            "172.18.0.5".parse().unwrap(),
+            &Method::POST,
+            "/api/deployment/reconcile"
+        ));
+        headers.insert(FORWARDED_HEADER, "1".parse().unwrap());
+        assert!(!is_local_deployment_request(
+            &headers,
+            local,
+            &Method::POST,
+            "/api/deployment/reconcile"
+        ));
+        headers.clear();
+        headers.insert("authorization", "Bearer invalid".parse().unwrap());
+        assert!(!is_local_deployment_request(
+            &headers,
+            local,
+            &Method::POST,
+            "/api/deployment/reconcile"
+        ));
+        headers.clear();
+        assert!(!is_local_deployment_request(
+            &headers,
+            local,
+            &Method::POST,
+            "/api/sessions/list"
+        ));
+    }
 
     #[test]
     fn wildcard_hosts_map_to_loopback() {

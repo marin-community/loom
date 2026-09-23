@@ -21,6 +21,70 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
+async fn shared_deployment_accepts_only_unmarked_local_reconciliation() {
+    let ts = TestServer::start().await;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::auth::GH_ORGANIZATIONS_KEY.to_string(),
+            Some("example:123".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let manifest = json!({"settings": {}, "profiles": [], "federations": [], "remote_mcps": [], "prune": false});
+    let local = http
+        .post(url(&ts, "/api/deployment/reconcile"))
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local.status(), StatusCode::OK);
+
+    let forwarded = http
+        .post(url(&ts, "/api/deployment/reconcile"))
+        .header("X-Loom-Forwarded", "1")
+        .json(&manifest)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forwarded.status(), StatusCode::UNAUTHORIZED);
+
+    let other_operation = http
+        .post(url(&ts, "/api/sessions/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_operation.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial]
+async fn forwarded_request_cannot_use_general_loopback_trust() {
+    let ts = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let local = http
+        .post(url(&ts, "/api/sessions/list"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(local.status(), StatusCode::OK);
+
+    let forwarded = http
+        .post(url(&ts, "/api/sessions/list"))
+        .header("X-Loom-Forwarded", "1")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forwarded.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+#[serial]
 async fn organization_revalidation_renews_only_active_members() {
     let ts = TestServer::start_with_app().await;
     weaver_core::config::apply(
