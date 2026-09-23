@@ -453,21 +453,25 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
   if ! command -v claude-agent-acp >/dev/null 2>&1 \
     || ! command -v codex-acp >/dev/null 2>&1 \
     || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; then
+    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
+    || ! npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; then
     echo "loom: installing pinned ACP adapters into $HOME/.npm-global ..." >&2
     # The ACP adapters Loom's sessions speak through. Exact
     # pins, not dist-tags: two upstream projects releasing weekly sit between
     # loom and the agents, so the fleet moves versions only via a deliberate
-    # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Installed on the volume so
-    # they persist across recreates; loom's launch default (`npx --yes …`)
+    # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Pin @openai/codex too:
+    # codex-acp permits newer versions through its dependency range. Install
+    # them on the volume so they persist across recreates; loom's launch default (`npx --yes …`)
     # resolves these installed bins from PATH without a network fetch.
     npm install -g \
       "@agentclientprotocol/claude-agent-acp@$claude_acp_version" \
-      "@agentclientprotocol/codex-acp@$codex_acp_version"
+      "@agentclientprotocol/codex-acp@$codex_acp_version" \
+      "@openai/codex@$codex_version"
     { command -v claude-agent-acp >/dev/null 2>&1 \
       && command -v codex-acp >/dev/null 2>&1 \
       && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; } \
+      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
+      && npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; } \
       || { echo "loom: pinned ACP adapters are required" >&2; exit 1; }
   fi
   # Delegate the per-session cgroup subtree (see loom-cgroup-init above).
