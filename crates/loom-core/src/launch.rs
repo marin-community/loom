@@ -17,7 +17,8 @@ use weaver_api::{
 use crate::db::Db;
 use crate::profile::Profile;
 
-const RESOLVER_SCHEMA_VERSION: &str = "launch-resolver-v1";
+const RESOLVER_SCHEMA_VERSION: &str = "launch-resolver-v2";
+const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Context-derived class for producers such as watches. `None` lets the
 /// profile supply its class, the default for interactive launches.
@@ -253,8 +254,13 @@ pub async fn resolve(
 
     let (model, model_source) = match selected(&overrides.model) {
         Some(value) => (value.to_string(), "launch_override"),
-        None if agent_overridden => (String::new(), "agent_default"),
-        None if profile.model.is_empty() => (String::new(), "agent_default"),
+        None if agent_overridden || profile.model.is_empty() => {
+            if agent == "claude" {
+                (DEFAULT_CLAUDE_MODEL.to_string(), "agent_default")
+            } else {
+                (String::new(), "agent_default")
+            }
+        }
         None => (profile.model.clone(), "profile"),
     };
     let (effort, effort_source) = match selected(&overrides.effort) {
@@ -427,6 +433,68 @@ pub async fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn claude_launch_resolves_explicit_opus_default_and_preserves_model_choices() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query("UPDATE profiles SET agent_kind = 'claude', model = '' WHERE name = 'default'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        let selection = LaunchSelection::default();
+        let default = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(default.view.model, "claude-opus-5-5");
+        assert_eq!(default.view.provenance.model, "agent_default");
+
+        let explicit = resolve(
+            &db,
+            &LaunchSelection {
+                overrides: LaunchOverrides {
+                    model: Some("claude-sonnet-4-5".to_string()),
+                    ..Default::default()
+                },
+                ..selection.clone()
+            },
+            &ResolveOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(explicit.view.model, "claude-sonnet-4-5");
+        assert_eq!(explicit.view.provenance.model, "launch_override");
+
+        sqlx::query("UPDATE profiles SET model = 'claude-opus-4-8' WHERE name = 'default'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let profile = resolve(&db, &selection, &ResolveOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(profile.view.model, "claude-opus-4-8");
+        assert_eq!(profile.view.provenance.model, "profile");
+
+        sqlx::query("UPDATE profiles SET agent_kind = 'codex', model = 'gpt-5.6-sol' WHERE name = 'default'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let agent_override = resolve(
+            &db,
+            &LaunchSelection {
+                overrides: LaunchOverrides {
+                    agent: Some("claude".to_string()),
+                    ..Default::default()
+                },
+                ..selection
+            },
+            &ResolveOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(agent_override.view.model, "claude-opus-5-5");
+        assert_eq!(agent_override.view.provenance.model, "agent_default");
+    }
 
     #[tokio::test]
     async fn override_resolution_tracks_provenance_without_mutating_profile() {

@@ -171,10 +171,10 @@ RUN set -eux; \
 # OpenAI Codex CLI (`codex`) — are deliberately NOT baked into the image. The
 # container runs as a non-root user, so a runtime installed into the read-only
 # system dirs can neither self-update nor be bumped live. Instead
-# loom-entrypoint (below) installs both native CLIs at first boot into the app
+# loom-entrypoint (below) installs both native CLIs into the app
 # user's $HOME on the persisted loom_home volume, where they are writable,
-# update in place, and survive container recreates. Claude can be pinned with
-# CLAUDE_CODE_VERSION (see compose).
+# update in place, and survive container recreates. It checks their versions
+# on every server start so an old persisted install cannot outlive a pin.
 
 # code-server — the per-session embedded VS Code that `crate::ide` spawns and
 # reverse-proxies (one rooted at each worktree, behind loom's auth). The `.deb`
@@ -426,31 +426,21 @@ cat > /usr/local/bin/loom-entrypoint <<'SH'
 #!/bin/sh
 set -eu
 if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
-  if [ ! -x "$HOME/.local/bin/claude" ]; then
-    echo "loom: installing self-updating Claude Code into $HOME/.local ..." >&2
-    # The stock native installer drops claude into $HOME/.local/bin (writable, on
-    # the volume); Claude then auto-updates itself in place. Pin with
-    # CLAUDE_CODE_VERSION (stable|latest|<version>; default stable). `curl | bash`
-    # can't surface a download failure through the pipe, so check the binary landed
-    # rather than trusting the exit status. Non-fatal: loom still boots either way;
-    # agents just lack `claude` until a boot with network installs it.
-    curl -fsSL https://claude.ai/install.sh | bash -s -- "${CLAUDE_CODE_VERSION:-stable}" || true
-    [ -x "$HOME/.local/bin/claude" ] \
-      || echo "loom: WARNING: Claude install failed (offline?); agents lack 'claude' until a later boot installs it" >&2
+  claude_version="${CLAUDE_CODE_VERSION:-2.1.280}"
+  codex_version="${CODEX_CLI_VERSION:-0.156.1}"
+  if [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" != "$claude_version (Claude Code)" ]; then
+    echo "loom: installing Claude Code $claude_version into $HOME/.local ..." >&2
+    curl -fsSL https://claude.ai/install.sh | bash -s -- "$claude_version"
   fi
-  if [ ! -x "$HOME/.local/bin/codex" ]; then
-    echo "loom: installing native Codex CLI into $HOME/.local ..." >&2
-    # Use OpenAI's native installer rather than the npm wrapper. It downloads the
-    # platform binary into the persisted, writable home volume, which is already
-    # early on PATH. CODEX_NON_INTERACTIVE prevents an entrypoint without a TTY
-    # from blocking on installer prompts. Non-fatal — like Claude, loom still
-    # boots and agents can add it on a later networked boot.
-    # Codex is useless without OpenAI auth (OPENAI_API_KEY, or `codex login`),
-    # but installing the CLI needs neither.
-    curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh || true
-    [ -x "$HOME/.local/bin/codex" ] \
-      || echo "loom: WARNING: native Codex install failed (offline?); the codex runtime is unavailable until a later boot installs it" >&2
+  [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" = "$claude_version (Claude Code)" ] \
+    || { echo "loom: Claude Code $claude_version is required" >&2; exit 1; }
+  if [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" != "codex-cli $codex_version" ]; then
+    echo "loom: installing Codex CLI $codex_version into $HOME/.local ..." >&2
+    curl -fsSL https://chatgpt.com/codex/install.sh \
+      | CODEX_RELEASE="$codex_version" CODEX_NON_INTERACTIVE=1 sh
   fi
+  [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" = "codex-cli $codex_version" ] \
+    || { echo "loom: Codex CLI $codex_version is required" >&2; exit 1; }
   if [ -x "$HOME/.local/bin/codex" ]; then
     # The ChatGPT login is shared for model access, but account-level apps carry
     # the identity of whoever authorized them. Keep them unavailable to every
@@ -458,8 +448,8 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     "$HOME/.local/bin/codex" features disable apps >/dev/null \
       || echo "loom: WARNING: could not disable Codex account-level apps" >&2
   fi
-  claude_acp_version="${CLAUDE_ACP_VERSION:-0.66.0}"
-  codex_acp_version="${CODEX_ACP_VERSION:-1.4.0}"
+  claude_acp_version="${CLAUDE_ACP_VERSION:-0.81.1}"
+  codex_acp_version="${CODEX_ACP_VERSION:-1.13.1}"
   if ! command -v claude-agent-acp >/dev/null 2>&1 \
     || ! command -v codex-acp >/dev/null 2>&1 \
     || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
@@ -471,15 +461,14 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Installed on the volume so
     # they persist across recreates; loom's launch default (`npx --yes …`)
     # resolves these installed bins from PATH without a network fetch.
-    # Non-fatal like the CLIs above.
     npm install -g \
       "@agentclientprotocol/claude-agent-acp@$claude_acp_version" \
-      "@agentclientprotocol/codex-acp@$codex_acp_version" || true
+      "@agentclientprotocol/codex-acp@$codex_acp_version"
     { command -v claude-agent-acp >/dev/null 2>&1 \
       && command -v codex-acp >/dev/null 2>&1 \
       && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
       && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; } \
-      || echo "loom: WARNING: pinned ACP adapter install failed (offline?); existing adapters may remain in use" >&2
+      || { echo "loom: pinned ACP adapters are required" >&2; exit 1; }
   fi
   # Delegate the per-session cgroup subtree (see loom-cgroup-init above).
   # Non-fatal: without it sessions run with no memory limit.
