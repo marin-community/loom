@@ -3024,7 +3024,13 @@ async fn rest_create_vets_builtin_profile_before_provisioning() {
     let before = backend::list_sessions().await.unwrap();
     weaver_core::config::apply(
         &ts.state.db,
-        &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
+        &[(
+            "acp.claude_cmd".to_string(),
+            Some(format!(
+                "FAKE_ACP_MODELS=claude-opus-5-5,fake-fast,fake-deep {}",
+                agent_cmd()
+            )),
+        )],
     )
     .await
     .unwrap();
