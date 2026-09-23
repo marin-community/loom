@@ -46,7 +46,7 @@ async fn deployment_token_reconciles_in_shared_mode_without_admin_access() {
         .await
         .unwrap();
     assert_eq!(listed[0]["id"], token_id);
-    assert!(listed.to_string().find(token).is_none());
+    assert!(!listed.to_string().contains(token));
     let (admin_token, _) = loom::auth::create_token(&ts.state.db, "rjpower", "admin", None)
         .await
         .unwrap();
