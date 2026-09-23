@@ -50,7 +50,9 @@ owner_github = "your-github-login"
 # override any of these, or anything above, for a single invocation by
 # exporting the same-named env var instead of editing this file — see
 # `loom config render-env --help`.)
-# tls_email = "you@example.com"    # LOOM_TLS_EMAIL: ACME contact for cert-expiry notices
-# host_uid = "1000"                # HOST_UID: uid the image runs as
-# host_gid = "1000"                # HOST_GID: gid the image runs as
-# image = "loom:latest"            # LOOM_IMAGE: override the image tag
+# tls_email = "you@example.com"        # LOOM_TLS_EMAIL: ACME contact for cert-expiry notices
+# tls_cert_file = "/path/to/cert.pem"  # Bring your own cert (e.g. `tailscale cert`)
+# tls_key_file = "/path/to/key.pem"    #   instead of Caddy's automatic https
+# host_uid = "1000"                    # HOST_UID: uid the image runs as
+# host_gid = "1000"                    # HOST_GID: gid the image runs as
+# image = "loom:latest"                # LOOM_IMAGE: override the image tag

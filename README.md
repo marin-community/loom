@@ -39,12 +39,27 @@ written for it to run; do them yourself if you'd rather.
    If `~/.local/bin` isn't on your `$PATH`, add it (e.g.
    `export PATH="$HOME/.local/bin:$PATH"` in your shell profile).
 
-Then start the orchestrator and open the dashboard:
+3. **Run the setup wizard.** It seeds a bootstrap operator (the GitHub login
+   allowed to sign in first) and optionally registers a GitHub App:
 
-```sh
-loom server run     # REST + SSE server, runtime manager, background monitor
-loom open           # open the web UI (http://127.0.0.1:7878)
-```
+   ```sh
+   loom setup
+   ```
+
+4. **Start it and open the dashboard.** Locally:
+
+   ```sh
+   loom server run     # REST + SSE server, runtime manager, background monitor
+   loom open           # open the web UI (http://127.0.0.1:7878)
+   ```
+
+   Or under Docker Compose — see [deploy/README.md](deploy/README.md):
+
+   ```sh
+   loom config render-env         # loom.toml -> deploy/standalone/.env
+   cd deploy/standalone
+   docker compose up -d --build
+   ```
 
 Run `loom help` for registered resource groups, `loom <group> --help` for
 syntax, `loom help --json` for machine-readable discovery, and inspect the

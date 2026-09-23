@@ -64,9 +64,11 @@ def find_loom() -> str:
 def docker_gid() -> str | None:
     """The host's `docker` group gid, so the loom container's app user can join
     it (compose `group_add`) and reach the bind-mounted Docker socket for
-    `docker build`. None when there's no such group (e.g. Docker Desktop on
-    macOS, where the socket isn't group-owned anyway) — the compose file's 999
-    fallback then applies."""
+    `docker build`. None when there's no such group (e.g. Docker Desktop, which
+    runs its own Linux VM unrelated to any macOS/Windows group) — the caller
+    then passes DOCKER_GID=0 explicitly, opting into Dockerfile's
+    loom-docker-socket-init chmod fallback rather than leaving DOCKER_GID unset
+    (compose requires it; see docker-compose.yml)."""
     try:
         import grp
 
@@ -129,9 +131,7 @@ def main(local_: bool, config: str | None, no_build: bool) -> None:
     env.setdefault("BUILDX_BUILDER", "default")
     # Pass the host docker gid through for the loom service's `group_add`, so
     # sessions can reach the bind-mounted Docker socket (see docker-compose.yml).
-    gid = docker_gid()
-    if gid:
-        env.setdefault("DOCKER_GID", gid)
+    env.setdefault("DOCKER_GID", docker_gid() or "0")
     if local_:
         env["LOOM_DOMAIN"] = "localhost"
     run(render, env=env)

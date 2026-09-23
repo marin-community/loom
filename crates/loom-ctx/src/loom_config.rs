@@ -70,6 +70,11 @@ pub struct LoomConfig {
     pub slack_bot_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_email: Option<String>,
+    /// Path (on the host) to a pre-generated certificate/key pair
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_cert_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_key_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_uid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +189,18 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: false,
         get_fn: |c| c.tls_email.as_deref(),
         set_fn: |c, v| c.tls_email = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_TLS_CERT_FILE",
+        secret: false,
+        get_fn: |c| c.tls_cert_file.as_deref(),
+        set_fn: |c, v| c.tls_cert_file = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_TLS_KEY_FILE",
+        secret: false,
+        get_fn: |c| c.tls_key_file.as_deref(),
+        set_fn: |c, v| c.tls_key_file = Some(v),
     },
     FieldSpec {
         env_name: "HOST_UID",

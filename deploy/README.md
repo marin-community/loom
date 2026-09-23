@@ -27,7 +27,8 @@ services:
   service that publishes ports (`80`/`443`). It obtains and renews a real TLS
   certificate for your domain automatically, terminates TLS, and reverse-proxies
   everything to loom — including the WebSocket terminal. See
-  [`standalone/Caddyfile`](standalone/Caddyfile).
+  [`standalone/Caddyfile`](standalone/Caddyfile) — or, to supply your own
+  certificate instead, [Bring your own certificate](#bring-your-own-certificate).
 - **loom-init** — a one-shot that seeds the security-relevant auth settings into
   the database before loom starts (see [Security posture](#security-posture)),
   then exits.
@@ -63,6 +64,7 @@ host-side `loom` binary):
 loom config render-env         # loom.toml -> deploy/standalone/.env
 
 cd deploy/standalone
+export DOCKER_GID=$(getent group docker | cut -d: -f3)  # see "Agent runtime" below
 docker compose up -d --build   # builds the image, then starts the stack
 docker compose logs -f caddy   # watch the certificate get issued
 ```
@@ -111,9 +113,10 @@ and why; you don't hand-edit `.env` itself.
 | `OPENAI_API_KEY` | for Codex | API key for the Codex agents; only needed if you launch the `codex` runtime. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | GitHub OAuth app — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
 | `LOOM_TLS_EMAIL` | no | ACME contact for cert-expiry notices; only used if you uncomment the global block in the Caddyfile. |
+| `LOOM_TLS_CERT_FILE` / `_KEY_FILE` | no | Paths to a pre-generated certificate/key pair, in place of Caddy's automatic HTTPS. Both or neither. See [Bring your own certificate](#bring-your-own-certificate). |
 | `HOST_UID` / `HOST_GID` | no (1000) | uid:gid the image runs as — matters only if you bind-mount a host dir. |
 | `LOOM_IMAGE` | no | Override the image tag (defaults to the locally-built `loom:latest`). |
-| `DOCKER_GID` | no (999) | Host `docker` group gid the loom container joins to reach the bind-mounted Docker socket for in-session `docker build` (see [Agent runtime](#agent-runtime--client-packages)). `run.py` derives it from the host automatically; set it by hand only for a manual `docker compose up` on a host whose docker gid isn't the 999 default. |
+| `DOCKER_GID` | **yes** | Host `docker` group gid the loom container joins to reach the bind-mounted Docker socket for in-session `docker build` (see [Agent runtime](#agent-runtime--client-packages)). `run.py` derives it from the host automatically; the raw `docker compose` Quick start needs it exported by hand. No default — deliberately: on Docker Desktop, where there's no host `docker` group to find, `0` opts into a chmod fallback (`loom-docker-socket-init` in the Dockerfile) that makes the host's `docker.sock` world-writable, which must never happen silently just because a real Linux host's operator forgot to export it. |
 
 Every one of these is an ordinary `loom.toml` field (`tls_email`, `host_uid`,
 `host_gid`, `image`, alongside the credential fields above) — there's no
@@ -215,6 +218,17 @@ docker compose exec loom loom config set auth.trust_loopback false
 
 Access past the front-door is then gated by GitHub/password login for the UI and
 bearer tokens for automation — see the repo README.
+
+## Bring your own certificate
+
+For a certificate you generate and renew yourself (e.g. `tailscale cert`)
+instead of Caddy's automatic HTTPS, set `LOOM_TLS_CERT_FILE` and
+`LOOM_TLS_KEY_FILE` (loom.toml fields `tls_cert_file` / `tls_key_file`) to
+those files' paths on the host, then bring the stack up as usual.
+
+If your renewal job replaces the file via rename rather than editing it
+in place the container keeps serving the stale certificate. Add
+`docker compose restart caddy` to the renewal cron job to update the certs.
 
 ## First-run login
 
@@ -477,7 +491,9 @@ The agent tooling the image ships splits by how it updates:
   runs against the *host* daemon, reusing its layer cache and writing images to
   the host data-root, not into the container. The non-root app user reaches the
   socket by joining the host `docker` group via `DOCKER_GID`, which `run.py`
-  derives from the host for you. Note the socket-share tradeoff in
+  derives from the host for you (`export DOCKER_GID=$(getent group docker |
+  cut -d: -f3)` by hand otherwise — compose refuses to start without it, on
+  purpose, rather than silently falling back). Note the socket-share tradeoff in
   [Security posture](#security-posture): it is the same daemon that runs this
   stack. `docker build` and `docker run` with in-container paths work; a
   `docker run -v <worktree-path>:…` bind mount does **not**, because that path

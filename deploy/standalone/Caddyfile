@@ -15,6 +15,11 @@
 # }
 
 {$LOOM_DOMAIN} {
+	# Bring your own certificate (e.g. `tailscale cert`) instead of ACME by
+	# setting LOOM_TLS_CERT_FILE / LOOM_TLS_KEY_FILE (loom.toml or .env) —
+	# See deploy/README.md "Bring your own certificate".
+	{$LOOM_TLS_DIRECTIVE}
+
 	# Prometheus metrics are scraped over the VM's loopback-only compose port.
 	# Profile names and fleet counts are operational metadata, not a public API.
 	@metrics path /metrics

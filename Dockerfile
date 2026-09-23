@@ -416,6 +416,25 @@ echo 'app ALL=(root) NOPASSWD: /usr/local/bin/loom-cgroup-init' > /etc/sudoers.d
 chmod 440 /etc/sudoers.d/loom-cgroup-init
 EOF
 
+# Docker Desktop (macOS / Windows) does not create a docker group on the host,
+# so docker_gid() returns None and DOCKER_GID is set to 0. This root-only
+# script is the fallback when DOCKER_GID=0. It makes the socket reachable
+# regardless of uid/gid ownership.
+RUN <<'EOF'
+cat > /usr/local/bin/loom-docker-socket-init <<'SH'
+#!/bin/sh
+set -eu
+sock=/var/run/docker.sock
+[ -S "$sock" ] || exit 0
+[ "${LOOM_SESSION_DOCKER_GID:-}" = "0" ] || exit 0
+chmod o+rw "$sock"
+SH
+chmod 755 /usr/local/bin/loom-docker-socket-init
+echo 'app ALL=(root) NOPASSWD: /usr/local/bin/loom-docker-socket-init' \
+  > /etc/sudoers.d/loom-docker-socket-init
+chmod 440 /etc/sudoers.d/loom-docker-socket-init
+EOF
+
 # Container entrypoint: before the daemon starts, make sure the agent runtimes
 # (`claude` + `codex`) are installed on the persisted $HOME volume and the
 # delegated session-cgroup subtree is prepared, then hand off to the CMD. Both
@@ -478,6 +497,12 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
   # Non-fatal: without it sessions run with no memory limit.
   sudo -n /usr/local/bin/loom-cgroup-init \
     || echo "loom: WARNING: cgroup delegation failed; sessions run without memory limits" >&2
+  # Reach the bind-mounted Docker socket even when group_add couldn't (see
+  # loom-docker-socket-init above). Non-fatal: without it, docker-out-of-docker
+  # (session containers, in-session `docker build`) doesn't work, but loom
+  # itself still boots — this runs before `exec` specifically so it does.
+  sudo -n /usr/local/bin/loom-docker-socket-init \
+    || echo "loom: WARNING: docker socket permission fixup failed; docker-out-of-docker may not work" >&2
 fi
 exec "$@"
 SH
