@@ -18,7 +18,7 @@ use crate::db::Db;
 use crate::profile::Profile;
 
 const RESOLVER_SCHEMA_VERSION: &str = "launch-resolver-v2";
-const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
 
 /// Context-derived class for producers such as watches. `None` lets the
 /// profile supply its class, the default for interactive launches.

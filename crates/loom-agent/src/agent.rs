@@ -112,6 +112,7 @@ const MODEL_CHOICES: &[(&str, &str)] = &[
 ];
 
 const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
+    ("gpt-6-sol", "GPT-6 Sol"),
     ("gpt-5.6-sol", "GPT-5.6 Sol"),
     ("gpt-5.6-terra", "GPT-5.6 Terra"),
     ("gpt-5.6-luna", "GPT-5.6 Luna"),
