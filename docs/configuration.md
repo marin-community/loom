@@ -27,6 +27,8 @@ therefore removes local administrative authority. Organization authorization
 disables both implicit paths for general API access. The deployment reconcile
 operation also accepts a request from the server container's own loopback
 listener, provided it has no proxy marker or credential.
+Requests marked `X-Loom-Forwarded` never receive loopback trust, even if the
+proxy connects from a loopback address.
 
 **Settings → Agents & profiles** contains the readable, non-secret environment
 on the `default` profile. Other profiles keep their write-only environment

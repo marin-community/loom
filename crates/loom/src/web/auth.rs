@@ -235,6 +235,7 @@ async fn resolve_principal(
         });
     }
     if peer.is_loopback()
+        && !headers.contains_key(FORWARDED_HEADER)
         && config::get_bool(
             &st.db,
             "auth.trust_loopback",
