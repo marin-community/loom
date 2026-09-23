@@ -1217,6 +1217,16 @@ async fn mint_staged_session_token(
     Ok(StagedSessionToken { id, value: plain })
 }
 
+/// Automation subjects are authorized by their profile grant, not a users row.
+/// Their session tokens use the primary user for storage while retaining a
+/// session-scoped grant. Human creators must still pass user authorization.
+pub fn session_token_owner<'a>(creator_kind: &str, created_by: Option<&'a str>) -> Option<&'a str> {
+    match creator_kind {
+        "automation" => None,
+        _ => created_by,
+    }
+}
+
 /// Mint a session credential without revoking any predecessor. Provider
 /// handoff uses this staged form so a rejected preflight or teardown rollback
 /// leaves the live source token fully usable.
@@ -2149,6 +2159,12 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+        for username in [user.username.as_str(), "missing-user"] {
+            let owner = session_token_owner("user", Some(username));
+            assert!(create_session_token(&db, owner, "session-id", &branch.id)
+                .await
+                .is_err());
+        }
 
         let due = github_organization_authorizations_due(&db).await.unwrap();
         assert_eq!(due.len(), 1);

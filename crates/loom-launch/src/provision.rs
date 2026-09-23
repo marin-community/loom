@@ -1281,7 +1281,7 @@ async fn create_inner(
     crate::auth::revoke_session_tokens(&st.db, &session_id).await?;
     let session_token = crate::auth::create_session_token_with_policy(
         &st.db,
-        created_by.as_deref(),
+        crate::auth::session_token_owner(&launch_policy.creator_kind, created_by.as_deref()),
         &session_id,
         &branch.id,
         launch_profile.restricted,
