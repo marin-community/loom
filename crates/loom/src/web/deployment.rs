@@ -1,14 +1,13 @@
 use std::collections::BTreeSet;
 
 use weaver_api::operations::deployment::reconcile;
-use weaver_api::{CreatedTokenView, DeploymentView, RevokeTokenResult, TokenView};
+use weaver_api::DeploymentView;
 
-use crate::{auth, config};
+use crate::config;
 
-use super::auth as web_auth;
 use super::operations::{register, Bound, OperationContext};
 use super::{profiles, ApiResult, AppError, AppState};
-use weaver_api::operations::deployment::{self, tokens};
+use weaver_api::operations::deployment;
 
 /// Reconcile the runtime resources declared by a deployment stack. This is the
 /// API-first boundary Pulumi's startup generation calls through the local Loom
@@ -202,60 +201,13 @@ pub(super) async fn reconcile_deployment_operation(
     reconcile_deployment_core(&context.state, input).await
 }
 
-async fn create_token(
-    context: OperationContext,
-    input: tokens::create::Input,
-) -> ApiResult<CreatedTokenView> {
-    let name = input.name.trim();
-    if name.is_empty() {
-        return Err(AppError::bad_request("a token name is required"));
-    }
-    let (token, info) =
-        auth::create_deployment_token(&context.state.db, name, input.expires_in_days)
-            .await
-            .map_err(|error| AppError::bad_request(error.to_string()))?;
-    tracing::info!(id = %info.id, name = %info.name, "deployment token created");
-    Ok(CreatedTokenView {
-        token,
-        info: web_auth::token_view(info),
-    })
-}
-
-async fn list_tokens(
-    context: OperationContext,
-    _input: tokens::list::Input,
-) -> ApiResult<Vec<TokenView>> {
-    Ok(auth::list_deployment_tokens(&context.state.db)
-        .await?
-        .into_iter()
-        .map(web_auth::token_view)
-        .collect())
-}
-
-async fn revoke_token(
-    context: OperationContext,
-    input: tokens::revoke::Input,
-) -> ApiResult<RevokeTokenResult> {
-    let revoked = auth::revoke_deployment_token(&context.state.db, &input.id).await?;
-    if revoked {
-        tracing::info!(id = %input.id, "deployment token revoked");
-    }
-    Ok(RevokeTokenResult {
-        revoked,
-        id: input.id,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Operation registry — `deployment.*`, bound onto
 // `weaver_api::operations::deployment`.
 // ---------------------------------------------------------------------------
 
 pub(super) fn bound_operations() -> Vec<Bound> {
-    vec![
-        register::<reconcile::Op, _, _>(reconcile_deployment_operation),
-        register::<tokens::create::Op, _, _>(create_token),
-        register::<tokens::list::Op, _, _>(list_tokens),
-        register::<tokens::revoke::Op, _, _>(revoke_token),
-    ]
+    vec![register::<reconcile::Op, _, _>(
+        reconcile_deployment_operation,
+    )]
 }

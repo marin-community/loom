@@ -98,8 +98,6 @@ impl AuthVia {
 pub enum Grant {
     Admin,
     User,
-    /// May only reconcile the declared deployment manifest.
-    Deployment,
     /// No credential was presented.
     ///
     /// Only operations declaring `actor = Anonymous` accept this, so a request
@@ -159,10 +157,7 @@ impl Principal {
         match self.grant {
             Grant::Admin => Some(UserRole::Admin),
             Grant::User => Some(UserRole::User),
-            Grant::Deployment
-            | Grant::Automation { .. }
-            | Grant::Session { .. }
-            | Grant::Anonymous => None,
+            Grant::Automation { .. } | Grant::Session { .. } | Grant::Anonymous => None,
         }
     }
 }
@@ -1038,59 +1033,6 @@ pub async fn revoke_token(db: &Db, username: &str, id: &str) -> Result<bool> {
     Ok(res.rows_affected() > 0)
 }
 
-/// Mint a deployment-only credential independent of any human account.
-pub async fn create_deployment_token(
-    db: &Db,
-    name: &str,
-    expires_in_days: Option<i64>,
-) -> Result<(String, TokenInfo)> {
-    let (plain, hash, prefix) = mint_token();
-    let id = random_id();
-    let expires_at = match expires_in_days {
-        Some(days) if days > 0 => Some(
-            iso_in_days(days)
-                .ok_or_else(|| anyhow!("token expiry is outside the supported range"))?,
-        ),
-        _ => None,
-    };
-    sqlx::query(
-        "INSERT INTO deployment_tokens (id, name, token_hash, prefix, expires_at)
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(name)
-    .bind(&hash)
-    .bind(&prefix)
-    .bind(&expires_at)
-    .execute(db)
-    .await?;
-    let info = sqlx::query_as::<_, TokenInfo>(
-        "SELECT id, name, prefix, created_at, last_used_at, expires_at
-         FROM deployment_tokens WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_one(db)
-    .await?;
-    Ok((plain, info))
-}
-
-pub async fn list_deployment_tokens(db: &Db) -> Result<Vec<TokenInfo>> {
-    Ok(sqlx::query_as::<_, TokenInfo>(
-        "SELECT id, name, prefix, created_at, last_used_at, expires_at
-         FROM deployment_tokens ORDER BY created_at DESC",
-    )
-    .fetch_all(db)
-    .await?)
-}
-
-pub async fn revoke_deployment_token(db: &Db, id: &str) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM deployment_tokens WHERE id = ?")
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(result.rows_affected() > 0)
-}
-
 /// Resolve an `Authorization: Bearer` token to its [`Principal`]. Touches
 /// `last_used_at` on a hit (best-effort). `None` for an unknown, expired, or
 /// orphaned token.
@@ -1110,29 +1052,6 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
             }));
     }
     let hash = sha256_hex(token);
-    if let Some(row) = sqlx::query(
-        "SELECT id FROM deployment_tokens WHERE token_hash = ?
-         AND (expires_at IS NULL OR expires_at > ?)",
-    )
-    .bind(&hash)
-    .bind(now_iso())
-    .fetch_optional(db)
-    .await?
-    {
-        let id: String = row.get("id");
-        let _ = sqlx::query("UPDATE deployment_tokens SET last_used_at = ? WHERE id = ?")
-            .bind(now_iso())
-            .bind(&id)
-            .execute(db)
-            .await;
-        return Ok(Some(Principal {
-            username: "deployment".to_string(),
-            github_login: None,
-            via: AuthVia::Token,
-            grant: Grant::Deployment,
-            automation_context: None,
-        }));
-    }
     let row = sqlx::query(
         "SELECT t.id AS id, t.username AS username, u.github_login AS github_login,
                 u.role AS role, t.kind AS kind, t.grant_json AS grant_json,

@@ -80,12 +80,10 @@ fn run_identity(
         }
         // `actor = Internal` should refuse these before we got here, but defend against
         // misconfiguration by returning an error rather than panicking.
-        Grant::Anonymous | Grant::User | Grant::Deployment | Grant::Session { .. } => {
-            Err(AppError::new(
-                StatusCode::FORBIDDEN,
-                "creating an automation run requires an admin or automation credential",
-            ))
-        }
+        Grant::Anonymous | Grant::User | Grant::Session { .. } => Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            "creating an automation run requires an admin or automation credential",
+        )),
     }
 }
 

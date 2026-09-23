@@ -13,17 +13,4 @@ test.describe('settings · account identity', () => {
     await expect(page.getByText('via loopback')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Sign out' })).toBeVisible();
   });
-
-  test('an admin can create and revoke a deployment-only token', async ({ page, weaver }) => {
-    await page.goto(`${weaver.baseUrl}/settings`);
-    await page.getByTestId('settings-category-account').click();
-    await page.getByTestId('deployment-token-name').fill('production');
-    await page.getByTestId('deployment-token-create').click();
-    await expect(page.getByTestId('deployment-token-secret')).toContainText('loom_');
-    await expect(page.getByTestId('deployment-token-row')).toContainText('production');
-
-    await page.getByTestId('deployment-token-revoke').click();
-    await page.getByTestId('confirm-dialog-confirm').click();
-    await expect(page.getByTestId('deployment-token-row')).toHaveCount(0);
-  });
 });

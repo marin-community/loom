@@ -5,7 +5,6 @@ import { invokeOperation, listAgents } from '../api';
 import type { CustomAgent, SettingsEnvelope, SettingView } from '../types';
 import ToggleSwitch from '../components/ToggleSwitch.vue';
 import TokensPanel from '../components/TokensPanel.vue';
-import DeploymentTokensPanel from '../components/DeploymentTokensPanel.vue';
 import AccountPanel from '../components/AccountPanel.vue';
 import GithubConnectionPanel from '../components/GithubConnectionPanel.vue';
 import SlackPanel from '../components/SlackPanel.vue';
@@ -365,7 +364,6 @@ onMounted(() => {
           <template v-if="category === 'account'">
             <AccountPanel />
             <TokensPanel v-if="me.authorization_kind === 'manual'" />
-            <DeploymentTokensPanel v-if="me.role === 'admin'" />
           </template>
           <AppearancePanel v-if="category === 'preferences'" />
           <UsersPanel v-if="category === 'people'" />

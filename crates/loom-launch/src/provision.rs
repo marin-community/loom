@@ -157,7 +157,7 @@ impl Actor {
     /// fails closed if that invariant ever breaks.
     pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
         Some(match &principal.grant {
-            Grant::Anonymous | Grant::Deployment => return None,
+            Grant::Anonymous => return None,
             Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,

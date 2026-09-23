@@ -13,25 +13,6 @@ pub enum DeploymentCmd {
         #[arg(long, default_value = "-")]
         file: String,
     },
-    /// Manage credentials that can only apply a deployment manifest.
-    Token {
-        #[command(subcommand)]
-        command: DeploymentTokenCmd,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum DeploymentTokenCmd {
-    /// Mint a token and print its secret once.
-    Add {
-        name: String,
-        #[arg(long)]
-        expires_days: Option<i64>,
-    },
-    /// List deployment token metadata.
-    Ls,
-    /// Revoke a deployment token by id.
-    Rm { id: String },
 }
 
 pub async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
@@ -60,39 +41,6 @@ pub async fn run_deployment(cmd: DeploymentCmd) -> Result<()> {
                 result.federations.len()
             );
         }
-        DeploymentCmd::Token { command } => match command {
-            DeploymentTokenCmd::Add { name, expires_days } => {
-                let created = client::default()?
-                    .invoke::<deployment::tokens::create::Op>(&deployment::tokens::create::Input {
-                        name,
-                        expires_in_days: expires_days,
-                    })
-                    .await?;
-                println!("{}", created.token);
-                eprintln!(
-                    "deployment token id {} · {}",
-                    created.info.id, created.info.prefix
-                );
-            }
-            DeploymentTokenCmd::Ls => {
-                let tokens = client::default()?
-                    .invoke::<deployment::tokens::list::Op>(&deployment::tokens::list::Input {})
-                    .await?;
-                for token in tokens {
-                    println!("{}  {}  {}", token.id, token.name, token.prefix);
-                }
-            }
-            DeploymentTokenCmd::Rm { id } => {
-                let result = client::default()?
-                    .invoke::<deployment::tokens::revoke::Op>(&deployment::tokens::revoke::Input {
-                        id,
-                    })
-                    .await?;
-                if !result.revoked {
-                    anyhow::bail!("no deployment token with id {}", result.id);
-                }
-            }
-        },
     }
     Ok(())
 }
