@@ -713,6 +713,82 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automation_subject_without_user_can_launch_and_rotate_session_credentials() {
+    let ts = TestServer::start().await;
+    let subject = "github:775839592:marin-community/marin/.github/workflows/ops-loom-review.yaml@refs/heads/main:repo:marin-community/marin:pull_request";
+    let mut profile = interactive_shell_profile("review");
+    profile["class"] = json!("automation");
+    profile["strict"] = json!(true);
+    profile["env_clear"] = json!(true);
+    ts.client
+        .post("/api/profiles/create", profile)
+        .await
+        .unwrap();
+    let automation =
+        loom::automation::mint(&ts.state.db, subject, vec!["review".to_string()], 60, None)
+            .await
+            .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(automation.token)
+        .json(&json!({
+            "profile": "review",
+            "source": "actions",
+            "idempotency_key": "review:1",
+            "session": {
+                "cwd": ts.cwd(),
+                "title": "Automated review",
+                "goal": "Review the change"
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let run: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(run["status"], "running", "{run}");
+    let session = loom::session::get(&ts.state.db, run["session_id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.creator_kind, "automation");
+    assert_eq!(session.creator_subject, subject);
+    assert_eq!(session.created_by.as_deref(), Some(subject));
+    assert!(loom::auth::get_user(&ts.state.db, subject)
+        .await
+        .unwrap()
+        .is_none());
+
+    let mut env = Vec::new();
+    loom::lifecycle::rotate_session_token(&ts.state.db, &session, &mut env)
+        .await
+        .unwrap();
+    let token = &env.iter().find(|(key, _)| key == "LOOM_TOKEN").unwrap().1;
+    let principal = loom::auth::lookup_token(&ts.state.db, token)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        principal.grant,
+        loom::auth::Grant::Session {
+            session_id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
+            capabilities: None,
+        }
+    );
+    let denied = reqwest::Client::new()
+        .post(format!("http://{}/api/auth/tokens/list", ts.addr))
+        .bearer_auth(token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automation_channel_reuses_one_acp_session_without_replaying_deliveries() {
     let _adapter = EnvVarGuard::set(
         "WEAVER_CLAUDE_ACP_CMD",

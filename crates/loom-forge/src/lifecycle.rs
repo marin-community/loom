@@ -109,7 +109,7 @@ pub async fn rotate_session_token(
     crate::auth::revoke_session_tokens(db, &session.id).await?;
     let token = crate::auth::create_session_token(
         db,
-        session.created_by.as_deref(),
+        crate::auth::session_token_owner(&session.creator_kind, session.created_by.as_deref()),
         &session.id,
         &session.branch_id,
     )

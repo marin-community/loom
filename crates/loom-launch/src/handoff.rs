@@ -667,7 +667,7 @@ async fn handoff_session_inner(
     // staged token.
     let staged_token = crate::auth::stage_session_token_with_policy(
         &st.db,
-        session.created_by.as_deref(),
+        crate::auth::session_token_owner(&session.creator_kind, session.created_by.as_deref()),
         &session.id,
         &session.branch_id,
         plan.restricted,
