@@ -256,8 +256,9 @@ fn is_local_deployment_request(
     path: &str,
 ) -> bool {
     peer.is_loopback()
-        && method == Method::POST
-        && path.strip_prefix("/api").unwrap_or(path) == "/deployment/reconcile"
+        && weaver_api::operation_for_request(method.as_str(), path).is_some_and(|operation| {
+            operation.id == weaver_api::operations::deployment::reconcile::SPEC.id
+        })
         && !headers.contains_key(FORWARDED_HEADER)
         && !headers.contains_key(header::AUTHORIZATION)
         && !headers.contains_key(header::COOKIE)
