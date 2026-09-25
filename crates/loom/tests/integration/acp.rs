@@ -1382,6 +1382,81 @@ async fn prompt_queues_during_a_live_turn() {
     );
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_result_waits_for_parent_acp_turn() {
+    let ts = TestServer::start().await;
+    let parent_id = "acp-result-parent";
+    start_new(&ts, parent_id, None, None).await;
+    let parent = session_mod::get(&ts.state.db, parent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let parent_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        parent_id,
+        &parent.branch_id,
+    )
+    .await
+    .unwrap();
+    let first = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:first turn finished", "session": parent_id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first["queued"], false);
+
+    let http = reqwest::Client::new();
+    let child = http
+        .post(format!("http://{}/api/sessions/launch", ts.addr))
+        .bearer_auth(&parent_token)
+        .json(&json!({ "cwd": ts.cwd(), "goal": "queued result child", "agent": "shell" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child.status(), reqwest::StatusCode::OK);
+    let child: Value = child.json().await.unwrap();
+    let child_id = child["id"].as_str().unwrap();
+    let child_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        child_id,
+        child["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let result = http
+        .post(format!("http://{}/api/channels/messages/create", ts.addr))
+        .bearer_auth(&child_token)
+        .json(&json!({ "channel": child_id, "kind": "result", "body": "done" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.status(), reqwest::StatusCode::OK);
+    let parent = session_mod::get(&ts.state.db, parent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        parent
+            .pending_prompt
+            .as_deref()
+            .is_some_and(|prompt| prompt.contains(child_id)),
+        "child notice should wait for the current parent turn"
+    );
+    let chat = poll_chat(&ts, parent_id, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
+        block["kind"] == "agent_message" && block["payload"]["text"] == "first turn finished"
+    }));
+}
+
 /// Retracting unseen feedback is serialized by the ACP task: either the browser
 /// gets the exact durable text back for editing, or a turn boundary wins and the
 /// request conflicts. It can never both dispatch and return the same prompt.

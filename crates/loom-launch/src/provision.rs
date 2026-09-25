@@ -1469,24 +1469,23 @@ async fn create_inner(
     Ok(Provisioned { session, branch })
 }
 
-/// Session-specific operating context appended after the goal. Keep this
-/// compact: the goal is the outcome, the primer owns durable workflow rules,
-/// and this note supplies only the tracking contract. `loom summary` recovers
-/// context but is not a mandatory first turn.
+/// Session-specific operating context appended after the goal. This short
+/// command map reaches agents whose provider does not inject the primer.
+/// `loom summary` recovers context but is not a mandatory first turn.
 fn entrance_note(tracking_issue: Option<i64>) -> String {
-    let mut note = "You are working in a Loom session. Use `loom summary` \
-                    after compaction, `loom help` to explore the registered \
-                    command surface, and `loom permissions show` to inspect \
-                    effective access. This session has a durable channel for \
-                    user/agent messages and status history; append a typed \
-                    `result` there when delegated work is complete."
+    let mut note = "You are working in a Loom session. Quick commands:\n\
+                    - Discover: `loom help`; check access: `loom permissions show`.\n\
+                    - Catch up after compaction: `loom summary`.\n\
+                    - Report progress: `loom status set --tag ok --message \"tests running\"` (use `attention` or `blocked` when a person must act).\n\
+                    - Communicate: `loom channels read`; `loom channels send \"question or update\"`.\n\
+                    - Save or delegate: `loom artifacts write plan plan.md`; `loom sessions launch \"implement the parser\"`.\n\
+                    - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A typed child result also notifies its parent channel.\n\
+                    - Finish delegated work: `loom channels send --kind result \"<outcome or PR>\"`."
         .to_string();
     if let Some(id) = tracking_issue {
         note.push_str(&format!(
-            " This session is tracked as Loom issue #{id}: keep `loom \
-             status set --tag <level> --message \"<message>\"` honest as you work, and run `loom \
-             issues close {id}` once the task is complete (e.g. the PR is open) \
-             so whoever launched you knows you are done."
+            "\nThis session is tracked as Loom issue #{id}. Run `loom issues close {id}` \
+             once the task is complete (e.g. the PR is open)."
         ));
     }
     note

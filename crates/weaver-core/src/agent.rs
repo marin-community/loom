@@ -44,18 +44,19 @@ pub fn hooks_json(loom_bin: &str, mode: HookMode) -> Value {
     json!({ "hooks": hooks })
 }
 
-/// Compact builtin orientation. Command reference belongs to `loom help`, not
-/// a separately maintained Markdown catalogue.
+/// Compact builtin orientation. Full command reference belongs to `loom help`.
 const BUILTIN_WEAVER_MD: &str = r#"# Loom session
 
 You are working in a detached Loom session. Your opening task is the goal.
 
-- Run `loom summary` to recover durable context after interruption or compaction.
-- Run `loom help` to discover resource groups and `loom <group> --help` for commands.
-- Run `loom permissions show` to inspect effective access; request another GitHub repository with `loom permissions request github-repository owner/repo --reason "..."`. That request is the whole mechanism — it reaches a person in the web UI. Never ask the user to run a command instead; they usually have no shell on this machine.
-- Keep `loom status set --tag <ok|attention|blocked> --message "..."` honest. `attention` and `blocked` mean a person must act.
-- Use `loom channels read` and `loom channels send` for durable communication.
-- Finish delegated work with `loom channels send --kind result "<outcome or PR>"`.
+- Discover commands: `loom help`, then `loom help channels` or `loom sessions launch --help`.
+- Recover context after interruption or compaction: `loom summary`.
+- Check access: `loom permissions show`. For another GitHub repository, run `loom permissions request github-repository owner/repo --reason "..."`; the request reaches a person in the web UI. Do not ask them to run a shell command.
+- Report progress or a need for help: `loom status set --tag ok --message "tests running"` (use `attention` or `blocked` when a person must act).
+- Read and send durable messages: `loom channels read`; `loom channels send "question or update"`.
+- Save a deliverable: `loom artifacts write plan plan.md`. Delegate: `loom sessions launch "implement the parser"`.
+- Read a child's result: `loom channels read --channel <child-id> --kinds result`. A child's typed result also notifies its parent channel.
+- Finish delegated work: `loom channels send --kind result "<outcome or PR>"`.
 
 Repository-specific engineering and landing rules live in `AGENTS.md`.
 "#;

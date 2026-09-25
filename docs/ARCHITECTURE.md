@@ -441,6 +441,15 @@ naming the caller's own, which every session-credentialed request satisfies:
 any channel id would pass. Declaring `scope = Channel` forces the check to
 run, so a new channel operation cannot forget it.
 
+A child reports completion with a typed `result` in its own channel. Loom
+appends one linked, system-authored message to the immediate parent's channel
+and queues its delivery behind an active ACP turn (or sends it to the terminal
+pane). The link uses the source message id for idempotency. System authorship
+matters here:
+appending under the child's identity would subscribe it to the parent channel
+and widen its access. This handoff grants the child no access to the parent
+channel.
+
 One capability is narrower now: an automation credential reaches no raw path,
 only `actor = Internal` operations — `runs.create` alone. Nothing used its old
 ability to `GET /sessions/{id}` for sessions it had created, so the narrowing
