@@ -190,7 +190,9 @@ If any ID or precondition is invalid, none of the requested issues changes.
 
 An ordinary launch does not manufacture an issue. `loom sessions launch` prints
 the new session/channel id; a parent follows it with `loom channels read
---channel <id>` or blocks with `loom channels wait --channel <id>`. Explicit
+--channel <id> --kinds result` or blocks with `loom channels wait --channel
+<id> --kind result`. A child posts its result to its own channel; Loom sends a
+linked notification to the immediate parent's channel. Explicit
 `--claim` and GitHub-triggered launches retain a compatibility issue association
 because that work item already exists outside the session.
 

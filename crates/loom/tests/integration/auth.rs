@@ -1136,6 +1136,118 @@ async fn session_token_is_limited_to_its_tree_and_repository_work_items() {
     }
 }
 
+#[tokio::test]
+#[serial]
+async fn child_result_notifies_parent_without_parent_channel_access() {
+    let ts = TestServer::start().await;
+    let parent = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "result parent", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap();
+    let parent_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        parent_id,
+        parent["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let child = http
+        .post(url(&ts, "/api/sessions/launch"))
+        .bearer_auth(&parent_token)
+        .json(&json!({ "cwd": ts.cwd(), "goal": "result child", "agent": "shell" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child.status(), StatusCode::OK);
+    let child: Value = child.json().await.unwrap();
+    let child_id = child["id"].as_str().unwrap();
+    let child_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        child_id,
+        child["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let direct_write = http
+        .post(url(&ts, "/api/channels/messages/create"))
+        .bearer_auth(&child_token)
+        .json(&json!({ "channel": parent_id, "body": "arbitrary parent write" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(direct_write.status(), StatusCode::FORBIDDEN);
+
+    let request = json!({
+        "channel": child_id,
+        "kind": "result",
+        "body": "the implementation is ready",
+        "idempotency_key": "child-result-once"
+    });
+    let first = http
+        .post(url(&ts, "/api/channels/messages/create"))
+        .bearer_auth(&child_token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first: Value = first.json().await.unwrap();
+    let retry = http
+        .post(url(&ts, "/api/channels/messages/create"))
+        .bearer_auth(&child_token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    let retry: Value = retry.json().await.unwrap();
+    assert_eq!(retry["id"], first["id"]);
+
+    let parent_read = http
+        .post(url(&ts, "/api/channels/messages/list"))
+        .bearer_auth(&child_token)
+        .json(&json!({ "channel": parent_id, "kinds": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parent_read.status(), StatusCode::FORBIDDEN);
+    let parent_write = http
+        .post(url(&ts, "/api/channels/messages/create"))
+        .bearer_auth(&child_token)
+        .json(&json!({ "channel": parent_id, "body": "still forbidden" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(parent_write.status(), StatusCode::FORBIDDEN);
+
+    let parent_messages = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({ "channel": parent_id, "kinds": ["message"], "peek": true }),
+        )
+        .await
+        .unwrap();
+    let notices = parent_messages.as_array().unwrap();
+    assert_eq!(notices.len(), 1);
+    let notice = &notices[0];
+    assert_eq!(notice["author_kind"], "system");
+    assert_eq!(notice["payload"]["child_session_id"], child_id);
+    assert_eq!(notice["payload"]["source_channel_id"], child_id);
+    assert_eq!(notice["payload"]["source_message_id"], first["id"]);
+    assert!(notice["body"].as_str().unwrap().contains(child_id));
+    assert_eq!(notice["deliveries"][0]["target_session_id"], parent_id);
+    assert_eq!(notice["deliveries"][0]["state"], "delivered");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn session_token_can_delegate_through_the_cli_resolve_then_create_path() {

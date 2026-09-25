@@ -978,6 +978,45 @@ pub(super) async fn send_session(
     Ok(Json(json!({ "sent": true, "submitted": req.submit })))
 }
 
+/// Deliver a channel notification after the current ACP turn, preserving a
+/// parent's work when a child reports a result mid-turn. Terminal sessions use
+/// their ordinary pane delivery path.
+pub(super) async fn queue_session_message(
+    st: &AppState,
+    key: &str,
+    text: &str,
+    by: &str,
+) -> ApiResult<()> {
+    let (session, branch) = require_session(&st.db, key).await?;
+    if session.protocol != "acp" {
+        let _ = send_session(
+            State(st.clone()),
+            Path(key.to_string()),
+            Json(SendReq {
+                text: text.to_string(),
+                submit: true,
+                by: Some(by.to_string()),
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+    require_acp_task(st, &session)?
+        .prompt(text.to_string(), Some(by.to_string()), Vec::new())
+        .await
+        .map_err(|error| AppError::conflict(error.to_string()))?;
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "nudge",
+        json!({ "by": by, "text": text, "send_now": false }),
+    )
+    .await
+    .ok();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // The ACP chat journal + drive routes (protocol='acp' sessions)
 //
