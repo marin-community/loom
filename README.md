@@ -118,7 +118,11 @@ A profile may also carry organization-owned opening instructions. Loom appends
 them for every origin that selects the profile: user and delegated launches,
 Slack and GitHub triggers, watches, and authenticated automation. This keeps
 workflow and response conventions in deployment configuration while Loom's
-own prompt supplies only compact session and transport context.
+own prompt supplies only compact session and transport context. Instructions
+may reference `{{ goal }}` and `{{ loom }}` to place the session's goal and
+Loom's own orientation note wherever the profile wants them; whichever one is
+left unreferenced keeps its default position (goal first, orientation note
+after) instead of being dropped.
 
 Loom seeds lightweight instructions for an untouched `default` profile and
 editable `slack` and `github` starters from the same runtime posture. Their

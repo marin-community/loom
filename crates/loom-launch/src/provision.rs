@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
+use regex::Regex;
 use serde_json::json;
 use weaver_api::{LaunchOverrides, LaunchSelection, ResolvedLaunchView};
 use weaver_core::branch as branch_mod;
@@ -1492,9 +1494,17 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
 }
 
 /// Construct the positional first prompt from the stamped prelude policy.
-/// The user's goal is always the opening user message: making an agent fetch it
-/// through `loom summary` on turn one adds latency and duplicates the goal in
-/// context. `none` deliberately omits all Weaver orientation.
+/// By default the user's goal is always the opening user message, and
+/// Loom's own orientation note trails it when the profile's prelude is
+/// `weaver`: making an agent fetch context through `loom summary` on turn
+/// one adds latency and duplicates it in context. `none` deliberately omits
+/// all Loom orientation.
+///
+/// A profile's opening instructions may reference `{{ goal }}` and/or
+/// `{{ loom }}` to place the launch goal and Loom's orientation note
+/// wherever the profile wants them instead. Referencing a placeholder drops
+/// its default position; whichever one is left unreferenced keeps its
+/// default position, so neither is ever silently lost.
 fn build_launch_prompt(
     goal: &str,
     prelude: &str,
@@ -1502,21 +1512,51 @@ fn build_launch_prompt(
     entrance: &str,
     scratch: Option<&str>,
 ) -> String {
-    let mut parts = Vec::new();
-    if !goal.is_empty() {
-        parts.push(goal);
-        if prelude == "weaver" {
-            parts.push(entrance);
+    let instructions = instructions.trim();
+    let loom_note = if prelude == "weaver" { entrance } else { "" };
+    let has_goal_placeholder = goal_placeholder().is_match(instructions);
+    let has_loom_placeholder = loom_placeholder().is_match(instructions);
+
+    let mut parts: Vec<String> = Vec::new();
+    if has_goal_placeholder || has_loom_placeholder {
+        if !has_goal_placeholder && !goal.is_empty() {
+            parts.push(goal.to_string());
+        }
+        let rendered =
+            goal_placeholder().replace_all(instructions, |_: &regex::Captures| goal.to_string());
+        let rendered =
+            loom_placeholder().replace_all(&rendered, |_: &regex::Captures| loom_note.to_string());
+        if !rendered.is_empty() {
+            parts.push(rendered.into_owned());
+        }
+        if prelude == "weaver" && !has_loom_placeholder {
+            parts.push(entrance.to_string());
+        }
+    } else {
+        if !goal.is_empty() {
+            parts.push(goal.to_string());
+            if prelude == "weaver" {
+                parts.push(entrance.to_string());
+            }
+        }
+        if let Some(section) = profile_instructions_section(instructions) {
+            parts.push(section);
         }
     }
-    let profile_instructions = profile_instructions_section(instructions);
-    if let Some(instructions) = profile_instructions.as_deref() {
-        parts.push(instructions);
-    }
     if let Some(scratch) = scratch {
-        parts.push(scratch);
+        parts.push(scratch.to_string());
     }
     parts.join("\n\n")
+}
+
+fn goal_placeholder() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\{\{\s*goal\s*\}\}").unwrap())
+}
+
+fn loom_placeholder() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\{\{\s*loom\s*\}\}").unwrap())
 }
 
 pub(crate) fn profile_instructions_section(instructions: &str) -> Option<String> {
@@ -1746,28 +1786,24 @@ mod tests {
     }
 
     #[test]
-    fn profile_instructions_apply_with_or_without_the_weaver_prelude() {
-        let expected = "do the work\n\n## Profile instructions\n\nUse the organization workflow.";
+    fn placeholders_are_replaced_with_the_goal_and_loom_orientation() {
+        let instructions = "{{ loom }}\n\nHandle this ticket: {{ goal }}";
         assert_eq!(
-            build_launch_prompt(
-                "do the work",
-                "none",
-                "Use the organization workflow.",
-                "unused",
-                None,
-            ),
-            expected
+            build_launch_prompt("Fix bug X", "weaver", instructions, "Loom context.", None),
+            "Loom context.\n\nHandle this ticket: Fix bug X"
+        );
+    }
+
+    #[test]
+    fn defaults_apply_when_neither_placeholder_is_set() {
+        let instructions = "Use the organization workflow.";
+        assert_eq!(
+            build_launch_prompt("do the work", "none", instructions, "unused", None),
+            "do the work\n\n## Profile instructions\n\nUse the organization workflow."
         );
         assert_eq!(
-            build_launch_prompt(
-                "do the work",
-                "weaver",
-                "Use the organization workflow.",
-                "Weaver context.",
-                None,
-            ),
+            build_launch_prompt("do the work", "weaver", instructions, "Weaver context.", None),
             "do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow."
-                .to_string()
         );
     }
 }

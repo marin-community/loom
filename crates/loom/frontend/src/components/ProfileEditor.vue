@@ -208,8 +208,10 @@ watch(
         class="min-w-0 rounded bg-input px-2 py-1.5 font-mono text-xs"
       />
       <p class="text-xs text-muted">
-        Appended to the first prompt for user, Slack, GitHub, delegated, and automation launches. Do
-        not put secrets here.
+        Appended to the first prompt for user, Slack, GitHub, delegated, and automation launches.
+        Use <code v-pre>{{ goal }}</code> and <code v-pre>{{ loom }}</code> to place the session
+        goal and Loom's orientation note inline; either left out keeps its default position. Do not
+        put secrets here.
       </p>
     </div>
 
