@@ -227,6 +227,10 @@ impl Actor {
             ActorKind::Admin { username, .. } | ActorKind::Session { username, .. } => {
                 Some(username.clone())
             }
+            // Slack is a system subject, not a Loom user to authorize or subscribe.
+            ActorKind::Producer {
+                origin: "slack", ..
+            } => None,
             ActorKind::Producer { subject, .. } | ActorKind::Automation { subject, .. } => {
                 Some(subject.clone())
             }
@@ -1634,6 +1638,29 @@ async fn resolve_explicit_work_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn slack_producer_mints_session_token_without_a_slack_user() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        crate::auth::add_user(&db, "owner", None, None, None, crate::auth::UserRole::Admin)
+            .await
+            .unwrap();
+        let actor = Actor::producer("slack", "slack");
+        let created_by = actor.display_creator();
+        assert_eq!(actor.creator_identity(), ("system", "slack".to_string()));
+        let owner = crate::auth::session_token_owner("system", created_by.as_deref());
+        crate::auth::create_session_token(&db, owner, "session-id", "branch-id")
+            .await
+            .unwrap();
+        let token_owner: String = sqlx::query_scalar(
+            "SELECT username FROM api_tokens WHERE bound_session_id = 'session-id'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(token_owner, "owner");
+    }
 
     #[test]
     fn legacy_create_preserves_explicit_agent_default_selectors() {
