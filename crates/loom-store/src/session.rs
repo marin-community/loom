@@ -1042,11 +1042,10 @@ pub async fn reparent(db: &Db, id: &str, parent: Option<&str>) -> Result<()> {
     }
     if let Some(parent) = parent {
         // The parent must be a live, non-archived session.
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
-                .bind(parent)
-                .fetch_optional(db)
-                .await?;
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+            .bind(parent)
+            .fetch_optional(db)
+            .await?;
         match status.as_deref() {
             Some("running" | "orphaned" | "error" | "handoff") => {}
             Some(other) => anyhow::bail!("parent session {parent} is {other}, not live"),
@@ -1058,12 +1057,11 @@ pub async fn reparent(db: &Db, id: &str, parent: Option<&str>) -> Result<()> {
             if cursor == id {
                 anyhow::bail!("cannot re-parent a session under its own descendant");
             }
-            let next: Option<Option<String>> = sqlx::query_scalar(
-                "SELECT parent_session_id FROM sessions WHERE id = ?",
-            )
-            .bind(&cursor)
-            .fetch_optional(db)
-            .await?;
+            let next: Option<Option<String>> =
+                sqlx::query_scalar("SELECT parent_session_id FROM sessions WHERE id = ?")
+                    .bind(&cursor)
+                    .fetch_optional(db)
+                    .await?;
             match next.flatten() {
                 Some(next) => cursor = next,
                 None => break,
@@ -1074,19 +1072,19 @@ pub async fn reparent(db: &Db, id: &str, parent: Option<&str>) -> Result<()> {
                 .bind(parent)
                 .fetch_one(db)
                 .await?;
-        sqlx::query(
-            "UPDATE sessions SET parent_session_id = ?, parent_branch_id = ? WHERE id = ?",
-        )
-        .bind(parent)
-        .bind(parent_branch)
-        .bind(id)
-        .execute(db)
-        .await?;
-    } else {
-        sqlx::query("UPDATE sessions SET parent_session_id = NULL, parent_branch_id = NULL WHERE id = ?")
+        sqlx::query("UPDATE sessions SET parent_session_id = ?, parent_branch_id = ? WHERE id = ?")
+            .bind(parent)
+            .bind(parent_branch)
             .bind(id)
             .execute(db)
             .await?;
+    } else {
+        sqlx::query(
+            "UPDATE sessions SET parent_session_id = NULL, parent_branch_id = NULL WHERE id = ?",
+        )
+        .bind(id)
+        .execute(db)
+        .await?;
     }
     tracing::debug!(session = %id, parent = ?parent, "session re-parented");
     Ok(())

@@ -1193,12 +1193,17 @@ pub async fn build_acp_launch(
         ));
     }
     if is_codex {
-        // Adapter-contract env, deferring to any operator-provided value.
-        push_env_default(
-            &mut env,
-            "DEFAULT_AUTH_REQUEST",
-            r#"{"methodId":"api-key"}"#,
-        );
+        // The adapter only needs an automatic API-key auth request when a key
+        // is actually available. Otherwise leave auth to the persisted Codex
+        // login (including ChatGPT subscriptions), or report auth required so
+        // the operator can run `codex login` on this runner.
+        if codex_api_key_available(&env, spec.env_clear) {
+            push_env_default(
+                &mut env,
+                "DEFAULT_AUTH_REQUEST",
+                r#"{"methodId":"api-key"}"#,
+            );
+        }
         let codex_mode = codex_acp_mode(spec.mode);
         configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
@@ -1244,6 +1249,18 @@ pub async fn build_acp_launch(
             .then(|| spec.effort.trim().to_string()),
         goal,
         setup_timeout: std::time::Duration::from_secs(30),
+    })
+}
+
+fn codex_api_key_available(env: &[(String, String)], env_clear: bool) -> bool {
+    ["CODEX_API_KEY", "OPENAI_API_KEY"].into_iter().any(|key| {
+        env.iter()
+            .rev()
+            .find_map(|(name, value)| (name == key).then_some(value.as_str()))
+            .map_or_else(
+                || !env_clear && std::env::var(key).is_ok_and(|value| !value.trim().is_empty()),
+                |value| !value.trim().is_empty(),
+            )
     })
 }
 
@@ -2834,6 +2851,20 @@ mod tests {
         let model_only = codex_acp_config("gpt-5.3-codex", " ");
         assert_eq!(model_only["model"], "gpt-5.3-codex");
         assert!(model_only.get("model_reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn codex_api_key_auto_auth_requires_an_effective_key() {
+        let empty = vec![
+            ("CODEX_API_KEY".to_string(), String::new()),
+            ("OPENAI_API_KEY".to_string(), String::new()),
+        ];
+        assert!(!codex_api_key_available(&empty, false));
+        assert!(!codex_api_key_available(&empty, true));
+
+        let key = vec![("OPENAI_API_KEY".to_string(), "test-key".to_string())];
+        assert!(codex_api_key_available(&key, false));
+        assert!(codex_api_key_available(&key, true));
     }
 
     #[test]

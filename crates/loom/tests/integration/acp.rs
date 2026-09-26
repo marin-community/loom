@@ -4579,9 +4579,15 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         custom: None,
     };
 
+    // Explicit empty overrides make this independent of any API key in the
+    // test runner's environment: persisted ChatGPT login remains available.
+    let no_api_key = [
+        ("CODEX_API_KEY".to_string(), String::new()),
+        ("OPENAI_API_KEY".to_string(), String::new()),
+    ];
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(Some(goal.as_path()), &[], "bypassPermissions"),
+        &spec(Some(goal.as_path()), &no_api_key, "bypassPermissions"),
         loom::agent::AcpOpen::Fresh,
     )
     .await
@@ -4592,10 +4598,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
          exec npx --yes @agentclientprotocol/codex-acp",
         "the npm default (installed bin, else npx) resolves when neither env nor config names one"
     );
-    assert_eq!(
-        env_of(&launch, "DEFAULT_AUTH_REQUEST"),
-        vec![r#"{"methodId":"api-key"}"#.to_string()]
-    );
+    assert!(env_of(&launch, "DEFAULT_AUTH_REQUEST").is_empty());
     assert_eq!(
         env_of(&launch, "INITIAL_AGENT_MODE"),
         vec!["agent-full-access"]
@@ -4615,6 +4618,19 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         NewOrLoad::New { meta, .. } => assert!(meta.is_none(), "codex takes no _meta"),
         NewOrLoad::Load { .. } => panic!("a fresh launch opens session/new"),
     }
+
+    let api_key = [("OPENAI_API_KEY".to_string(), "test-key".to_string())];
+    let key_launch = loom::agent::build_acp_launch(
+        &ts.state.db,
+        &spec(None, &api_key, "agent"),
+        loom::agent::AcpOpen::Fresh,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        env_of(&key_launch, "DEFAULT_AUTH_REQUEST"),
+        vec![r#"{"methodId":"api-key"}"#.to_string()]
+    );
 
     // The provider-neutral launch default and codex-acp's reported/restored mode
     // resolve to the same Agent posture with Loom-owned automatic approval.

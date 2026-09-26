@@ -337,7 +337,16 @@ interactively (persisted under `~/.codex` on the same volume):
 
 ```sh
 docker compose exec loom codex login    # follow the prompts, then exit
+docker compose exec loom codex login status
 ```
+
+ChatGPT subscription login is a runner credential: perform it in the same
+container/user home that launches Codex agents. A successful login on a laptop
+does not authenticate a remote Loom runner. If using a headless host, run the
+device-code flow there with `codex login --device-auth`, then check its status
+before starting a session. Loom asks the ACP adapter for API-key authentication
+only when `CODEX_API_KEY` or `OPENAI_API_KEY` is configured; otherwise the adapter
+uses the persisted Codex login.
 
 The shared Codex login is used only for model access. At startup, Loom disables
 Codex account-level apps in the container, so a GitHub connector authorized on
