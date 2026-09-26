@@ -624,8 +624,18 @@ async fn create_inner(
 
     // Now acquire the managed clone (inside the gate), or reuse the local root
     // resolved above. The traversal / allowlist boundary lives in `repo`.
+    // `resolve_clone` treats a passed App as a hard requirement to mint an
+    // installation token, so hand it `None` when no App is configured — a
+    // PAT-only deployment (App id/key never set) otherwise cannot clone even
+    // public managed repos, because minting always fails before git runs.
+    // Public repos clone unauthenticated; the session's own credentials (user
+    // PAT or App broker) still apply to everything after the clone.
+    let clone_app = match st.trigger.app() {
+        Some(app) if app.is_configured().await => Some(app),
+        _ => None,
+    };
     let repo_root = match managed_repo {
-        Some(input) => repo::resolve_clone(&st.db, input, st.trigger.app())
+        Some(input) => repo::resolve_clone(&st.db, input, clone_app)
             .await
             .map_err(|e| match e {
                 repo::ResolveError::BadRequest(m) => ProvisionError::invalid(m),
