@@ -206,7 +206,7 @@ async fn new_session_with_placement(
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
     let script = session_script(name, script, memory_max_gb);
-    let supervisor_bin = tapestry_bin();
+    let supervisor_bin = supervisor_bin();
     let options = tapestry::LaunchOptions {
         name,
         cwd,
@@ -217,7 +217,7 @@ async fn new_session_with_placement(
         rows: 24,
         mode: tapestry::Mode::Pty,
         segment_max_bytes: None,
-        supervisor_bin: supervisor_bin.as_deref(),
+        supervisor_bin: Some(supervisor_bin.as_path()),
     };
     let result = match placement {
         SessionPlacement::Configured => runner::spawn(&options, memory_max_gb).await,
@@ -249,7 +249,7 @@ pub async fn new_relay_session(
     memory_max_gb: u64,
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning relay session");
-    let supervisor_bin = tapestry_bin();
+    let supervisor_bin = supervisor_bin();
     let options = tapestry::LaunchOptions {
         name,
         cwd,
@@ -260,7 +260,7 @@ pub async fn new_relay_session(
         rows: 24,
         mode: tapestry::Mode::Relay,
         segment_max_bytes: None,
-        supervisor_bin: supervisor_bin.as_deref(),
+        supervisor_bin: Some(supervisor_bin.as_path()),
     };
     let result = runner::spawn(&options, memory_max_gb).await;
     match &result {
@@ -445,6 +445,23 @@ fn tapestry_bin() -> Option<std::path::PathBuf> {
         .and_then(std::path::Path::parent)
         .map(|d| d.join("tapestry"))
         .filter(|p| p.exists())
+}
+
+/// The supervisor binary for this loom process. `tapestry_bin()` falls back to
+/// `None` when no sibling `tapestry` exists next to the loom binary (a
+/// partially built workspace), and `spawn_detached` would then re-exec the loom
+/// binary itself as `loom supervise -` — an unknown subcommand, so the
+/// "supervisor" dies instantly and every launch fails with the maddeningly
+/// opaque "supervisor did not come up within 5s". Fail loudly instead: a
+/// missing sibling is a deployment problem (build the whole workspace, not
+/// just `loom`).
+fn supervisor_bin() -> std::path::PathBuf {
+    tapestry_bin().unwrap_or_else(|| {
+        tracing::error!(
+            "no tapestry binary next to the loom binary — build the workspace: cargo build -p loom -p tapestry"
+        );
+        std::path::PathBuf::from("tapestry")
+    })
 }
 
 /// Translate the small set of key names loom uses into the raw bytes a PTY
