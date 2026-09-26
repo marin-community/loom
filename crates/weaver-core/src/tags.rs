@@ -72,6 +72,17 @@ pub const RECOVERED_KEY: &str = "recovered";
 /// The fixed value the [`RECOVERED_KEY`] tag carries.
 pub const RECOVERED_VALUE: &str = "true";
 
+/// A quiet marker identifying a leader chat as a **topic** — the durable unit
+/// of work in the dashboard's tree view. Arachne stamps it at every
+/// parent-creating point (top-level launch, delegation onto a parent,
+/// re-parenting). Topic-ness never depended on live children: the tag survives
+/// archive and restarts, so a leader keeps its shape even with every child
+/// finished and torn down.
+pub const TOPIC_KEY: &str = "topic";
+
+/// The fixed value the [`TOPIC_KEY`] tag carries.
+pub const TOPIC_VALUE: &str = "true";
+
 /// A quiet operator override that keeps automatic retention paths from
 /// archiving this branch's live session. Manual Archive remains available.
 pub const AUTO_ARCHIVE_KEY: &str = "auto-archive";

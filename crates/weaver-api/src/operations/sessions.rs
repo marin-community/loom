@@ -887,7 +887,7 @@ pub mod reparent {
 
     /// Re-parent a session under another session: the new parent becomes this
     /// session's launcher-of-record, and the session joins the parent's
-    /// placement group (its workstream). Re-parenting under nothing detaches
+    /// placement group (its topic). Re-parenting under nothing detaches
     /// the session, leaving it placed in its current group.
     #[operation(id = "sessions.reparent", actor = SessionSelf, scope = Session, risk = Write,
                 grants = ["loom/sessions/write@v1"], cli = "sessions reparent")]

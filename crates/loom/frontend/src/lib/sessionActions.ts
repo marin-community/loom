@@ -14,7 +14,7 @@ import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } fro
 // The session's write surface, shared by every place that can act on a session:
 // the detail page's header and the fleet list's per-row menu.
 //
-//   rename       — the one human-authored branch field (the workstream label)
+//   rename       — the one human-authored branch field (the topic label)
 //   clearTag     — delete any one tag, loud or quiet (a chip's × clears it);
 //                  clearing the agent's `attention` is how a human marks it calm
 //   adopt        — recreate the terminal for an orphaned session

@@ -178,7 +178,7 @@ async fn archive_keeps_branch_and_history() {
     );
 
     // Flag the session for attention; archiving must clear it (a torn-down
-    // workstream can't still "need me"). The recorded `tag` event (authored
+    // topic can't still "need me"). The recorded `tag` event (authored
     // `manual`) doubles as branch history we expect to survive the archive. The
     // message (description) is a separate branch field, patched alongside.
     client
@@ -198,7 +198,7 @@ async fn archive_keeps_branch_and_history() {
         .await
         .unwrap();
     // The soothing `idle` mark is quiet (not on the loud ladder) but is still a
-    // lifecycle signal a torn-down workstream shouldn't carry: archiving clears
+    // lifecycle signal a torn-down topic shouldn't carry: archiving clears
     // it too.
     client
         .post(

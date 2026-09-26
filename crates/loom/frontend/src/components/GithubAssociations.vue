@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { Session } from '../types';
 import { clearSessionGithub, patchIssue, refreshSessionGithub, setSessionGithub } from '../api';
 
-// The two high-frequency GitHub destinations a workstream accumulates: the issue
+// The two high-frequency GitHub destinations a topic accumulates: the issue
 // it came from and the PR it produces. A mapped pill is a direct link; its
 // adjacent edit control owns reassociation. An empty pill opens that same editor,
 // keeping setup discoverable without making every follow a two-click action.

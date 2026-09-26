@@ -1032,7 +1032,7 @@ pub async fn touch(db: &Db, id: &str) -> Result<()> {
 /// Reparent a session: set its launcher-of-record and branch provenance to
 /// the new parent, or detach it when `parent` is `None`. Sessions keep their
 /// current placement; callers decide whether to also move the row into the
-/// parent's group (Arachne's "workstream = top-level chat" view).
+/// parent's group (Arachne's "topic = top-level chat" view).
 ///
 /// Rejects cycles (a session parenting itself or one of its descendants) —
 /// the sidebar would render an infinitely nested tree otherwise.

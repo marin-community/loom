@@ -36,7 +36,7 @@ use loom::client;
 #[command(
     name = "loom",
     version,
-    about = "Orchestrate concurrent agent workstreams",
+    about = "Orchestrate concurrent agent topics",
     disable_help_subcommand = true
 )]
 struct Cli {

@@ -1664,7 +1664,7 @@ async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiRes
 }
 
 /// `sessions.reparent` — set the launcher-of-record for a session (or detach
-/// it), so Arachne can nest an existing chat under a workstream's top-level
+/// it), so Arachne can nest an existing chat under a topic's top-level
 /// session. The branch provenance (`parent_branch_id`) follows the new parent,
 /// and placement moves with it when the parent's group differs.
 async fn op_reparent(
@@ -1683,7 +1683,7 @@ async fn op_reparent(
     }
     session_mod::reparent(&st.db, &session.id, parent).await?;
     // Follow the parent into its placement group when one is given, so the
-    // sidebar's workstream view (group = top-level chat's tree) holds.
+    // sidebar's topic view (group = top-level chat's tree) holds.
     if let Some(parent) = parent {
         if let Some(parent_placement) = crate::session_layout::placement(&st.db, parent).await? {
             let here = crate::session_layout::placement(&st.db, &session.id).await?;

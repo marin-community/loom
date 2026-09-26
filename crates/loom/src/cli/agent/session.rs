@@ -189,7 +189,7 @@ fn read_hook_source() -> Option<String> {
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **Loom session** on branch `{branch}` (a detached agent workstream in a git worktree; the user reviews asynchronously via the Loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nQuick commands: `loom help` (discover), `loom permissions show` (access), `loom channels read` (messages), `loom status set --tag ok --message \"working\"` (progress; use `attention` or `blocked` when a person must act). Read a child's result with `loom channels read --channel <child-id> --kinds result`; finish delegated work with `loom channels send --kind result \"<outcome>\"`. State questions as plain text and raise attention; finish by opening a PR rather than merging.\n",
+        "Context was just compacted — you are still in a **Loom session** on branch `{branch}` (a detached agent topic in a git worktree; the user reviews asynchronously via the Loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nQuick commands: `loom help` (discover), `loom permissions show` (access), `loom channels read` (messages), `loom status set --tag ok --message \"working\"` (progress; use `attention` or `blocked` when a person must act). Read a child's result with `loom channels read --channel <child-id> --kinds result`; finish delegated work with `loom channels send --kind result \"<outcome>\"`. State questions as plain text and raise attention; finish by opening a PR rather than merging.\n",
         branch = b.branch,
     )
 }

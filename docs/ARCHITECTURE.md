@@ -770,7 +770,7 @@ the watch *replaces* the soothing `idle` mark with the real loud status; a
 "nothing needed" verdict leaves `idle` in place.
 
 Archiving a session clears its loud tags **and** the soothing `idle` mark: the
-agent is gone, so a torn-down workstream can't still "need me" nor is it
+agent is gone, so a torn-down topic can't still "need me" nor is it
 "resting", and the dashboard stops flagging or labelling it. The UI also treats
 any `archived` session as calm regardless of a stale tag left on the branch.
 
@@ -929,7 +929,7 @@ association is written.
 automatically — the same teardown as the Archive button: the terminal killed,
 worktree removed, branch and weaver history kept. The worktree is removed with
 `--force`, so any uncommitted work in it is discarded; a merged PR is taken to
-mean the workstream is done. The session-level `auto-archive: disabled` tag
+mean the topic is done. The session-level `auto-archive: disabled` tag
 suppresses this without changing the global policy. Turn the behaviour off
 globally with `loom config set github.archive_on_merge false` (or in the
 settings pane).

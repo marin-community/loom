@@ -51,7 +51,7 @@ function isAgentTag(tag: Tag): boolean {
 }
 
 // The current-state message (Branch.description). Suppressed for archived
-// sessions so torn-down workstreams don't show stale chatter.
+// sessions so torn-down topics don't show stale chatter.
 export function messageOf(s: SessionSummary): string {
   if (s.status === 'archived') return '';
   if (s.status === 'error' || s.status === 'orphaned') {
