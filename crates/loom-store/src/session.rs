@@ -1029,6 +1029,69 @@ pub async fn touch(db: &Db, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reparent a session: set its launcher-of-record and branch provenance to
+/// the new parent, or detach it when `parent` is `None`. Sessions keep their
+/// current placement; callers decide whether to also move the row into the
+/// parent's group (Arachne's "workstream = top-level chat" view).
+///
+/// Rejects cycles (a session parenting itself or one of its descendants) —
+/// the sidebar would render an infinitely nested tree otherwise.
+pub async fn reparent(db: &Db, id: &str, parent: Option<&str>) -> Result<()> {
+    if parent == Some(id) {
+        anyhow::bail!("a session cannot parent itself");
+    }
+    if let Some(parent) = parent {
+        // The parent must be a live, non-archived session.
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM sessions WHERE id = ?")
+                .bind(parent)
+                .fetch_optional(db)
+                .await?;
+        match status.as_deref() {
+            Some("running" | "orphaned" | "error" | "handoff") => {}
+            Some(other) => anyhow::bail!("parent session {parent} is {other}, not live"),
+            None => anyhow::bail!("parent session {parent} not found"),
+        }
+        // Cycle check: walk up from the candidate parent; if we reach `id`,\n        // the new link would close a loop.
+        let mut cursor = parent.to_string();
+        for _ in 0..1000 {
+            if cursor == id {
+                anyhow::bail!("cannot re-parent a session under its own descendant");
+            }
+            let next: Option<Option<String>> = sqlx::query_scalar(
+                "SELECT parent_session_id FROM sessions WHERE id = ?",
+            )
+            .bind(&cursor)
+            .fetch_optional(db)
+            .await?;
+            match next.flatten() {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        let parent_branch: Option<String> =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = ?")
+                .bind(parent)
+                .fetch_one(db)
+                .await?;
+        sqlx::query(
+            "UPDATE sessions SET parent_session_id = ?, parent_branch_id = ? WHERE id = ?",
+        )
+        .bind(parent)
+        .bind(parent_branch)
+        .bind(id)
+        .execute(db)
+        .await?;
+    } else {
+        sqlx::query("UPDATE sessions SET parent_session_id = NULL, parent_branch_id = NULL WHERE id = ?")
+            .bind(id)
+            .execute(db)
+            .await?;
+    }
+    tracing::debug!(session = %id, parent = ?parent, "session re-parented");
+    Ok(())
+}
+
 /// Mark a session as ACP-backed and record the agent's on-disk session id (the
 /// `session/new`/`session/load` id). Called by [`crate::acp::start`] once the
 /// adapter has opened its session.

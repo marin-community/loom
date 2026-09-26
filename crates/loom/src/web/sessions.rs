@@ -20,8 +20,9 @@ use crate::auth::Principal;
 use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
-use crate::{agent, backend, db, events, git, github, repo};
+use crate::{agent, backend, db, events, git, github, repo, session_layout};
 use weaver_api::operations::sessions as ops;
+use weaver_api::operations::session_layout as session_layout_ops;
 use weaver_api::{
     AcpMetadataView, BranchView, ChatCursorView, HistoryPageView, ResolvedLaunchView,
     ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
@@ -1185,6 +1186,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::tags::delete::Op, _, _>(op_tags_delete),
         register::<ops::tags::replace::Op, _, _>(op_tags_replace),
         register::<ops::adopt::Op, _, _>(op_adopt),
+        register::<ops::reparent::Op, _, _>(op_reparent),
         register::<ops::archive::Op, _, _>(op_archive),
         register::<ops::recover::Op, _, _>(op_recover),
         register::<ops::handoff::Op, _, _>(op_handoff),
@@ -1659,6 +1661,63 @@ async fn op_adopt(context: OperationContext, input: ops::adopt::Input) -> ApiRes
     adopt(st, &session, &branch).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     session_view(&st.db, &session, &branch).await
+}
+
+/// `sessions.reparent` — set the launcher-of-record for a session (or detach
+/// it), so Arachne can nest an existing chat under a workstream's top-level
+/// session. The branch provenance (`parent_branch_id`) follows the new parent,
+/// and placement moves with it when the parent's group differs.
+async fn op_reparent(
+    context: OperationContext,
+    input: ops::reparent::Input,
+) -> ApiResult<SessionSummaryView> {
+    let st = &context.state;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let parent = input
+        .parent
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    if parent == Some(session.id.as_str()) {
+        return Err(AppError::bad_request("a session cannot parent itself"));
+    }
+    session_mod::reparent(&st.db, &session.id, parent).await?;
+    // Follow the parent into its placement group when one is given, so the
+    // sidebar's workstream view (group = top-level chat's tree) holds.
+    if let Some(parent) = parent {
+        if let Some(parent_placement) = crate::session_layout::placement(&st.db, parent).await? {
+            let here = crate::session_layout::placement(&st.db, &session.id).await?;
+            if here.as_ref().map(|p| p.group_id.clone()) != Some(parent_placement.group_id.clone()) {
+                let input = session_layout_ops::r#move::Input {
+                    session_ids: vec![session.id.clone()],
+                    destination_group_id: parent_placement.group_id,
+                    before_session_id: None,
+                    expected_revision: None,
+                };
+                if let Err(error) = session_layout::move_sessions(
+                    &st.db,
+                    &context.principal.username,
+                    &input,
+                )
+                .await
+                {
+                    return Err(AppError::bad_request(format!("{error:?}")));
+                }
+            }
+        }
+    }
+    // Publish so dashboards re-render the tree (the fleet listens on the
+    // session's own topic for tag events; layout moves publish on `layout`).
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        "reparent",
+        json!({ "parent": parent.unwrap_or_default() }),
+    )
+    .await?;
+    let (session, branch) = require_session(&st.db, &session.id).await?;
+    session_summary_view(&st.db, &session, &branch).await
 }
 
 async fn op_archive(

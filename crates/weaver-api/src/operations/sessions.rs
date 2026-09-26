@@ -882,6 +882,25 @@ pub mod raw {
     pub type Output = ();
 }
 
+pub mod reparent {
+    use super::prelude::*;
+
+    /// Re-parent a session under another session: the new parent becomes this
+    /// session's launcher-of-record, and the session joins the parent's
+    /// placement group (its workstream). Re-parenting under nothing detaches
+    /// the session, leaving it placed in its current group.
+    #[operation(id = "sessions.reparent", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions reparent")]
+    pub struct Input {
+        #[operand(context)]
+        pub session: String,
+        /// The new parent session. Empty detaches (top-level session).
+        pub parent: Option<String>,
+    }
+
+    pub type Output = SessionSummaryView;
+}
+
 pub mod recover {
     use super::prelude::*;
 
@@ -1407,6 +1426,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     tags::delete::SPEC,
     adopt::SPEC,
     archive::SPEC,
+    reparent::SPEC,
     recover::SPEC,
     handoff::SPEC,
     handoff::resolve::SPEC,
