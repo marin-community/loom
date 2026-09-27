@@ -380,6 +380,13 @@ pub(crate) async fn session_view(
     } else {
         None
     };
+    // Same story for the newest user message (the summary's twin field):
+    // the detail view feeds the same recency helpers the fleet list does.
+    let last_user_message_at = if session.protocol == "acp" {
+        crate::chat::last_user_message_at(db, &session.id).await?
+    } else {
+        None
+    };
     let mcp_policy = serde_json::from_str::<McpPolicySnapshot>(&session.policy_mcp_access)
         .map(|snapshot| SessionMcpPolicyView::from(&snapshot))
         .map_err(|error| {
@@ -424,6 +431,7 @@ pub(crate) async fn session_view(
             .last_activity_at
             .clone()
             .unwrap_or_else(|| branch.updated_at.clone()),
+        last_user_message_at,
         created_at: session.created_at.clone(),
         updated_at: branch.updated_at.clone(),
         title_generation,
@@ -475,6 +483,14 @@ pub(crate) async fn session_summary_view(
     } else {
         None
     };
+    // Same story for the newest user message: ordering by it lets fleet UIs
+    // stay still while an agent streams (the field is only on the summary
+    // DTO — the search surface — but the query is shared).
+    let last_user_message_at = if session.protocol == "acp" {
+        crate::chat::last_user_message_at(db, &session.id).await?
+    } else {
+        None
+    };
     let usage = if session.protocol == "acp" {
         crate::chat::latest_usage(db, &session.id).await?
     } else {
@@ -491,6 +507,7 @@ pub(crate) async fn session_summary_view(
             .last_activity_at
             .clone()
             .unwrap_or_else(|| branch.updated_at.clone()),
+        last_user_message_at,
         created_at: session.created_at.clone(),
         parent_id: session.parent_branch_id.clone(),
         parent_session_id: session.parent_session_id.clone(),

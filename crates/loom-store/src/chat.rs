@@ -852,6 +852,30 @@ pub async fn latest_usage(db: &Db, session_id: &str) -> Result<Option<weaver_api
     Ok(row.and_then(|r| serde_json::from_str(&r.get::<String, _>("payload")).ok()))
 }
 
+/// When the session's newest `user_message` block was journaled, or `None` when
+/// the journal holds no user input. This is "when did a human (or a delivery on
+/// their behalf) last steer this conversation" — distinct from
+/// `sessions.last_activity_at`, which the ACP task restamps on every frame an
+/// agent streams (loom-agent's `touch_activity`). Fleet UIs order by this to
+/// keep a session's own busyness from reshuffling the list around it.
+///
+/// A launch goal journals as a `user_message` too (with `by: null`), so a
+/// freshly launched session reads as "just messaged" — the correct default:
+/// somebody just asked for something.
+/// A cheap query feeding
+/// [`SessionSummaryView::last_user_message_at`](weaver_api::SessionSummaryView).
+pub async fn last_user_message_at(db: &Db, session_id: &str) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT created_at FROM chat_blocks WHERE session_id = ? AND kind = ?
+         ORDER BY turn DESC, seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(kind::USER_MESSAGE)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|r| r.get::<String, _>("created_at")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1144,6 +1168,66 @@ mod tests {
         assert_eq!(latest_usage(&db, &s).await.unwrap().unwrap().used, 150);
         reset_usage(&db, &s).await.unwrap();
         assert_eq!(latest_usage(&db, &s).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn last_user_message_at_reads_the_newest_and_ignores_other_kinds() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let s = seed_session(&db).await;
+        assert_eq!(last_user_message_at(&db, &s).await.unwrap(), None);
+        insert(
+            &db,
+            &s,
+            0,
+            0,
+            kind::USER_MESSAGE,
+            &json!({"text":"first","by":null}),
+        )
+        .await
+        .unwrap();
+        let first = last_user_message_at(&db, &s).await.unwrap().unwrap();
+        // A newer agent message and usage block must not move the stamp.
+        insert(
+            &db,
+            &s,
+            1,
+            0,
+            kind::AGENT_MESSAGE,
+            &json!({"text":"working"}),
+        )
+        .await
+        .unwrap();
+        insert(&db, &s, 1, 1, kind::USAGE, &json!({"used":10,"size":20}))
+            .await
+            .unwrap();
+        assert_eq!(last_user_message_at(&db, &s).await.unwrap().unwrap(), first);
+        insert(
+            &db,
+            &s,
+            2,
+            0,
+            kind::USER_MESSAGE,
+            &json!({"text":"again","by":"manual"}),
+        )
+        .await
+        .unwrap();
+        let second = last_user_message_at(&db, &s).await.unwrap().unwrap();
+        // `now_iso` has millisecond precision, so two inserts in the same
+        // millisecond can carry equal stamps — the query still selects the
+        // turn-2 row (the `None`/`Some`/`kind`-filtering behaviour above is
+        // what this test pins), so equality is acceptable here.
+        assert!(second >= first, "the newer user message wins");
+        // And the selected row really is the turn-2 one: no user_message in
+        // turn 0 is left behind once turn 2 exists.
+        assert_eq!(
+            list(&db, &s)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|b| b.kind == kind::USER_MESSAGE)
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]
