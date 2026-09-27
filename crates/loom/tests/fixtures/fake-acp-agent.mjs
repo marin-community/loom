@@ -222,6 +222,11 @@ async function runToken(tok) {
     notify({ sessionUpdate: "tool_call_update", toolCallId, status: "in_progress" });
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "erunning" } });
     notify({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+  } else if (tok === "tool-update-without-start") {
+    const toolCallId = "update-only-tool";
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "before" } });
+    notify({ sessionUpdate: "tool_call_update", toolCallId, title: "Tool", status: "completed" });
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "after" } });
   } else if (tok === "thought-between-chunks") {
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "R" } });
     notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "checking" } });

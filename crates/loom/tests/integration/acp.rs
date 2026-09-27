@@ -814,6 +814,49 @@ async fn tool_updates_do_not_split_streaming_prose() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_tool_update_still_marks_a_prose_boundary() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-tool-update-first", None, None).await;
+    let mut rx = ts
+        .state
+        .acp
+        .get("acp-tool-update-first")
+        .unwrap()
+        .subscribe();
+
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "tool-update-without-start", "session": "acp-tool-update-first" }),
+        )
+        .await
+        .unwrap();
+    drain_events(&mut rx, Duration::from_secs(10), |e| {
+        e.event == "turn" && e.data["state"] == "ended"
+    })
+    .await;
+
+    let chat = ts
+        .client
+        .post(
+            "/api/sessions/chat",
+            json!({ "session": "acp-tool-update-first" }),
+        )
+        .await
+        .unwrap();
+    let messages: Vec<&Value> = chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["kind"] == "agent_message")
+        .collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["payload"]["text"], "before");
+    assert_eq!(messages[1]["payload"]["text"], "after");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interleaved_thought_deltas_do_not_split_prose() {
     let ts = TestServer::start().await;
     start_new(&ts, "acp-thought-interleave", None, None).await;

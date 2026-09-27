@@ -2418,6 +2418,11 @@ impl Task {
             SessionUpdate::ToolCallUpdate(tc) => {
                 // Updates describe an already-open tool. They can arrive while
                 // prose is streaming and do not start a new prose block.
+                // If the adapter omitted the initial call, this is its first
+                // observable tool boundary after all.
+                if !self.tools.contains_key(&tc.tool_call_id) {
+                    self.flush_buf().await;
+                }
                 self.on_tool(seq, tc).await;
             }
             SessionUpdate::Plan(p) => {
