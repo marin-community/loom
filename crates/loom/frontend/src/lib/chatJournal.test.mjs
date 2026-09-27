@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ChatJournalReconciler } from './chatJournal.ts';
+import { ChatJournalReconciler, turnStopPresentation } from './chatJournal.ts';
 
 const block = (text, outcome = null) => ({
   turn: 2,
@@ -51,4 +51,25 @@ test('reset invalidates an older snapshot request', () => {
   journal.reset();
   assert.deepEqual(journal.applySnapshot(oldRequest, [block('old session')]), []);
   assert.equal(blocks.size, 0);
+});
+
+test('max_tokens is presented as an explicit chat error', () => {
+  assert.deepEqual(turnStopPresentation('max_tokens'), {
+    label: 'error · maximum token limit reached',
+    loud: true,
+    error: true,
+  });
+});
+
+test('normal and recoverable runtime turn endings retain their presentation', () => {
+  assert.deepEqual(turnStopPresentation('end_turn'), {
+    label: 'end_turn',
+    loud: false,
+    error: false,
+  });
+  assert.deepEqual(turnStopPresentation('error'), {
+    label: 'error',
+    loud: true,
+    error: true,
+  });
 });

@@ -50,7 +50,7 @@ import type {
 import type { AcpMetadataView } from '../api/generated';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
-import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
+import { chatBlockKey, ChatJournalReconciler, turnStopPresentation } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import { localTime } from '../lib/time';
@@ -873,8 +873,10 @@ type Row =
       key: string;
       turn: number;
       stop: string;
+      stopLabel: string;
       usage: AcpUsage | null;
       loud: boolean;
+      error: boolean;
       recoverable: boolean;
     }
   | {
@@ -1068,13 +1070,16 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
       case 'turn_end': {
         flushActivity();
         const stop = (b.payload as unknown as TurnEndPayload).stop_reason ?? 'end_turn';
+        const presentation = turnStopPresentation(stop);
         rows.push({
           type: 'turnRule',
           key: k,
           turn: b.turn,
           stop,
+          stopLabel: presentation.label,
           usage: currentUsage ? { ...currentUsage } : null,
-          loud: stop === 'refusal' || stop === 'error',
+          loud: presentation.loud,
+          error: presentation.error,
           recoverable: false,
         });
         break;
@@ -1396,12 +1401,12 @@ function goTo(anchor: string) {
               <div
                 v-if="row.type === 'turnRule'"
                 class="acp-turn-rule"
-                :class="{ loud: row.loud, error: row.stop === 'error' }"
+                :class="{ loud: row.loud, error: row.error }"
                 data-testid="acp-turn-rule"
                 :role="row.recoverable ? 'alert' : undefined"
               >
                 <span
-                  >turn {{ row.turn + 1 }} · {{ row.stop
+                  >turn {{ row.turn + 1 }} · {{ row.stopLabel
                   }}<template v-if="row.usage">
                     · {{ formatTokens(row.usage.used) }} /
                     {{ formatTokens(row.usage.size) }} context</template
