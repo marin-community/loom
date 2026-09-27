@@ -332,6 +332,13 @@ pub async fn resolve_clone(
             ResolveError::Clone(format!("cloning {slug_str}: {e}"))
         })?;
     tracing::info!(repo = %slug_str, dest = %dest.display(), "managed repo clone ready");
+    // Canonicalize so the caller keys repo identity (branch rows, sessions,
+    // issues) on the same form session provisioning derives — it canonicalizes
+    // its `repo_root` too. On macOS the registered path is often spelled
+    // through the `/var` symlink while the canonical form is `/private/var`;
+    // without this the webhook's forward lookup (find_by_repo_branch) missed
+    // the branch a live session owns and forked a duplicate launch.
+    let dest = dest.canonicalize().unwrap_or(dest);
     Ok(dest)
 }
 
@@ -536,7 +543,10 @@ mod tests {
         .unwrap();
 
         let path = resolve_clone(&db, "acme/widgets", None).await.unwrap();
-        assert_eq!(path, dest);
+        // `resolve_clone` canonicalizes its result so repo identity agrees with
+        // the session-provision path; compare against the canonical form.
+        let canonical = dest.canonicalize().unwrap();
+        assert_eq!(path, canonical);
         assert!(
             dest.join(".git").exists(),
             "repo was cloned to the managed path"

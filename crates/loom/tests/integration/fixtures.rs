@@ -329,9 +329,18 @@ impl TestServer {
         self.repo.path()
     }
 
-    /// `repo_path()` as the lossy string the API expects in `cwd`.
+    /// `repo_path()` as the lossy string the API expects in `cwd` —
+    /// canonicalized, the same form `git rev-parse` returns to a real caller
+    /// and the form the launch path keys `repo_root` on. Without this the
+    /// symlinked `/var/...` spelling a `TempDir` hands out never matches the
+    /// canonical `/private/var/...` the server stores, and every
+    /// `repo_root`-keyed lookup (issues boards, `repo:branch` keys, claimed
+    /// issues) quietly misses on macOS.
     pub fn cwd(&self) -> String {
-        self.repo.path().to_string_lossy().into_owned()
+        std::fs::canonicalize(self.repo.path())
+            .unwrap_or_else(|_| self.repo.path().to_path_buf())
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
