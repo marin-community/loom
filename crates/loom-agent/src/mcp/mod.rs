@@ -1221,7 +1221,7 @@ mod tests {
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:021c51cdef86f5a7a718295d78417769756dc22f1a826636afa56e654a7d679d",
+                "sha256:172cca0f73a9b49e55f55624c64b41ead32313ba45c852b11068e07e44163ebd",
             ),
             (
                 "loom/messaging/slack@v1",
