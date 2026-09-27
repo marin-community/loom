@@ -228,6 +228,13 @@ pub struct SessionSummaryView {
     pub branch: BranchSummaryView,
 }
 
+/// Per-role instructions supplied by a client and inherited by descendants.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionLaunchGuidance {
+    pub root: String,
+    pub child: String,
+}
+
 /// The complete session view, as against the compact
 /// [`SessionSummaryView`] fleet indexes poll: every field a session detail view
 /// needs, including the session's whole [`BranchView`].
@@ -261,6 +268,9 @@ pub struct SessionView {
     /// `parent_id` is retained for backward compatibility with older sessions.
     #[serde(default)]
     pub parent_session_id: Option<String>,
+    /// Client guidance stamped at launch and inherited by delegated sessions.
+    #[serde(default)]
+    pub launch_guidance: Option<SessionLaunchGuidance>,
     /// The principal (username) that launched this session — attribution for the
     /// shared team board. `null` for engine-created warm watch sessions and rows
     /// that predate the column. Not a security boundary: the fleet stays

@@ -440,6 +440,9 @@ pub(crate) async fn session_view(
         title_generation,
         parent_id: session.parent_branch_id.clone(),
         parent_session_id: session.parent_session_id.clone(),
+        launch_guidance: serde_json::from_str::<serde_json::Value>(&session.launch_snapshot)
+            .ok()
+            .and_then(|snapshot| serde_json::from_value(snapshot["launch_guidance"].clone()).ok()),
         created_by: session.created_by.clone(),
         origin: session.origin.clone(),
         class: session.class.clone(),

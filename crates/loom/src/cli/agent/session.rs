@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use weaver_api::operations::sessions;
-use weaver_api::BranchView;
+use weaver_api::{BranchView, SessionView};
 use weaver_core::tags;
 
 use super::status::render_summary;
@@ -185,13 +185,25 @@ fn read_hook_source() -> Option<String> {
 /// The concise Loom re-orientation replayed after a context compaction: a short
 /// reminder that this is still a Loom session, the supplied catch-up summary,
 /// and the load-bearing rules an agent must not lose (status, no blocking TUI
-/// prompts, PR-not-merge, and typed result delivery).
+/// prompts and typed result delivery). Landing follows the session contract.
 fn compact_replay(b: &BranchView, summary: &str) -> String {
     let summary = summary.trim_end();
     format!(
-        "Context was just compacted — you are still in a **Loom session** on branch `{branch}` (a detached agent topic in a git worktree; the user reviews asynchronously via the Loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nQuick commands: `loom help` (discover), `loom permissions show` (access), `loom channels read` (messages), `loom status set --tag ok --message \"working\"` (progress; flag `--tag attention` whenever the next expected input is a person's — a blocking question or decision, or work that is done and ready for review; `--tag blocked` when you cannot proceed). Read a child's result with `loom channels read --channel <child-id> --kinds result`; finish delegated work with `loom channels send --kind result \"<outcome>\"`. State questions as plain text and raise attention; finish by opening a PR rather than merging.\n",
+        "Context was just compacted — you are still in a **Loom session** on branch `{branch}` (a detached agent topic in a git worktree; the user reviews asynchronously via the Loom dashboard, not this terminal). Re-orientation:\n\n{summary}\n\nQuick commands: `loom help` (discover), `loom permissions show` (access), `loom channels read` (messages), `loom status set --tag ok --message \"working\"` (progress; flag `--tag attention` whenever the next expected input is a person's — a blocking question or decision, or work that is done and ready for review; `--tag blocked` when you cannot proceed). Read a child's result with `loom channels read --channel <child-id> --kinds result`; finish delegated work with `loom channels send --kind result \"<outcome>\"`. State questions as plain text and raise attention; follow the session's landing instructions.\n",
         branch = b.branch,
     )
+}
+
+fn with_launch_guidance(mut context: String, session: &SessionView) -> String {
+    if let Some(guidance) = &session.launch_guidance {
+        context.push_str("\n\n");
+        context.push_str(if session.parent_session_id.is_some() {
+            &guidance.child
+        } else {
+            &guidance.root
+        });
+    }
+    context
 }
 
 async fn cmd_hook(event: String) -> Result<()> {
@@ -235,15 +247,17 @@ async fn cmd_hook(event: String) -> Result<()> {
             // session is unchanged — replay a concise re-orientation (the
             // `loom summary` catch-up) rather than the full repository primer. On a
             // genuine start/resume/clear, inject the full primer.
-            let b = client
-                .invoke::<sessions::status::get::Op>(&sessions::status::get::Input { session: key })
+            let session = client
+                .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
                 .await?;
+            let b = &session.branch;
             let context = if is_compact {
-                let summary = render_summary(&client, &b).await.unwrap_or_default();
-                compact_replay(&b, &summary)
+                let summary = render_summary(&client, b).await.unwrap_or_default();
+                compact_replay(b, &summary)
             } else {
-                weaver_md_for_branch(&b)
+                weaver_md_for_branch(b)
             };
+            let context = with_launch_guidance(context, &session);
             print!("{}", weaver_core::agent::session_primer(&context));
         }
         Ok(())
