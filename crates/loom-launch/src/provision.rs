@@ -1492,7 +1492,8 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
     let mut note = "You are working in a Loom session. Quick commands:\n\
                     - Discover: `loom help`; check access: `loom permissions show`.\n\
                     - Catch up after compaction: `loom summary`.\n\
-                    - Report progress: `loom status set --tag ok --message \"tests running\"` (use `attention` or `blocked` when a person must act).\n\
+                    - Report progress: `loom status set --tag ok --message \"tests running\"`.\n\
+                    - Flag for attention: `loom status set --tag attention --message \"...\"` — do this whenever the next expected input is a person's: you are blocked on a question, a decision, or your work is done and ready for review (e.g. \"changes are ready, PR #12\"; then `--tag ok` only when you resume working). Use `--tag blocked` when you cannot proceed at all.\n\
                     - Communicate: `loom channels read`; `loom channels send \"question or update\"`.\n\
                     - Save or delegate: `loom artifacts write plan plan.md`; `loom sessions launch \"implement the parser\"`.\n\
                     - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A typed child result also notifies its parent channel.\n\
@@ -1805,9 +1806,16 @@ mod tests {
         assert!(note.contains("Loom issue #42"));
         assert!(note.contains("loom issues close 42"));
         assert!(note.contains("loom status"));
+        // The attention contract is explicit, not a parenthetical: a topic
+        // whose work is ready for review must flag `attention` — the user
+        // otherwise sees a merely idle row and has to read the thread
+        // (postmortem: ctrl/cmd-enter landed without ever asking).
+        assert!(note.contains("--tag attention"));
+        assert!(note.contains("ready for review"));
         // Untracked sessions get the orientation with no issue contract.
         let untracked = entrance_note(None);
         assert!(untracked.contains("loom summary"));
+        assert!(untracked.contains("--tag attention"));
         assert!(!untracked.contains("issue"));
     }
 

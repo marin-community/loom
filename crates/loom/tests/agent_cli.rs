@@ -1094,6 +1094,14 @@ async fn session_start_hook_after_compaction_replays_the_concise_summary() {
         out.contains("loom help"),
         "replay should point at registered help: {out}"
     );
+    // The attention contract survives compaction: the next expected input
+    // being a person's (question, decision, or ready-for-review work) must
+    // still flag `attention` — an agent that forgets this after compaction
+    // lands work that never asks for review.
+    assert!(
+        out.contains("--tag attention"),
+        "compact replay must restate the attention contract: {out}"
+    );
     // It must stay concise — not re-feed the whole WEAVER.md.
     assert!(
         !out.contains("detached Loom session"),

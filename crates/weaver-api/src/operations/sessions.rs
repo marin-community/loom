@@ -1139,7 +1139,10 @@ pub mod status {
         #[operation(id = "sessions.status.set", actor = SessionSelf, scope = Session, risk = Write,
                     grants = ["loom/sessions/write@v1"], cli = "status set", render = custom)]
         pub struct Input {
-            /// The attention level.
+            /// The attention level. Set `attention` whenever the next expected
+            /// input is a person's — a blocking question or decision, or work
+            /// done and ready for review; `blocked` when you cannot proceed at
+            /// all; `ok` while you are working or once resumed.
             #[operand(long = "tag")]
             #[schemars(extend("enum" = ["ok", "attention", "blocked"]))]
             pub level: String,

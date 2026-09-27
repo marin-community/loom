@@ -52,7 +52,8 @@ You are working in a detached Loom session. Your opening task is the goal.
 - Discover commands: `loom help`, then `loom help channels` or `loom sessions launch --help`.
 - Recover context after interruption or compaction: `loom summary`.
 - Check access: `loom permissions show`. For another GitHub repository, run `loom permissions request github-repository owner/repo --reason "..."`; the request reaches a person in the web UI. Do not ask them to run a shell command.
-- Report progress or a need for help: `loom status set --tag ok --message "tests running"` (use `attention` or `blocked` when a person must act).
+- Report progress or a need for help: `loom status set --tag ok --message "tests running"`.
+- Flag for attention: `loom status set --tag attention --message "..."` — do this whenever the next expected input is a person's: you are blocked on a question or decision, or your work is done and ready for review (e.g. "changes are ready, PR #12"); return to `--tag ok` only when you resume working. Use `--tag blocked` when you cannot proceed at all.
 - Read and send durable messages: `loom channels read`; `loom channels send "question or update"`.
 - Save a deliverable: `loom artifacts write plan plan.md`. Delegate: `loom sessions launch "implement the parser"`.
 - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A child's typed result also notifies its parent channel.
@@ -122,10 +123,14 @@ mod tests {
     fn session_primer_wraps_the_builtin_weaver_md() {
         let v: Value = serde_json::from_str(&session_primer(builtin_weaver_md())).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        assert!(v["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap()
-            .contains("loom status"));
+        let primer = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(primer.contains("loom status"));
+        // The attention contract is explicit in the primer: whenever the
+        // next expected input is a person's — blocked on a question or
+        // decision, or work done and ready for review — the agent flags
+        // `attention` (postmortem: ctrl/cmd-enter landed without asking).
+        assert!(primer.contains("--tag attention"));
+        assert!(primer.contains("ready for review"));
     }
 
     #[test]

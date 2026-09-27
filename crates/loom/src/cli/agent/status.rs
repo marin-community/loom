@@ -21,7 +21,10 @@ pub enum StatusCmd {
     Get,
     /// Update the attention level and optional current-state message.
     Set {
-        /// Attention level: `ok`, `attention`, or `blocked`.
+        /// Attention level. `attention` whenever the next expected input is
+        /// a person's — a blocking question or decision, or work done and
+        /// ready for review; `blocked` when you cannot proceed at all; `ok`
+        /// while working or once resumed.
         #[arg(long)]
         tag: String,
         /// Current-state message, e.g. "Wired up routes; tests pass".
