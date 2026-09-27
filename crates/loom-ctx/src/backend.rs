@@ -21,6 +21,10 @@ use crate::runner;
 use weaver_core::db::Db;
 
 /// Supervisor namespace reserved for disposable ACP prompts and launch validation.
+/// The nonce appended to it is 8 hex chars: the full supervisor name lands at 26
+/// chars, keeping `run_dir()/name.sock` under the OS control-socket limit even
+/// where `WEAVER_HOME` is a long tempdir (macOS `sun_path` caps the path at 103
+/// chars; a 16-hex nonce overflowed it on stock macOS TMPDIR paths).
 pub const TRANSIENT_SESSION_PREFIX: &str = "weaver-acp-prompt-";
 
 /// Names of nondurable supervisors currently owned by this Loom process.

@@ -179,9 +179,9 @@ pub async fn validate_launch(
     }
 
     let relay_name = format!(
-        "{}{:016x}",
+        "{}{:08x}",
         crate::backend::TRANSIENT_SESSION_PREFIX,
-        rand::random::<u64>()
+        rand::random::<u32>()
     );
     let _relay_lease = transient_sessions.lease(&relay_name);
     let env: Vec<(&str, &str)> = launch
@@ -239,9 +239,9 @@ pub async fn prompt_once(
     }
 
     let relay_name = format!(
-        "{}{:016x}",
+        "{}{:08x}",
         crate::backend::TRANSIENT_SESSION_PREFIX,
-        rand::random::<u64>()
+        rand::random::<u32>()
     );
     // No database row, so the lease keeps the periodic reconciler from
     // treating this in-flight prompt as crash debris; dropping it after
@@ -4031,8 +4031,19 @@ mod tests {
             "options":[{"value":"glm-5.3","name":"GLM 5.3"}]
         })];
         let expected = Some(("provider-model".to_string(), "glm-5.3".to_string()));
-        assert_eq!(preferred_config_value(&glm, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
-        assert_eq!(preferred_config_value(&glm, "model", &["haiku", "luna", "glm"], true), expected);
+        assert_eq!(
+            preferred_config_value(
+                &glm,
+                "model",
+                &["haiku", "luna", "glm", "mini", "nano", "pi"],
+                true
+            ),
+            expected
+        );
+        assert_eq!(
+            preferred_config_value(&glm, "model", &["haiku", "luna", "glm"], true),
+            expected
+        );
 
         let pi = vec![json!({
             "id":"model",
@@ -4040,7 +4051,15 @@ mod tests {
             "options":[{"value":"pi-4.5","name":"Pi 4.5"}]
         })];
         let expected = Some(("model".to_string(), "pi-4.5".to_string()));
-        assert_eq!(preferred_config_value(&pi, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
+        assert_eq!(
+            preferred_config_value(
+                &pi,
+                "model",
+                &["haiku", "luna", "glm", "mini", "nano", "pi"],
+                true
+            ),
+            expected
+        );
 
         // `pi` placed before stronger hints must not swallow them: a
         // `copilot-*` id contains "pi", so an exact haiku still wins first.
@@ -4053,7 +4072,15 @@ mod tests {
             ]
         })];
         let expected = Some(("model".to_string(), "claude-haiku-4-5".to_string()));
-        assert_eq!(preferred_config_value(&mixed, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
+        assert_eq!(
+            preferred_config_value(
+                &mixed,
+                "model",
+                &["haiku", "luna", "glm", "mini", "nano", "pi"],
+                true
+            ),
+            expected
+        );
     }
 
     #[test]
