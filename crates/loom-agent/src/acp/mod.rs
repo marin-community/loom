@@ -4020,6 +4020,43 @@ mod tests {
     }
 
     #[test]
+    fn economy_hints_match_glm_and_pi_models() {
+        // The one-shot economy hint list (titles, handoff summaries) must
+        // reach adapters whose advertised economy models are named after
+        // their vendor rather than Anthropic's: GLM (`glm-5.3`) and pi
+        // (`pi-4.5`) both qualify as budget models.
+        let glm = vec![json!({
+            "id":"provider-model",
+            "category":"model",
+            "options":[{"value":"glm-5.3","name":"GLM 5.3"}]
+        })];
+        let expected = Some(("provider-model".to_string(), "glm-5.3".to_string()));
+        assert_eq!(preferred_config_value(&glm, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
+        assert_eq!(preferred_config_value(&glm, "model", &["haiku", "luna", "glm"], true), expected);
+
+        let pi = vec![json!({
+            "id":"model",
+            "category":"model",
+            "options":[{"value":"pi-4.5","name":"Pi 4.5"}]
+        })];
+        let expected = Some(("model".to_string(), "pi-4.5".to_string()));
+        assert_eq!(preferred_config_value(&pi, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
+
+        // `pi` placed before stronger hints must not swallow them: a
+        // `copilot-*` id contains "pi", so an exact haiku still wins first.
+        let mixed = vec![json!({
+            "id":"model",
+            "category":"model",
+            "options":[
+                {"value":"copilot-pro","name":"Copilot"},
+                {"value":"claude-haiku-4-5","name":"Haiku"}
+            ]
+        })];
+        let expected = Some(("model".to_string(), "claude-haiku-4-5".to_string()));
+        assert_eq!(preferred_config_value(&mixed, "model", &["haiku", "luna", "glm", "mini", "nano", "pi"], true), expected);
+    }
+
+    #[test]
     fn automatic_permission_choice_never_persists_policy() {
         let options = [
             PermissionOption {

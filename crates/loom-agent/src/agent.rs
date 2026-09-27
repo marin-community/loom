@@ -1740,6 +1740,15 @@ enum OneShotPolicy<'a> {
     Metadata,
 }
 
+/// The economy-class hint list for one-shot prompts (metadata titles,
+/// resumption cues, handoff summaries). Matching is exact first, then
+/// substring-contains (see `preferred_config_value`), so `glm-5.3` matches
+/// `glm` and pi's advertised models match `pi` without pinning any one
+/// vendor's naming scheme. `pi` is last because its substring can
+/// false-positive inside longer ids (e.g. `copilot`); the earlier hints
+/// keep exact-ish matches first.
+const ECONOMY_MODEL_HINTS: &[&str] = &["haiku", "luna", "glm", "mini", "nano", "pi"];
+
 struct OneShotLaunchPolicy<'a> {
     extra_env: Vec<(String, String)>,
     env_clear: bool,
@@ -1801,7 +1810,7 @@ impl<'a> AgentManager<'a> {
             self.acp.transient_sessions(),
             launch,
             prompt,
-            crate::acp::AcpPromptModel::FirstContaining(&["haiku", "luna"]),
+            crate::acp::AcpPromptModel::FirstContaining(ECONOMY_MODEL_HINTS),
             crate::acp::AcpPromptEffort::Prefer("low"),
             timeout,
         )
@@ -2042,7 +2051,6 @@ impl<'a> AgentManager<'a> {
         } else {
             effort.trim()
         };
-        const ECONOMY_MODEL_HINTS: &[&str] = &["haiku", "luna", "mini", "nano"];
         let preferred_model = if economy {
             crate::acp::AcpPromptModel::FirstContaining(ECONOMY_MODEL_HINTS)
         } else if selected_model.is_empty() {
