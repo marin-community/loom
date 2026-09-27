@@ -21,8 +21,8 @@ use crate::db::Db;
 use crate::events::Event;
 use crate::session::{self as session_mod, Session};
 use crate::{agent, backend, db, events, git, github, repo, session_layout};
-use weaver_api::operations::sessions as ops;
 use weaver_api::operations::session_layout as session_layout_ops;
+use weaver_api::operations::sessions as ops;
 use weaver_api::{
     AcpMetadataView, BranchView, ChatCursorView, HistoryPageView, ResolvedLaunchView,
     ResumptionCueView, SendReq, SessionArchiveResult, SessionChatView, SessionCreatorFilter,
@@ -1687,19 +1687,16 @@ async fn op_reparent(
     if let Some(parent) = parent {
         if let Some(parent_placement) = crate::session_layout::placement(&st.db, parent).await? {
             let here = crate::session_layout::placement(&st.db, &session.id).await?;
-            if here.as_ref().map(|p| p.group_id.clone()) != Some(parent_placement.group_id.clone()) {
+            if here.as_ref().map(|p| p.group_id.clone()) != Some(parent_placement.group_id.clone())
+            {
                 let input = session_layout_ops::r#move::Input {
                     session_ids: vec![session.id.clone()],
                     destination_group_id: parent_placement.group_id,
                     before_session_id: None,
                     expected_revision: None,
                 };
-                if let Err(error) = session_layout::move_sessions(
-                    &st.db,
-                    &context.principal.username,
-                    &input,
-                )
-                .await
+                if let Err(error) =
+                    session_layout::move_sessions(&st.db, &context.principal.username, &input).await
                 {
                     return Err(AppError::bad_request(format!("{error:?}")));
                 }
