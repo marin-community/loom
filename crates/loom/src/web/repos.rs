@@ -7,7 +7,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use weaver_api::operations::repos as ops;
-use weaver_api::{RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView};
+use weaver_api::{
+    RecentRepoView, RepoBranchView, RepoRevisionValidationView, RepoView, RepoWorktreeView,
+};
 
 use crate::backend;
 use crate::git;
@@ -697,6 +699,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::recent::Op, _, _>(recent_operation),
         register::<ops::branches::Op, _, _>(branches_operation),
         register::<ops::revisions::validate::Op, _, _>(revisions_validate_operation),
+        register::<ops::worktrees::ensure::Op, _, _>(worktrees_ensure_operation),
     ];
     bound.extend(super::repo_env::bound_operations());
     bound
@@ -798,5 +801,92 @@ async fn revisions_validate_operation(
         valid,
         repo_root: repo_root.display().to_string(),
         message,
+    })
+}
+
+/// `repos.worktrees.ensure` — see the operation's declaration for the
+/// contract. Session-free on purpose: this creates a checkout a human can open
+/// in an editor without resuming the session whose work produced the branch.
+async fn worktrees_ensure_operation(
+    context: OperationContext,
+    input: ops::worktrees::ensure::Input,
+) -> ApiResult<ops::worktrees::ensure::Output> {
+    let st = context.state;
+    let cwd = PathBuf::from(&input.cwd);
+    let repo_root = git::repo_root(&cwd)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    // Resolve the target branch: an explicit `pr` names its head branch (a
+    // cross-repo PR is refused — its head lives in a fork this checkout cannot
+    // usefully check out), else the caller's `branch`. Exactly one of the two.
+    let branch = match (input.pr, input.branch.as_deref()) {
+        (Some(number), _) => {
+            if number <= 0 {
+                return Err(AppError::bad_request("pr must be a positive number"));
+            }
+            let slug = repo::github_slug_for_root(&st.db, &repo_root)
+                .await
+                .map_err(|e| AppError::bad_request(e.to_string()))?
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "repository at '{}' has no GitHub remote",
+                        repo_root.display()
+                    ))
+                })?;
+            let head = st
+                .trigger
+                .gh()
+                .pr_head(&slug, number)
+                .await
+                .map_err(|e| AppError::bad_request(format!("could not look up PR #{number}: {e}")))?;
+            if head.cross_repo {
+                return Err(AppError::bad_request(format!(
+                    "PR #{number} is from a fork; its head branch cannot be checked out here"
+                )));
+            }
+            head.head_ref
+        }
+        (None, Some(branch)) => branch.trim().to_string(),
+        (None, None) => {
+            return Err(AppError::bad_request(
+                "one of `branch` or `pr` is required",
+            ))
+        }
+    };
+    if branch.is_empty() || branch.starts_with('-') {
+        return Err(AppError::bad_request("branch must be a valid branch name"));
+    }
+    // Idempotent: an existing worktree is returned untouched. `worktree_prune`
+    // first so a path removed out-of-band (a manual `rm -rf`) does not block
+    // re-registration — the same recovery pattern `sessions.recover` uses.
+    if let Some(existing) = git::worktree_for_branch(&repo_root, &branch).await? {
+        return Ok(RepoWorktreeView {
+            repo_root: repo_root.display().to_string(),
+            branch,
+            path: existing.display().to_string(),
+            created: false,
+        });
+    }
+    // Materialize the branch locally when it exists only on origin (a PR head
+    // that was never checked out here), fetching on demand. No-op when local.
+    git::ensure_local_branch_from_origin(&repo_root, &branch)
+        .await
+        .map_err(|e| AppError::bad_request(format!("branch '{branch}' not found: {e}")))?;
+    let slug = branch_mod::slugify(&branch);
+    let path = repo_root.join(".worktrees").join(&slug);
+    git::worktree_prune(&repo_root).await.ok();
+    tokio::fs::create_dir_all(repo_root.join(".worktrees"))
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    git::ensure_excluded(&repo_root, ".worktrees/").await.ok();
+    git::worktree_add_existing(&repo_root, &path, &branch)
+        .await
+        .map_err(|e| AppError::bad_request(e.to_string()))?;
+    tracing::info!(repo = %repo_root.display(), %branch, path = %path.display(), "ensured worktree");
+    Ok(RepoWorktreeView {
+        repo_root: repo_root.display().to_string(),
+        branch,
+        path: path.display().to_string(),
+        created: true,
     })
 }

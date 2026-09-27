@@ -90,6 +90,23 @@ pub const AUTO_ARCHIVE_KEY: &str = "auto-archive";
 /// The fixed opt-out value carried by [`AUTO_ARCHIVE_KEY`].
 pub const AUTO_ARCHIVE_DISABLED_VALUE: &str = "disabled";
 
+/// A quiet operator request that archive keep this branch's worktree on disk
+/// (the "Keep worktree" action in a UI). Archive normally removes the
+/// checkout — the branch row and its commits survive, the checkout does not —
+/// while the work producing a PR or topic attachment is often still being read
+/// after the session ends. With this tag set, archive tears down everything
+/// else (terminal, relay, tokens) but leaves the checkout for a human, and the
+/// worktree stays discoverable through `repos.branches` and
+/// `repos.worktrees.ensure` (idempotent on the surviving checkout).
+/// Deletion (`sessions.delete`) still removes it; clearing the tag restores
+/// archive's default teardown on the next archive.
+pub const WORKTREE_KEEP_KEY: &str = "worktree:keep";
+
+/// Whether archive should leave this branch's worktree on disk.
+pub async fn keeps_worktree(db: &Db, branch_id: &str) -> Result<bool> {
+    Ok(get(db, branch_id, WORKTREE_KEEP_KEY).await?.is_some())
+}
+
 /// Branch tag wiring a session to a GitHub thread; the value is
 /// `owner/name#number` (an issue or a PR — GitHub comments treat them alike).
 /// Quiet. While present, Loom mirrors every `loom status` write onto one
@@ -394,6 +411,11 @@ mod tests {
             AUTO_ARCHIVE_KEY,
             AUTO_ARCHIVE_DISABLED_VALUE
         ));
+        // `worktree:keep` is quiet (a request, not a signal) and any non-empty
+        // value is storable — the conventional one is `true`.
+        assert!(!is_loud(WORKTREE_KEEP_KEY));
+        assert!(is_valid_value(WORKTREE_KEEP_KEY, "true"));
+        assert!(!is_reserved_tag(WORKTREE_KEEP_KEY));
 
         // Loudness is value-driven: any key holding a ladder value is loud (a
         // watch's typed `review`/`stuck`), while a quiet value never is.

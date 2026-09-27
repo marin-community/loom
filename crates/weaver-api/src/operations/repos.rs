@@ -162,12 +162,51 @@ pub mod revisions {
     }
 }
 
+pub mod worktrees {
+    //! Ensuring an editable checkout exists for a branch.
+    pub(super) use super::prelude;
+    pub mod ensure {
+        use super::prelude::*;
+
+        /// Ensure a branch has a worktree checked out, creating one when it does
+        /// not — the checkout-recovery half of “open this code” for a branch whose
+        /// session was archived (archive keeps the branch but removes its
+        /// worktree). Session-free on purpose: giving a human an editable checkout
+        /// must not resurrect the session's agent or readmit it to the fleet.
+        ///
+        /// When `pr` is given, the branch is the PR's head branch (a fork PR is
+        /// refused — its head lives in a repo loom cannot push to); `branch` names
+        /// the branch directly. Idempotent: an existing worktree is returned, not
+        /// recreated. The branch is materialized from `origin/<branch>` (fetching
+        /// on demand) when it does not exist locally, so a never-checked-out PR
+        /// head works too.
+        #[operation(id = "repos.worktrees.ensure", actor = User, scope = Global, risk = Write,
+                    cli = "repos worktrees ensure")]
+        pub struct Input {
+            /// A path inside the repo checkout to ensure the worktree under.
+            #[operand(positional)]
+            pub cwd: String,
+            /// The branch to check out (e.g. `weaver/my-task`, or a PR's head
+            /// branch).
+            #[operand(long = "branch")]
+            pub branch: Option<String>,
+            /// A pull-request number whose head branch to check out. Takes
+            /// precedence over `branch`; a cross-repo (fork) PR is refused.
+            #[operand(long = "pr")]
+            pub pr: Option<i64>,
+        }
+
+        pub type Output = RepoWorktreeView;
+    }
+}
+
 static OPERATIONS: &[&OperationSpec] = &[
     list::SPEC,
     register::SPEC,
     recent::SPEC,
     branches::SPEC,
     revisions::validate::SPEC,
+    worktrees::ensure::SPEC,
     env::get::SPEC,
     env::set::SPEC,
     env::delete::SPEC,

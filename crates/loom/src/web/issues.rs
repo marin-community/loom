@@ -553,21 +553,32 @@ pub(super) async fn reopen_issue_operation(
 // ---------------------------------------------------------------------------
 
 /// Resolve a repo identity from an explicit `repo_root` or, failing that, a
-/// `cwd` — canonicalized to match how issues are keyed.
+/// `cwd` — canonicalized to match how issues are keyed. An explicit
+/// `repo_root` is canonicalized too: callers pass the path they hold (a
+/// launch `cwd`, a worktree path), and on symlinked roots like macOS
+/// `/var`/`/private/var` the canonical and spell-through-symlink forms must
+/// land on the same key the launch path stored, or a board query quietly
+/// misses every issue.
 pub(crate) async fn resolve_repo_root(
     repo_root: Option<&str>,
     cwd: Option<&str>,
 ) -> ApiResult<String> {
-    if let Some(rr) = repo_root.map(str::trim).filter(|s| !s.is_empty()) {
-        return Ok(rr.to_string());
-    }
-    let cwd = cwd
+    let given = repo_root
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| AppError::bad_request("repo_root or cwd is required"))?;
-    let root = git::repo_root(&PathBuf::from(cwd))
-        .await
-        .map_err(|e| AppError::bad_request(e.to_string()))?;
+        .map(PathBuf::from);
+    let root = match given {
+        Some(explicit) => explicit,
+        None => {
+            let cwd = cwd
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| AppError::bad_request("repo_root or cwd is required"))?;
+            git::repo_root(&PathBuf::from(cwd))
+                .await
+                .map_err(|e| AppError::bad_request(e.to_string()))?
+        }
+    };
     Ok(root.canonicalize().unwrap_or(root).display().to_string())
 }
 

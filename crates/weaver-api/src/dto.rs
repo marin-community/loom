@@ -335,6 +335,13 @@ pub struct SessionView {
     /// The session's one canonical, operator-controlled fleet location.
     #[serde(default)]
     pub placement: Option<SessionPlacementView>,
+    /// True when the session's `work_dir` still exists on disk. Archive removes
+    /// the worktree while keeping the branch, so a caller cannot infer presence
+    /// from `status` alone; this lets a UI offer "recreate checkout" exactly
+    /// when it is gone. `#[serde(default)]` keeps older-server responses
+    /// (and pre-migration fixtures) parsing as `false` rather than failing.
+    #[serde(default)]
+    pub worktree_present: bool,
     pub branch: BranchView,
 }
 
@@ -2528,6 +2535,20 @@ pub struct RepoRevisionValidationView {
     pub repo_root: String,
     /// Why resolution failed, when `valid` is false.
     pub message: Option<String>,
+}
+
+/// Result of `repos.worktrees.ensure`: where the branch's editable checkout
+/// lives and whether this call created it.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoWorktreeView {
+    pub repo_root: String,
+    /// The branch now checked out in the worktree (a PR's head branch when
+    /// `pr` was given).
+    pub branch: String,
+    /// The worktree's absolute server-local path.
+    pub path: String,
+    /// Whether this call created the worktree (false when one already existed).
+    pub created: bool,
 }
 
 /// One per-repo environment variable's metadata, and the row type

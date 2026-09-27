@@ -407,6 +407,17 @@ pub(crate) async fn session_view(
         (placement.group_system_key.as_deref() == Some("later")).then_some("parked".to_string())
     });
     let legacy_sort_order = placement.as_ref().map(|placement| placement.rank as f64);
+    // An as-exists check, not a read: `try_exists` distinguishes "gone" from
+    // "unreadable", so a permissions problem surfaces elsewhere rather than
+    // silently reporting the checkout missing.
+    let worktree_present = tokio::fs::try_exists(&session.work_dir)
+        .await
+        .map_err(|error| {
+            AppError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not check work_dir {}: {error}", session.work_dir),
+            )
+        })?;
     let title_generation =
         crate::metadata_assist::title_view(db, &session.id, branch.title_provenance).await?;
     Ok(SessionView {
@@ -449,6 +460,7 @@ pub(crate) async fn session_view(
         mcp_policy,
         resolved_launch,
         placement,
+        worktree_present,
         branch: bv,
     })
 }

@@ -12,6 +12,8 @@
 use serde_json::json;
 use serial_test::serial;
 
+use weaver_api::operations::repos;
+
 use crate::fixtures::{sh, TestServer};
 
 /// Lay out a bare repo at `<root>/acme/widgets` (so its trailing path is the
@@ -234,5 +236,193 @@ async fn create_rejects_traversal_identifiers() {
     assert!(
         err.contains("400"),
         "register traversal should 400, got {err}"
+    );
+}
+
+/// `repos.worktrees.ensure`: the checkout-recovery half of "open this code".
+/// A branch whose session was archived (or a never-checked-out local branch)
+/// gets a worktree materialized under `.worktrees/<slug>`; an existing
+/// worktree is returned idempotently; and the branch is fetched from `origin`
+/// on demand when it exists only on the remote.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktrees_ensure_materializes_and_is_idempotent() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let repo = ts.repo_path().to_path_buf();
+    let cwd = ts.cwd();
+
+    // A local branch nobody has ever checked out.
+    sh(&repo, "git", &["branch", "feature/z", "main"]);
+
+    let ensured = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("feature/z".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(ensured.created, "a missing worktree should be created");
+    let path = repo.join(".worktrees").join("feature-z");
+    assert_eq!(
+        std::fs::canonicalize(&ensured.path).unwrap(),
+        std::fs::canonicalize(&path).unwrap(),
+        "worktree should be created at .worktrees/feature-z"
+    );
+    assert_eq!(ensured.branch, "feature/z");
+    assert!(
+        std::path::Path::new(&ensured.path).join(".git").exists(),
+        "ensured worktree should be a real checkout, got {}",
+        ensured.path
+    );
+
+    // Idempotent: the second call returns the same checkout untouched.
+    let again = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("feature/z".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(!again.created, "an existing worktree must not be recreated");
+    assert_eq!(again.path, ensured.path);
+
+    // A worktree registered outside `.worktrees` is returned as-is too —
+    // recovery should not relocate a checkout the user placed deliberately.
+    sh(&repo, "git", &["branch", "feature/elsewhere", "main"]);
+    let custom = repo.join("custom-checkout");
+    sh(
+        &repo,
+        "git",
+        &[
+            "worktree",
+            "add",
+            custom.to_str().unwrap(),
+            "feature/elsewhere",
+        ],
+    );
+    let external = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("feature/elsewhere".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(!external.created);
+    assert_eq!(
+        std::fs::canonicalize(&external.path).unwrap(),
+        std::fs::canonicalize(&custom).unwrap(),
+        "ensure should return the pre-existing checkout, not create another"
+    );
+
+    // The primary checkout (main, checked out at the repo root) is returned
+    // rather than duplicated.
+    let primary = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("main".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(!primary.created);
+    assert_eq!(
+        std::fs::canonicalize(&primary.path).unwrap(),
+        std::fs::canonicalize(&repo).unwrap(),
+        "the branch checked out in the primary worktree should resolve there"
+    );
+
+    // A branch that exists nowhere is a 400, not a silent success.
+    let missing = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("no/such/branch".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.contains("400"),
+        "missing branch should be a 400, got {missing}"
+    );
+
+    // Argument validation: neither `branch` nor `pr`, and a non-positive PR.
+    let neither = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: None,
+            pr: None,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        neither.contains("400"),
+        "neither branch nor pr should be a 400, got {neither}"
+    );
+    let bad_pr = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: None,
+            pr: Some(0),
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        bad_pr.contains("400"),
+        "pr must be positive, got {bad_pr}"
+    );
+}
+
+/// `repos.worktrees.ensure` fetches a remote-only branch from `origin` on
+/// demand, so a never-checked-out PR head works too. The remote is a local
+/// bare repo reached over `file://`, so the test never touches the network.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktrees_ensure_fetches_remote_only_branch() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    let repo = ts.repo_path().to_path_buf();
+    let cwd = ts.cwd();
+
+    // A bare remote carrying a branch this checkout has never seen.
+    let remotes = tempfile::tempdir().unwrap();
+    let remote_url = make_bare_remote(remotes.path());
+    sh(&repo, "git", &["remote", "add", "origin", &remote_url]);
+    // `make_bare_remote` clones from the throwaway work repo at <root>/work,
+    // so the push target and the push source agree on history.
+    let work = remotes.path().join("work");
+    sh(&work, "git", &["checkout", "-q", "-b", "weaver/remote-only"]);
+    std::fs::write(work.join("REMOTE.md"), "from the remote\n").unwrap();
+    sh(&work, "git", &["add", "."]);
+    sh(&work, "git", &["commit", "-q", "-m", "remote work"]);
+    // Push over the file:// URL (the same remote `origin` points at).
+    sh(&work, "git", &["push", "-q", &remote_url, "weaver/remote-only"]);
+
+    // The branch exists only on the remote: ensure fetches it, materializes a
+    // local branch, and checks it out.
+    let ensured = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: cwd.clone(),
+            branch: Some("weaver/remote-only".to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(ensured.created);
+    assert_eq!(ensured.branch, "weaver/remote-only");
+    let checkout = std::path::Path::new(&ensured.path);
+    assert!(
+        checkout.join("REMOTE.md").exists(),
+        "the fetched branch's file should be present in the worktree"
+    );
+    assert!(
+        weaver_core::git::branch_exists(&repo, "weaver/remote-only").await,
+        "a local branch should be materialized from origin"
     );
 }

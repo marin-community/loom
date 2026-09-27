@@ -10,6 +10,7 @@ use serial_test::serial;
 use tokio::io::AsyncWriteExt;
 
 use loom::backend;
+use weaver_api::operations::repos;
 
 use crate::fixtures::{branch_tag, plant_claude_transcript, HomeGuard, TestServer};
 use weaver_api::operations::branches;
@@ -308,4 +309,97 @@ async fn archive_keeps_branch_and_history() {
         .post("/api/sessions/delete", json!({ "session": arch_id }))
         .await
         .unwrap();
+}
+
+/// A `worktree:keep` branch tag asks archive to leave the checkout on disk —
+/// the "Keep worktree" action. Everything else still tears down (terminal,
+/// relay, tokens, attention), the branch survives as usual, and the archived
+/// session reports `worktree_present: true` so a UI can offer the checkout
+/// without recreating it. `repos.worktrees.ensure` then returns it untouched.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_keeps_worktree_when_tagged() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let created = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "keep my checkout", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let branch_id = created["branch"]["id"].as_str().unwrap().to_string();
+    let work_dir = created["work_dir"].as_str().unwrap().to_string();
+    let term_session = created["term_session"].as_str().unwrap().to_string();
+    assert!(Path::new(&work_dir).exists(), "worktree missing before archive");
+
+    // The quiet operator request: set through the branch-owned tag operation,
+    // the same route a UI's "Keep worktree" action uses.
+    client
+        .post(
+            "/api/branches/tags/set",
+            json!({
+                "branch": branch_id,
+                "key": "worktree:keep",
+                "value": "true",
+                "note": "keep for human editing",
+                "by": "manual",
+            }),
+        )
+        .await
+        .unwrap();
+
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+
+    // The teardown ran (terminal gone, status archived) …
+    assert!(!backend::has_session(&term_session).await);
+    let view = client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "archived");
+    // … but the checkout survived, and the session view says so.
+    assert!(
+        Path::new(&work_dir).exists(),
+        "worktree:keep should preserve the checkout"
+    );
+    assert_eq!(
+        view["worktree_present"], true,
+        "the archived session should report its worktree still on disk"
+    );
+    assert_eq!(
+        branch_tag(&view, "worktree:keep").unwrap()["value"], "true",
+        "the quiet tag itself survives archive (only loud tags are cleared)"
+    );
+
+    // `repos.worktrees.ensure` is idempotent over the surviving checkout: it
+    // returns it rather than recreating or relocating it.
+    let ensured = client
+        .invoke::<repos::worktrees::ensure::Op>(&repos::worktrees::ensure::Input {
+            cwd: ts.cwd(),
+            branch: Some(created["branch"]["branch"].as_str().unwrap().to_string()),
+            pr: None,
+        })
+        .await
+        .unwrap();
+    assert!(!ensured.created);
+    assert_eq!(
+        std::fs::canonicalize(&ensured.path).unwrap(),
+        std::fs::canonicalize(&work_dir).unwrap(),
+        "ensure should hand back the kept checkout, not build another"
+    );
+
+    // Deleting still removes it — keep is an archive-time choice, not a
+    // permanent protection from explicit teardown.
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert!(!Path::new(&work_dir).exists());
 }

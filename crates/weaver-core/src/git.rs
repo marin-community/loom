@@ -354,6 +354,29 @@ pub async fn create_local_branch_from_origin(repo_root: &Path, branch: &str) -> 
     Ok(())
 }
 
+/// Ensure `branch` exists locally, creating it from `origin/<branch>` and
+/// fetching the remote ref on demand when it has never been fetched — the
+/// checkout-recovery path for a branch this machine has only ever seen on the
+/// remote (a PR head that was never checked out here). A no-op when the local
+/// branch already exists. Errors when the branch exists neither locally nor on
+/// `origin`: a leading `-` is rejected as an option injection before any git
+/// call runs.
+pub async fn ensure_local_branch_from_origin(repo_root: &Path, branch: &str) -> Result<()> {
+    if branch.starts_with('-') {
+        bail!("invalid branch name '{branch}'");
+    }
+    if branch_exists(repo_root, branch).await {
+        return Ok(());
+    }
+    let remote_ref = format!("origin/{branch}");
+    if !revision_exists(repo_root, &remote_ref).await {
+        // `git fetch` fails when the ref does not exist on the remote, which is
+        // the signal we want — there is nothing to check out.
+        git(repo_root, &["fetch", "origin", branch]).await?;
+    }
+    create_local_branch_from_origin(repo_root, branch).await
+}
+
 /// List local branch names (`refs/heads/*`).
 pub async fn list_branches(repo_root: &Path) -> Result<Vec<String>> {
     let out = git(
