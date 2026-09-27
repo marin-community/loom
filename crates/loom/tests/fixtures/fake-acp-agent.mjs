@@ -215,6 +215,17 @@ async function runToken(tok) {
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(0, half) } });
     await sleep(5);
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(half) } });
+  } else if (tok === "tool-update-between-chunks") {
+    const toolCallId = "interleaved-tool";
+    notify({ sessionUpdate: "tool_call", toolCallId, title: "Background tool", kind: "execute", status: "in_progress" });
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "R" } });
+    notify({ sessionUpdate: "tool_call_update", toolCallId, status: "in_progress" });
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "erunning" } });
+    notify({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" });
+  } else if (tok === "thought-between-chunks") {
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "R" } });
+    notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "checking" } });
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "erunning" } });
   } else if (tok.startsWith("think:")) {
     notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: tok.slice(6) } });
   } else if (tok.startsWith("echo:")) {

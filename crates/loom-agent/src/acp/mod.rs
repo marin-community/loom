@@ -1408,7 +1408,7 @@ struct PendingMode {
 // ---------------------------------------------------------------------------
 
 /// An open consolidation buffer accumulating chunk deltas of one `kind` until a
-/// block boundary flushes it.
+/// semantic boundary flushes it.
 struct ChunkBuf {
     kind: &'static str,
     text: String,
@@ -1639,7 +1639,8 @@ struct Task {
     /// `session/cancel` cannot leave the provider's context half-compacted.
     compaction_turn: bool,
 
-    buf: Option<ChunkBuf>,
+    message_buf: Option<ChunkBuf>,
+    thought_buf: Option<ChunkBuf>,
     tools: HashMap<String, LiveTool>,
     pending_perms: HashMap<String, PendingPerm>,
 
@@ -1726,7 +1727,8 @@ impl Task {
             turns_dispatched,
             turn_live: false,
             compaction_turn: false,
-            buf: None,
+            message_buf: None,
+            thought_buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
             effective_mode: None,
@@ -1822,7 +1824,8 @@ impl Task {
             turns_dispatched,
             turn_live: live_turn.is_some(),
             compaction_turn,
-            buf: None,
+            message_buf: None,
+            thought_buf: None,
             tools: HashMap::new(),
             pending_perms: HashMap::new(),
             // Old in-flight records have no mode. Keep that unknown rather than
@@ -2074,7 +2077,8 @@ impl Task {
                 self.suppress_journal = false;
                 // Drop any consolidation the suppressed replay left half-open
                 // so it can't flush stale history into a later turn.
-                self.buf = None;
+                self.message_buf = None;
+                self.thought_buf = None;
                 self.tools.clear();
                 if res.is_none() {
                     bail!("session/load failed: {err:?}");
@@ -2407,8 +2411,13 @@ impl Task {
                     self.on_chunk(kind::THOUGHT, &t, seq).await;
                 }
             }
-            SessionUpdate::ToolCall(tc) | SessionUpdate::ToolCallUpdate(tc) => {
+            SessionUpdate::ToolCall(tc) => {
                 self.flush_buf().await;
+                self.on_tool(seq, tc).await;
+            }
+            SessionUpdate::ToolCallUpdate(tc) => {
+                // Updates describe an already-open tool. They can arrive while
+                // prose is streaming and do not start a new prose block.
                 self.on_tool(seq, tc).await;
             }
             SessionUpdate::Plan(p) => {
@@ -2527,11 +2536,14 @@ impl Task {
     }
 
     async fn on_chunk(&mut self, kind: &'static str, text: &str, seq: u64) {
-        let need_flush = self.buf.as_ref().map(|b| b.kind != kind).unwrap_or(false);
-        if need_flush {
-            self.flush_buf().await;
-        }
-        let b = self.buf.get_or_insert_with(|| ChunkBuf {
+        // Pi can alternate thought and prose deltas within one assistant
+        // message. A kind switch alone is not a message boundary.
+        let slot = match kind {
+            kind::AGENT_MESSAGE => &mut self.message_buf,
+            kind::THOUGHT => &mut self.thought_buf,
+            _ => return,
+        };
+        let b = slot.get_or_insert_with(|| ChunkBuf {
             kind,
             text: String::new(),
             first_seq: seq,
@@ -2544,25 +2556,31 @@ impl Task {
     }
 
     async fn flush_buf(&mut self) {
-        let Some(b) = self.buf.take() else { return };
-        let (kind, payload) = match b.kind {
-            kind::AGENT_MESSAGE
-                if self
-                    .pending_interrupt_notice_through
-                    .is_some_and(|through| self.current_turn <= through)
-                    && b.text.trim() == ADAPTER_INTERRUPT_NOTICE =>
-            {
-                self.pending_interrupt_notice_through = None;
-                // Journal an empty block so the ordinary `block` SSE clears the
-                // already-streamed shadow in connected browsers. Empty agent
-                // prose is ignored by the renderer and handoff history.
-                (kind::AGENT_MESSAGE, json!({ "text": "" }))
-            }
-            kind::AGENT_MESSAGE => (kind::AGENT_MESSAGE, json!({ "text": b.text })),
-            kind::THOUGHT => (kind::THOUGHT, json!({ "text": b.text, "ms": Value::Null })),
-            _ => return,
-        };
-        self.journal_block(kind, payload).await;
+        let mut buffers: Vec<_> = [self.message_buf.take(), self.thought_buf.take()]
+            .into_iter()
+            .flatten()
+            .collect();
+        buffers.sort_by_key(|b| b.first_seq);
+        for b in buffers {
+            let (kind, payload) = match b.kind {
+                kind::AGENT_MESSAGE
+                    if self
+                        .pending_interrupt_notice_through
+                        .is_some_and(|through| self.current_turn <= through)
+                        && b.text.trim() == ADAPTER_INTERRUPT_NOTICE =>
+                {
+                    self.pending_interrupt_notice_through = None;
+                    // Journal an empty block so the ordinary `block` SSE clears the
+                    // already-streamed shadow in connected browsers. Empty agent
+                    // prose is ignored by the renderer and handoff history.
+                    (kind::AGENT_MESSAGE, json!({ "text": "" }))
+                }
+                kind::AGENT_MESSAGE => (kind::AGENT_MESSAGE, json!({ "text": b.text })),
+                kind::THOUGHT => (kind::THOUGHT, json!({ "text": b.text, "ms": Value::Null })),
+                _ => continue,
+            };
+            self.journal_block(kind, payload).await;
+        }
     }
 
     async fn on_tool(&mut self, seq: u64, tc: ToolCall) {
@@ -3687,7 +3705,10 @@ impl Task {
         let mut track = |s: u64| {
             min_pending = Some(min_pending.map_or(s, |m| m.min(s)));
         };
-        if let Some(b) = &self.buf {
+        if let Some(b) = &self.message_buf {
+            track(b.first_seq);
+        }
+        if let Some(b) = &self.thought_buf {
             track(b.first_seq);
         }
         for t in self.tools.values() {
