@@ -123,7 +123,9 @@ mod tests {
     fn session_primer_wraps_the_builtin_weaver_md() {
         let v: Value = serde_json::from_str(&session_primer(builtin_weaver_md())).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
-        let primer = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let primer = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
         assert!(primer.contains("loom status"));
         // The attention contract is explicit in the primer: whenever the
         // next expected input is a person's — blocked on a question or

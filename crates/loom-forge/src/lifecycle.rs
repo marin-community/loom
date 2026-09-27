@@ -351,7 +351,18 @@ async fn archive_teardown(
     // worktree stays discoverable through `repos.branches`, and
     // `repos.worktrees.ensure` returns it idempotently.
     let keep_worktree = tags::keeps_worktree(&st.db, &branch.id).await?;
-    transition_step(st, session, branch, "archiving", if keep_worktree { "Keeping worktree" } else { "Removing worktree" }).await?;
+    transition_step(
+        st,
+        session,
+        branch,
+        "archiving",
+        if keep_worktree {
+            "Keeping worktree"
+        } else {
+            "Removing worktree"
+        },
+    )
+    .await?;
     let repo_root = PathBuf::from(&branch.repo_root);
     let work_dir = PathBuf::from(&session.work_dir);
     tracing::debug!(session = %session.id, "killed terminal, debug shells, and ide sessions");

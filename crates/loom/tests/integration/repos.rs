@@ -373,10 +373,7 @@ async fn worktrees_ensure_materializes_and_is_idempotent() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(
-        bad_pr.contains("400"),
-        "pr must be positive, got {bad_pr}"
-    );
+    assert!(bad_pr.contains("400"), "pr must be positive, got {bad_pr}");
 }
 
 /// `repos.worktrees.ensure` fetches a remote-only branch from `origin` on
@@ -397,12 +394,20 @@ async fn worktrees_ensure_fetches_remote_only_branch() {
     // `make_bare_remote` clones from the throwaway work repo at <root>/work,
     // so the push target and the push source agree on history.
     let work = remotes.path().join("work");
-    sh(&work, "git", &["checkout", "-q", "-b", "weaver/remote-only"]);
+    sh(
+        &work,
+        "git",
+        &["checkout", "-q", "-b", "weaver/remote-only"],
+    );
     std::fs::write(work.join("REMOTE.md"), "from the remote\n").unwrap();
     sh(&work, "git", &["add", "."]);
     sh(&work, "git", &["commit", "-q", "-m", "remote work"]);
     // Push over the file:// URL (the same remote `origin` points at).
-    sh(&work, "git", &["push", "-q", &remote_url, "weaver/remote-only"]);
+    sh(
+        &work,
+        "git",
+        &["push", "-q", &remote_url, "weaver/remote-only"],
+    );
 
     // The branch exists only on the remote: ensure fetches it, materializes a
     // local branch, and checks it out.

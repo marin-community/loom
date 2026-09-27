@@ -833,12 +833,9 @@ async fn worktrees_ensure_operation(
                         repo_root.display()
                     ))
                 })?;
-            let head = st
-                .trigger
-                .gh()
-                .pr_head(&slug, number)
-                .await
-                .map_err(|e| AppError::bad_request(format!("could not look up PR #{number}: {e}")))?;
+            let head = st.trigger.gh().pr_head(&slug, number).await.map_err(|e| {
+                AppError::bad_request(format!("could not look up PR #{number}: {e}"))
+            })?;
             if head.cross_repo {
                 return Err(AppError::bad_request(format!(
                     "PR #{number} is from a fork; its head branch cannot be checked out here"
@@ -847,11 +844,7 @@ async fn worktrees_ensure_operation(
             head.head_ref
         }
         (None, Some(branch)) => branch.trim().to_string(),
-        (None, None) => {
-            return Err(AppError::bad_request(
-                "one of `branch` or `pr` is required",
-            ))
-        }
+        (None, None) => return Err(AppError::bad_request("one of `branch` or `pr` is required")),
     };
     if branch.is_empty() || branch.starts_with('-') {
         return Err(AppError::bad_request("branch must be a valid branch name"));

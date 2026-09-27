@@ -333,7 +333,10 @@ async fn archive_keeps_worktree_when_tagged() {
     let branch_id = created["branch"]["id"].as_str().unwrap().to_string();
     let work_dir = created["work_dir"].as_str().unwrap().to_string();
     let term_session = created["term_session"].as_str().unwrap().to_string();
-    assert!(Path::new(&work_dir).exists(), "worktree missing before archive");
+    assert!(
+        Path::new(&work_dir).exists(),
+        "worktree missing before archive"
+    );
 
     // The quiet operator request: set through the branch-owned tag operation,
     // the same route a UI's "Keep worktree" action uses.
@@ -374,7 +377,8 @@ async fn archive_keeps_worktree_when_tagged() {
         "the archived session should report its worktree still on disk"
     );
     assert_eq!(
-        branch_tag(&view, "worktree:keep").unwrap()["value"], "true",
+        branch_tag(&view, "worktree:keep").unwrap()["value"],
+        "true",
         "the quiet tag itself survives archive (only loud tags are cleared)"
     );
 
