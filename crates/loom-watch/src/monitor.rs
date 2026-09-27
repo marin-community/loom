@@ -136,7 +136,12 @@ async fn run_inner(state: AppState) {
             if runtime_starting(session, now) {
                 continue;
             }
-            if !backend::has_session(&session.term_session).await {
+            let runtime_alive = if session.protocol == "acp" {
+                backend::has_live_relay_child(&session.term_session).await
+            } else {
+                backend::has_session(&session.term_session).await
+            };
+            if !runtime_alive {
                 if session.status == "orphaned" {
                     continue;
                 }

@@ -208,8 +208,8 @@ pub async fn repair_acp_sessions(state: &AppState) {
         if state.acp.is_live(&session.id) {
             continue;
         }
-        if !backend::has_session(&session.term_session).await {
-            continue; // dead relay — the monitor will mark it orphaned.
+        if !backend::has_live_relay_child(&session.term_session).await {
+            continue; // An exited agent cannot be restored by re-attaching its spool.
         }
         match crate::acp::attach(&state.acp_ctx(), &session.id).await {
             Ok(()) => {
@@ -270,7 +270,12 @@ async fn reconcile_sessions(state: &AppState) {
         if session_mod::is_terminal(&session.status) {
             continue;
         }
-        if backend::has_session(&session.term_session).await {
+        let runtime_alive = if session.protocol == "acp" {
+            backend::has_live_relay_child(&session.term_session).await
+        } else {
+            backend::has_session(&session.term_session).await
+        };
+        if runtime_alive {
             continue;
         }
         let Ok(Some(branch)) = branch_mod::get(&state.db, &session.branch_id).await else {
@@ -353,7 +358,12 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         if session_mod::is_terminal(&session.status) {
             continue;
         }
-        if backend::has_session(&session.term_session).await {
+        let runtime_alive = if session.protocol == "acp" {
+            backend::has_live_relay_child(&session.term_session).await
+        } else {
+            backend::has_session(&session.term_session).await
+        };
+        if runtime_alive {
             continue;
         }
         match crate::lifecycle::adopt(state, &session, &branch).await {

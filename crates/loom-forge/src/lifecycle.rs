@@ -1282,14 +1282,19 @@ pub async fn adopt_acp(
         ))));
     }
 
-    if backend::has_session(&session.term_session).await {
+    if backend::has_live_relay_child(&session.term_session).await {
         // The relay outlived a crashed task — re-attach from the persisted cursor.
         tracing::info!(session = %session.id, "acp relay alive; re-attaching");
         crate::acp::attach(&st.acp_ctx(), &session.id)
             .await
             .map_err(|e| anyhow!(e.to_string()))?;
     } else {
-        // The relay is gone — respawn the adapter and reopen the conversation.
+        // The relay is gone or its child exited. Retire an exited relay before
+        // reusing its name; its retained spool cannot answer new ACP requests.
+        if backend::has_session(&session.term_session).await {
+            backend::kill_session_and_wait(&session.term_session).await?;
+        }
+        // Respawn the adapter and reopen the conversation.
         let repo_root = PathBuf::from(&branch.repo_root);
         let repo_cfg = repo_cfg_or_default(&repo_root);
         let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;

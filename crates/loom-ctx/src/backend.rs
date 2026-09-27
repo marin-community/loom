@@ -66,6 +66,20 @@ pub async fn has_session(name: &str) -> bool {
     tapestry::Client::is_alive(name).await
 }
 
+/// Whether an ACP relay still has a running agent child. Relay supervisors
+/// deliberately survive child exit to retain their spool, so `has_session`
+/// alone is not evidence that re-attaching can restore a live ACP driver.
+pub async fn has_live_relay_child(name: &str) -> bool {
+    let probe = async {
+        let mut client = tapestry::Client::connect(name).await.ok()?;
+        client.ping().await.ok()
+    };
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), probe).await,
+        Ok(Some(info)) if info.alive && info.relay && info.exited.is_none()
+    )
+}
+
 /// The delegated cgroup-v2 subtree sessions confine themselves under. Created
 /// and chowned to the loom user at container boot by `loom-cgroup-init` (see
 /// the Dockerfile); absent (the normal case outside the standalone deploy)

@@ -2383,6 +2383,69 @@ async fn adopt_reconciles_an_orphaned_row_that_still_has_a_live_driver() {
     .await;
 }
 
+/// A retained relay spool does not mean its ACP child can still be repaired.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_does_not_reattach_an_exited_relay_child() {
+    let ts = TestServer::start().await;
+    let id = "acp-exited-repair";
+    make_session(&ts, id).await;
+    let name = format!("weaver-{id}");
+    backend::new_relay_session(&name, "exit 0", &[], false, ts.repo_path(), 0)
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut client = tapestry::Client::connect(&name).await.unwrap();
+        if client.ping().await.unwrap().exited == Some(0) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "relay child did not exit"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(backend::has_session(&name).await, "relay retains its spool");
+    assert!(!backend::has_live_relay_child(&name).await);
+    session_mod::mark_orphaned(&ts.state.db, id).await.unwrap();
+
+    loom::server::repair_acp_sessions(&ts.state).await;
+    loom::server::repair_acp_sessions(&ts.state).await;
+    assert!(!ts.state.acp.is_live(id));
+    assert_eq!(
+        session_mod::get(&ts.state.db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "orphaned",
+        "repair must not briefly show an exited task as running"
+    );
+
+    // Explicit adoption must replace the exited relay, not subscribe to its
+    // retained EXIT frame and fall straight back to orphaned.
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("acp.claude_cmd".to_string(), Some(agent_cmd()))],
+    )
+    .await
+    .unwrap();
+    ts.client
+        .post("/api/sessions/adopt", json!({ "session": id }))
+        .await
+        .expect("adopt restarts an exited ACP child");
+    assert!(backend::has_live_relay_child(&name).await);
+    assert_eq!(
+        session_mod::get(&ts.state.db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "running"
+    );
+}
+
 /// A relay can survive while its Loom-side task exits (for example after a
 /// journal write loses a prolonged SQLite lock race). The repair pass must
 /// re-register the driver, replay the unacked frames, and leave the session
