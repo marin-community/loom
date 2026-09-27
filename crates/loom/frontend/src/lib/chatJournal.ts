@@ -7,6 +7,34 @@ export function chatBlockKey(block: JournalPosition): string {
   return `${block.turn}:${block.seq}`;
 }
 
+export interface TurnStopPresentation {
+  label: string;
+  loud: boolean;
+  error: boolean;
+}
+
+/** Turn-end presentation policy shared by snapshot and streamed chat rows.
+ *
+ * ACP reports `max_tokens` as a successful JSON-RPC response, but it is not a
+ * successful conversational turn: the model was cut off before it could
+ * finish. Keep the provider's durable stop reason intact while rendering that
+ * boundary as an explicit chat error instead of the quiet normal separator.
+ */
+export function turnStopPresentation(stop: string): TurnStopPresentation {
+  if (stop === 'max_tokens') {
+    return {
+      label: 'error · maximum token limit reached',
+      loud: true,
+      error: true,
+    };
+  }
+  return {
+    label: stop,
+    loud: stop === 'refusal' || stop === 'error',
+    error: stop === 'error',
+  };
+}
+
 /**
  * Reconciles the REST journal snapshot with committed blocks arriving over SSE.
  *
