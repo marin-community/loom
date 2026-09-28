@@ -1180,7 +1180,10 @@ mod tests {
     /// when a tool's schema changes, so a session holding e.g.
     /// `loom/artifacts/write@v1` can tell that `write`'s tool definition
     /// changed under it. Re-pin only with a reason, and check whether tool
-    /// *membership* moved too.
+    /// *membership* moved too. (Re-pinned for `channels.write@v1` when the
+    /// acknowledgement rule landed: `channels.read_marker.set`'s description
+    /// now documents that a parent's ack retires the child's raised
+    /// `attention` tag.)
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
@@ -1197,7 +1200,7 @@ mod tests {
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:e928a720610385e4820bc5b5414b52e5a7a059c383bfd7ecc7c3fda88517da06",
+                "sha256:27ada3c1cf9df3503c3c6166d6f319f90f9e82bb57e82bc322fb5d468b88ab24",
             ),
             (
                 "loom/artifacts/read@v1",

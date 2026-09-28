@@ -274,6 +274,98 @@ async fn notify_parent_of_result(
     Ok(())
 }
 
+/// Clear a child's raised `attention` tag when its parent has read the
+/// child's channel — the "acknowledged child results stand down" rule.
+///
+/// A child raises `--tag attention` when its delegated work is ready for
+/// review; the parent consumes the result by reading the child's channel,
+/// and that acknowledgement is what retires the flag. Without this the tag
+/// sits in the operator's Needs You view forever (see the Arachne
+/// postmortems), so the parent's read is the durable signal that work was
+/// handed off. Both read paths clear it — `channels.read_marker.set`
+/// (`loom channels ack`) and `channels.messages.list` without `peek`
+/// (`loom channels read`, the documented way to consume a child's result) —
+/// because both advance the same read marker and an acknowledgement that
+/// only fires on one of them would silently miss the other. Exactly the
+/// paired parent clears it:
+///
+/// * only the session that `parent_session_id` names — an unrelated session
+///   reading the same channel is not an acknowledgement (an ancestor in
+///   the child's tree may reach the channel, and a human has no session at
+///   all);
+/// * only the `attention` level — `blocked` states a session that cannot
+///   proceed at all and stays until its author resolves or rewords it;
+/// * the clear is recorded as a `tag` event (author `loom`) so the fleet view
+///   and its watches refresh, and it is idempotent — a second ack on an
+///   already-calm child is a no-op.
+async fn clear_child_attention_on_parent_read(st: &AppState, channel_id: &str, reader: &Subject) {
+    if let Err(error) = clear_child_attention_on_parent_read_inner(st, channel_id, reader).await {
+        // The read marker has already advanced; the tag clear is bookkeeping
+        // and must not fail the acknowledgement the operator already made.
+        tracing::warn!(
+            channel = channel_id,
+            reader = %reader.id,
+            error = %error.message(),
+            "could not clear acknowledged child's attention tag"
+        );
+    }
+}
+
+async fn clear_child_attention_on_parent_read_inner(
+    st: &AppState,
+    channel_id: &str,
+    reader: &Subject,
+) -> ApiResult<()> {
+    if reader.kind != SubjectKind::Session {
+        return Ok(());
+    }
+    // The channel of a session is named by the session id itself.
+    let child: Option<SessionRow> =
+        sqlx::query_as("SELECT branch_id, parent_session_id FROM sessions WHERE id = ?")
+            .bind(channel_id)
+            .fetch_optional(&st.db)
+            .await?;
+    let Some(child) = child else {
+        return Ok(());
+    };
+    if child.parent_session_id.as_deref() != Some(reader.id.as_str()) {
+        return Ok(());
+    }
+    let Some(tag) =
+        weaver_core::tags::get(&st.db, &child.branch_id, weaver_core::tags::ATTENTION_KEY).await?
+    else {
+        return Ok(());
+    };
+    if tag.value != "attention" {
+        // `blocked` (the only other value on the attention ladder) is
+        // preserved — see the doc comment above. Acknowledgement retires
+        // "ready for review", not "stuck".
+        return Ok(());
+    }
+    weaver_core::tags::clear(&st.db, &child.branch_id, weaver_core::tags::ATTENTION_KEY).await?;
+    let by = format!("system:loom/parent-read:{}", reader.id);
+    events::record_tag(
+        &st.db,
+        &st.bus,
+        &child.branch_id,
+        weaver_core::tags::ATTENTION_KEY,
+        "",
+        "",
+        &by,
+    )
+    .await
+    .ok();
+    Ok(())
+}
+
+/// The subset of a `sessions` row the acknowledgement rule needs. Read as one
+/// row so the parent check and the tag clear cannot observe different rows.
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    branch_id: String,
+    parent_session_id: Option<String>,
+}
+
 async fn channel_bindings(
     st: &AppState,
     id: &str,
@@ -532,6 +624,11 @@ pub(super) async fn list_channel_messages_operation(
         if let Some(last) = messages.last() {
             let subject = principal_subject(&principal);
             channels::mark_read(&st.db, &channel_id, &subject, Some(last.seq)).await?;
+            // Reading through `messages.list` (what `loom channels read`
+            // performs) advances the read marker exactly like
+            // `channels.read_marker.set`, so it acknowledges a child's
+            // result the same way.
+            clear_child_attention_on_parent_read(&st, &channel_id, &subject).await;
         }
     }
     Ok(messages)
@@ -688,6 +785,12 @@ pub(super) async fn set_channel_read_marker_operation(
     let channel_id = resolve_channel_id(&principal, &input.channel)?;
     channel_access(&st, &channel_id).await?;
     let subject = principal_subject(&principal);
+    // A session acknowledging a channel it is the parent of retires the
+    // child's raised `attention` tag — see
+    // [`clear_child_attention_on_parent_read`]. Cleared server-side as a
+    // system mutation, the same authority `notify_parent_of_result` writes
+    // with.
+    clear_child_attention_on_parent_read(&st, &channel_id, &subject).await;
     Ok(channels::mark_read(&st.db, &channel_id, &subject, input.seq).await?)
 }
 
