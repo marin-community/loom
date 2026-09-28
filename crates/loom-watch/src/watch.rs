@@ -1516,8 +1516,13 @@ mod tests {
 
     /// An `AppState` over a fresh in-memory db plus a watch registered on
     /// `program` — the minimum for a [`fire`] round to run a script end to end.
+    /// A booted server always has a primary user; the spawn's credential is
+    /// minted in that user's name.
     async fn script_fixture(program: &str) -> (AppState, Watch) {
         let db = crate::db::connect_in_memory().await.unwrap();
+        crate::auth::add_user(&db, "owner", None, None, None, crate::auth::UserRole::Admin)
+            .await
+            .unwrap();
         let state = AppState {
             ctx: crate::Ctx {
                 db: db.clone(),
