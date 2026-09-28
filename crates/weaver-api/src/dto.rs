@@ -223,10 +223,9 @@ pub struct SessionSummaryView {
     pub profile: String,
     #[serde(default)]
     pub usage: Option<AcpUsage>,
-    /// An unanswered ACP tool permission, if one exists. The journal is the
-    /// source of truth, so this clears as soon as the request is resolved.
+    /// Unanswered ACP tool permissions in journal order.
     #[serde(default)]
-    pub pending_permission: Option<PendingPermissionView>,
+    pub pending_permissions: Vec<PendingPermissionView>,
     #[serde(default)]
     pub placement: Option<SessionPlacementView>,
     pub branch: BranchSummaryView,
@@ -246,7 +245,7 @@ pub struct SessionView {
     pub id: String,
     pub status: String,
     #[serde(default)]
-    pub pending_permission: Option<PendingPermissionView>,
+    pub pending_permissions: Vec<PendingPermissionView>,
     #[serde(default)]
     pub transition: Option<SessionTransitionView>,
     pub work_dir: String,

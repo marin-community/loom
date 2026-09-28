@@ -1076,6 +1076,35 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn open_permissions_keeps_every_unanswered_request() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let session = seed_session(&db).await;
+        for (seq, id) in [(1, "first"), (2, "second")] {
+            insert(
+                &db,
+                &session,
+                0,
+                seq,
+                kind::PERMISSION_REQUEST,
+                &json!({ "request_id": id, "title": id, "outcome": null }),
+            )
+            .await
+            .unwrap();
+        }
+        let open = open_permissions(&db, &session).await.unwrap();
+        assert_eq!(open.len(), 2);
+        assert_eq!(open[0].payload["request_id"], "first");
+        assert_eq!(open[1].payload["request_id"], "second");
+
+        resolve_permission(&db, &session, "first", "allow", "manual")
+            .await
+            .unwrap();
+        let open = open_permissions(&db, &session).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].payload["request_id"], "second");
+    }
+
     #[test]
     fn preview_text_renders_compact_lines_for_the_tail() {
         let block = |turn: i64, seq: i64, kind: &str, payload: Value| ChatBlockView {

@@ -3325,7 +3325,7 @@ impl Task {
 
     /// Fleet consumers subscribe to session events, not every chat stream.
     /// Publish a small invalidation when the journal's pending permissions
-    /// change so their attention summaries refresh immediately.
+    /// change so their session summaries refresh immediately.
     async fn permission_changed(&self, request_id: &str, state: &str) {
         if let Ok(Some(session)) = session::get(&self.db, &self.session_id).await {
             let _ = crate::events::record(
