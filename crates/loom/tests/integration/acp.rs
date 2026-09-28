@@ -2572,6 +2572,40 @@ async fn user_echo_chunks_do_not_duplicate_history() {
     );
 }
 
+/// Pi can stream a brief thought delta between two halves of one text block.
+/// The final message is continuous, so a kind switch must not split its prose.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interleaved_thought_does_not_split_agent_message() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-interleaved", None, None).await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({
+                "text": "think:initial|say:Two|think:.|say: distinct problems found|tool:execute:next|say:Later",
+                "session": "acp-interleaved"
+            }),
+        )
+        .await
+        .unwrap();
+
+    let chat = poll_chat(&ts, "acp-interleaved", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    let messages: Vec<_> = blocks
+        .iter()
+        .filter(|b| b["kind"] == "agent_message")
+        .map(|b| b["payload"]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages, ["Two distinct problems found", "Later"]);
+    assert!(blocks
+        .iter()
+        .any(|b| { b["kind"] == "thought" && b["payload"]["text"] == "initial." }));
+}
+
 /// 6. Interrupt: cancelling a waiting turn ends it with stop reason `cancelled`.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
