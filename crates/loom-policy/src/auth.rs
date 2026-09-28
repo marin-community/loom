@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::collections::HashMap;
-use weaver_core::db::iso_in_days;
+use weaver_core::db::{iso_in_days, iso_in_seconds};
 
 use crate::db::{now_iso, Db};
 
@@ -921,6 +921,9 @@ pub async fn delete_session(db: &Db, cookie: &str) -> Result<()> {
 pub enum TokenKind {
     Pat,
     Local,
+    /// Minted by the server for one of its own subprocesses; see
+    /// [`create_engine_token`].
+    Engine,
 }
 
 impl TokenKind {
@@ -928,6 +931,7 @@ impl TokenKind {
         match self {
             TokenKind::Pat => "pat",
             TokenKind::Local => "local",
+            TokenKind::Engine => "engine",
         }
     }
 }
@@ -1078,7 +1082,10 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
         return Ok(None);
     }
-    let mut grant = if kind == TokenKind::Pat.as_str() || kind == TokenKind::Local.as_str() {
+    let role_backed = [TokenKind::Pat, TokenKind::Local, TokenKind::Engine]
+        .iter()
+        .any(|role_kind| kind == role_kind.as_str());
+    let mut grant = if role_backed {
         row.get::<UserRole, _>("role").grant()
     } else {
         let grant_json: String = row.get("grant_json");
@@ -1321,6 +1328,84 @@ pub async fn revoke_session_tokens(db: &Db, session_id: &str) -> Result<u64> {
 }
 
 // ---------------------------------------------------------------------------
+// Engine tokens
+// ---------------------------------------------------------------------------
+
+/// Name recorded on the operator scratch shell's engine credential, so a fresh
+/// shell can retire its predecessor's token.
+pub const SHELL_ENGINE_TOKEN_NAME: &str = "operator shell";
+
+/// A credential minted for one of Loom's own subprocesses.
+#[derive(Debug, Clone)]
+pub struct EngineToken {
+    pub id: String,
+    /// The bearer plaintext; handed to the subprocess and never stored.
+    pub value: String,
+}
+
+/// Mint a credential for a subprocess Loom runs itself: a watch round or the
+/// operator scratch shell. It resolves to the primary user's current role, like
+/// the machine-local token, but remains valid in shared-deployment mode because
+/// the server issues it per process and nothing persists the plaintext on disk.
+/// `ttl_secs` bounds its life; `None` leaves it valid until revoked. Expired
+/// engine rows are pruned on every mint.
+pub async fn create_engine_token(
+    db: &Db,
+    name: &str,
+    ttl_secs: Option<i64>,
+) -> Result<EngineToken> {
+    sqlx::query("DELETE FROM api_tokens WHERE kind = 'engine' AND expires_at <= ?")
+        .bind(now_iso())
+        .execute(db)
+        .await?;
+    let owner = primary_user(db)
+        .await?
+        .ok_or_else(|| anyhow!("no primary user for engine token"))?;
+    let expires_at = match ttl_secs {
+        Some(secs) => Some(
+            iso_in_seconds(secs)
+                .ok_or_else(|| anyhow!("engine token ttl is outside the supported range"))?,
+        ),
+        None => None,
+    };
+    let (plain, hash, prefix) = mint_token();
+    let id = random_id();
+    sqlx::query(
+        "INSERT INTO api_tokens (id, username, name, token_hash, prefix, kind, expires_at)
+         VALUES (?, ?, ?, ?, ?, 'engine', ?)",
+    )
+    .bind(&id)
+    .bind(&owner)
+    .bind(name)
+    .bind(hash)
+    .bind(prefix)
+    .bind(&expires_at)
+    .execute(db)
+    .await
+    .context("creating engine token")?;
+    Ok(EngineToken { id, value: plain })
+}
+
+/// Retire one engine token once its subprocess has finished.
+pub async fn revoke_engine_token(db: &Db, id: &str) -> Result<bool> {
+    let res = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind = 'engine'")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Retire every engine token recorded under `name`, for a subprocess whose
+/// predecessor may have been replaced without a clean shutdown.
+pub async fn revoke_engine_tokens_named(db: &Db, name: &str) -> Result<u64> {
+    let res = sqlx::query("DELETE FROM api_tokens WHERE name = ? AND kind = 'engine'")
+        .bind(name)
+        .execute(db)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+// ---------------------------------------------------------------------------
 // The machine-local token
 // ---------------------------------------------------------------------------
 
@@ -1328,9 +1413,9 @@ pub use crate::paths::local_token_path;
 
 /// Ensure the machine-local bearer token exists and return its plaintext.
 ///
-/// loom injects this into the environments of its own same-host subprocesses
-/// (the agent's terminal, watch scripts) and the `loom` CLI reads it, so local
-/// automation authenticates even when `auth.trust_loopback` is off. The
+/// The `loom` CLI reads it as its same-host fallback credential, so local
+/// automation authenticates even when `auth.trust_loopback` is off. Loom's own
+/// subprocesses receive a per-process [`create_engine_token`] instead. The
 /// plaintext is persisted (0600) under `$WEAVER_HOME` and reused across
 /// restarts; if the database is reset but the file survives, the same plaintext
 /// is re-registered so existing subprocesses keep working.
@@ -2676,6 +2761,49 @@ mod tests {
         // each ensures a working bearer for the same owner.
         let first = register_then_lookup(&db).await;
         assert_eq!(first.username, "rjpower");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn engine_tokens_survive_shared_mode_unlike_the_local_token() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let (local, _) =
+            create_token_kind(&db, "rjpower", LOCAL_TOKEN_NAME, None, TokenKind::Local)
+                .await
+                .unwrap();
+        crate::config::latch_github_organization_shared_mode(&db)
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &local).await.unwrap().is_none());
+
+        let round = create_engine_token(&db, "watch round", Some(600))
+            .await
+            .unwrap();
+        let principal = lookup_token(&db, &round.value).await.unwrap().unwrap();
+        assert_eq!(principal.username, "rjpower");
+        assert!(matches!(principal.grant, Grant::Admin));
+        assert!(list_tokens(&db, "rjpower").await.unwrap().is_empty());
+        assert!(revoke_engine_token(&db, &round.id).await.unwrap());
+        assert!(lookup_token(&db, &round.value).await.unwrap().is_none());
+
+        let expired = create_engine_token(&db, "watch round", Some(-1))
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &expired.value).await.unwrap().is_none());
+
+        let first_shell = create_engine_token(&db, SHELL_ENGINE_TOKEN_NAME, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoke_engine_tokens_named(&db, SHELL_ENGINE_TOKEN_NAME)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(lookup_token(&db, &first_shell.value)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     async fn register_then_lookup(db: &Db) -> Principal {

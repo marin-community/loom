@@ -190,6 +190,15 @@ pub fn iso_in_days(days: i64) -> Option<String> {
         .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
 }
 
+/// The instant `seconds` seconds from now, in the same stored format as
+/// [`now_iso`]. A negative interval yields an instant already in the past.
+pub fn iso_in_seconds(seconds: i64) -> Option<String> {
+    let delta = chrono::TimeDelta::try_seconds(seconds)?;
+    chrono::Utc::now()
+        .checked_add_signed(delta)
+        .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
+}
+
 /// Open (creating if missing) and migrate the on-disk database.
 ///
 /// Backend-specific surface, kept here and in [`begin_immediate`]: the

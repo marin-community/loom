@@ -1043,21 +1043,28 @@ configured the GitHub button is hidden and `auth.me` reports
 
 **The machine-local token.** On startup loom mints (and persists, 0600, at
 `$WEAVER_HOME/loom-token`) a `kind = 'local'` `api_tokens` row owned by the
-primary user, and injects it as `LOOM_TOKEN` into the environments of its own
-same-host subprocesses (the agent's terminal, watch scripts) — and the `loom`
-CLI reads it. This makes `auth.trust_loopback = false` a fully working mode:
-behind a **same-host reverse proxy** (where forwarded requests look like
-loopback and so trust must be off) local automation still authenticates via this
-token, while remote callers must present their own. The local token is hidden
-from the token list and is not revocable from the UI. Once
-`auth.github_organizations` puts Loom in shared mode, authorization ignores the
-machine token and loopback trust so neither can bypass the per-user lease. That
+primary user, and the `loom` CLI reads it as its same-host fallback credential.
+This makes `auth.trust_loopback = false` a fully working mode: behind a
+**same-host reverse proxy** (where forwarded requests look like loopback and so
+trust must be off) local automation still authenticates via this token, while
+remote callers must present their own. The local token is hidden from the token
+list and is not revocable from the UI. Once `auth.github_organizations` puts
+Loom in shared mode, authorization ignores the machine token and loopback trust
+so neither can bypass the per-user lease. That
 shared-mode latch is written durably when the organization setting first becomes
 nonempty and is never cleared by configuration reconciliation, user removal, or
 session lifecycle. Configuration loss, failed workload teardown, and an
 in-flight launch therefore cannot reopen local admin authority. Loom exposes no
 automatic transition back to single-user trust; that would require a separate,
 audited recovery procedure. Removing a user still closes their sessions.
+
+**Engine tokens.** Loom's own subprocesses — each watch script spawn and the
+operator scratch shell — receive a `kind = 'engine'` `api_tokens` row as
+`LOOM_TOKEN` instead. The server mints one per process with the primary user's
+current role, never writes its plaintext to disk, and revokes it when the
+process ends (a watch spawn's token also expires shortly after the round
+budget). Because it is issued per process rather than persisted, it stays
+valid in shared mode, which the machine-local token does not.
 
 **CLI contexts.** The `loom` CLI stores named server URLs in
 `$XDG_CONFIG_HOME/loom/config.toml` and their personal API tokens in a separate
