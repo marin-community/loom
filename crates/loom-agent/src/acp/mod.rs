@@ -3317,7 +3317,26 @@ impl Task {
                 let _ = self.answer_permission(&req_key, &opt, "policy").await;
             }
         }
+        if self.pending_perms.contains_key(&req_key) {
+            self.permission_changed(&req_key, "pending").await;
+        }
         Ok(())
+    }
+
+    /// Fleet consumers subscribe to session events, not every chat stream.
+    /// Publish a small invalidation when the journal's pending permissions
+    /// change so their attention summaries refresh immediately.
+    async fn permission_changed(&self, request_id: &str, state: &str) {
+        if let Ok(Some(session)) = session::get(&self.db, &self.session_id).await {
+            let _ = crate::events::record(
+                &self.db,
+                &self.bus,
+                &session.branch_id,
+                "permission",
+                json!({ "request_id": request_id, "state": state }),
+            )
+            .await;
+        }
     }
 
     async fn answer_permission(
@@ -3340,6 +3359,7 @@ impl Task {
             {
                 self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
             }
+            self.permission_changed(request_id, "resolved").await;
             let _ = self.maybe_ack().await;
             PermAnswer::Ok
         } else {
@@ -3380,7 +3400,8 @@ impl Task {
         }
         // ACP requires the client to answer every pending permission request
         // with the `cancelled` outcome when it cancels a turn.
-        for (_, pp) in self.pending_perms.drain() {
+        let pending: Vec<_> = self.pending_perms.drain().collect();
+        for (request_id, pp) in pending {
             let _ = self
                 .stream
                 .write(&wire::response_line(
@@ -3388,6 +3409,13 @@ impl Task {
                     wire::permission_cancelled(),
                 ))
                 .await;
+            if let Ok(Some(view)) =
+                chat::cancel_permission(&self.db, &self.session_id, &request_id, "turn-cancelled")
+                    .await
+            {
+                self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
+            }
+            self.permission_changed(&request_id, "cancelled").await;
         }
         result
     }
