@@ -916,7 +916,8 @@ pub async fn delete_session(db: &Db, cookie: &str) -> Result<()> {
 // API tokens
 // ---------------------------------------------------------------------------
 
-/// 'pat' (a user-managed personal access token) or 'local' (the machine token).
+/// 'pat' (a user-managed personal access token), 'local' (the machine token),
+/// or 'engine' (minted per subprocess Loom runs itself).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Pat,
