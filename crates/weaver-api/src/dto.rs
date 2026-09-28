@@ -223,9 +223,18 @@ pub struct SessionSummaryView {
     pub profile: String,
     #[serde(default)]
     pub usage: Option<AcpUsage>,
+    /// Unanswered ACP tool permissions in journal order.
+    #[serde(default)]
+    pub pending_permissions: Vec<PendingPermissionView>,
     #[serde(default)]
     pub placement: Option<SessionPlacementView>,
     pub branch: BranchSummaryView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PendingPermissionView {
+    pub request_id: String,
+    pub title: String,
 }
 
 /// The complete session view, as against the compact
@@ -235,6 +244,8 @@ pub struct SessionSummaryView {
 pub struct SessionView {
     pub id: String,
     pub status: String,
+    #[serde(default)]
+    pub pending_permissions: Vec<PendingPermissionView>,
     #[serde(default)]
     pub transition: Option<SessionTransitionView>,
     pub work_dir: String,

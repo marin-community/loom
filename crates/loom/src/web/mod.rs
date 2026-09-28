@@ -380,6 +380,7 @@ pub(crate) async fn session_view(
     } else {
         None
     };
+    let pending_permissions = pending_permissions_view(db, session).await?;
     let mcp_policy = serde_json::from_str::<McpPolicySnapshot>(&session.policy_mcp_access)
         .map(|snapshot| SessionMcpPolicyView::from(&snapshot))
         .map_err(|error| {
@@ -423,6 +424,7 @@ pub(crate) async fn session_view(
     Ok(SessionView {
         id: session.id.clone(),
         status: session.status.clone(),
+        pending_permissions,
         transition: session_transition_view(session),
         work_dir: session.work_dir.clone(),
         term_session: session.term_session.clone(),
@@ -492,6 +494,7 @@ pub(crate) async fn session_summary_view(
     } else {
         None
     };
+    let pending_permissions = pending_permissions_view(db, session).await?;
     let placement = crate::session_layout::placement(db, &session.id).await?;
     Ok(SessionSummaryView {
         id: session.id.clone(),
@@ -512,9 +515,33 @@ pub(crate) async fn session_summary_view(
         tracking_issue: session.tracking_issue_id,
         profile: session.profile.clone(),
         usage,
+        pending_permissions,
         placement,
         branch: BranchSummaryView::from(&branch),
     })
+}
+
+async fn pending_permissions_view(
+    db: &Db,
+    session: &Session,
+) -> ApiResult<Vec<weaver_api::PendingPermissionView>> {
+    if session.protocol != "acp" || session.status == "archived" {
+        return Ok(Vec::new());
+    }
+    Ok(crate::chat::open_permissions(db, &session.id)
+        .await?
+        .into_iter()
+        .map(|block| weaver_api::PendingPermissionView {
+            request_id: block.payload["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            title: block.payload["title"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        })
+        .collect())
 }
 
 fn session_transition_view(session: &Session) -> Option<weaver_api::SessionTransitionView> {
