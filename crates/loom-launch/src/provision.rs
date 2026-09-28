@@ -1065,6 +1065,33 @@ async fn create_inner(
             None => None,
         }
     };
+    // Loom CLI children omit this field; inherit from their exact parent.
+    let parent_guidance = if let Some(id) = parent_session_id.as_deref() {
+        session_mod::get(&st.db, id)
+            .await?
+            .and_then(|session| guidance_from_snapshot(&session.launch_snapshot))
+    } else {
+        None
+    };
+    let guidance = req.launch_guidance.as_ref().or(parent_guidance.as_ref());
+    if let Some(guidance) = guidance {
+        for text in [&guidance.root, &guidance.child] {
+            if text.trim().is_empty() || text.len() > 4096 {
+                return Err(ProvisionError::invalid(
+                    "launch guidance must have nonempty root and child text under 4096 bytes each",
+                ));
+            }
+        }
+    }
+    let is_worker = parent_session_id.is_some();
+    let launch_snapshot = if let Some(guidance) = guidance {
+        let mut snapshot: serde_json::Value = serde_json::from_str(&launch_snapshot)
+            .map_err(|error| ProvisionError::internal(error.to_string()))?;
+        snapshot["launch_guidance"] = json!(guidance);
+        snapshot.to_string()
+    } else {
+        launch_snapshot
+    };
     let (creator_kind, creator_subject) = actor.creator_identity();
     let launch_policy = session_mod::SessionLaunchPolicy {
         profile: profile_name.clone(),
@@ -1127,13 +1154,23 @@ async fn create_inner(
     let goal_file = {
         let scratch = scratch_note(&scratch_names);
         let entrance = entrance_note(tracking_issue);
-        let launch_prompt = build_launch_prompt(
+        let mut launch_prompt = build_launch_prompt(
             &goal,
             &launch_profile.prelude,
             &launch_profile.instructions,
             &entrance,
             scratch.as_deref(),
         );
+        if let Some(guidance) = guidance {
+            if !launch_prompt.is_empty() {
+                launch_prompt.push_str("\n\n");
+            }
+            launch_prompt.push_str(if is_worker {
+                &guidance.child
+            } else {
+                &guidance.root
+            });
+        }
         if launch_prompt.is_empty() {
             None
         } else {
@@ -1485,6 +1522,16 @@ async fn create_inner(
     Ok(Provisioned { session, branch })
 }
 
+/// Client guidance stays in the snapshot so CLI children inherit it without
+/// changing the caller's selected agent or profile.
+fn guidance_from_snapshot(snapshot: &str) -> Option<weaver_api::SessionLaunchGuidance> {
+    serde_json::from_str::<serde_json::Value>(snapshot)
+        .ok()?
+        .get("launch_guidance")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
 /// Session-specific operating context appended after the goal. This short
 /// command map reaches agents whose provider does not inject the primer.
 /// `loom summary` recovers context but is not a mandatory first turn.
@@ -1817,6 +1864,18 @@ mod tests {
         assert!(untracked.contains("loom summary"));
         assert!(untracked.contains("--tag attention"));
         assert!(!untracked.contains("issue"));
+    }
+
+    #[test]
+    fn launch_guidance_survives_snapshot_and_is_absent_by_default() {
+        assert!(guidance_from_snapshot("{}").is_none());
+        assert!(guidance_from_snapshot("not json").is_none());
+        let guidance = guidance_from_snapshot(
+            r#"{"launch_guidance":{"root":"Delegate work","child":"Report result"}}"#,
+        )
+        .unwrap();
+        assert_eq!(guidance.root, "Delegate work");
+        assert_eq!(guidance.child, "Report result");
     }
 
     #[test]

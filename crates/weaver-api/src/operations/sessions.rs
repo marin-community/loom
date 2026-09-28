@@ -599,6 +599,10 @@ pub mod launch {
         pub class: Option<String>,
         /// Named launch profile; blank selects `default`.
         pub profile: Option<String>,
+        /// Per-role startup guidance supplied by the client and inherited by
+        /// delegated sessions, without changing their selected profile.
+        #[operand(json, skip_cli)]
+        pub launch_guidance: Option<SessionLaunchGuidance>,
         /// A pre-existing Loom backlog item to claim for this session.
         pub claim_issue: Option<i64>,
         /// An existing GitHub issue number to seed the session from.

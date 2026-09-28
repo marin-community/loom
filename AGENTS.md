@@ -77,6 +77,9 @@ WEAVER_HOME=$(mktemp -d) loom server run --addr 127.0.0.1:0
 
 ## Landing changes
 
+These are the default rules for work on Loom itself. A session's explicit
+client-supplied launch guidance takes precedence for its own delivery workflow.
+
 The full commit → lint-review decision → PR → CI handoff flow is the
 **`pull-request` skill**
 ([.agents/skills/pull-request.md](.agents/skills/pull-request.md)) — invoke it
