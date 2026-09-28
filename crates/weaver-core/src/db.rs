@@ -184,7 +184,16 @@ pub fn now_iso() -> String {
 /// string comparison against `*_at` columns is sound. Returns `None` when the
 /// requested interval or resulting instant is outside chrono's range.
 pub fn iso_in_days(days: i64) -> Option<String> {
-    let delta = chrono::TimeDelta::try_days(days)?;
+    iso_after(chrono::TimeDelta::try_days(days)?)
+}
+
+/// The instant `seconds` seconds from now, in the same stored format as
+/// [`now_iso`]. A negative interval yields an instant already in the past.
+pub fn iso_in_seconds(seconds: i64) -> Option<String> {
+    iso_after(chrono::TimeDelta::try_seconds(seconds)?)
+}
+
+fn iso_after(delta: chrono::TimeDelta) -> Option<String> {
     chrono::Utc::now()
         .checked_add_signed(delta)
         .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())

@@ -471,12 +471,13 @@ client id and secret into Settings → Integrations (or set `LOOM_GITHUB_CLIENT_
 Behind a **same-host reverse proxy** the proxy's forwarded requests appear to
 come from loopback, so set `auth.trust_loopback false` and `auth.cookie_secure
 true`. Local automation keeps working: loom mints a machine-local token (at
-`~/.weaver/loom-token`, mode 0600) and hands it to its own subprocesses, so only
-genuinely remote callers need to present a token or log in. Once
-`auth.github_organizations` has been enabled, Loom permanently latches that
-database into shared-deployment mode and ignores both loopback trust and the
-machine-local token; every request instead resolves to a manual user or an
-organization-authorized user with a current lease.
+`~/.weaver/loom-token`, mode 0600) for the `loom` CLI and a short-lived engine
+token for each of its own subprocesses, so only genuinely remote callers need
+to present a token or log in. Once `auth.github_organizations` has been
+enabled, Loom permanently latches that database into shared-deployment mode and
+ignores both loopback trust and the machine-local token; every request instead
+resolves to a manual user, an organization-authorized user with a current
+lease, or an engine token minted for a watch script or the scratch shell.
 
 ## Configuration
 

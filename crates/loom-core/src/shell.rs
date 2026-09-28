@@ -33,7 +33,7 @@ use anyhow::Result;
 use crate::agent;
 use crate::backend;
 use crate::session::Session;
-use crate::{agent_env, Ctx};
+use crate::{agent_env, auth, Ctx};
 
 /// The fixed supervisor name for the operator scratch shell. Distinct from any
 /// agent session's `term_session` (those are random ids), so it never collides.
@@ -57,24 +57,27 @@ fn bare_shell_script() -> String {
 
 /// Build the launch script **and** environment for the operator scratch shell.
 /// The env is `WEAVER_API` + `LOOM_TOKEN` so the in-place `weaver`/`loom` CLIs
-/// work, plus the operator-managed [`agent_env`] vars. The script just `exec`s
-/// the login shell via
+/// work, plus the operator-managed [`agent_env`] vars. The token is an engine
+/// credential minted for this shell; any predecessor shell's credential is
+/// retired first, since the shell may have died without one. The script just
+/// `exec`s the login shell via
 /// [`agent::bare_shell_script`] (no inner agent command); the env is delivered
 /// out of band by the [`backend`] launch helpers, not `export`-ed into the script, so
 /// secrets stay off argv. This is a plain shell, not an agent, so it does not go
 /// through the agent launch path.
-async fn shell_script(st: &Ctx) -> (String, Vec<(String, String)>) {
+async fn shell_script(st: &Ctx) -> Result<(String, Vec<(String, String)>)> {
     let api_url = format!("http://{}", st.addr);
-    let local_token = agent::read_local_token();
+    auth::revoke_engine_tokens_named(&st.db, auth::SHELL_ENGINE_TOKEN_NAME).await?;
+    let token = auth::create_engine_token(&st.db, auth::SHELL_ENGINE_TOKEN_NAME, None).await?;
     let extra = agent_env::pairs(&st.db).await.unwrap_or_default();
 
-    let mut env: Vec<(String, String)> = vec![("WEAVER_API".to_string(), api_url)];
-    if let Some(token) = local_token {
-        env.push(("LOOM_TOKEN".to_string(), token));
-    }
+    let mut env: Vec<(String, String)> = vec![
+        ("WEAVER_API".to_string(), api_url),
+        ("LOOM_TOKEN".to_string(), token.value),
+    ];
     env.extend(extra);
 
-    (bare_shell_script(), env)
+    Ok((bare_shell_script(), env))
 }
 
 /// Borrow an owned env pair list as the `&[(&str, &str)]` slice
@@ -90,7 +93,7 @@ pub async fn ensure(st: &Ctx) -> Result<()> {
     if backend::has_session(SHELL_SESSION).await {
         return Ok(());
     }
-    let (script, env) = shell_script(st).await;
+    let (script, env) = shell_script(st).await?;
     let cwd = shell_cwd();
     tracing::info!(session = SHELL_SESSION, cwd = %cwd.display(), "spawning operator scratch shell");
     backend::new_session_on_host(SHELL_SESSION, &cwd, &script, &env_refs(&env), false).await

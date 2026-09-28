@@ -931,6 +931,11 @@ struct ScriptOutput {
     duration_ms: i64,
 }
 
+/// Name recorded on the credential minted for each watch script spawn.
+const ENGINE_TOKEN_NAME: &str = "watch script";
+/// Slack past the round budget before a spawn's credential lapses on its own.
+const ENGINE_TOKEN_GRACE_SECS: i64 = 60;
+
 /// Calling-agent credentials and lifecycle markers that a watch program must
 /// not inherit. Watch scripts receive only their explicit Loom REST capability
 /// token; GitHub state reaches builtins through Loom's API snapshots.
@@ -1020,16 +1025,23 @@ async fn spawn_script(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    // The script reaches the daemon over the REST API; hand it the machine-local
-    // token so it authenticates even when loopback trust is off.
-    if let Some(token) = crate::agent::read_local_token() {
-        command.env("LOOM_TOKEN", token);
-    }
+    // The script reaches the daemon over the REST API with a credential minted
+    // for this spawn alone. The machine-local token would not do: shared
+    // deployments reject it. The expiry backstops a round the budget cancels
+    // before the revoke below runs.
+    let ttl = get_int(&state.db, "watch.default_timeout_secs", 600)
+        .await
+        .max(1)
+        + ENGINE_TOKEN_GRACE_SECS;
+    let token = crate::auth::create_engine_token(&state.db, ENGINE_TOKEN_NAME, Some(ttl)).await?;
+    command.env("LOOM_TOKEN", &token.value);
     for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
     let started = std::time::Instant::now();
-    let out = command.output().await.map_err(|e| {
+    let out = command.output().await;
+    crate::auth::revoke_engine_token(&state.db, &token.id).await?;
+    let out = out.map_err(|e| {
         anyhow::anyhow!("spawning {interpreter} failed: {e} (is {interpreter} installed?)")
     })?;
     Ok(ScriptOutput {
@@ -1504,8 +1516,13 @@ mod tests {
 
     /// An `AppState` over a fresh in-memory db plus a watch registered on
     /// `program` — the minimum for a [`fire`] round to run a script end to end.
+    /// A booted server always has a primary user; the spawn's credential is
+    /// minted in that user's name.
     async fn script_fixture(program: &str) -> (AppState, Watch) {
         let db = crate::db::connect_in_memory().await.unwrap();
+        crate::auth::add_user(&db, "owner", None, None, None, crate::auth::UserRole::Admin)
+            .await
+            .unwrap();
         let state = AppState {
             ctx: crate::Ctx {
                 db: db.clone(),

@@ -958,6 +958,60 @@ async fn watch_subprocess_does_not_receive_github_credentials() {
     );
 }
 
+/// Shared-deployment mode rejects the machine-local token and loopback trust,
+/// so a watch round must authenticate with the credential minted for its spawn.
+#[tokio::test]
+#[serial]
+async fn watch_round_authenticates_in_shared_deployment_mode() {
+    if !python3_available() {
+        eprintln!("skipping: python3 not on PATH");
+        return;
+    }
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    let (session_id, _branch, _repo) = make_session(&ts, "shared work").await;
+    set_config(&state, "auth.trust_loopback", "false").await;
+    core_config::latch_github_organization_shared_mode(&state.db)
+        .await
+        .unwrap();
+
+    let o = enabled_watch(
+        &state,
+        watch_store::NewWatch {
+            name: "shared-survey".to_string(),
+            trigger_spec: json!({ "on": ["session.idle"] }).to_string(),
+            scope: json!({}).to_string(),
+            program: survey_program(),
+            capabilities: vec!["observe".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let run_id = watch::fire_now(&state, &o.name, false, "manual")
+        .await
+        .unwrap();
+    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+        .await
+        .unwrap();
+    let run = runs.iter().find(|r| r.id == run_id).unwrap();
+    assert_eq!(
+        run.outcome, "ok",
+        "round failed: {} / {}",
+        run.summary, run.stderr
+    );
+    assert_eq!(surveyed_ids(run), vec![session_id]);
+
+    let leftover: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_tokens WHERE kind = 'engine'")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(
+        leftover, 0,
+        "the spawn's credential is revoked after the round"
+    );
+}
+
 /// A stored PR snapshot for a branch, as the GitHub poll loop would write it.
 fn pr_snapshot(state: &str, number: i64) -> weaver_core::github::GithubStatus {
     weaver_core::github::GithubStatus {
