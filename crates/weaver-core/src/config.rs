@@ -583,12 +583,12 @@ pub const REGISTRY: &[SettingSpec] = &[
         label: "Session memory limit (GiB)",
         description: "Memory ceiling for each terminal session — the agent and \
             everything it spawns. The docker session runner applies it as the \
-            session container's memory limit, never above the host's physical \
-            memory; with a delegated cgroup subtree (the standalone Docker \
-            deploy prepares one at boot) it becomes a per-session cgroup cap; \
-            elsewhere sessions run unlimited. Keep it well below host memory \
-            so concurrent sessions fit. 0 disables the limit. Takes effect for \
-            sessions launched after the change.",
+            session container's memory limit; with a delegated cgroup subtree \
+            (the standalone Docker deploy prepares one at boot) it becomes a \
+            per-session cgroup cap; elsewhere sessions run unlimited. The \
+            effective limit never exceeds the host's physical memory. Keep it \
+            well below host memory so concurrent sessions fit. 0 disables the \
+            limit. Takes effect for sessions launched after the change.",
         kind: SettingKind::Int,
         default: "8",
         group: "Sessions",

@@ -286,16 +286,9 @@ impl Runner for ContainerRunner {
             None => {}
         }
 
-        let host_total = std::fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|meminfo| {
-                meminfo
-                    .lines()
-                    .find_map(|line| line.strip_prefix("MemTotal:"))
-                    .and_then(|value| value.split_whitespace().next())
-                    .and_then(|kib| kib.parse::<u64>().ok())
-                    .map(|kib| kib * 1024)
-            });
+        let mut host = sysinfo::System::new();
+        host.refresh_memory();
+        let host_total = (host.total_memory() > 0).then(|| host.total_memory());
         let body = self.create_body(opts, memory_max_gb, host_total)?;
         let spec = tapestry::encode_launch_spec(opts, &[("WEAVER_API", &self.config.api_url)])?;
         let options = CreateContainerOptionsBuilder::default()

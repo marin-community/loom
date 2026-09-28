@@ -43,6 +43,7 @@ tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 # The suites here share process-global env (WEAVER_HOME and friends), so they

@@ -188,14 +188,13 @@ and an unconfined seccomp profile. The first two let `loom-cgroup-init`
 (root-only, via a single sudoers line) remount the container's own cgroup-v2
 tree read-write and delegate an `agents/` subtree to the app user, which is what
 lets loom confine **each session to its own memory cgroup** (the
-`session.memory_max_gb` setting, default 8 GiB). A runaway agent process is
-then OOM-killed inside its session instead of stalling the whole VM. With
-`LOOM_RUNNER=docker` (this stack's default) the same setting is also applied
-as each session container's memory limit, clamped to the host's physical
-memory — a larger limit could never engage on its own, because the kernel's
-global OOM killer fires before any single cgroup reaches it. On Docker
-Desktop the "host" is the Linux VM, so size the setting against the VM's
-allocation, not the Mac's RAM. Next to
+`session.memory_max_gb` setting, default 8 GiB), clamped to the host's
+physical memory. A
+runaway agent process is then OOM-killed inside its session instead of
+stalling the whole VM. With `LOOM_RUNNER=docker` (this stack's default) the
+same setting is also applied as each session container's memory limit. On
+Docker Desktop the "host" is the Linux VM, so size the setting against the
+VM's allocation, not the Mac's RAM. Next to
 the docker.sock mount these grants add no real capability on this box. The
 seccomp exception additionally lets bubblewrap create the namespaces that
 Codex and Claude use for command sandboxing. Remove the first two and loom
@@ -457,13 +456,12 @@ The agent tooling the image ships splits by how it updates:
 
   ```sh
   docker compose exec loom npm i -g <package>      # node CLIs → ~/.npm-global
-  docker compose exec loom uv tool install <tool>  # python CLIs → ~/.local
+  docker compose exec loom uv tool install <tool>  # python CLIs → ~/.local/bin
   ```
 
 - **Bounding Rust build cpu or memory.** Cargo and clippy default to one
   parallel `rustc` per CPU. Set `CARGO_BUILD_JOBS` to limit the number of
   cores cargo uses, which limits build memory with it.
-
 
   System packages work too, without a rebuild: the app user may run `apt-get`,
   `apt` and `dpkg` under `sudo` (nothing else — see
