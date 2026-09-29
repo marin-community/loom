@@ -174,7 +174,7 @@ async fn reconcile_deployment_core(
         .collect();
     let removed_users = auth::reconcile_deployment_users(&st.db, &users, req.prune)
         .await
-        .map_err(|error| AppError::bad_request(error.to_string()))?;
+        .map_err(|error| AppError::bad_request(format!("{error:#}")))?;
 
     let mut profile_views = Vec::new();
     for name in profile_names {

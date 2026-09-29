@@ -654,46 +654,43 @@ pub async fn reconcile_deployment_users(
 
     let mut tx = db.begin().await?;
     for user in users {
+        sqlx::query(
+            "INSERT INTO users (username, github_login, github_user_id, role, deployment_managed)
+             VALUES (?, ?, ?, 'user', 1) ON CONFLICT(username) DO NOTHING",
+        )
+        .bind(&user.username)
+        .bind(&user.github_login)
+        .bind(user.github_user_id)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("adding deployment user '{}'", user.username))?;
         let existing = sqlx::query(
             "SELECT github_user_id, role, authorization_kind, deployment_managed
              FROM users WHERE username = ?",
         )
         .bind(&user.username)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
-        if let Some(existing) = existing {
-            let managed = existing.get::<bool, _>("deployment_managed");
-            let id = existing.get::<Option<i64>, _>("github_user_id");
-            let role = existing.get::<UserRole, _>("role");
-            let kind = existing.get::<UserAuthorizationKind, _>("authorization_kind");
-            if !managed
-                || id != Some(user.github_user_id)
-                || role != UserRole::User
-                || kind != UserAuthorizationKind::Manual
-            {
-                return Err(anyhow!(
-                    "deployment user '{}' conflicts with an existing operator",
-                    user.username
-                ));
-            }
-            sqlx::query("UPDATE users SET github_login = ? WHERE username = ?")
-                .bind(&user.github_login)
-                .bind(&user.username)
-                .execute(&mut *tx)
-                .await
-                .with_context(|| format!("updating deployment user '{}'", user.username))?;
-        } else {
-            sqlx::query(
-                "INSERT INTO users (username, github_login, github_user_id, role, deployment_managed)
-                 VALUES (?, ?, ?, 'user', 1)",
-            )
-            .bind(&user.username)
+        let managed = existing.get::<bool, _>("deployment_managed");
+        let id = existing.get::<Option<i64>, _>("github_user_id");
+        let role = existing.get::<UserRole, _>("role");
+        let kind = existing.get::<UserAuthorizationKind, _>("authorization_kind");
+        if !managed
+            || id != Some(user.github_user_id)
+            || role != UserRole::User
+            || kind != UserAuthorizationKind::Manual
+        {
+            return Err(anyhow!(
+                "deployment user '{}' conflicts with an existing operator",
+                user.username
+            ));
+        }
+        sqlx::query("UPDATE users SET github_login = ? WHERE username = ?")
             .bind(&user.github_login)
-            .bind(user.github_user_id)
+            .bind(&user.username)
             .execute(&mut *tx)
             .await
-            .with_context(|| format!("adding deployment user '{}'", user.username))?;
-        }
+            .with_context(|| format!("updating deployment user '{}'", user.username))?;
     }
 
     let mut removed = Vec::new();
