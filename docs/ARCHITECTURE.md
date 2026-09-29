@@ -450,6 +450,16 @@ appending under the child's identity would subscribe it to the parent channel
 and widen its access. This handoff grants the child no access to the parent
 channel.
 
+The acknowledgement closes the loop: when the parent consumes the result —
+any `channels.read_marker.set` on the child's channel, which is what `loom
+channels ack` and every `loom channels read` perform — the server clears the
+child's raised `attention` tag as a system mutation and records a `tag` event
+so the fleet view refreshes. Only the parent `parent_session_id` names may
+clear it (a grandparent or sibling reading the same channel does not), and
+`blocked` survives: acknowledgement retires "work is ready for review", not
+"this session is stuck". Without this rule the child sits in the operator's
+Needs You view forever after its result is consumed.
+
 One capability is narrower now: an automation credential reaches no raw path,
 only `actor = Internal` operations — `runs.create` alone. Nothing used its old
 ability to `GET /sessions/{id}` for sessions it had created, so the narrowing

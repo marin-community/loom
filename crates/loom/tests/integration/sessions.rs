@@ -1572,3 +1572,331 @@ async fn issue_hiding_follows_the_branch_current_claim_holder() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Acknowledged child results stand down from attention
+//
+// A child raises `--tag attention` when its delegated work is ready for review.
+// The parent consumes the result by reading the child's channel, and that
+// acknowledgement (`channels.read_marker.set` — `loom channels ack`) is what
+// retires the tag. Without it the child sits in the operator's Needs You view
+// forever (the Arachne postmortems); the tests below pin each guard of the rule.
+// ---------------------------------------------------------------------------
+
+/// The fixture every acknowledgement case needs: a parent and a child launched
+/// with the parent's credential (so `parent_session_id` is set), both with
+/// tokens, and the child's `attention` tag raised at `level` — the state
+/// `loom status set --tag <level>` leaves behind.
+async fn acknowledgement_fixture(level: &str) -> (TestServer, String, String, String) {
+    let ts = TestServer::start().await;
+    let parent = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "ack parent", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let parent_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &parent_id,
+        parent["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+
+    // The child of the parent, launched with the parent's credential.
+    let child = launch_with(&ts, &parent_token, "ack child").await;
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    ts.client
+        .post(
+            "/api/sessions/tags/set",
+            json!({
+                "session": child_id,
+                "key": "attention",
+                "value": level,
+                "note": "ready for review",
+                "by": "agent"
+            }),
+        )
+        .await
+        .unwrap();
+    (ts, parent_id, parent_token, child_id)
+}
+
+/// Launch a session holding `credential`, returning its JSON view.
+async fn launch_with(ts: &TestServer, credential: &str, goal: &str) -> serde_json::Value {
+    let http = reqwest::Client::new();
+    let response = http
+        .post(format!("http://{}/api/sessions/launch", ts.addr))
+        .bearer_auth(credential)
+        .json(&json!({ "cwd": ts.cwd(), "goal": goal, "agent": "shell" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    response.json().await.unwrap()
+}
+
+/// A session token for `session`'s JSON view.
+async fn token_for(ts: &TestServer, session: &serde_json::Value) -> String {
+    loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        session["id"].as_str().unwrap(),
+        session["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+/// The child's tags, read through `sessions.get` (tags live on the branch).
+async fn child_tags(ts: &TestServer, child_id: &str) -> serde_json::Value {
+    ts.client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap()["branch"]["tags"]
+        .clone()
+}
+
+/// Acknowledge `channel` as `credential`, asserting the request succeeds.
+async fn acknowledge(ts: &TestServer, credential: &str, channel: &str) {
+    let http = reqwest::Client::new();
+    let response = http
+        .post(format!("http://{}/api/channels/read_marker/set", ts.addr))
+        .bearer_auth(credential)
+        .json(&json!({ "channel": channel }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "acknowledging {channel} should succeed"
+    );
+}
+
+/// The parent acknowledging the child's channel clears the raised `attention`
+/// tag, and a second acknowledgement is a no-op (idempotent).
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_ack_clears_child_attention() {
+    let (ts, _parent_id, parent_token, child_id) = acknowledgement_fixture("attention").await;
+
+    // Before: the tag is raised.
+    let tags = child_tags(&ts, &child_id).await;
+    assert_eq!(tags[0]["key"], "attention");
+    assert_eq!(tags[0]["value"], "attention");
+
+    acknowledge(&ts, &parent_token, &child_id).await;
+
+    // After: the tag is gone — absence is the calm state.
+    let tags = child_tags(&ts, &child_id).await;
+    assert!(
+        tags.as_array().unwrap().is_empty(),
+        "the acknowledged child's attention tag should be cleared, got {tags}"
+    );
+
+    // The clear is a durable `tag` event the fleet view and its watches
+    // refresh from, attributed to the server rather than the agent.
+    let events = ts
+        .client
+        .post("/api/sessions/events/list", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    let clears = events
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            event["kind"] == "tag"
+                && event["data"]["key"] == "attention"
+                && event["data"]["value"] == ""
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        clears.len(),
+        1,
+        "the acknowledgement should record one tag-clear event, got {events}"
+    );
+    assert!(
+        clears[0]["data"]["by"]
+            .as_str()
+            .unwrap()
+            .starts_with("system:loom/parent-read:"),
+        "the clear is authored by the server on the parent's behalf, got {}",
+        clears[0]["data"]["by"]
+    );
+
+    // Idempotent: a second acknowledgement succeeds, changes nothing, and
+    // records no further tag event.
+    acknowledge(&ts, &parent_token, &child_id).await;
+    let tags = child_tags(&ts, &child_id).await;
+    assert!(tags.as_array().unwrap().is_empty());
+}
+
+/// A blocked child is preserved: acknowledgement retires `attention` (the work
+/// was consumed) but `blocked` states the session cannot proceed at all, so it
+/// stays until its author resolves it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_ack_preserves_blocked_child() {
+    let (ts, _parent_id, parent_token, child_id) = acknowledgement_fixture("blocked").await;
+
+    acknowledge(&ts, &parent_token, &child_id).await;
+
+    let tags = child_tags(&ts, &child_id).await;
+    assert_eq!(
+        tags[0]["value"], "blocked",
+        "a blocked child's tag must survive acknowledgement, got {tags}"
+    );
+}
+
+/// Only the paired parent may clear. Two non-parent ackers, both of which can
+/// otherwise reach the channel: the child's *grandparent* (an ancestor —
+/// `channel_belongs_to_session_tree` reaches down the whole tree) and an
+/// unrelated session (which the channel scope refuses outright). Neither
+/// clears the tag; the direct parent's acknowledgement still does.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_parent_ack_does_not_clear_child_attention() {
+    let (ts, _parent_id, parent_token, child_id) = acknowledgement_fixture("attention").await;
+
+    // The grandchild, launched with the child's credential: the parent is its
+    // grandparent — close enough to reach the grandchild's channel through the
+    // tree, but not the parent `parent_session_id` names.
+    let child_token = token_for(
+        &ts,
+        &ts.client
+            .post("/api/sessions/get", json!({ "session": child_id }))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let grandchild = launch_with(&ts, &child_token, "ack grandchild").await;
+    let grandchild_id = grandchild["id"].as_str().unwrap().to_string();
+    ts.client
+        .post(
+            "/api/sessions/tags/set",
+            json!({
+                "session": grandchild_id,
+                "key": "attention",
+                "value": "attention",
+                "by": "agent"
+            }),
+        )
+        .await
+        .unwrap();
+
+    // The grandparent's acknowledgement reaches the channel but does not
+    // clear: only the parent `parent_session_id` names may.
+    acknowledge(&ts, &parent_token, &grandchild_id).await;
+    let tags = child_tags(&ts, &grandchild_id).await;
+    assert_eq!(
+        tags[0]["value"], "attention",
+        "a grandparent acknowledgement must not clear the tag, got {tags}"
+    );
+
+    // An unrelated session is refused by the channel scope before the guard
+    // is even reached.
+    let stranger = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "stranger", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let stranger_token = token_for(&ts, &stranger).await;
+    let http = reqwest::Client::new();
+    let response = http
+        .post(format!("http://{}/api/channels/read_marker/set", ts.addr))
+        .bearer_auth(&stranger_token)
+        .json(&json!({ "channel": grandchild_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "an unrelated session cannot reach the child's channel"
+    );
+    let tags = child_tags(&ts, &grandchild_id).await;
+    assert_eq!(tags[0]["value"], "attention");
+
+    // The direct parent's acknowledgement still clears it afterwards.
+    acknowledge(&ts, &child_token, &grandchild_id).await;
+    let tags = child_tags(&ts, &grandchild_id).await;
+    assert!(
+        tags.as_array().unwrap().is_empty(),
+        "the direct parent's acknowledgement should clear the tag, got {tags}"
+    );
+}
+
+/// Reading a child's channel through `channels.messages.list` (the path `loom
+/// channels read --channel <child-id> --kinds result` performs) acknowledges
+/// the result the same way an explicit `channels ack` does, while a `peek` —
+/// which deliberately does not advance the read marker — does not.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parent_read_of_child_channel_clears_attention() {
+    let (ts, _parent_id, parent_token, child_id) = acknowledgement_fixture("attention").await;
+
+    // The child posts the typed result its attention tag announces.
+    let child_token = token_for(
+        &ts,
+        &ts.client
+            .post("/api/sessions/get", json!({ "session": child_id }))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let http = reqwest::Client::new();
+    let result = http
+        .post(format!("http://{}/api/channels/messages/create", ts.addr))
+        .bearer_auth(&child_token)
+        .json(&json!({
+            "channel": child_id,
+            "kind": "result",
+            "body": "the implementation is ready",
+            "idempotency_key": "parent-read-once"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(result.status(), reqwest::StatusCode::OK);
+
+    // A peek reads without acknowledging.
+    let http = reqwest::Client::new();
+    let peeked = http
+        .post(format!("http://{}/api/channels/messages/list", ts.addr))
+        .bearer_auth(&parent_token)
+        .json(&json!({ "channel": child_id, "kinds": ["result"], "peek": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(peeked.status(), reqwest::StatusCode::OK);
+    let tags = child_tags(&ts, &child_id).await;
+    assert_eq!(
+        tags[0]["value"], "attention",
+        "a peek must not acknowledge, got {tags}"
+    );
+
+    // The ordinary read — what consumes the result — clears it.
+    let read = http
+        .post(format!("http://{}/api/channels/messages/list", ts.addr))
+        .bearer_auth(&parent_token)
+        .json(&json!({ "channel": child_id, "kinds": ["result"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), reqwest::StatusCode::OK);
+    let tags = child_tags(&ts, &child_id).await;
+    assert!(
+        tags.as_array().unwrap().is_empty(),
+        "reading the child's channel should clear the attention tag, got {tags}"
+    );
+}

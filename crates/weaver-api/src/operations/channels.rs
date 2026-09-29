@@ -212,7 +212,10 @@ pub mod read_marker {
     pub mod set {
         use super::prelude::*;
 
-        /// Acknowledge a channel through a sequence number.
+        /// Acknowledge a channel through a sequence number. When the caller is
+        /// the parent of the channel's session, the acknowledgement also
+        /// retires that child's raised `attention` tag (blocked is preserved);
+        /// `channels.messages.list` without `peek` acknowledges the same way.
         #[operation(id = "channels.read_marker.set", actor = SessionSelf, scope = Channel,
                     risk = Write, grants = ["loom/channels/write@v1"], cli = "channels ack",
                     render = custom)]

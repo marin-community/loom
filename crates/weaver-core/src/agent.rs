@@ -55,7 +55,7 @@ You are working in a detached Loom session. Your opening task is the goal.
 - Report progress or a need for help: `loom status set --tag ok --message "tests running"` (use `attention` or `blocked` when a person must act).
 - Read and send durable messages: `loom channels read`; `loom channels send "question or update"`.
 - Save a deliverable: `loom artifacts write plan plan.md`. Delegate: `loom sessions launch "implement the parser"`.
-- Read a child's result: `loom channels read --channel <child-id> --kinds result`. A child's typed result also notifies its parent channel.
+- Read a child's result: `loom channels read --channel <child-id> --kinds result`. A child's typed result also notifies its parent channel; reading it also clears the child's raised attention flag.
 - Finish delegated work: `loom channels send --kind result "<outcome or PR>"`.
 
 Repository-specific engineering and landing rules live in `AGENTS.md`.
