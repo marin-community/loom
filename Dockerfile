@@ -446,7 +446,7 @@ cat > /usr/local/bin/loom-entrypoint <<'SH'
 set -eu
 if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
   claude_version="${CLAUDE_CODE_VERSION:-2.1.280}"
-  codex_version="${CODEX_CLI_VERSION:-0.156.1}"
+  codex_version="${CODEX_CLI_VERSION:-0.159.1}"
   if [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" != "$claude_version (Claude Code)" ]; then
     echo "loom: installing Claude Code $claude_version into $HOME/.local ..." >&2
     curl -fsSL https://claude.ai/install.sh | bash -s -- "$claude_version"

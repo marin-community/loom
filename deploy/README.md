@@ -429,7 +429,7 @@ The agent tooling the image ships splits by how it updates:
   `loom_home` volume (`~/.local/bin`). Updates survive `up`/`down`/recreate.
   On every server start, the entrypoint
   checks the installed versions against `CLAUDE_CODE_VERSION` (default
-  `2.1.280`) and `CODEX_CLI_VERSION` (default `0.156.1`). It installs a
+  `2.1.280`) and `CODEX_CLI_VERSION` (default `0.159.1`). It installs a
   mismatched version before starting Loom and fails startup if either pinned
   version is unavailable. The ACP adapters are checked and installed the same
   way, at `CLAUDE_ACP_VERSION=0.81.1` and `CODEX_ACP_VERSION=1.13.1` by default.
