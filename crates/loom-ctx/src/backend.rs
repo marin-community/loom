@@ -92,18 +92,29 @@ pub async fn memory_max_gb(db: &Db) -> u64 {
 /// delegated subtree the standalone deploy prepares at boot); elsewhere the
 /// guard falls through silently. A *failed* confinement attempt, by contrast,
 /// warns into the session terminal so an unlimited session is visible.
+///
+/// The cap is clamped to the host's physical memory at run time: the shell
+/// takes the minimum of the configured ceiling and MemTotal.
+/// `memory.swap.max` is zeroed so the ceiling can't
+/// leak into swap on a host that has any, but best-effort: the file is
+/// missing on kernels without swap accounting, and the RAM cap alone is
+/// still worth keeping.
 fn memory_prelude(name: &str, memory_max_gb: u64) -> String {
     let dir = format!("{AGENT_CGROUP_DIR}/{name}");
     let bytes = memory_max_gb.saturating_mul(1024 * 1024 * 1024);
-    // memory.swap.max is zeroed so the ceiling can't leak into swap on a host
-    // that has any, but best-effort: the file is missing on kernels without
-    // swap accounting, and the RAM cap alone is still worth keeping.
     format!(
-        "if [ -w {AGENT_CGROUP_DIR} ]; then \
-if mkdir -p '{dir}' 2>/dev/null && echo {bytes} > '{dir}/memory.max' 2>/dev/null \
+        r#"if [ -w {AGENT_CGROUP_DIR} ]; then
+cap={bytes}
+total=$(awk '/^MemTotal:/ {{printf "%.0f\n", $2 * 1024}}' /proc/meminfo 2>/dev/null)
+if [ -n "$total" ] && [ "$total" -lt "$cap" ]; then
+echo "loom: clamping the {memory_max_gb}g session memory limit to the host's physical memory" >&2
+cap=$total
+fi
+if mkdir -p '{dir}' 2>/dev/null && echo "$cap" > '{dir}/memory.max' 2>/dev/null \
 && echo $$ > '{dir}/cgroup.procs' 2>/dev/null; then \
 echo 0 > '{dir}/memory.swap.max' 2>/dev/null || true; else \
-echo 'loom: warning: could not apply the {memory_max_gb}g session memory limit' >&2; fi; fi\n"
+echo 'loom: warning: could not apply the {memory_max_gb}g session memory limit' >&2; fi; fi
+"#
     )
 }
 
@@ -491,11 +502,12 @@ mod tests {
     fn memory_prelude_confines_the_session_to_its_named_cgroup() {
         let prelude = memory_prelude("weaver-abc123", 8);
         // Guarded on the delegated subtree, so it no-ops where none exists.
-        assert!(prelude.starts_with("if [ -w /sys/fs/cgroup/agents ]; then "));
+        assert!(prelude.starts_with("if [ -w /sys/fs/cgroup/agents ]; then\n"));
         // The limit lands in this session's own cgroup, in bytes.
         assert!(prelude.contains("mkdir -p '/sys/fs/cgroup/agents/weaver-abc123'"));
+        assert!(prelude.contains("cap=8589934592"));
         assert!(
-            prelude.contains("echo 8589934592 > '/sys/fs/cgroup/agents/weaver-abc123/memory.max'")
+            prelude.contains("echo \"$cap\" > '/sys/fs/cgroup/agents/weaver-abc123/memory.max'")
         );
         // The shell moves itself in, so everything it spawns inherits the cap.
         assert!(prelude.contains("echo $$ > '/sys/fs/cgroup/agents/weaver-abc123/cgroup.procs'"));
@@ -505,6 +517,22 @@ mod tests {
         assert!(prelude.contains("could not apply the 8g session memory limit"));
         // Newline-terminated so the launch script proper starts on its own line.
         assert!(prelude.ends_with("fi\n"));
+    }
+
+    #[test]
+    fn memory_prelude_clamps_the_cap_to_host_memory() {
+        let prelude = memory_prelude("weaver-abc123", 8);
+        // The cap is the minimum of the configured ceiling and MemTotal,
+        // printed as a plain integer so shell arithmetic accepts it...
+        assert!(
+            prelude.contains("awk '/^MemTotal:/ {printf \"%.0f\\n\", $2 * 1024}' /proc/meminfo")
+        );
+        // ...taken at run time, so an over-host ceiling is reduced, loudly.
+        assert!(prelude.contains("if [ -n \"$total\" ] && [ \"$total\" -lt \"$cap\" ]"));
+        assert!(prelude.contains("cap=$total"));
+        assert!(prelude.contains("clamping the 8g session memory limit"));
+        // An unreadable MemTotal leaves the configured ceiling alone.
+        assert!(prelude.contains("[ -n \"$total\" ]"));
     }
 
     #[tokio::test]
@@ -530,6 +558,6 @@ mod tests {
     #[test]
     fn memory_prelude_saturates_an_absurd_limit_instead_of_wrapping() {
         let prelude = memory_prelude("s", u64::MAX / 2);
-        assert!(prelude.contains(&format!("echo {} > ", u64::MAX)));
+        assert!(prelude.contains(&format!("cap={}", u64::MAX)));
     }
 }

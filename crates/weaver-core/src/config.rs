@@ -582,13 +582,13 @@ pub const REGISTRY: &[SettingSpec] = &[
         key: "session.memory_max_gb",
         label: "Session memory limit (GiB)",
         description: "Memory ceiling for each terminal session — the agent and \
-            everything it spawns — enforced through a per-session cgroup. When a \
-            session crosses it, the kernel OOM-kills the biggest process inside \
-            that session only; the host and the other sessions are untouched. \
-            Applies where loom runs with a delegated cgroup subtree (the \
-            standalone Docker deploy prepares one at boot); elsewhere sessions \
-            run unlimited. 0 disables the limit. Takes effect for sessions \
-            launched after the change.",
+            everything it spawns. The docker session runner applies it as the \
+            session container's memory limit; with a delegated cgroup subtree \
+            (the standalone Docker deploy prepares one at boot) it becomes a \
+            per-session cgroup cap; elsewhere sessions run unlimited. The \
+            effective limit never exceeds the host's physical memory. Keep it \
+            well below host memory so concurrent sessions fit. 0 disables the \
+            limit. Takes effect for sessions launched after the change.",
         kind: SettingKind::Int,
         default: "8",
         group: "Sessions",
