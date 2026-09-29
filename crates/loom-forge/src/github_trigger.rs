@@ -13,8 +13,8 @@
 //!    submitted `pull_request_review` events, ignoring the bot's own events.
 //! 4. **Match** the trigger phrase ([`is_trigger`]) — a standalone mention
 //!    newly introduced into the request prose, quotes and code excluded.
-//! 5. **Authorize the requester** ([`authorize`]) against loom's approved-user
-//!    allowlist. Anyone else is ignored after an access-info reply; a per-repo
+//! 5. **Authorize the requester** ([`authorize`]) against Loom user grants or
+//!    the trigger-only GitHub ID list. Anyone else gets an access-info reply; a per-repo
 //!    rate limit blunts spam.
 //!
 //! The handler that sequences these steps (and then creates the session and
@@ -553,7 +553,8 @@ pub async fn record_delivery(db: &Db, delivery_id: &str) -> Result<bool> {
 
 pub use weaver_core::github::valid_login;
 
-/// Whether a GitHub identity may trigger a session. A manual grant is durable;
+/// Whether a GitHub identity may trigger a session. A manual grant or a
+/// trigger-only GitHub ID grant is durable;
 /// a current organization lease is accepted without a GitHub round trip. An
 /// expired lease is revalidated with the App installation before the trigger
 /// proceeds, and every non-active result fails closed.
@@ -576,6 +577,24 @@ pub async fn authorize(
             tracing::warn!(%error, login, "trigger denied: approved-user lookup failed");
             return false;
         }
+    }
+
+    let allowed_ids = match config::try_get(db, config::GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY).await {
+        Ok(Some(value)) => match config::parse_github_trigger_allowed_user_ids(&value) {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "invalid GitHub trigger user IDs");
+                Vec::new()
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, "could not read GitHub trigger user IDs");
+            Vec::new()
+        }
+    };
+    if allowed_ids.contains(&github_user_id) {
+        return true;
     }
 
     let authorization = match auth::github_organization_authorization_for_identity(
@@ -1105,7 +1124,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authorize_trusts_approved_users_only() {
+    async fn authorize_trusts_granted_identities_only() {
         let db = crate::db::connect_in_memory().await.unwrap();
         // An approved loom user (their GitHub login is on the `users` allowlist —
         // the same one that gates sign-in) may trigger, with no GitHub call.
@@ -1186,6 +1205,44 @@ mod tests {
         assert!(!authorize(&db, None, "stranger", 303).await);
         // A malformed login is denied before any lookup.
         assert!(!authorize(&db, None, "../etc", 101).await);
+    }
+
+    #[tokio::test]
+    async fn trigger_grant_does_not_bind_an_existing_admin_account() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        auth::add_user(&db, "ci", None, None, None, auth::UserRole::Admin)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET github_login = 'ci' WHERE username = 'ci'")
+            .execute(&db)
+            .await
+            .unwrap();
+        config::apply(
+            &db,
+            &[(
+                config::GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY.to_string(),
+                Some("123".to_string()),
+            )],
+        )
+        .await
+        .unwrap();
+
+        assert!(authorize(&db, None, "ci", 123).await);
+        assert!(!authorize(&db, None, "ci", 42).await);
+        let user = auth::get_user(&db, "ci").await.unwrap().unwrap();
+        assert_eq!(user.github_user_id, None);
+        assert_eq!(user.role, auth::UserRole::Admin);
+
+        config::apply(
+            &db,
+            &[(
+                config::GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY.to_string(),
+                None,
+            )],
+        )
+        .await
+        .unwrap();
+        assert!(!authorize(&db, None, "ci", 123).await);
     }
 
     #[test]

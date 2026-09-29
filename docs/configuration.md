@@ -222,6 +222,11 @@ deployment layer.
 Runtime setting overrides are never pruned. A full desired-state manifest
 should use `prune: true`; a partial update should use `false`.
 
+`github.trigger_allowed_user_ids` grants signed GitHub issue and PR triggers
+to the listed numeric GitHub user IDs. Separate IDs with spaces or commas.
+This setting does not create Loom users, grant browser sign-in, or change roles.
+Clearing an ID revokes its trigger access unless another authorization grants it.
+
 ### Browser embeddings
 
 `browser.allowed_origins` is a comma-separated list of exact origins that may
