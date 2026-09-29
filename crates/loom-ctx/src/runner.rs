@@ -158,6 +158,7 @@ impl ContainerRunner {
         &self,
         opts: &tapestry::LaunchOptions<'_>,
         memory_max_gb: u64,
+        host_total: Option<u64>,
     ) -> Result<ContainerCreateBody> {
         if !opts.cwd.starts_with(Path::new(CONTAINER_HOME)) {
             bail!(
@@ -172,10 +173,18 @@ impl ContainerRunner {
         let memory = if memory_max_gb == 0 {
             None
         } else {
-            let bytes = memory_max_gb
+            let requested = memory_max_gb
                 .checked_mul(BYTES_PER_GIB)
                 .context("ContainerRunner memory limit is too large")?;
-            Some(i64::try_from(bytes).context("ContainerRunner memory limit is too large")?)
+            let effective = host_total.map_or(requested, |total| requested.min(total));
+            if effective < requested {
+                tracing::warn!(
+                    requested_gib = memory_max_gb,
+                    effective_bytes = effective,
+                    "clamping session memory limit to the host's physical memory"
+                );
+            }
+            Some(i64::try_from(effective).context("ContainerRunner memory limit is too large")?)
         };
         let labels = HashMap::from([
             (
@@ -277,7 +286,10 @@ impl Runner for ContainerRunner {
             None => {}
         }
 
-        let body = self.create_body(opts, memory_max_gb)?;
+        let mut host = sysinfo::System::new();
+        host.refresh_memory();
+        let host_total = (host.total_memory() > 0).then(|| host.total_memory());
+        let body = self.create_body(opts, memory_max_gb, host_total)?;
         let spec = tapestry::encode_launch_spec(opts, &[("WEAVER_API", &self.config.api_url)])?;
         let options = CreateContainerOptionsBuilder::default()
             .name(&container)
@@ -568,7 +580,7 @@ mod tests {
         let env = [("API_TOKEN", "super-secret")];
         let cwd = Path::new("/home/app/.weaver/repos/example/.worktrees/abc");
         let body = container_runner()
-            .create_body(&launch_options(cwd, &env), 8)
+            .create_body(&launch_options(cwd, &env), 8, Some(64 * BYTES_PER_GIB))
             .unwrap();
 
         assert_eq!(
@@ -608,7 +620,45 @@ mod tests {
     #[test]
     fn container_runner_rejects_a_workdir_outside_the_shared_home() {
         let opts = launch_options(Path::new("/tmp/repo"), &[]);
-        assert!(container_runner().create_body(&opts, 0).is_err());
+        assert!(container_runner().create_body(&opts, 0, None).is_err());
+    }
+
+    #[test]
+    fn session_memory_is_clamped_to_host_memory_and_zero_is_unlimited() {
+        let cwd = Path::new("/home/app/.weaver/repos/example/.worktrees/abc");
+        let runner = container_runner();
+        let host = Some(4 * BYTES_PER_GIB);
+
+        // An 8g ceiling on a 4g host is clamped to the host's physical memory,
+        // with swap kept equal so the cgroup still cannot swap past it.
+        let body = runner
+            .create_body(&launch_options(cwd, &[]), 8, host)
+            .unwrap();
+        let clamped = body.host_config.as_ref().unwrap();
+        assert_eq!(clamped.memory, Some(4 * BYTES_PER_GIB as i64));
+        assert_eq!(clamped.memory_swap, clamped.memory);
+
+        // Below the host the configured ceiling applies as-is.
+        let body = runner
+            .create_body(&launch_options(cwd, &[]), 2, host)
+            .unwrap();
+        assert_eq!(
+            body.host_config.as_ref().unwrap().memory,
+            Some(2 * BYTES_PER_GIB as i64)
+        );
+
+        // 0 stays unlimited; an unreadable host leaves the ceiling alone.
+        let body = runner
+            .create_body(&launch_options(cwd, &[]), 0, host)
+            .unwrap();
+        assert_eq!(body.host_config.as_ref().unwrap().memory, None);
+        let body = runner
+            .create_body(&launch_options(cwd, &[]), 8, None)
+            .unwrap();
+        assert_eq!(
+            body.host_config.as_ref().unwrap().memory,
+            Some(8 * BYTES_PER_GIB as i64)
+        );
     }
 
     #[test]
