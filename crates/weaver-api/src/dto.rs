@@ -1252,15 +1252,6 @@ pub struct DeploymentView {
     pub federations: Vec<FederationView>,
 }
 
-/// A deployment-owned GitHub user grant. The immutable id prevents a renamed
-/// login from granting access to a different GitHub account.
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct DeploymentUserReq {
-    pub username: String,
-    pub github_login: String,
-    pub github_user_id: i64,
-}
-
 /// One Slack thread, as an automation caller names it. `channel` is a Slack
 /// channel id (`C…`/`G…`/`D…`, never a `#name`) and `thread_ts` the message `ts`
 /// of the thread's root. The workspace is loom's own — a caller cannot address

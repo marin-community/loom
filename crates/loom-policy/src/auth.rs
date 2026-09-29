@@ -31,7 +31,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use weaver_core::db::{iso_in_days, iso_in_seconds};
 
 use crate::db::{now_iso, Db};
@@ -620,103 +620,6 @@ pub async fn add_user(
     .await
     .with_context(|| format!("adding user '{username}'"))?;
     Ok(())
-}
-
-/// A GitHub identity whose normal user grant is owned by a deployment.
-#[derive(Debug, Clone)]
-pub struct DeploymentUser {
-    pub username: String,
-    pub github_login: String,
-    pub github_user_id: i64,
-}
-
-/// Reconcile deployment-owned grants without adopting operator-managed users.
-/// Removing a declared user revokes their sessions and tokens through the users
-/// table's foreign keys.
-pub async fn reconcile_deployment_users(
-    db: &Db,
-    users: &[DeploymentUser],
-    prune: bool,
-) -> Result<Vec<String>> {
-    let mut names = HashSet::new();
-    let mut ids = HashSet::new();
-    for user in users {
-        if !weaver_core::github::valid_login(&user.username)
-            || !weaver_core::github::valid_login(&user.github_login)
-            || user.github_user_id <= 0
-        {
-            return Err(anyhow!("invalid deployment user '{}'", user.username));
-        }
-        if !names.insert(user.username.as_str()) || !ids.insert(user.github_user_id) {
-            return Err(anyhow!("duplicate deployment user '{}'", user.username));
-        }
-    }
-
-    let mut tx = db.begin().await?;
-    for user in users {
-        sqlx::query(
-            "INSERT INTO users (username, github_login, github_user_id, role, deployment_managed)
-             VALUES (?, ?, ?, 'user', 1) ON CONFLICT(username) DO NOTHING",
-        )
-        .bind(&user.username)
-        .bind(&user.github_login)
-        .bind(user.github_user_id)
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("adding deployment user '{}'", user.username))?;
-        let existing = sqlx::query(
-            "SELECT github_user_id, role, authorization_kind, deployment_managed
-             FROM users WHERE username = ?",
-        )
-        .bind(&user.username)
-        .fetch_one(&mut *tx)
-        .await?;
-        let managed = existing.get::<bool, _>("deployment_managed");
-        let id = existing.get::<Option<i64>, _>("github_user_id");
-        let role = existing.get::<UserRole, _>("role");
-        let kind = existing.get::<UserAuthorizationKind, _>("authorization_kind");
-        if !managed
-            || id != Some(user.github_user_id)
-            || role != UserRole::User
-            || kind != UserAuthorizationKind::Manual
-        {
-            return Err(anyhow!(
-                "deployment user '{}' conflicts with an existing operator",
-                user.username
-            ));
-        }
-        sqlx::query("UPDATE users SET github_login = ? WHERE username = ?")
-            .bind(&user.github_login)
-            .bind(&user.username)
-            .execute(&mut *tx)
-            .await
-            .with_context(|| format!("updating deployment user '{}'", user.username))?;
-    }
-
-    let mut removed = Vec::new();
-    if prune {
-        let managed = sqlx::query_scalar::<_, String>(
-            "SELECT username FROM users WHERE deployment_managed = 1",
-        )
-        .fetch_all(&mut *tx)
-        .await?;
-        for username in managed {
-            if !names.contains(username.as_str()) {
-                let deleted = sqlx::query(
-                    "DELETE FROM users WHERE username = ? AND deployment_managed = 1 AND role = 'user'",
-                )
-                    .bind(&username)
-                    .execute(&mut *tx)
-                    .await?;
-                if deleted.rows_affected() != 1 {
-                    return Err(anyhow!("deployment user '{username}' has a different role"));
-                }
-                removed.push(username);
-            }
-        }
-    }
-    tx.commit().await?;
-    Ok(removed)
 }
 
 /// Bind an administrator-confirmed immutable GitHub identity to a manual user.

@@ -33,6 +33,8 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 /// The phrase an `issue_comment` must begin with to trigger a loom session via
 /// the GitHub webhook. Fixed (not free-text) in v1 to shrink the abuse surface.
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
+/// Immutable GitHub user ids allowed to trigger Loom without a Loom account.
+pub const GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY: &str = "github.trigger_allowed_user_ids";
 /// Named launch profile selected by GitHub-triggered sessions.
 pub const DEFAULT_GITHUB_PROFILE: &str = "default";
 /// GitHub organizations whose active members receive renewable Loom access.
@@ -195,6 +197,17 @@ pub const REGISTRY: &[SettingSpec] = &[
             is configured.",
         kind: SettingKind::String,
         default: DEFAULT_GITHUB_TRIGGER_PHRASE,
+        group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY,
+        label: "GitHub trigger user IDs",
+        description: "Space- or comma-separated numeric GitHub user IDs that may \
+            trigger sessions from signed GitHub issue and PR events. This does \
+            not grant Loom sign-in or change user roles.",
+        kind: SettingKind::String,
+        default: "",
         group: "GitHub",
         options: &[],
     },
@@ -730,6 +743,25 @@ pub fn parse_github_organizations(
     Ok(organizations)
 }
 
+/// Parse immutable GitHub user IDs granted issue-trigger access.
+pub fn parse_github_trigger_allowed_user_ids(value: &str) -> std::result::Result<Vec<i64>, String> {
+    let mut ids = Vec::new();
+    for entry in value
+        .split(|c: char| c == ',' || c.is_ascii_whitespace())
+        .filter(|item| !item.is_empty())
+    {
+        let id = entry
+            .parse::<i64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| format!("invalid GitHub trigger user id '{entry}'"))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
 /// Check that `value` is acceptable for `key`. Unregistered keys accept any
 /// value; registered keys are checked against their [`SettingKind`]. The error
 /// is a key-free reason (e.g. `expects an integer, got 'soon'`) so callers can
@@ -741,6 +773,9 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
     match key {
         GITHUB_ORGANIZATIONS_KEY => {
             parse_github_organizations(value).map(|_| ())?;
+        }
+        GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY => {
+            parse_github_trigger_allowed_user_ids(value).map(|_| ())?;
         }
         "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
             return Err(format!(
@@ -1136,6 +1171,16 @@ mod tests {
         assert!(validate("auth.github_organizations", "Open-Athena").is_err());
         assert!(validate("auth.github_organizations", "Open/Athena:1").is_err());
         assert!(validate("auth.github_organizations", "Open-Athena:0").is_err());
+    }
+
+    #[test]
+    fn github_trigger_user_ids_are_numeric_and_positive() {
+        assert_eq!(
+            parse_github_trigger_allowed_user_ids("123, 42 123").unwrap(),
+            vec![123, 42]
+        );
+        assert!(validate(GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY, "0").is_err());
+        assert!(validate(GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY, "ci").is_err());
     }
 
     #[test]
