@@ -21,6 +21,68 @@ fn url(ts: &TestServer, path: &str) -> String {
 
 #[tokio::test]
 #[serial]
+async fn deployment_user_can_trigger_until_grant_is_pruned() {
+    let ts = TestServer::start_api_only().await;
+    let grant = json!({
+        "users": [{
+            "username": "ci",
+            "github_login": "ci",
+            "github_user_id": 306337490
+        }],
+        "prune": true
+    });
+    ts.client
+        .post("/api/deployment/reconcile", grant.clone())
+        .await
+        .unwrap();
+    ts.client
+        .post("/api/deployment/reconcile", grant)
+        .await
+        .unwrap();
+    assert!(loom::github_trigger::authorize(&ts.state.db, None, "ci", 306337490).await);
+    assert!(!loom::github_trigger::authorize(&ts.state.db, None, "ci", 1).await);
+
+    ts.client
+        .post(
+            "/api/deployment/reconcile",
+            json!({"users": [], "prune": true}),
+        )
+        .await
+        .unwrap();
+    assert!(!loom::github_trigger::authorize(&ts.state.db, None, "ci", 306337490).await);
+    assert!(loom::auth::get_user(&ts.state.db, "rjpower")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+#[serial]
+async fn deployment_cannot_adopt_an_existing_operator() {
+    let ts = TestServer::start_api_only().await;
+    loom::auth::add_user(
+        &ts.state.db,
+        "ci",
+        Some("ci"),
+        Some(306337490),
+        None,
+        loom::auth::UserRole::User,
+    )
+    .await
+    .unwrap();
+    let result = ts
+        .client
+        .post(
+            "/api/deployment/reconcile",
+            json!({"users": [{"username": "ci", "github_login": "ci", "github_user_id": 306337490}]}),
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(loom::github_trigger::authorize(&ts.state.db, None, "ci", 306337490).await);
+}
+
+#[tokio::test]
+#[serial]
 async fn shared_deployment_accepts_only_unmarked_local_reconciliation() {
     let ts = TestServer::start().await;
     weaver_core::config::apply(

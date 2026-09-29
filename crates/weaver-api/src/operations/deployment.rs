@@ -1,5 +1,5 @@
-//! Declarative reconciliation of runtime settings, launch profiles, and
-//! workload federation mappings against one deployment stack.
+//! Declarative reconciliation of runtime settings, users, launch profiles,
+//! and workload federation mappings against one deployment stack.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -10,8 +10,7 @@ pub mod reconcile {
 
     use super::prelude::*;
 
-    /// Reconcile the runtime resources declared by a deployment stack: settings,
-    /// remote MCP servers, launch profiles, and federation mappings.
+    /// Reconcile the runtime resources declared by a deployment stack.
     ///
     /// The manifest carries references and policy, never secret values.
     #[operation(id = "deployment.reconcile", actor = Admin, scope = Global, risk = ExternalWrite,
@@ -21,6 +20,9 @@ pub mod reconcile {
         /// values remain a higher-precedence override.
         #[operand(json, default = BTreeMap::new())]
         pub settings: BTreeMap<String, DeploymentSettingValue>,
+        /// GitHub identities granted the normal user role by this deployment.
+        #[operand(json, default = Vec::new())]
+        pub users: Vec<DeploymentUserReq>,
         /// Remote Streamable HTTP MCP servers available to profile groups.
         #[operand(json, default = Vec::new())]
         pub remote_mcps: Vec<RemoteMcpReq>,

@@ -216,9 +216,15 @@ standing credential by running `curl` inside the Loom container against
 overwrites `X-Loom-Forwarded`; other containers cannot use the exception by
 calling Loom over the Docker network.
 
+The `users` list grants the normal user role to exact GitHub identities. Each
+entry needs `username`, `github_login`, and the immutable `github_user_id`.
+An existing operator account cannot be adopted by a deployment. These grants
+also permit browser sign-in and GitHub issue triggers.
+
 With `prune: true`, deployment-managed settings, remote MCP servers, profiles,
-and federation mappings omitted from the manifest are removed from the
-deployment layer.
+federation mappings, and users omitted from the manifest are removed. Removing
+a deployment user revokes their browser sessions and tokens and closes sessions
+they created.
 Runtime setting overrides are never pruned. A full desired-state manifest
 should use `prune: true`; a partial update should use `false`.
 

@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use weaver_api::operations::deployment::reconcile;
 use weaver_api::DeploymentView;
 
+use crate::auth;
 use crate::config;
 
 use super::operations::{register, Bound, OperationContext};
@@ -74,6 +75,7 @@ async fn reconcile_deployment_core(
             serialized_profile_names.insert(name);
         }
     }
+
     let _profile_permits = st
         .launch_gate
         .acquire_profiles(serialized_profile_names.iter().map(String::as_str))
@@ -161,6 +163,19 @@ async fn reconcile_deployment_core(
         }
     }
 
+    let users: Vec<auth::DeploymentUser> = req
+        .users
+        .iter()
+        .map(|user| auth::DeploymentUser {
+            username: user.username.clone(),
+            github_login: user.github_login.clone(),
+            github_user_id: user.github_user_id,
+        })
+        .collect();
+    let removed_users = auth::reconcile_deployment_users(&st.db, &users, req.prune)
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+
     let mut profile_views = Vec::new();
     for name in profile_names {
         let profile = crate::profile::get(&st.db, &name)
@@ -185,6 +200,11 @@ async fn reconcile_deployment_core(
         .into_iter()
         .filter(|server| remote_mcp_identities.contains(&server.identity))
         .collect();
+    drop(_resolver_permit);
+    drop(_profile_permits);
+    for username in removed_users {
+        crate::lifecycle::close_sessions_created_by(st, &username).await;
+    }
     Ok(DeploymentView {
         settings,
         remote_mcps,
