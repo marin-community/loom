@@ -396,6 +396,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // session's scoped bearer. It belongs to another database and explicit
       // invalid credentials correctly cannot fall through to loopback trust.
       delete childEnv.LOOM_TOKEN;
+      // Same leak, other direction: the production container points loom at
+      // the deployed SPA bundle, which would shadow the freshly built bundle
+      // this suite exists to exercise.
+      delete childEnv.WEAVER_STATIC_DIR;
 
       // Bind to a random free port (0) and parse the actual port from stdout.
       const server: ChildProcess = spawn(LOOM_BINARY, ['server', 'run', '--addr', '127.0.0.1:0'], {
