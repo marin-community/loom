@@ -11,7 +11,7 @@ tapestry = { path = "../tapestry" }
 anyhow = "1"
 # Trait objects with async methods — the GitHub trigger's gateway abstraction
 # (`GithubApi`), so the App-backed implementation and a test fake share a type.
-async-trait = "0.1"
+async-trait = "0.1.92"
 base64 = "0.22"
 bollard = { version = "0.21", default-features = false, features = ["pipe"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
