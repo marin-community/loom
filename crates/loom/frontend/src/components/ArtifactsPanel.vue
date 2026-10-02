@@ -294,6 +294,58 @@ async function save() {
   }
 }
 
+// --- Download ---------------------------------------------------------------
+
+// File extension for each image MIME type `artifacts.raw` serves, so a
+// download opens with the right app even when the artifact's name carries no
+// extension of its own.
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+  'image/bmp': 'bmp',
+  'image/x-icon': 'ico',
+};
+
+// The MIME type of an image artifact's stored payload: the explicit `image`
+// kind keeps a standalone data URI, older envelopes a one-image markdown
+// wrapper. Mirrors the server's own extraction in `web/artifacts.rs`.
+function imageMime(content: string): string | null {
+  let uri = content.trim();
+  if (uri.startsWith('![') && uri.endsWith(')')) {
+    const at = uri.lastIndexOf('](data:');
+    if (at < 0) return null;
+    uri = uri.slice(at + 2, uri.length - 1);
+  }
+  const mime = /^data:([^;,]+);base64,/.exec(uri)?.[1] ?? null;
+  return mime && mime.startsWith('image/') ? mime : null;
+}
+
+function download() {
+  const v = view.value;
+  if (!v) return;
+  const name = selected.value;
+  const a = document.createElement('a');
+  let blobUrl: string | null = null;
+  if (isImage.value) {
+    a.href = artifactImageUrl.value;
+    const ext = IMAGE_EXTENSIONS[imageMime(v.content) ?? ''];
+    a.download = ext && !name.endsWith(`.${ext}`) ? `${name}.${ext}` : name;
+  } else {
+    const blob = new Blob([v.content], {
+      type: isMarkdown.value ? 'text/markdown' : isHtml.value ? 'text/html' : 'text/plain',
+    });
+    blobUrl = URL.createObjectURL(blob);
+    a.href = blobUrl;
+    a.download = isMarkdown.value ? `${name}.md` : isHtml.value ? `${name}.html` : `${name}.txt`;
+  }
+  a.click();
+  if (blobUrl) URL.revokeObjectURL(blobUrl);
+}
+
 // --- Delete ----------------------------------------------------------------
 
 // Remove the open artifact (every revision). After it's gone, fall back to the
@@ -566,6 +618,13 @@ onUnmounted(() => {
               </div>
 
               <template v-if="!editing">
+                <button
+                  class="btn-secondary px-2.5 py-1 text-xs"
+                  data-testid="artifact-download"
+                  @click="download"
+                >
+                  Download
+                </button>
                 <button
                   class="btn-secondary px-2.5 py-1 text-xs"
                   :disabled="!onLatest"

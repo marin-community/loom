@@ -1,3 +1,4 @@
+import { readFile } from 'node:fs/promises';
 import { test, expect } from '../fixtures/weaver';
 
 // Artifacts are the agent's out-of-repo documents: named, scoped (branch vs
@@ -187,6 +188,64 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('[data-artifact="doomed"]')).toHaveCount(0, {
       timeout: 15_000,
     });
+  });
+
+  test('the toolbar downloads the open artifact', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'download me',
+      name: 'artifacts-download',
+    });
+    const doc = '# Report\n\nDownloadable body.\n';
+    // Two revisions so the download can be pinned to the one on screen.
+    await weaver.writeArtifact(session, 'report', '# Report\n\nFirst.\n', {
+      title: 'Report',
+    });
+    await weaver.writeArtifact(session, 'report', doc, { title: 'Report' });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/report`);
+    await expect(page.locator('.markdown-body h1')).toContainText('Report');
+
+    // Latest: the file carries the markdown source under a `.md` name.
+    const [latest] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(latest.suggestedFilename()).toBe('report.md');
+    expect(await readFile(await latest.path(), 'utf8')).toBe(doc);
+
+    // An older revision downloads that revision's content, not the latest's.
+    await page.getByTestId('artifact-rev').selectOption('1');
+    const [older] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(older.suggestedFilename()).toBe('report.md');
+    expect(await readFile(await older.path(), 'utf8')).toBe('# Report\n\nFirst.\n');
+  });
+
+  test('an image artifact downloads as its decoded bytes', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({
+      goal: 'download the shot',
+      name: 'artifacts-download-image',
+    });
+    // A 1×1 transparent PNG; the CLI sniffs it from magic bytes and stores a
+    // self-contained image artifact.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    await weaver.writeArtifact(session, 'shot', png, { title: 'Screenshot' });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/shot`);
+    await expect(page.getByTestId('artifact-image')).toBeVisible();
+
+    // The name carries no extension, so the download stamps PNG's on.
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByTestId('artifact-download').click(),
+    ]);
+    expect(download.suggestedFilename()).toBe('shot.png');
+    expect((await readFile(await download.path())).equals(png)).toBe(true);
   });
 
   test('an html artifact renders in a sandboxed iframe, with a source view', async ({
