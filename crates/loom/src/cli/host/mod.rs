@@ -11,4 +11,5 @@ pub mod deployment;
 pub mod federation;
 pub mod server;
 pub mod setup;
+pub mod skills;
 pub mod tokens;
