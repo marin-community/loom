@@ -29,7 +29,7 @@ import { operationPath } from '../api';
 // Either drive a session terminal (`id`) or attach to an explicit WebSocket
 // path (`wsPath`, e.g. the operator scratch shell at `/api/shell/terminal`).
 // Exactly one is expected; `wsPath` wins when both are set.
-const props = defineProps<{ id?: string; wsPath?: string }>();
+const props = defineProps<{ id?: string; wsPath?: string; autofocus?: boolean }>();
 
 const host = ref<HTMLElement | null>(null);
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'error';
@@ -306,6 +306,8 @@ onMounted(async () => {
     },
   });
   term.open(host.value);
+  // A freshly created shell should receive keystrokes right away.
+  if (props.autofocus) term.focus();
 
   // If the timeout won the race above, apply the real config once the fetch
   // resolves. Only touch options that actually differ so a no-op (configured ===

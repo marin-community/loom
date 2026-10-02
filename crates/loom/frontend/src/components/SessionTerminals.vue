@@ -131,6 +131,7 @@ onMounted(loadShells);
       <section v-for="idx in shells" v-show="active === idx" :key="idx" class="h-full">
         <AgentTerminal
           :ws-path="`${operationPath('sessions.shells.terminal')}?session=${encodeURIComponent(props.id)}&index=${idx}`"
+          autofocus
           class="h-full"
         />
       </section>
