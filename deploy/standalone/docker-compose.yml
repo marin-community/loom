@@ -67,6 +67,14 @@ services:
       LOOM_SESSION_DOCKER_GID: ${DOCKER_GID:?set DOCKER_GID — see deploy/README.md "Agent runtime & client packages"}
       LOOM_SESSION_NETWORK: loom_default
       LOOM_SESSION_API_URL: http://loom:7878
+      # Optional tool/skill installs loom-entrypoint runs on every boot —
+      # both empty by default, so an existing deploy is unaffected. Normally
+      # loom.toml's install_cmd / install_skills fields, rendered into .env
+      # by `loom config render-env`; spelled out here too for a raw-compose
+      # deploy. See deploy/README.md "Optional tool installs" for the
+      # canonical open-code-review example.
+      LOOM_INSTALL_CMD: ${LOOM_INSTALL_CMD:-}
+      LOOM_INSTALL_SKILLS: ${LOOM_INSTALL_SKILLS:-}
     depends_on:
       loom-init:
         condition: service_completed_successfully

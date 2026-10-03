@@ -436,10 +436,12 @@ chmod 440 /etc/sudoers.d/loom-docker-socket-init
 EOF
 
 # Container entrypoint: before the daemon starts, make sure the agent runtimes
-# (`claude` + `codex`) are installed on the persisted $HOME volume and the
-# delegated session-cgroup subtree is prepared, then hand off to the CMD. Both
-# run only for `loom server …` — one-shot admin commands (`loom config set`,
-# `loom setup`, the compose init service) skip them.
+# (`claude` + `codex`) are installed on the persisted $HOME volume, any
+# operator-requested optional installs happen (LOOM_INSTALL_CMD /
+# LOOM_INSTALL_SKILLS), and the delegated session-cgroup subtree is prepared,
+# then hand off to the CMD. All of it runs only for `loom server …` — one-shot
+# admin commands (`loom config set`, `loom setup`, the compose init service)
+# skip them.
 RUN <<'EOF'
 cat > /usr/local/bin/loom-entrypoint <<'SH'
 #!/bin/sh
@@ -492,6 +494,35 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
       && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
       && npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; } \
       || { echo "loom: pinned ACP adapters are required" >&2; exit 1; }
+  fi
+  # Optional, operator-supplied installs (see deploy/README.md "Optional tool
+  # installs"). LOOM_INSTALL_CMD is arbitrary shell — the generic hook that
+  # installs anything loom doesn't know about (e.g. a pinned
+  # `npm install -g`), and typically stages any companion skill payloads under
+  # $HOME/.local/share/loom/skills/. LOOM_INSTALL_SKILLS then names
+  # name=source pairs for `loom skills install`, which copies each payload
+  # into every harness that is actually installed, where that harness reads
+  # user-level skills. Both run after the runtime installs above so skill
+  # placement sees this boot's harnesses, and both are fail-soft: an optional
+  # install must never wedge the control plane (unlike the pinned CLIs).
+  if [ -n "${LOOM_INSTALL_CMD:-}" ]; then
+    echo "loom: running LOOM_INSTALL_CMD ..." >&2
+    sh -c "$LOOM_INSTALL_CMD" \
+      || echo "loom: WARNING: LOOM_INSTALL_CMD failed; optional installs may be missing" >&2
+  fi
+  if [ -n "${LOOM_INSTALL_SKILLS:-}" ]; then
+    # One pair per line (read -r keeps spaces in a source path; no globbing).
+    printf '%s\n' "$LOOM_INSTALL_SKILLS" | tr ',' '\n' \
+      | while IFS= read -r pair; do
+      name=${pair%%=*}
+      source=${pair#*=}
+      if [ -z "$name" ] || [ -z "$source" ] || [ "$source" = "$pair" ]; then
+        echo "loom: WARNING: LOOM_INSTALL_SKILLS entry '$pair' is not name=source; skipping it" >&2
+        continue
+      fi
+      loom skills install "$name" "$source" \
+        || echo "loom: WARNING: skill '$name' did not install for every harness; continuing" >&2
+    done
   fi
   # Delegate the per-session cgroup subtree (see loom-cgroup-init above).
   # Non-fatal: without it sessions run with no memory limit.

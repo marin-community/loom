@@ -56,3 +56,14 @@ owner_github = "your-github-login"
 # host_uid = "1000"                    # HOST_UID: uid the image runs as
 # host_gid = "1000"                    # HOST_GID: gid the image runs as
 # image = "loom:latest"                # LOOM_IMAGE: override the image tag
+
+# Optional tool installs the entrypoint runs on every server boot, after the
+# pinned Claude/Codex runtime installs — fail-soft, unset by default. The
+# first is arbitrary shell: the generic hook for tools loom knows nothing
+# about; stage any companion skill under $HOME/.local/share/loom/skills/
+# so the second can point at it. The second is a comma-separated name=source
+# list `loom skills install` copies into every installed harness's global
+# skills dir. See deploy/README.md "Optional tool installs" for the canonical
+# open-code-review example.
+# install_cmd = "npm install -g @alibaba-group/open-code-review@1.14.0"
+# install_skills = "open-code-review=/home/app/.local/share/loom/skills/open-code-review"
