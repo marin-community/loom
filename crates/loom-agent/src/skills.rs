@@ -238,14 +238,49 @@ async fn copy_skill(source: &Path, dest_root: &Path) -> Result<CopyStatus> {
     tokio::task::spawn_blocking(move || {
         let meta = std::fs::metadata(&source)
             .with_context(|| format!("reading skill source {}", source.display()))?;
+        // A wrong-typed destination (stale skill version or stray operator
+        // file) is replaced, not failed on.
+        clear_type_conflict(&dest_root, true)?;
         if meta.is_dir() {
             copy_tree(&source, &dest_root)
         } else {
-            copy_file_if_changed(&source, &dest_root.join("SKILL.md"))
+            let dest = dest_root.join("SKILL.md");
+            clear_type_conflict(&dest, false)?;
+            copy_file_if_changed(&source, &dest)
         }
     })
     .await
     .context("joining skill copy")?
+}
+
+/// Remove `dest` when its type (file, directory, or symlink) doesn't fit
+/// what the source needs to place there, so a skill version that changed an
+/// entry's type replaces the stale one. Symlinks always yield, so nothing
+/// is ever written through.
+fn clear_type_conflict(dest: &Path, needed_is_dir: bool) -> Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(dest) else {
+        return Ok(());
+    };
+    if meta.is_dir() {
+        if !needed_is_dir {
+            std::fs::remove_dir_all(dest)
+                .with_context(|| format!("replacing {}", dest.display()))?;
+        }
+    } else if needed_is_dir || meta.is_symlink() {
+        std::fs::remove_file(dest).with_context(|| format!("replacing {}", dest.display()))?;
+    }
+    Ok(())
+}
+
+/// Remove `path` whatever its type — used when replacing a stale entry.
+fn remove_any(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+    .with_context(|| format!("replacing {}", path.display()))
 }
 
 /// Recursively copy `source` into `dest`, writing only differing files.
@@ -258,10 +293,12 @@ fn copy_tree(source: &Path, dest: &Path) -> Result<CopyStatus> {
         let entry_dest = dest.join(entry.file_name());
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
+            clear_type_conflict(&entry_dest, true)?;
             if copy_tree(&entry.path(), &entry_dest)? == CopyStatus::Copied {
                 status = CopyStatus::Copied;
             }
         } else if file_type.is_file() {
+            clear_type_conflict(&entry_dest, false)?;
             if copy_file_if_changed(&entry.path(), &entry_dest)? == CopyStatus::Copied {
                 status = CopyStatus::Copied;
             }
@@ -270,14 +307,10 @@ fn copy_tree(source: &Path, dest: &Path) -> Result<CopyStatus> {
             // `exists()` follows links: a changed target would look "present"
             // and never propagate, and a broken dest link would make the
             // create below fail on EEXIST. Compare the links themselves.
-            if std::fs::symlink_metadata(&entry_dest).is_ok() {
-                let same = std::fs::read_link(&entry_dest).is_ok_and(|t| t == target);
-                if same {
-                    continue;
-                }
-                std::fs::remove_file(&entry_dest)
-                    .with_context(|| format!("replacing {}", entry_dest.display()))?;
+            if std::fs::read_link(&entry_dest).is_ok_and(|t| t == target) {
+                continue;
             }
+            remove_any(&entry_dest)?;
             std::fs::create_dir_all(dest)?;
             create_symlink(&target, &entry_dest)
                 .with_context(|| format!("linking {}", entry_dest.display()))?;
@@ -463,6 +496,71 @@ mod tests {
             copy_skill(Path::new("/nonexistent/skill.md"), &home.join("skills/x"))
                 .await
                 .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn entry_type_changes_between_skill_versions_replace_the_stale_one() {
+        let (_dir, home) = temp_home();
+        let dest_root = home.join("skills/packaged");
+        let source = tempfile::tempdir().unwrap();
+
+        // v1 ships `helper` as a file.
+        std::fs::write(source.path().join("SKILL.md"), "v1").unwrap();
+        std::fs::write(source.path().join("helper"), "old").unwrap();
+        copy_skill(source.path(), &dest_root).await.unwrap();
+
+        // v2 ships `helper` as a directory: the stale file is replaced, the
+        // copy does not fail for the harness.
+        std::fs::remove_file(source.path().join("helper")).unwrap();
+        std::fs::create_dir(source.path().join("helper")).unwrap();
+        std::fs::write(source.path().join("helper/data"), "new").unwrap();
+        copy_skill(source.path(), &dest_root).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("helper/data")).unwrap(),
+            "new"
+        );
+
+        // A file source replaces a dest whose SKILL.md became a directory.
+        let file_source = tempfile::tempdir().unwrap();
+        std::fs::write(file_source.path().join("skill.md"), "v3").unwrap();
+        std::fs::remove_file(dest_root.join("SKILL.md")).unwrap();
+        std::fs::create_dir(dest_root.join("SKILL.md")).unwrap();
+        copy_skill(file_source.path().join("skill.md").as_path(), &dest_root)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("SKILL.md")).unwrap(),
+            "v3"
+        );
+
+        // A dir source replaces a dest_root that is a plain file.
+        std::fs::remove_dir_all(&dest_root).unwrap();
+        std::fs::write(&dest_root, "stale").unwrap();
+        copy_skill(source.path(), &dest_root).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest_root.join("helper/data")).unwrap(),
+            "new"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_source_replaces_a_destination_directory() {
+        let (_dir, home) = temp_home();
+        let dest_root = home.join("skills/packaged");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("real"), "x").unwrap();
+        std::os::unix::fs::symlink("real", source.path().join("link")).unwrap();
+
+        // An older skill version shipped `link` as a directory; the link
+        // replaces it instead of failing with EISDIR.
+        std::fs::create_dir_all(dest_root.join("link")).unwrap();
+        copy_skill(source.path(), &dest_root).await.unwrap();
+        assert_eq!(
+            std::fs::read_link(dest_root.join("link")).unwrap(),
+            std::path::Path::new("real")
         );
     }
 

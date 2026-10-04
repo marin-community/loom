@@ -118,7 +118,7 @@ enum HostCmd {
     /// Install an agent skill into every installed harness's global skills
     /// directory.
     ///
-    ///     loom skills install open-code-review ~/skills/open-code-review/SKILL.md
+    ///     loom skills install open-code-review-delegate ~/skills/open-code-review-delegate/SKILL.md
     Skills {
         #[command(subcommand)]
         cmd: SkillsCmd,

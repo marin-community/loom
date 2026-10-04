@@ -524,8 +524,10 @@ unlike the pinned runtimes above. Set them as `loom.toml` fields —
   would by hand; exact pins keep it idempotent, and everything lands on the
   persisted `loom_home` volume, so every session container sees it. The
   command is also the right place to *stage* any companion skill payload under
-  the conventional `$HOME/.local/share/loom/skills/`, so the next hook has a
-  known path to point at.
+  the conventional `/home/app/.local/share/loom/skills/`, so the next hook has a
+  known path to point at. Use absolute paths and `$$` for a literal `$` —
+  Compose interpolates `$VAR` in `.env` values against the *host*, so
+  `$HOME` in a command silently resolves to the wrong home.
 - **`LOOM_INSTALL_SKILLS`** — comma-separated `name=source` pairs. For each,
   the entrypoint runs `loom skills install <name> <source>`, which detects
   which harnesses are *actually installed* (the same PATH checks the agent
@@ -536,36 +538,39 @@ unlike the pinned runtimes above. Set them as `loom.toml` fields —
   re-running every boot is a no-op.
 
 The canonical example — [open-code-review](https://github.com/alibaba/open-code-review)
-(`ocr`), whose npm package ships only the CLI launcher, with its agent skill
-published in the GitHub repo instead. One tag pins binary and skill together,
-so they can't drift:
+(`ocr`), whose npm package ships only the CLI launcher, with its agent skills
+published in the GitHub repo instead. The example installs the **delegate**
+skill (`open-code-review-delegate`): the harness's own model performs the
+review and OCR supplies only the deterministic parts — file selection and
+rule resolution — so no OCR-side LLM endpoint or API key is needed. One tag
+pins binary and skill together, so they can't drift:
 
 ```toml
 # loom.toml — rendered into deploy/standalone/.env by `loom config render-env`
 install_cmd = """
-  npm install -g @alibaba-group/open-code-review@1.14.0 &&
-  mkdir -p /home/app/.local/share/loom/skills/open-code-review &&
-  curl -fsSL https://raw.githubusercontent.com/alibaba/open-code-review/v1.14.0/skills/open-code-review/SKILL.md \
-    -o /home/app/.local/share/loom/skills/open-code-review/SKILL.md
+  npm install -g @alibaba-group/open-code-review@1.12.11 &&
+  mkdir -p /home/app/.local/share/loom/skills/open-code-review-delegate &&
+  curl -fsSL https://raw.githubusercontent.com/alibaba/open-code-review/v1.12.11/skills/open-code-review-delegate/SKILL.md \
+    -o /home/app/.local/share/loom/skills/open-code-review-delegate/SKILL.md
   """
-install_skills = "open-code-review=/home/app/.local/share/loom/skills/open-code-review"
+install_skills = "open-code-review-delegate=/home/app/.local/share/loom/skills/open-code-review-delegate"
 ```
 
 (A raw-compose deploy that skips `loom.toml` sets the same values as
 `LOOM_INSTALL_CMD` / `LOOM_INSTALL_SKILLS` in the `loom` service's
 `environment:` — the docker-compose.yml wiring carries either through.)
 
-With that, every installed harness gets an `open-code-review` skill that runs
-the pinned `ocr` CLI. The tool stays optional by construction: agents without
-it (or a deploy without the flags) behave exactly as before, and the skill
-itself tells the agent to install the CLI on demand if a review ever hits
-`command not found`.
+With that, every installed harness gets an `open-code-review-delegate` skill
+that drives the pinned `ocr` CLI. The tool stays optional by construction:
+agents without it (or a deploy without the flags) behave exactly as before.
+Upstream also publishes a full `open-code-review` skill (OCR calls its own
+configured LLM); stage and install that one the same way if you prefer it.
 
 The same skill copier works on a host (non-docker) loom, for any skill from
 any source — loom owns placement, never content:
 
 ```sh
-loom skills install open-code-review ~/skills/open-code-review/SKILL.md
+loom skills install open-code-review-delegate ~/skills/open-code-review-delegate/SKILL.md
 ```
 
 ## Operations

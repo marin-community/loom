@@ -87,11 +87,16 @@ pub struct LoomConfig {
     /// failure warns and the daemon still starts. Not a secret: it's a
     /// command an operator authors, though one *may* embed a token in it —
     /// treat the rendered `.env` as private either way.
+    ///
+    /// Docker Compose interpolates `$VAR` in `.env` values against the host,
+    /// so an install command must use absolute container paths (the examples
+    /// use `/home/app/...`) and `$$` for a literal `$` — never `$HOME`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_cmd: Option<String>,
     /// Comma-separated `name=source` pairs naming skills to copy into every
     /// installed harness's global skills dir on boot (sources typically
-    /// staged under `$HOME/.local/share/loom/skills/` by `install_cmd`).
+    /// staged under `/home/app/.local/share/loom/skills/` by `install_cmd`).
+    /// Sources with spaces work; commas separate pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_skills: Option<String>,
 }
