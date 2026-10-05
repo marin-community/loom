@@ -773,7 +773,7 @@ onActivated(() => {
             />
           </div>
 
-          <div class="grid grid-cols-2 gap-3">
+          <div v-if="!scheduledForm" class="grid grid-cols-2 gap-3">
             <div>
               <label class="mb-1 block text-xs text-muted">Program</label>
               <select
@@ -935,7 +935,11 @@ onActivated(() => {
 
           <div>
             <label class="mb-1 block text-xs text-muted">
-              Agent profile — automation-safe ACP profile for judgements
+              {{
+                scheduledForm
+                  ? 'Agent profile — runs the task'
+                  : 'Agent profile — automation-safe ACP profile for judgements'
+              }}
             </label>
             <select
               v-model="form.profile"
@@ -947,7 +951,7 @@ onActivated(() => {
             </select>
           </div>
 
-          <div>
+          <div v-if="!scheduledForm">
             <label class="mb-1 block text-xs text-muted">
               Capabilities — the intervention ladder (<code>observe</code> always on)
             </label>

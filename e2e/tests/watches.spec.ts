@@ -66,10 +66,23 @@ test.describe('watch panel', () => {
     await expect(detail).toContainText('attention ≠ ok');
   });
 
-  test('shows and edits an agent schedule and its task prompt', async ({ page, weaver }) => {
-    await weaver.seedWatch({ name: 'weekday-agent', trigger: { cron: '0 9 * * 1-5', timezone: 'America/Los_Angeles' },
-      agent: { profile: 'watch', repo: 'org/repo', prompt: 'Check jobs', slack_channels: ['C12345'] } });
+  test('creates, previews and edits an agent schedule and its task prompt', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/watches`);
+    await page.getByTestId('watch-new').click();
+    const form = page.getByTestId('watch-form');
+    await page.getByTestId('watch-name').fill('weekday-agent');
+    await page.getByRole('button', { name: 'Cron', exact: true }).click();
+    await expect(page.getByTestId('watch-program')).toHaveCount(0);
+    await expect(page.getByTestId('cap-nudge')).toHaveCount(0);
+    await form.getByPlaceholder('0 * * * *').fill('0 9 * * 1-5');
+    await form.getByPlaceholder('UTC').fill('America/Los_Angeles');
+    await form.getByPlaceholder('marin-community/marin').fill('org/repo');
+    await form.getByPlaceholder('C0123456789').fill('C12345');
+    await form.locator('textarea').fill('Check jobs');
+    await page.getByRole('button', { name: 'Preview next five runs' }).click();
+    await expect(form.locator('li')).toHaveCount(5);
+    await page.getByTestId('watch-create').click();
+    await expect(page.getByTestId('watch-row')).toHaveCount(1);
     await page.getByTestId('watch-tab-script').click();
     await expect(page.getByText('Check jobs', { exact: true })).toBeVisible();
     await page.getByTestId('watch-tab-config').click();
