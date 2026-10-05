@@ -4952,3 +4952,83 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
         );
     }
 }
+
+/// Exercise dispatch through the same reservation, provision and ACP path as
+/// the daemon, with a cached fixture repository and no external services.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_watch_dispatches_agent_through_automation_launch() {
+    let _adapter = EnvVarSet::set("WEAVER_CLAUDE_ACP_CMD", &agent_cmd());
+    let ts = TestServer::start_with_app().await;
+    loom::repo::register(
+        &ts.state.db,
+        "org/repo",
+        "https://github.com/org/repo.git",
+        &ts.cwd(),
+    )
+    .await
+    .unwrap();
+    ts.client.post("/api/profiles/create", json!({
+        "name":"scheduled-test", "agent_kind":"claude", "model":"fake-fast", "protocol":"acp", "mode":"default",
+        "class":"automation", "strict":true, "env_clear":true, "prelude":"none", "turn_budget":1, "github_repositories":["org/repo"]
+    })).await.unwrap();
+    let watch = ts
+        .client
+        .post(
+            "/api/watches/create",
+            json!({
+                "name":"dispatch-test", "trigger":{"every":"1h"}, "run_timeout_secs":15,
+                "agent":{"profile":"scheduled-test", "repo":"org/repo", "prompt":"say:jobs checked"}
+            }),
+        )
+        .await
+        .unwrap();
+    let id = watch["id"].as_str().unwrap();
+    ts.client
+        .post("/api/watches/run", json!({"key":id}))
+        .await
+        .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("watch.enabled".into(), Some("true".into()))],
+    )
+    .await
+    .unwrap();
+    let occurrences = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let history = weaver_core::occurrence::history(&ts.state.db, id, 10)
+                .await
+                .unwrap();
+            if history.first().is_some_and(|occurrence| {
+                !matches!(
+                    occurrence.status.as_str(),
+                    "pending" | "dispatching" | "running" | "finishing"
+                )
+            }) {
+                break history;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let occurrence = &occurrences[0];
+    let runs = weaver_core::watch::recent_runs(&ts.state.db, id, 1)
+        .await
+        .unwrap();
+    assert_eq!(runs[0].outcome, "ok", "{}", runs[0].summary);
+    let run = loom::runs::get(&ts.state.db, occurrence.run_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.source, "watch");
+    assert_eq!(run.idempotency_key, occurrence.id);
+    assert_eq!(run.status, "completed");
+    let session = session_mod::get(&ts.state.db, occurrence.session_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.class, "automation");
+    assert_eq!(session.status, "archived");
+    assert!(!loom::backend::has_session(&session.term_session).await);
+}
