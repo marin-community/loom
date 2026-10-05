@@ -217,6 +217,8 @@ async fn run_inner(state: AppState) {
 pub enum ReapReason {
     /// The tracking issue an automation session was launched for has closed.
     IssueClosed,
+    /// A completed scheduled agent has remained visible for five minutes.
+    ScheduledDone,
     /// The session sat idle past its origin's configured TTL.
     IdleTtl,
 }
@@ -242,7 +244,8 @@ fn retention_issue_id(session: &Session) -> Option<i64> {
 /// `idle_archive_secs <= 0` disables the TTL trigger. Both triggers share a
 /// safety guard: no live ACP turn (`acp_inflight`; a terminal session's only
 /// liveness signal is `last_activity_at` itself) and at least
-/// [`REAP_GRACE_SECS`] of stillness — archiving destroys the worktree, so a
+/// [`REAP_GRACE_SECS`] of stillness for ordinary sessions. Completed scheduled
+/// sessions use their shorter archive delay. Archiving destroys the worktree, so a
 /// session that just moved is never reaped.
 fn reap_decision(
     session: &Session,
@@ -254,6 +257,11 @@ fn reap_decision(
         return None;
     }
     let idle = idle_secs(session, now);
+    if session.origin == "watch" {
+        return (matches!(session.status.as_str(), "done" | "error")
+            && idle >= weaver_core::schedule::ARCHIVE_DELAY_SECS)
+            .then_some(ReapReason::ScheduledDone);
+    }
     if idle < REAP_GRACE_SECS {
         return None;
     }
@@ -298,6 +306,19 @@ async fn reap_sessions(
         let Some(reason) = reap_decision(session, issue_closed, ttl, now) else {
             continue;
         };
+        if reason == ReapReason::ScheduledDone {
+            match crate::runs::list_for_session(&state.db, &session.id).await {
+                Ok(runs)
+                    if runs
+                        .iter()
+                        .any(|run| run.source == "watch" && run.status == "completed") => {}
+                Ok(_) => continue,
+                Err(error) => {
+                    tracing::warn!(id = %session.id, %error, "reaper: scheduled result lookup failed");
+                    continue;
+                }
+            }
+        }
         let branch = match branch_mod::get(&state.db, &session.branch_id).await {
             Ok(Some(b)) => b,
             Ok(None) => {
@@ -661,6 +682,27 @@ mod tests {
         let mut transitioning = idle.clone();
         transitioning.lifecycle_transition = Some("archiving".to_string());
         assert_eq!(reap_decision(&transitioning, true, ttl, now), None);
+    }
+
+    #[test]
+    fn scheduled_retention_waits_five_minutes_and_requires_a_stopped_turn() {
+        use super::{reap_decision, ReapReason};
+        let now = Utc::now();
+        let finished_at = weaver_core::schedule::iso(now - chrono::Duration::seconds(299));
+        let mut session = session_with_activity(Some(&finished_at), &finished_at);
+        session.origin = "watch".into();
+        session.status = "done".into();
+        assert_eq!(reap_decision(&session, false, 0, now), None);
+        let later = now + chrono::Duration::seconds(1);
+        assert_eq!(
+            reap_decision(&session, false, 0, later),
+            Some(ReapReason::ScheduledDone)
+        );
+        session.acp_inflight = Some("{}".into());
+        assert_eq!(reap_decision(&session, false, 0, later), None);
+        session.acp_inflight = None;
+        session.status = "running".into();
+        assert_eq!(reap_decision(&session, true, 1, later), None);
     }
 
     #[test]

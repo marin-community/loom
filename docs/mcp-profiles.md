@@ -36,7 +36,10 @@ name Loom integrations.
 Builtins are trusted code shipped with Loom. Their content digest covers the
 adapter identity, capability metadata, ordered tools, and advertised schemas.
 Builtins provide resource families for context, channel, artifact, session,
-permissions, issues, fixed-repository GitHub, and routed-thread messaging.
+permissions, issues, fixed-repository GitHub, persistent watch state, and Slack
+messaging. Watch state (`loom/watches/state@v1`, group `watch`) and scheduled
+Slack posting (`loom/messaging/post@v1`, group `messaging`) are independent
+capabilities.
 One `loom` stdio server exposes every selected tool under a domain-qualified
 name. The tools call Loom's typed REST client and return
 machine-readable `structuredContent`; service credentials and provider routing

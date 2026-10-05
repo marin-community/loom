@@ -1244,12 +1244,26 @@ impl DeploymentSettingValue {
     }
 }
 
+pub type DeploymentWatchReq = crate::operations::watches::create::Input;
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentView {
+    pub watches: Vec<WatchView>,
     pub settings: Vec<SettingView>,
     pub remote_mcps: Vec<RemoteMcpView>,
     pub profiles: Vec<ProfileView>,
     pub federations: Vec<FederationView>,
+}
+
+pub use weaver_core::occurrence::SlackDeliveryStatus;
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SlackDeliveryView {
+    pub status: SlackDeliveryStatus,
+    pub posted: bool,
+    pub ts: Option<String>,
+    pub error: Option<String>,
+    pub retry_at: Option<String>,
 }
 
 /// One Slack thread, as an automation caller names it. `channel` is a Slack
@@ -1923,6 +1937,12 @@ pub struct ChangeSetDto {
 /// re-parses strings; `capabilities` is a real array.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchView {
+    pub agent: Option<weaver_core::schedule::AgentTarget>,
+    pub revision: i64,
+    pub deployment_managed: bool,
+    pub paused: bool,
+    pub run_timeout_secs: i64,
+    pub state_version: i64,
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -1971,8 +1991,14 @@ pub struct WatchView {
 impl WatchView {
     /// Build the view from a watch plus the most recent round's outcome,
     /// read from the run history.
-    pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
-        Self {
+    pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            agent: o.agent()?,
+            revision: o.revision,
+            deployment_managed: o.deployment_managed,
+            paused: o.paused,
+            run_timeout_secs: o.run_timeout_secs,
+            state_version: o.state_version,
             id: o.id.clone(),
             name: o.name.clone(),
             enabled: o.enabled,
@@ -1994,8 +2020,14 @@ impl WatchView {
             last_outcome,
             created_at: o.created_at.clone(),
             updated_at: o.updated_at.clone(),
-        }
+        })
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WatchStateView {
+    pub value: Value,
+    pub version: i64,
 }
 
 /// One round in a watch's history (the audit trail), with `actions` parsed

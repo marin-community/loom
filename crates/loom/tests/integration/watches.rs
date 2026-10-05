@@ -574,89 +574,49 @@ async fn resume_nudges_a_stalled_session_and_arms_backoff() {
 /// drives a round through the dispatcher — the producer→consumer chain unattended.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn timer_emits_cron_tick_for_a_due_watch_and_dispatches_it() {
-    if !python3_available() {
-        eprintln!("skipping: python3 not on PATH");
-        return;
-    }
+async fn timer_queues_agent_occurrence_and_manual_run_obeys_overlap() {
     let ts = TestServer::start().await;
     let state = engine_state(&ts).await;
-    let (session_id, _branch_id, _repo_root) = make_session(&ts, "tick me").await;
-    ts.client
+    let created = ts
+        .client
         .post(
-            "/api/sessions/tags/set",
-            json!({ "session": session_id, "key": "attention", "value": "attention", "by": "agent" }),
+            "/api/watches/create",
+            json!({
+                "name": "scheduled-agent", "enabled": true, "trigger": {"every":"30m"},
+                "agent": {"profile":"watch", "repo":"org/repo", "prompt":"Check jobs"}
+            }),
         )
         .await
         .unwrap();
-
-    let o = enabled_watch(
-        &state,
-        watch_store::NewWatch {
-            // `every` sugar so the next-fire is deterministic duration arithmetic.
-            trigger_spec: json!({ "every": "30m" }).to_string(),
-            name: "hourly".to_string(),
-            scope: json!({ "attention": "!ok" }).to_string(),
-            program: survey_program(),
-            capabilities: vec!["observe".to_string()],
-            ..Default::default()
-        },
+    let id = created["id"].as_str().unwrap();
+    let now = Utc::now();
+    watch_store::set_schedule(
+        &state.db,
+        id,
+        None,
+        Some(&weaver_core::schedule::iso(
+            now - chrono::Duration::seconds(1),
+        )),
     )
-    .await;
-
-    // Force it due: set next_run_at into the past.
-    watch_store::set_schedule(&state.db, &o.id, None, Some("2000-01-01T00:00:00.000Z"))
+    .await
+    .unwrap();
+    weaver_core::occurrence::tick(&state.db, now).await.unwrap();
+    let occurrences = ts
+        .client
+        .post("/api/watches/occurrences", json!({"key":id}))
         .await
         .unwrap();
-
-    let watermark = events::max_id(&state.db).await.unwrap();
-    watch::tick_timer(&state).await;
-
-    // The tick is a logged `cron` system event carrying our id.
-    let new_events = events::since(&state.db, watermark).await.unwrap();
-    let cron = new_events
-        .iter()
-        .find(|e| e.kind == "cron" && e.data["watch"] == o.id.as_str())
-        .expect("the timer emits a cron tick for the due watch");
-    assert!(
-        events::is_system(&cron.branch_id),
-        "a cron tick is a fleet-global (system) row"
-    );
-
-    // It advanced next_run_at into the future, so it won't re-fire every tick.
-    let after = watch_store::get(&state.db, &o.id).await.unwrap().unwrap();
-    assert!(
-        after.next_run_at.is_some(),
-        "the timer advances next_run_at"
-    );
-    assert_ne!(
-        after.next_run_at.as_deref(),
-        Some("2000-01-01T00:00:00.000Z"),
-        "next_run_at moved forward off the past due time"
-    );
-
-    // The dispatcher consumes the cron tick and runs the scheduled round.
-    let in_flight = watch::new_in_flight();
-    watch::dispatch(&state, &in_flight, cron).await;
-    let runs = watch_store::recent_runs(&state.db, &o.id, 10)
+    assert_eq!(occurrences.as_array().unwrap().len(), 1);
+    assert_eq!(occurrences[0]["status"], "pending");
+    assert_eq!(occurrences[0]["revision"], 1);
+    let result = ts
+        .client
+        .post("/api/watches/run", json!({"key":id}))
         .await
         .unwrap();
-    assert_eq!(runs.len(), 1, "the cron tick fires exactly one round");
-    assert_eq!(
-        surveyed_ids(&runs[0]),
-        vec![session_id.clone()],
-        "the scheduled round surveyed the in-scope session"
-    );
-
-    ts.client
-        .post("/api/sessions/delete", json!({ "session": session_id }))
-        .await
-        .unwrap();
+    assert_eq!(result["outcome"], "skipped");
 }
 
-/// Guardrails: a cooldown re-fire and an in-flight re-fire are both refused — the
-/// cooldown one recorded `skipped`, the in-flight one dropped silently (it never
-/// opened a run row, because it never started).
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cooldown_and_overlap_refire_are_refused() {
@@ -786,7 +746,7 @@ async fn rest_watch_lifecycle_and_validation() {
             "/api/watches/create",
             json!({
                 "name": "rest-watch",
-                "trigger": { "cron": "0 * * * *" },
+                "trigger": { "on": ["session.attention"] },
                 "scope": { "attention": "!ok" },
                 "program": "builtin:status",
                 "params": { "prompt": "is it stuck?" },
@@ -799,7 +759,7 @@ async fn rest_watch_lifecycle_and_validation() {
     assert_eq!(created["name"], "rest-watch");
     assert_eq!(created["enabled"], false, "new watches start disabled");
     // JSON-bearing fields come back parsed, not as strings.
-    assert_eq!(created["trigger"]["cron"], "0 * * * *");
+    assert_eq!(created["trigger"]["on"][0], "session.attention");
     assert_eq!(created["scope"]["attention"], "!ok");
     assert_eq!(created["params"]["prompt"], "is it stuck?");
     assert_eq!(created["capabilities"][2], "mark");
@@ -1544,7 +1504,7 @@ async fn warm_session_is_hidden_from_fleet_and_survey() {
         &state,
         watch_store::NewWatch {
             name: "warm-watch".to_string(),
-            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            trigger_spec: json!({ "on": ["session.attention"] }).to_string(),
             scope: json!({ "attention": "!ok" }).to_string(),
             program: survey_program(),
             capabilities: vec!["observe".to_string()],
@@ -1648,7 +1608,7 @@ async fn warm_session_is_re_adopted_across_restart_independent_of_auto_adopt() {
         &state,
         watch_store::NewWatch {
             name: "memory-watch".to_string(),
-            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            trigger_spec: json!({ "on": ["session.attention"] }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
             params: json!({ "warm": true }).to_string(),
             program: survey_program(),
@@ -1769,7 +1729,7 @@ async fn ensure_warm_session_reuses_the_same_session() {
         &state,
         watch_store::NewWatch {
             name: "reuse-watch".to_string(),
-            trigger_spec: json!({ "cron": "0 * * * *" }).to_string(),
+            trigger_spec: json!({ "on": ["session.attention"] }).to_string(),
             scope: json!({ "repo": repo_root }).to_string(),
             params: json!({ "warm": true }).to_string(),
             program: survey_program(),
@@ -1890,4 +1850,94 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         .post("/api/sessions/delete", json!({ "session": merged_id }))
         .await
         .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_script_uses_the_queue_and_preserves_cadence() {
+    if !python3_available() {
+        return;
+    }
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    let (session_id, _, _) = make_session(&ts, "mechanical survey").await;
+    let created = ts
+        .client
+        .post(
+            "/api/watches/create",
+            json!({
+                "name":"scheduled-script", "program":survey_program(), "enabled":true,
+                "trigger":{"every":"30m"}, "capabilities":["observe"], "run_timeout_secs":30
+            }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+    let now = Utc::now();
+    watch_store::set_schedule(
+        &state.db,
+        id,
+        None,
+        Some(&weaver_core::schedule::iso(
+            now - chrono::Duration::seconds(1),
+        )),
+    )
+    .await
+    .unwrap();
+    weaver_core::occurrence::tick(&state.db, now).await.unwrap();
+    let occurrence = weaver_core::occurrence::active(&state.db)
+        .await
+        .unwrap()
+        .remove(0);
+    let next = watch_store::get(&state.db, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run_at;
+    let result = ts
+        .client
+        .post("/api/watches/run", json!({"key":id}))
+        .await
+        .unwrap();
+    assert_eq!(result["outcome"], "skipped");
+    watch::execute_script_occurrence(&state, &occurrence)
+        .await
+        .unwrap();
+    let run = watch_store::recent_runs(&state.db, id, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == occurrence.watch_run_id)
+        .unwrap();
+    assert_eq!(run.outcome, "ok", "{}", run.summary);
+    assert_eq!(run.exit_code, Some(0));
+    assert!(surveyed_ids(&run).contains(&session_id));
+    assert!(weaver_core::occurrence::active(&state.db)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        watch_store::get(&state.db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at,
+        next
+    );
+    assert!(weaver_core::occurrence::history(&state.db, id, 10)
+        .await
+        .unwrap()[0]
+        .session_id
+        .is_none());
+    // Reprocessing the same snapshot must not run the script again.
+    watch::execute_script_occurrence(&state, &occurrence)
+        .await
+        .unwrap();
+    assert_eq!(
+        watch_store::recent_runs(&state.db, id, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }

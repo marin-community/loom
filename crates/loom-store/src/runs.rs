@@ -292,7 +292,7 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Run>> {
     )
 }
 
-async fn get_by_key(db: &Db, subject: &str, key: &str) -> Result<Option<Run>> {
+pub async fn get_by_key(db: &Db, subject: &str, key: &str) -> Result<Option<Run>> {
     Ok(sqlx::query_as::<_, Run>(
         "SELECT * FROM automation_runs WHERE actor_subject = ? AND idempotency_key = ?",
     )
@@ -339,15 +339,16 @@ pub async fn launched(db: &Db, id: &str, session_id: &str) -> Result<bool> {
 }
 
 /// Claim a reservation abandoned while provisioning. A live request keeps its
-/// five-minute lease; after that, exactly one retry may resume with the same
-/// preallocated session id.
+/// five-minute lease (30 seconds for bounded scheduled agents); after that,
+/// exactly one retry may resume with the same preallocated session id.
 pub async fn claim_stale(db: &Db, id: &str) -> Result<bool> {
     Ok(sqlx::query(
         "UPDATE automation_runs SET updated_at = ?
-         WHERE id = ? AND status = 'creating' AND updated_at <= ?",
+         WHERE id = ? AND status = 'creating' AND updated_at <= CASE WHEN source = 'watch' THEN ? ELSE ? END",
     )
     .bind(now_iso())
     .bind(id)
+    .bind((chrono::Utc::now() - chrono::Duration::seconds(30)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
     .bind(stale_before())
     .execute(db)
     .await?
@@ -537,7 +538,7 @@ pub async fn reconcile_missing_sessions(db: &Db) -> Result<u64> {
         "UPDATE automation_runs
          SET status = 'cancelled', outcome = 'cancelled',
              summary = 'session provisioning was interrupted', updated_at = ?
-         WHERE (status = 'running' OR (status = 'creating' AND updated_at <= ?))
+         WHERE source != 'watch' AND (status = 'running' OR (status = 'creating' AND updated_at <= ?))
            AND NOT EXISTS (
                SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
            )",
@@ -547,6 +548,27 @@ pub async fn reconcile_missing_sessions(db: &Db) -> Result<u64> {
     .execute(db)
     .await?
     .rows_affected())
+}
+
+/// Fence delayed scheduled provisioning before any ACP task can execute.
+/// A cancelled occurrence may still have a relay handshake draining on an old
+/// daemon; that runtime has no authority to begin an agent turn.
+pub async fn require_watch_turn(db: &Db, session_id: &str, completed_turns: i64) -> Result<()> {
+    let scheduled: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM automation_runs WHERE session_id = ? AND source = 'watch')",
+    )
+    .bind(session_id)
+    .fetch_one(db)
+    .await?;
+    if !scheduled {
+        return Ok(());
+    }
+    let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watch_occurrences o JOIN watches w ON w.id = o.watch_id JOIN automation_runs r ON r.id = o.run_id WHERE o.session_id = ? AND o.status IN ('dispatching','running') AND r.status IN ('creating','running') AND o.deadline_at > ? AND (o.status = 'running' OR (w.revision = o.revision AND ((w.enabled = 1 AND w.paused = 0) OR o.trigger_reason IN ('run','manual')))))")
+        .bind(session_id).bind(now_iso()).fetch_one(db).await?;
+    if !valid || completed_turns > 0 {
+        anyhow::bail!("scheduled occurrence no longer owns an agent turn");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

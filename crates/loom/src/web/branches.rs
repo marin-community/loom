@@ -142,6 +142,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::get::Op, _, _>(get_operation),
         register::<ops::update::Op, _, _>(update_operation),
         register::<ops::status::set::Op, _, _>(status_set_operation),
+        register::<ops::slack::post::Op, _, _>(slack_post_operation),
         register::<ops::slack::send::Op, _, _>(slack_send_operation),
         register::<ops::events::list::Op, _, _>(events_list_operation),
         register::<ops::events::create::Op, _, _>(events_create_operation),
@@ -470,6 +471,13 @@ async fn issues_list_operation(
         weaver_core::issue::list_for_branch(&st.db, &branch.repo_root, &branch.branch, input.all)
             .await?;
     super::issues::issue_views(&st.db, issues).await
+}
+
+async fn slack_post_operation(
+    context: OperationContext,
+    input: ops::slack::post::Input,
+) -> ApiResult<weaver_api::SlackDeliveryView> {
+    super::scheduled::slack_post(&context.state, input).await
 }
 
 #[cfg(test)]

@@ -57,7 +57,7 @@ and the rule for placing a new module.
 | `crates/loom-ctx/src/client_context.rs` | named endpoint and credential resolution for the `loom` CLI: XDG user config, private credentials, and repository context selection |
 | `crates/loom/src/server.rs` | bind, write `server.json`, spawn bg tasks |
 | `crates/loom-watch/src/monitor.rs` | status detection, orphan marking, hook-event consumer, and the shared lifecycle-promotion path (`promote_lifecycle`) both the terminal hook consumer and the ACP turn-boundary driver (`record_acp_lifecycle`) run through |
-| `crates/loom-watch/src/watch.rs` | the watch engine: cron timer + event dispatcher + the round executor (the script subprocess executor every program runs on) |
+| `crates/loom-watch/src/watch.rs` | the reactive watch engine: dynamic-wake timer, event dispatcher, and script round executor |
 | `crates/loom-watch/src/builtins.rs` | the builtin watch program registry; the script programs are real Python files in `crates/loom-watch/watches/`, embedded into the binary |
 | `python/weaver-loom/` | the pure-Python layer over the loom REST API (`weaver_loom`: client + watch round context); stdlib-only, uv-buildable, vendored onto every script's `PYTHONPATH` by the engine; server-free contract tests in `tests/` (`uv run pytest`, CI's `python-binding` job) |
 | `crates/loom-agent/src/agent.rs` | `AgentManager` plus launch mapping: resolves registered runtimes, launches terminal agents, builds ACP launches, and runs transient ACP judgement prompts for handoff summaries and `POST /api/agents/oneshot` |
@@ -1155,7 +1155,7 @@ descriptors. Custom-server tools are filtered to the stamped rules; remote
 servers use ACP's HTTP transport directly and advertise their tools with MCP
 `tools/list` rather than passing through a Loom proxy process.
 One built-in `loom` MCP server exposes namespaced context, channel, artifact,
-session, messaging, permission, issue, and fixed-repository GitHub tools.
+session, watch, messaging, permission, issue, and fixed-repository GitHub tools.
 Resource tools return concise text plus
 machine-readable MCP `structuredContent`; their DTOs are the same ones used by
 the REST client and CLI. The ordinary first-party domains obtain their names,
@@ -1191,8 +1191,8 @@ registry so the secret never rides `settings.get`.
 
 ## Watches
 
-A **watch** is a periodic / triggered program over the fleet: it
-wakes on a trigger (a cron tick or a session event), surveys the sessions in
+A **script watch** is a reactive program over the fleet: it
+wakes on a session event or a one-shot recheck, surveys the sessions in
 scope, and acts within an explicit capability set. The engine (`loom::watch`,
 spawned in `server::serve`, self-gated on the
 `watch.enabled` setting) runs each **round** under non-optional guardrails
@@ -1269,3 +1269,60 @@ builtins are stdlib-only and need neither).
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |
+
+## Scheduled watches
+
+Cron and interval watches choose a mechanical Python `program` or an `agent`
+target: an automation-safe ACP profile, `owner/repo`, task prompt, and allowed
+Slack channel IDs. Scripts execute directly; agents launch sessions. Existing
+scheduled scripts keep their enabled state and cadence through migration.
+Reactive scripts retain their event subscriptions and dynamic `wake_at`.
+
+The independent scheduling loop queues an occurrence and advances its
+cadence in one SQLite transaction. A partial unique constraint keeps one active
+occurrence per watch, including manual runs. Each occurrence snapshots its
+revision and definition, and dispatches to the chosen executor. Agents launch through the automation
+reservation path with the occurrence ID as the idempotency key. Interrupted
+agent dispatch retries that key;
+external callers cannot select the scheduler's `watch` source.
+
+The schedule and executor are separate choices. The UI offers
+intervals, daily times, weekdays, and an advanced cron expression. Calendar
+schedules use an IANA time zone (UTC by default); the API and IaC accept
+five-field cron or an `every` duration such as `30m`.
+
+Missed runs coalesce into the latest scheduled run if it is no more than ten
+minutes late. Older runs and runs that overlap an active occurrence are skipped. Execution times out after
+five minutes unless the watch sets `run_timeout_secs`. Pausing suppresses pending
+and future work; resume starts with the next scheduled time.
+
+Scheduled scripts use the existing round contract for output, actions, state,
+and dynamic wakes. A durable process lease claims each script once. A gated
+process-group leader remains alive through execution and teardown; the daemon
+stops the entire group before releasing overlap. An interrupted script settles
+as an error without replaying potentially completed actions. Output, state,
+wake, and occurrence completion are committed together. Script execution does
+not create an agent session.
+
+A completed ACP turn, stopped session, or occurrence deadline begins durable
+settlement. The loop stops the agent before releasing the overlap constraint.
+Completed sessions remain visible for about five minutes, then the retention reaper
+archives them through the shared lifecycle path. The `auto-archive: disabled`
+tag retains a session for inspection. Each watch has history in `watches.runs`
+and occurrence/run/session identifiers in `watches.occurrences`. `watches.preview` shows five upcoming times.
+
+Agents use branch-scoped `watches.state` for object-valued persistent memory,
+with a version check for replacement. `branches.slack.post` checks the owning
+occurrence's destination snapshot and reserves an action key before contacting
+Slack. Definite rejections allow a later retry with that key; 429 responses
+persist `Retry-After`. Ambiguous delivery remains uncertain and is not reposted.
+The `loom/watches/state@v1` capability in the `watch` MCP group exposes
+`watch_state`. The separate `loom/messaging/post@v1` capability in the
+`messaging` group exposes `messaging_slack_post`. Profiles can select either
+capability or both; neither grants access to the other's operation.
+
+Deployment reconciliation applies profiles before named watches. It
+preserves IDs, state, history, runtime pause, and cadence when unchanged. Pruning
+pauses omitted managed watches and leaves operator-owned watches alone. Marin's
+`infra/loom` stack renders these definitions and confined prompt-file contents
+into the deployment manifest.

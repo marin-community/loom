@@ -55,6 +55,22 @@ async fn reconcile_deployment_core(
             }
         }
     }
+    let mut watch_names = BTreeSet::new();
+    for declared in &req.watches {
+        if !watch_names.insert(declared.name.trim().to_string()) {
+            return Err(AppError::bad_request("watch declared more than once"));
+        }
+        if let Some(existing) =
+            weaver_core::watch::get_by_name(&st.db, declared.name.trim()).await?
+        {
+            if !existing.deployment_managed {
+                return Err(AppError::conflict(format!(
+                    "watch '{}' is not deployment-managed",
+                    declared.name
+                )));
+            }
+        }
+    }
     let mut federation_names = BTreeSet::new();
     for mapping in &req.federations {
         if !federation_names.insert(mapping.name.trim().to_string()) {
@@ -132,6 +148,22 @@ async fn reconcile_deployment_core(
         }
     }
 
+    for declared in &req.watches {
+        super::watches::reconcile_watch(st, declared.clone()).await?;
+    }
+    if req.prune {
+        for watch in weaver_core::watch::list(&st.db).await? {
+            if watch.deployment_managed && !watch_names.contains(&watch.name) {
+                sqlx::query(
+                    "UPDATE watches SET enabled = 0, paused = 1, next_run_at = NULL WHERE id = ?",
+                )
+                .bind(&watch.id)
+                .execute(&st.db)
+                .await?;
+            }
+        }
+    }
+
     for mapping in &req.federations {
         crate::automation::federation_add(&st.db, mapping)
             .await
@@ -147,6 +179,17 @@ async fn reconcile_deployment_core(
         }
         for name in crate::profile::deployment_managed_names(&st.db).await? {
             if !profile_names.contains(&name) {
+                let definitions = weaver_core::occurrence::active(&st.db)
+                    .await?
+                    .into_iter()
+                    .map(|occurrence| {
+                        serde_json::from_str::<weaver_core::watch::Watch>(&occurrence.definition)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let pending_retirement = definitions.iter().any(|watch| watch.profile == name);
+                if pending_retirement {
+                    continue;
+                }
                 crate::profile::remove(&st.db, &name)
                     .await
                     .map_err(|error| AppError::bad_request(error.to_string()))?;
@@ -185,7 +228,14 @@ async fn reconcile_deployment_core(
         .into_iter()
         .filter(|server| remote_mcp_identities.contains(&server.identity))
         .collect();
+    let mut watches = Vec::new();
+    for watch in weaver_core::watch::list(&st.db).await? {
+        if watch_names.contains(&watch.name) {
+            watches.push(weaver_api::WatchView::from_parts(&watch, None)?);
+        }
+    }
     Ok(DeploymentView {
+        watches,
         settings,
         remote_mcps,
         profiles: profile_views,

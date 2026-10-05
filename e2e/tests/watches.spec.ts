@@ -43,7 +43,7 @@ test.describe('watch panel', () => {
   test('lists a watch and auto-selects it into the detail pane', async ({ page, weaver }) => {
     await weaver.seedWatch({
       name: 'status-check',
-      trigger: { cron: '0 * * * *' },
+      trigger: { on: ['session.attention'] },
       scope: { attention: '!ok' },
       params: { prompt: 'flag stuck sessions' },
     });
@@ -62,8 +62,60 @@ test.describe('watch panel', () => {
     // trigger and scope readable as chips.
     const detail = page.getByTestId('watch-detail');
     await expect(detail).toContainText('status-check');
-    await expect(detail).toContainText('cron 0 * * * *');
+    await expect(detail).toContainText('on session.attention');
     await expect(detail).toContainText('attention ≠ ok');
+  });
+
+  test('creates and edits a mechanical schedule without an agent target', async ({ page, weaver }) => {
+    await page.goto(`${weaver.baseUrl}/watches`);
+    await page.getByTestId('watch-new').click();
+    await page.getByTestId('watch-name').fill('merge-check');
+    await page.getByRole('button', { name: 'Advanced: cron', exact: true }).click();
+    await page.getByLabel('Execution', { exact: true }).selectOption('script');
+    await page.getByTestId('watch-program').selectOption('builtin:archive-merged');
+    await page.getByTestId('watch-form').getByPlaceholder('0 * * * *').fill('15 10 * * *');
+    await page.getByTestId('watch-form').getByPlaceholder('UTC').fill('America/Los_Angeles');
+    await page.getByTestId('watch-create').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('daily at 10:15 America/Los_Angeles');
+    await page.getByTestId('watch-tab-config').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('builtin:archive-merged');
+    await page.getByTestId('watch-edit').click();
+    await page.getByLabel('Schedule', { exact: true }).selectOption('daily');
+    await page.getByLabel('Time of day').fill('11:15');
+    await page.getByLabel('Timeout (seconds)').fill('60');
+    await page.getByTestId('watch-save').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('daily at 11:15 America/Los_Angeles');
+    await expect(page.getByText('Timeout: 60 seconds', {exact:true})).toBeVisible();
+  });
+
+  test('creates, previews and edits an agent schedule and its task prompt', async ({ page, weaver }) => {
+    await page.goto(`${weaver.baseUrl}/watches`);
+    await page.getByTestId('watch-new').click();
+    const form = page.getByTestId('watch-form');
+    await page.getByTestId('watch-name').fill('weekday-agent');
+    await page.getByRole('button', { name: 'Weekdays at…', exact: true }).click();
+    await expect(page.getByTestId('watch-program')).toHaveCount(0);
+    await expect(page.getByTestId('cap-nudge')).toHaveCount(0);
+    await form.getByLabel('Time of day').fill('09:00');
+    await form.getByPlaceholder('UTC').fill('America/Los_Angeles');
+    await form.getByPlaceholder('marin-community/marin').fill('org/repo');
+    await form.getByPlaceholder('C0123456789').fill('C12345');
+    await form.locator('textarea').fill('Check jobs');
+    await page.getByRole('button', { name: 'Preview next five runs' }).click();
+    await expect(form.locator('li')).toHaveCount(5);
+    await page.getByTestId('watch-create').click();
+    await expect(page.getByTestId('watch-row')).toHaveCount(1);
+    await page.getByTestId('watch-tab-script').click();
+    await expect(page.getByText('Check jobs', { exact: true })).toBeVisible();
+    await page.getByTestId('watch-tab-config').click();
+    await expect(page.getByText('Time zone: America/Los_Angeles')).toBeVisible();
+    await page.getByTestId('watch-edit').click();
+    await page.getByLabel('Repository', { exact: true }).fill('org/other');
+    await page.getByLabel('Schedule', { exact: true }).selectOption('daily');
+    await page.getByLabel('Time of day').fill('10:30');
+    await page.getByTestId('watch-save').click();
+    await expect(page.getByText('daily at 10:30 America/Los_Angeles').first()).toBeVisible();
+    await expect(page.getByText('Repository: org/other', { exact: true })).toBeVisible();
   });
 
   test('uses the mailbox command grammar for selection, tabs, and creation', async ({

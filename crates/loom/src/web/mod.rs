@@ -98,6 +98,7 @@ mod repo_env;
 mod repos;
 mod restricted_github;
 mod reviews;
+pub(crate) mod scheduled;
 mod scope;
 mod scratch;
 mod self_context;
@@ -273,6 +274,7 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
         let status = match err.downcast_ref::<crate::lifecycle::Refusal>() {
             Some(crate::lifecycle::Refusal::Conflict(_)) => StatusCode::CONFLICT,
             Some(crate::lifecycle::Refusal::Invalid(_)) => StatusCode::BAD_REQUEST,
+            None if err.is::<weaver_core::watch::ExecutionChangeConflict>() => StatusCode::CONFLICT,
             None => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self {

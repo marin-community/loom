@@ -31,6 +31,9 @@ pub mod reconcile {
         /// Trusted GitHub Actions OIDC workflow mappings this stack declares.
         #[operand(json, default = Vec::new())]
         pub federations: Vec<FederationReq>,
+        /// Agent watches owned by this deployment.
+        #[operand(json, default = Vec::new())]
+        pub watches: Vec<DeploymentWatchReq>,
         /// Remove previously deployment-managed resources omitted from this
         /// request.
         #[operand(default = false)]

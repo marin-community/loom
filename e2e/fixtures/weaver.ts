@@ -112,6 +112,7 @@ export interface SeedWatchOpts {
   name: string;
   /** Trigger predicate; defaults to a manual `{}` (only fires on Run now). */
   trigger?: Record<string, unknown>;
+  agent?: { profile: string; repo: string; prompt: string; slack_channels?: string[] };
   /** Fleet scope; defaults to `{}` (whole fleet). */
   scope?: Record<string, unknown>;
   program?: string;
@@ -537,6 +538,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           method: 'POST',
           body: JSON.stringify({
             name: opts.name,
+            agent: opts.agent,
             trigger: opts.trigger ?? {},
             scope: opts.scope ?? {},
             program: opts.program ?? 'builtin:status',

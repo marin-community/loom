@@ -30,6 +30,7 @@ pub(crate) mod context;
 pub(crate) mod issue;
 pub(crate) mod messaging;
 pub(crate) mod permission;
+pub(crate) mod watch;
 
 // These stay hand-written rather than bound via `dispatch::bind` — see each
 // module's own doc comment for exactly which tool and why (a response
@@ -100,6 +101,7 @@ const ADAPTERS: &[&Adapter] = &[
     &session::ADAPTER,
     &messaging::ADAPTER,
     &permission::ADAPTER,
+    &watch::ADAPTER,
 ];
 
 fn adapters() -> impl Iterator<Item = &'static Adapter> {
@@ -1021,6 +1023,59 @@ mod tests {
     }
 
     #[test]
+    fn watch_state_and_slack_post_are_independent_capabilities() {
+        let cases: &[(&[&str], &[&str], &[&str])] = &[
+            (
+                &["loom/watches/state@v1"],
+                &["watch_state"],
+                &["loom/watches/state@v1"],
+            ),
+            (
+                &["loom/messaging/post@v1"],
+                &["messaging_slack_post"],
+                &["loom/branches/slack-post@v1"],
+            ),
+            (
+                &["loom/watches/state@v1", "loom/messaging/post@v1"],
+                &["watch_state", "messaging_slack_post"],
+                &["loom/watches/state@v1", "loom/branches/slack-post@v1"],
+            ),
+        ];
+        for (sets, tools, grants) in cases {
+            let rules = expand_tool_sets(
+                &sets
+                    .iter()
+                    .map(|set| (*set).to_string())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let servers = server_configs(&rules);
+            let mut exposed: Vec<String> = serde_json::from_str(
+                servers["loom"]["env"]["LOOM_MCP_ALLOWED_TOOLS"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            exposed.sort();
+            let mut expected_tools = tools.to_vec();
+            expected_tools.sort();
+            assert_eq!(exposed, expected_tools);
+
+            let mut expected_grants = vec![
+                "loom/sessions/read@v1",
+                "loom/permissions/read@v1",
+                "loom/permissions/request@v1",
+            ];
+            expected_grants.extend_from_slice(grants);
+            expected_grants.sort();
+            assert_eq!(
+                super::session_capabilities(true, sets.iter().copied()),
+                expected_grants
+            );
+        }
+    }
+
+    #[test]
     fn ignores_unknown_namespaced_sets() {
         let expanded = expand_tool_sets(&[
             "mcp/github/admin".to_string(),
@@ -1224,6 +1279,10 @@ mod tests {
                 "sha256:021c51cdef86f5a7a718295d78417769756dc22f1a826636afa56e654a7d679d",
             ),
             (
+                "loom/messaging/post@v1",
+                "sha256:b1a99d38ccdeb0f3e8bd2c05836f93354d56dba594096fa875672c22aa042f8e",
+            ),
+            (
                 "loom/messaging/slack@v1",
                 "sha256:89d1f86e4c28cf1c73287493609abbf347ff99a257e611107e62067840b854f4",
             ),
@@ -1234,6 +1293,10 @@ mod tests {
             (
                 "loom/permissions/request@v1",
                 "sha256:e2d2e7c103d995b9d8a9374f77ba4e5f03d6ad34c26fd8478ff8c4ae3df1479d",
+            ),
+            (
+                "loom/watches/state@v1",
+                "sha256:582d00d9cb42f724a9559e2ad080ac221a264fabd94dbed5e985f129655c1bb1",
             ),
         ]
         .into_iter()
@@ -1248,7 +1311,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual.len(), expected.len(), "actual digests: {actual:#?}");
         // Report every drift at once, not just the first failure, so a re-pin
         // is a deliberate decision informed by everything that changed.
         let drift: Vec<String> = expected

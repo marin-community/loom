@@ -1257,3 +1257,88 @@ async fn deployment_reconcile_rest_journey() {
         );
     }
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deployment_reconciles_script_updates_and_executor_changes_without_losing_identity() {
+    let ts = TestServer::start().await;
+    let mut manifest = json!({"watches":[{"name":"scheduled-check","trigger":{"every":"30m"},"program":"builtin:archive-merged","params":{"label":"first"},"enabled":true}],"prune":true});
+    ts.client
+        .post("/api/deployment/reconcile", manifest.clone())
+        .await
+        .unwrap();
+    let first = ts
+        .client
+        .post("/api/watches/get", json!({"key":"scheduled-check"}))
+        .await
+        .unwrap();
+    assert!(first["agent"].is_null());
+    ts.client
+        .post("/api/deployment/reconcile", manifest.clone())
+        .await
+        .unwrap();
+    let unchanged = ts
+        .client
+        .post("/api/watches/get", json!({"key":"scheduled-check"}))
+        .await
+        .unwrap();
+    assert_eq!(unchanged["revision"], first["revision"]);
+    let inferred = json!({"watches":[{"name":"reactive-defaults","program":"builtin:pr-label","enabled":false}]});
+    ts.client
+        .post("/api/deployment/reconcile", inferred.clone())
+        .await
+        .unwrap();
+    let before = ts
+        .client
+        .post("/api/watches/get", json!({"key":"reactive-defaults"}))
+        .await
+        .unwrap();
+    ts.client
+        .post("/api/deployment/reconcile", inferred)
+        .await
+        .unwrap();
+    let after = ts
+        .client
+        .post("/api/watches/get", json!({"key":"reactive-defaults"}))
+        .await
+        .unwrap();
+    assert_eq!(after["revision"], before["revision"]);
+    assert_eq!(after["trigger"], before["trigger"]);
+    assert_eq!(after["capabilities"], before["capabilities"]);
+    manifest["watches"][0]["params"] = json!({"label":"second"});
+    ts.client
+        .post("/api/deployment/reconcile", manifest.clone())
+        .await
+        .unwrap();
+    let changed = ts
+        .client
+        .post("/api/watches/get", json!({"key":"scheduled-check"}))
+        .await
+        .unwrap();
+    assert_eq!(changed["params"], json!({"label":"second"}));
+    assert_eq!(changed["id"], first["id"]);
+    manifest["watches"][0] = json!({"name":"scheduled-check","trigger":{"every":"30m"},"agent":{"profile":"watch","repo":"org/repo","prompt":"Check jobs"},"enabled":true});
+    ts.client
+        .post("/api/deployment/reconcile", manifest.clone())
+        .await
+        .unwrap();
+    let agent = ts
+        .client
+        .post("/api/watches/get", json!({"key":"scheduled-check"}))
+        .await
+        .unwrap();
+    assert_eq!(agent["agent"]["prompt"], "Check jobs");
+    manifest["watches"][0] = json!({"name":"scheduled-check","trigger":{"every":"30m"},"program":"builtin:archive-merged","capabilities":["observe"],"enabled":true});
+    ts.client
+        .post("/api/deployment/reconcile", manifest)
+        .await
+        .unwrap();
+    let script = ts
+        .client
+        .post("/api/watches/get", json!({"key":"scheduled-check"}))
+        .await
+        .unwrap();
+    assert!(script["agent"].is_null());
+    assert_eq!(script["program"], "builtin:archive-merged");
+    assert_eq!(script["id"], first["id"]);
+}

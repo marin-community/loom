@@ -162,6 +162,15 @@ async fn launch_run(
     run: crate::runs::Run,
     failure: LaunchFailure,
 ) -> ApiResult<RunView> {
+    if req.source == "watch" {
+        let attached = sqlx::query("UPDATE watch_occurrences SET run_id = ?, session_id = ?, status = 'dispatching' WHERE id = ? AND status IN ('pending','dispatching') AND EXISTS(SELECT 1 FROM watches w WHERE w.id = watch_occurrences.watch_id AND w.revision = watch_occurrences.revision AND ((w.enabled = 1 AND w.paused = 0) OR trigger_reason IN ('run','manual')))")
+            .bind(&run.id).bind(&run.session_id).bind(&req.idempotency_key).execute(&st.db).await?.rows_affected();
+        if attached == 0 {
+            return Err(AppError::conflict(
+                "scheduled definition changed before dispatch",
+            ));
+        }
+    }
     let actor = crate::provision::Actor::automation(
         req.source.clone(),
         subject,
@@ -310,17 +319,23 @@ async fn dispatch_channel_run(
 }
 
 /// Everything after identity resolution for `runs.create`.
-async fn create_run_core(
+pub(super) async fn create_run_core(
     st: &AppState,
     principal: &Principal,
     mut req: run_operations::create::Input,
     subject: String,
     profiles: Vec<String>,
+    scheduler: bool,
 ) -> ApiResult<RunView> {
-    let profile = req.profile.trim().to_string();
-    if !matches!(req.source.as_str(), "actions" | "ops" | "grafana") {
+    if req.source == "watch" && !scheduler {
         return Err(AppError::bad_request(
-            "run source must be 'actions', 'ops', or 'grafana'",
+            "watch source is reserved for the scheduler",
+        ));
+    }
+    let profile = req.profile.trim().to_string();
+    if !matches!(req.source.as_str(), "actions" | "ops" | "grafana" | "watch") {
+        return Err(AppError::bad_request(
+            "run source must be 'actions', 'ops', 'grafana', or 'watch'",
         ));
     }
     if let Some(watch_id) = req.watch_id.as_deref() {
@@ -484,7 +499,15 @@ pub(super) async fn create_run(
 ) -> ApiResult<RunView> {
     let profile = input.profile.trim().to_string();
     let (subject, profiles) = run_identity(&context.principal, &profile)?;
-    create_run_core(&context.state, &context.principal, input, subject, profiles).await
+    create_run_core(
+        &context.state,
+        &context.principal,
+        input,
+        subject,
+        profiles,
+        false,
+    )
+    .await
 }
 
 /// `runs.list` is declared `actor = User`: only `Grant::Admin`/`Grant::User`

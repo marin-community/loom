@@ -118,6 +118,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "activate_pr_labeller",
         include_str!("../migrations/0019_activate_pr_labeller.sql"),
     ),
+    (
+        20,
+        "scheduled_agents",
+        include_str!("../migrations/0020_scheduled_agents.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.
@@ -471,6 +476,32 @@ mod tests {
     /// these assertions track [`MIGRATIONS`] instead of a hand-kept literal.
     fn all_versions() -> Vec<i64> {
         MIGRATIONS.iter().map(|(v, _, _)| *v).collect()
+    }
+
+    #[tokio::test]
+    async fn scheduling_migration_keeps_enabled_scripts_and_their_due_time() {
+        let pool = empty_pool().await;
+        for (_, _, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version < 20) {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO watches (id,name,enabled,trigger_spec,program,next_run_at) VALUES ('legacy','merge-check',1,'{\"every\":\"30m\"}','builtin:archive-merged','2026-10-05T10:00:00.000Z')").execute(&pool).await.unwrap();
+        let (_, _, sql) = MIGRATIONS
+            .iter()
+            .find(|(version, _, _)| *version == 20)
+            .unwrap();
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        let watch = crate::watch::get(&pool, "legacy").await.unwrap().unwrap();
+        assert!(watch.enabled);
+        assert_eq!(
+            watch.next_run_at.as_deref(),
+            Some("2026-10-05T10:00:00.000Z")
+        );
+        assert!(watch.agent().unwrap().is_none());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-05T10:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        crate::occurrence::tick(&pool, now).await.unwrap();
+        assert_eq!(crate::occurrence::active(&pool).await.unwrap().len(), 1);
     }
 
     /// A fresh database ends up with the current schema, every migration

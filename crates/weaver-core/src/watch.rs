@@ -54,6 +54,12 @@ pub struct Watch {
     pub wake_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub agent_spec: Option<String>,
+    pub revision: i64,
+    pub deployment_managed: bool,
+    pub paused: bool,
+    pub run_timeout_secs: i64,
+    pub state_version: i64,
 }
 
 /// The parsed trigger — a watch's **subscription manifest**: what wakes a round.
@@ -69,7 +75,10 @@ pub struct Watch {
 /// (`{"event":"attention","level":"blocked"}`) is still parsed and folded into
 /// the subscription set, so watches predating the manifest keep working.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Trigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +210,13 @@ impl Scope {
 }
 
 impl Watch {
+    pub fn agent(&self) -> Result<Option<crate::schedule::AgentTarget>> {
+        self.agent_spec
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(Into::into)
+    }
     /// Parse the trigger; an unparseable spec yields the empty (never-matching,
     /// never-scheduled) trigger rather than erroring a whole round.
     pub fn trigger(&self) -> Trigger {
@@ -290,6 +306,8 @@ pub struct NewWatch {
     /// `false` so a bare `NewWatch` (CLI / seeds / tests) starts disabled;
     /// the loom create UI opts in to `true`.
     pub enabled: bool,
+    pub agent: Option<crate::schedule::AgentTarget>,
+    pub run_timeout_secs: i64,
 }
 
 impl Default for NewWatch {
@@ -310,6 +328,8 @@ impl Default for NewWatch {
             effort: String::new(),
             cooldown_secs: 0,
             enabled: false,
+            agent: None,
+            run_timeout_secs: crate::schedule::RUN_TIMEOUT_SECS,
         }
     }
 }
@@ -321,8 +341,8 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     sqlx::query(
         "INSERT INTO watches
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
-            profile, model, effort, cooldown_secs, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            profile, model, effort, cooldown_secs, created_at, updated_at, agent_spec, run_timeout_secs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -338,6 +358,8 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     .bind(new.cooldown_secs)
     .bind(&now)
     .bind(&now)
+    .bind(new.agent.as_ref().map(serde_json::to_string).transpose()?)
+    .bind(new.run_timeout_secs)
     .execute(db)
     .await?;
     get(db, &id)
@@ -389,7 +411,8 @@ pub async fn list_enabled(db: &Db) -> Result<Vec<Watch>> {
 }
 
 pub async fn set_enabled(db: &Db, id: &str, enabled: bool) -> Result<()> {
-    sqlx::query("UPDATE watches SET enabled = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET next_run_at = CASE WHEN enabled = 0 AND ? = 1 THEN NULL ELSE next_run_at END, enabled = ?, updated_at = ? WHERE id = ?")
+        .bind(enabled)
         .bind(enabled)
         .bind(now_iso())
         .bind(id)
@@ -413,12 +436,16 @@ pub struct WatchUpdate {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub cooldown_secs: Option<i64>,
+    pub agent_spec: Option<String>,
+    pub run_timeout_secs: Option<i64>,
 }
 
 impl WatchUpdate {
     /// Whether any field is set — lets a caller skip a no-op write.
     pub fn is_empty(&self) -> bool {
-        self.trigger_spec.is_none()
+        self.agent_spec.is_none()
+            && self.run_timeout_secs.is_none()
+            && self.trigger_spec.is_none()
             && self.scope.is_none()
             && self.program.is_none()
             && self.params.is_none()
@@ -430,10 +457,50 @@ impl WatchUpdate {
     }
 }
 
+#[derive(Debug)]
+pub struct ExecutionChangeConflict;
+impl std::fmt::Display for ExecutionChangeConflict {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "wait for active work before switching between reactive and scheduled execution",
+        )
+    }
+}
+impl std::error::Error for ExecutionChangeConflict {}
+
 /// Apply a partial update to a watch's mutable fields. Each `Some(_)`
 /// overwrites; `COALESCE(?, col)` leaves an absent field untouched. `updated_at`
 /// always advances.
 pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
+    let mut tx = db.begin().await?;
+    let current: Watch = sqlx::query_as("SELECT * FROM watches WHERE id = ?")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let trigger: Trigger = patch
+        .trigger_spec
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_else(|| current.trigger());
+    let agent: Option<crate::schedule::AgentTarget> = match patch.agent_spec.as_deref() {
+        Some(value) => serde_json::from_str(value)?,
+        None => current.agent()?,
+    };
+    let queued_path = trigger.is_scheduled() || agent.is_some();
+    let was_queued_path = current.trigger().is_scheduled() || current.agent_spec.is_some();
+    if queued_path != was_queued_path {
+        let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watch_occurrences WHERE watch_id = ? AND status IN ('pending','dispatching','running','finishing'))").bind(id).fetch_one(&mut *tx).await?;
+        let owners: Vec<String> = sqlx::query_scalar("SELECT execution_owner FROM watch_runs WHERE watch_id = ? AND finished_at IS NULL AND execution_owner IS NOT NULL").bind(id).fetch_all(&mut *tx).await?;
+        let mut reactive_active = false;
+        for owner in owners {
+            let owner: crate::process_identity::ProcessIdentity = serde_json::from_str(&owner)?;
+            reactive_active |= owner.alive()?;
+        }
+        if active || reactive_active {
+            return Err(ExecutionChangeConflict.into());
+        }
+    }
     let caps = match &patch.capabilities {
         Some(c) => Some(serde_json::to_string(c)?),
         None => None,
@@ -449,6 +516,10 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
            model         = COALESCE(?, model),
            effort        = COALESCE(?, effort),
            cooldown_secs = COALESCE(?, cooldown_secs),
+           agent_spec = CASE WHEN ? IS NULL THEN agent_spec ELSE NULLIF(?, 'null') END,
+           run_timeout_secs = COALESCE(?, run_timeout_secs),
+           revision = revision + 1,
+           next_run_at = CASE WHEN ? THEN NULL ELSE next_run_at END,
            updated_at    = ?
          WHERE id = ?",
     )
@@ -461,10 +532,15 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
     .bind(&patch.model)
     .bind(&patch.effort)
     .bind(patch.cooldown_secs)
+    .bind(&patch.agent_spec)
+    .bind(&patch.agent_spec)
+    .bind(patch.run_timeout_secs)
+    .bind(patch.trigger_spec.is_some())
     .bind(now_iso())
     .bind(id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -576,6 +652,40 @@ pub struct RunRecord<'a> {
     pub duration_ms: Option<i64>,
 }
 
+/// Fence a reactive snapshot against concurrent edits and queued execution.
+pub async fn start_round(
+    db: &Db,
+    snapshot: &Watch,
+    reason: &str,
+    event: &str,
+) -> Result<Option<i64>> {
+    let owner = crate::process_identity::ProcessIdentity::read(std::process::id())?;
+    let mut tx = db.begin().await?;
+    let claimed = sqlx::query("UPDATE watches SET last_run_at = last_run_at WHERE id = ? AND revision = ? AND agent_spec IS NULL AND NOT EXISTS(SELECT 1 FROM watch_occurrences WHERE watch_id = ? AND status IN ('pending','dispatching','running','finishing'))").bind(&snapshot.id).bind(snapshot.revision).bind(&snapshot.id).execute(&mut *tx).await?.rows_affected();
+    if claimed == 0 {
+        return Ok(None);
+    }
+    let run: i64 = sqlx::query_scalar("INSERT INTO watch_runs (watch_id,trigger_reason,trigger_event,started_at,execution_owner) VALUES (?,?,?,?,?) RETURNING id")
+        .bind(&snapshot.id).bind(reason).bind(event).bind(now_iso()).bind(serde_json::to_string(&owner)?).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(Some(run))
+}
+
+pub const AGENTIC_MIN_COOLDOWN_SECS: i64 = 15 * 60;
+
+pub fn round_cooldown(watch: &Watch, reason: &str, global: i64) -> i64 {
+    let agentic = watch.capabilities().iter().any(|cap| cap == "judge");
+    if reason == "manual" || reason.starts_with("run") || (reason == "wake" && !agentic) {
+        return 0;
+    }
+    let cooldown = watch.cooldown_secs.max(global);
+    if agentic {
+        cooldown.max(AGENTIC_MIN_COOLDOWN_SECS)
+    } else {
+        cooldown
+    }
+}
+
 /// Open a run row at the start of a round; returns its id. `trigger_event` is
 /// the normalized event that woke it. The executor closes it with
 /// [`finish_run`].
@@ -600,6 +710,14 @@ pub async fn start_run(
 
 /// Close a run row with its outcome, summary, actions, and captured output.
 pub async fn finish_run(db: &Db, run_id: i64, rec: &RunRecord<'_>) -> Result<()> {
+    finish_run_on(db, run_id, rec).await
+}
+
+pub async fn finish_run_on<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    run_id: i64,
+    rec: &RunRecord<'_>,
+) -> Result<()> {
     sqlx::query(
         "UPDATE watch_runs SET finished_at = ?, outcome = ?, summary = ?, actions = ?,
            stdout = ?, stderr = ?, exit_code = ?, duration_ms = ?
@@ -614,7 +732,7 @@ pub async fn finish_run(db: &Db, run_id: i64, rec: &RunRecord<'_>) -> Result<()>
     .bind(rec.exit_code)
     .bind(rec.duration_ms)
     .bind(run_id)
-    .execute(db)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -632,6 +750,74 @@ pub async fn recent_runs(db: &Db, watch_id: &str, limit: i64) -> Result<Vec<Watc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn execution_path_changes_wait_for_active_work_and_fence_old_snapshots() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let watch = create(
+            &db,
+            &NewWatch {
+                name: "path-change".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run = start_round(&db, &watch, "manual", "manual")
+            .await
+            .unwrap()
+            .unwrap();
+        let scheduled = WatchUpdate {
+            trigger_spec: Some(r#"{"every":"30m"}"#.into()),
+            ..Default::default()
+        };
+        assert!(update(&db, &watch.id, &scheduled).await.is_err());
+        finish_run(
+            &db,
+            run,
+            &RunRecord {
+                outcome: "noop",
+                summary: "done",
+                actions: &serde_json::json!([]),
+                stdout: "",
+                stderr: "",
+                exit_code: Some(0),
+                duration_ms: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+        update(&db, &watch.id, &scheduled).await.unwrap();
+        assert!(start_round(&db, &watch, "manual", "manual")
+            .await
+            .unwrap()
+            .is_none());
+        let changed = get(&db, &watch.id).await.unwrap().unwrap();
+        crate::occurrence::enqueue(
+            &db,
+            &changed,
+            &crate::occurrence::EnqueueRequest {
+                due: chrono::Utc::now(),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: serde_json::json!({}),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(update(
+            &db,
+            &watch.id,
+            &WatchUpdate {
+                trigger_spec: Some("{}".into()),
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err());
+    }
 
     #[tokio::test]
     async fn create_and_resolve_by_id_or_name() {
@@ -824,6 +1010,12 @@ mod tests {
     #[test]
     fn capabilities_default_to_observe_plus_grants() {
         let o = Watch {
+            agent_spec: None,
+            revision: 1,
+            deployment_managed: false,
+            paused: false,
+            run_timeout_secs: crate::schedule::RUN_TIMEOUT_SECS,
+            state_version: 0,
             id: "x".into(),
             name: "x".into(),
             enabled: false,

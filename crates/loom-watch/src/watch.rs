@@ -1,37 +1,9 @@
-//! The Watch **engine** — the timer, dispatcher, and round executor that
-//! run inside the loom daemon (the single owner of the terminal/session runtime).
+//! Reactive script dispatch and the shared Python round executor.
 //!
-//! The storage + model (`Watch`, `Trigger`, `Scope`, the run audit) lives
-//! in [`weaver_core::watch`]; this module is the live machinery that turns
-//! those rows into action. It is built as **two halves of one event loop**:
-//!
-//! * **The timer (producer).** For each enabled scheduled watch it keeps a
-//!   `next_run_at`, and when due writes a `cron` system event into the same
-//!   `events` stream session changes flow through — nothing more. A cron tick is
-//!   a first-class, logged row.
-//! * **The dispatcher (consumer).** A sibling of [`crate::monitor::run`] on its
-//!   own independent watermark: it reads `events::since`, and for each new event
-//!   fires every enabled watch whose trigger matches — a scheduled one
-//!   matches its own `cron` tick, a reactive one matches a `tag` write (the
-//!   tag's key/value become the trigger's match kind/level, so `attention` and
-//!   `triage` tags still drive `{event:"attention"|"triage"}` triggers) or a
-//!   `stale` tick, and `manual` ticks (operator "run now") fire the named
-//!   watch.
-//!
-//! Both halves are folded into one [`run`] loop, self-gated on the
-//! `watch.enabled` master switch so the daemon can always spawn it and it
-//! idles cheaply when off.
-//!
-//! A **round** is one execution ([`fire`]). It is **level-triggered**: the event
-//! that woke it is only a nudge to re-survey the *current* scoped fleet — it
-//! never "handles" the specific event, so firing twice is idempotent. The round
-//! runs a **program** under the non-optional guardrails — no-overlap, cooldown,
-//! timeout, no-recursion — and records every mutating action as both an
-//! `watch_runs` action entry and an `events` row (the audit rule). Two
-//! program shapes share that one substrate ([`run_program`]): the builtin
-//! **scripts** embedded from [`crate::builtins`] and custom program files —
-//! both run by the same subprocess executor ([`run_script`]), reaching the
-//! fleet only through the loom REST API.
+//! The event loop drains session changes and dynamic one-shot wakes. Cron and
+//! interval timing belongs to the durable occurrence queue; its runtime calls
+//! [`execute_script_occurrence`] or launches an agent. Both script paths use
+//! the same subprocess contract, credential stripping, output audit, and state.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -53,21 +25,8 @@ use weaver_core::watch::{self as watch_store, Watch};
 /// promptly without the loop being a busy spinner.
 const TICK: Duration = Duration::from_millis(1500);
 
-/// An automatic agent-backed watch may run at most once in this window. Model
-/// use is identified by the explicit `judge` capability, so the guard applies
-/// equally to builtins and custom programs. Manual runs remain available for
-/// authoring and diagnosis.
-pub const AGENTIC_MIN_COOLDOWN_SECS: i64 = 15 * 60;
-
-/// Read an integer setting, falling back to `default` on absence or parse
-/// failure. `weaver_core::config` has bool/string getters but no int getter, so
-/// the engine parses the raw value itself.
-pub async fn get_int(db: &crate::Db, key: &str, default: i64) -> i64 {
-    core_config::get(db, key)
-        .await
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(default)
-}
+pub use weaver_core::config::get_int;
+pub use weaver_core::watch::AGENTIC_MIN_COOLDOWN_SECS;
 
 /// The set of watch ids with a round currently in flight. Shared across the
 /// dispatcher and any `fire_now` caller so the **no-overlap** guardrail holds no
@@ -142,10 +101,8 @@ pub async fn seed_builtins(db: &crate::Db) -> anyhow::Result<()> {
 // The engine loop (timer + dispatcher)
 // ---------------------------------------------------------------------------
 
-/// The background engine: spawned in [`crate::server::serve`] alongside the
-/// monitor and the GitHub poller. One loop drives both halves — the timer emits
-/// `cron` ticks, then the dispatcher drains new events and fires matching
-/// watches — so cron and reactive triggers share exactly one code path.
+/// Drain reactive events and dynamic script wakes independently of scheduled
+/// occurrence execution.
 pub async fn run(state: AppState) {
     if let Err(e) = seed_builtins(&state.db).await {
         tracing::warn!("watch: seeding builtin watches failed: {e}");
@@ -173,9 +130,7 @@ pub async fn run(state: AppState) {
             continue;
         }
 
-        // 1. Timer (producer): emit `cron` ticks for any scheduled watch
-        //    that is due. Each tick is a visible `events` row the dispatcher
-        //    then consumes below.
+        // Emit due one-shot script wakes into the event stream.
         tick_timer(&state).await;
 
         // 2. Dispatcher (consumer): drain new events and fire matching rounds.
@@ -191,12 +146,8 @@ pub async fn run(state: AppState) {
     }
 }
 
-/// The timer half: for each enabled scheduled watch, compute (and persist)
-/// its `next_run_at` if missing, and when it is due emit a `cron` system tick and
-/// advance the schedule. Self-gating on the master switch happens in [`run`].
-///
-/// Public so a test can drive one timer pass without the loop's master-switch
-/// gate or tick cadence; in production only [`run`] calls it.
+/// Emit due dynamic script wakes. Calendar and interval schedules are queued
+/// by `weaver_core::occurrence::tick`.
 pub async fn tick_timer(state: &AppState) {
     let watches = match watch_store::list_enabled(&state.db).await {
         Ok(o) => o,
@@ -207,7 +158,10 @@ pub async fn tick_timer(state: &AppState) {
     };
     let now = Utc::now();
     for o in watches {
-        // Dynamic one-shot wake (any watch, scheduled or reactive): a round
+        if o.agent_spec.is_some() {
+            continue;
+        }
+        // Dynamic one-shot wake for reactive programs: a round
         // asked to re-run at `wake_at`. Record the tick first and only clear the
         // column once it lands — a failed insert then leaves the wake set to retry
         // next pass, rather than silently losing it. The clear still happens in
@@ -238,37 +192,6 @@ pub async fn tick_timer(state: &AppState) {
                 continue;
             }
         }
-        let trigger = o.trigger();
-        if !trigger.is_scheduled() {
-            continue;
-        }
-        // Seed a never-scheduled watch's next-fire without firing it now.
-        let next = match o.next_run_at.as_deref() {
-            Some(ts) => parse_iso(ts),
-            None => None,
-        };
-        let next = match next {
-            Some(n) => n,
-            None => {
-                if let Some(n) = next_fire(&o, now) {
-                    let _ = watch_store::set_schedule(&state.db, &o.id, None, Some(&iso(n))).await;
-                }
-                continue;
-            }
-        };
-        if next > now {
-            continue;
-        }
-        // Due: emit the cron tick (the dispatcher fires the round) and advance.
-        tracing::debug!(watch = %o.id, name = %o.name, "watch timer: cron due; emitting tick");
-        if let Err(e) =
-            events::record_system(&state.db, &state.bus, "cron", json!({ "watch": o.id })).await
-        {
-            tracing::warn!(watch = %o.id, "watch timer: recording cron tick failed: {e}");
-            continue;
-        }
-        let advanced = next_fire(&o, now).map(iso);
-        let _ = watch_store::set_schedule(&state.db, &o.id, None, advanced.as_deref()).await;
     }
 }
 
@@ -279,7 +202,7 @@ pub async fn tick_timer(state: &AppState) {
 /// changed — `rnd.triggered_sessions()` — instead of re-surveying the whole
 /// fleet, which is what keeps a watch like the PR labeller from hitting the
 /// GitHub API once per session every tick.
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TriggerCtx {
     event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -551,6 +474,38 @@ pub async fn fire(
     dry_run: bool,
     ctx: &TriggerCtx,
 ) -> Option<i64> {
+    if o.agent_spec.is_some() || o.trigger().is_scheduled() {
+        if dry_run && o.agent_spec.is_some() {
+            return record_skipped(
+                state,
+                o,
+                trigger_reason,
+                &ctx.event,
+                "Agent dry run: no session launched",
+            )
+            .await;
+        }
+        return match weaver_core::occurrence::enqueue(
+            &state.db,
+            o,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: Utc::now(),
+                reason: trigger_reason,
+                automatic: !trigger_reason.starts_with("run") && trigger_reason != "manual",
+                dry_run,
+                trigger_context: serde_json::to_value(ctx).expect("trigger context serializes"),
+            },
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%error, "watch enqueue failed");
+                None
+            }
+        };
+    }
     // 1. No-overlap: claim the in-flight slot or drop silently. A dropped round
     //    is intentionally not a run row — it never started.
     {
@@ -565,22 +520,13 @@ pub async fn fire(
         id: o.id.clone(),
     };
 
-    let manual = trigger_reason == "manual" || trigger_reason.starts_with("run");
-    let agentic = o.capabilities().iter().any(|cap| cap == "judge");
-    // Mechanical self-wakes choose their own pacing and bypass the global
-    // default. Agentic self-wakes remain subject to the 15-minute floor.
-    let bypass_cooldown = manual || (trigger_reason == "wake" && !agentic);
     let now = Utc::now();
-
-    // 2. Cooldown: a re-fire inside the gap is recorded `skipped` (a manual run
-    //    bypasses it; a mechanical self-wake does too).
-    let mut cooldown = o
-        .cooldown_secs
-        .max(get_int(&state.db, "watch.default_cooldown_secs", 0).await);
-    if agentic {
-        cooldown = cooldown.max(AGENTIC_MIN_COOLDOWN_SECS);
-    }
-    if !bypass_cooldown && cooldown > 0 {
+    let cooldown = watch_store::round_cooldown(
+        o,
+        trigger_reason,
+        get_int(&state.db, "watch.default_cooldown_secs", 0).await,
+    );
+    if cooldown > 0 {
         if let Some(last) = o.last_run_at.as_deref().and_then(parse_iso) {
             if (now - last).num_seconds() < cooldown {
                 return record_skipped(
@@ -596,8 +542,9 @@ pub async fn fire(
     }
 
     // Open the run row; everything from here closes it via `finish_run`.
-    let run_id = match watch_store::start_run(&state.db, &o.id, trigger_reason, &ctx.event).await {
-        Ok(id) => id,
+    let run_id = match watch_store::start_round(&state.db, o, trigger_reason, &ctx.event).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return None,
         Err(e) => {
             tracing::warn!(watch = %o.id, "watch: opening run row failed: {e}");
             return None;
@@ -624,30 +571,119 @@ pub async fn fire(
 
     let _ = watch_store::finish_run(&state.db, run_id, &round.record()).await;
     tracing::info!(watch = %o.id, run = run_id, outcome = %round.outcome, "watch run completed");
-    // Stamp the schedule: last_run_at = now; advance next_run_at for a scheduled
-    // watch (a reactive one keeps None).
-    let next = next_fire(o, now).map(iso);
-    let _ = watch_store::set_schedule(&state.db, &o.id, Some(&iso(now)), next.as_deref()).await;
+    let _ = watch_store::set_schedule(&state.db, &o.id, Some(&iso(now)), None).await;
 
-    // Persist the program's lookaside-state write and its dynamic-wake request.
-    // These are how a round carries memory forward and self-schedules its next
-    // look (e.g. an exponential-backoff recheck) — independent of the cron
-    // cadence above.
+    if let Err(error) = persist_round(state, o, &round, now).await {
+        tracing::warn!(watch = %o.id, %error, "watch bookkeeping failed");
+    }
+
+    Some(run_id)
+}
+
+async fn persist_round(
+    state: &AppState,
+    o: &Watch,
+    round: &RoundResult,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
     if let Some(new_state) = &round.state {
-        let _ = watch_store::set_state(&state.db, &o.id, new_state).await;
+        watch_store::set_state(&state.db, &o.id, new_state).await?;
     }
     match round.wake {
         Wake::Leave => {}
         Wake::Clear => {
-            let _ = watch_store::set_wake_at(&state.db, &o.id, None).await;
+            watch_store::set_wake_at(&state.db, &o.id, None).await?;
         }
         Wake::In(secs) => {
             let wake_at = iso(now + chrono::Duration::seconds(secs.max(1)));
-            let _ = watch_store::set_wake_at(&state.db, &o.id, Some(&wake_at)).await;
+            watch_store::set_wake_at(&state.db, &o.id, Some(&wake_at)).await?;
         }
     }
+    Ok(())
+}
 
-    Some(run_id)
+/// Execute a scheduled script once. Running scripts owned by a dead daemon
+/// settle as errors after teardown; replay could duplicate their actions.
+pub async fn execute_script_occurrence(
+    state: &AppState,
+    occurrence: &weaver_core::occurrence::Occurrence,
+) -> anyhow::Result<()> {
+    recover_script_occurrence(state, occurrence).await?;
+    if occurrence.status != weaver_core::occurrence::OccurrenceStatus::Pending {
+        return Ok(());
+    }
+    let watch: Watch = serde_json::from_str(&occurrence.definition)?;
+    let ctx: TriggerCtx = serde_json::from_str(&occurrence.trigger_context)?;
+    let remaining = (DateTime::parse_from_rfc3339(&occurrence.deadline_at)?.with_timezone(&Utc)
+        - Utc::now())
+    .to_std()
+    .unwrap_or_default();
+    if !crate::script_process::claim(&state.db, occurrence).await? {
+        return Ok(());
+    }
+    let result = tokio::time::timeout(remaining, async {
+        run_script(
+            state,
+            &watch,
+            occurrence.dry_run,
+            resolve_source(&watch.program)?,
+            &ctx,
+            Some(occurrence),
+        )
+        .await
+    })
+    .await;
+    let round = match result {
+        Ok(Ok(round)) => round,
+        Ok(Err(error)) => RoundResult::failed(format!("round failed: {error}")),
+        Err(_) => RoundResult::failed("Script exceeded the occurrence deadline".into()),
+    };
+    crate::script_process::stop(&state.db, &occurrence.id).await?;
+    let wake_at = match round.wake {
+        Wake::Leave => None,
+        Wake::Clear => Some(None),
+        Wake::In(secs) => Some(Some(iso(
+            Utc::now() + chrono::Duration::seconds(secs.max(1))
+        ))),
+    };
+    crate::script_process::complete(
+        &state.db,
+        occurrence,
+        &round.record(),
+        round.state.as_ref(),
+        wake_at,
+    )
+    .await
+}
+
+/// Recover interrupted or expired scripts even when the master switch is off.
+pub async fn recover_script_occurrence(
+    state: &AppState,
+    occurrence: &weaver_core::occurrence::Occurrence,
+) -> anyhow::Result<()> {
+    crate::script_process::cancel_pending(&state.db, occurrence).await?;
+    use weaver_core::occurrence::OccurrenceStatus;
+    if matches!(
+        occurrence.status,
+        OccurrenceStatus::Running | OccurrenceStatus::Finishing
+    ) {
+        let expired = DateTime::parse_from_rfc3339(&occurrence.deadline_at)? <= Utc::now();
+        if !expired && crate::script_process::owner_alive(&state.db, &occurrence.id).await? {
+            return Ok(());
+        }
+        crate::script_process::stop(&state.db, &occurrence.id).await?;
+        let round = RoundResult::failed(
+            if expired {
+                "Script exceeded the occurrence deadline"
+            } else {
+                "Script interrupted by daemon restart; not replayed"
+            }
+            .into(),
+        );
+        return crate::script_process::complete(&state.db, occurrence, &round.record(), None, None)
+            .await;
+    }
+    Ok(())
 }
 
 /// Record a `skipped` round (cooldown / a guardrail that still merits an audit
@@ -780,7 +816,7 @@ async fn run_program(
     dry_run: bool,
     ctx: &TriggerCtx,
 ) -> anyhow::Result<RoundResult> {
-    run_script(state, o, dry_run, resolve_source(&o.program)?, ctx).await
+    run_script(state, o, dry_run, resolve_source(&o.program)?, ctx, None).await
 }
 
 /// A scratch file name for an embedded builtin: `builtin:pr-label` →
@@ -844,6 +880,7 @@ async fn run_script(
     dry_run: bool,
     src: ScriptSource,
     ctx: &TriggerCtx,
+    occurrence: Option<&weaver_core::occurrence::Occurrence>,
 ) -> anyhow::Result<RoundResult> {
     let config = json!({
         "id": o.id,
@@ -859,6 +896,8 @@ async fn run_script(
         "mode": "run",
         "trigger": serde_json::to_value(ctx).unwrap_or(Value::Null),
         "state": o.state(),
+        "occurrence": occurrence,
+        "timeout_secs": o.run_timeout_secs,
     });
 
     // A spawn / scratch-setup failure (no interpreter, unreadable file) is a
@@ -1011,7 +1050,24 @@ async fn spawn_script(
     } else {
         "python3"
     };
-    let mut command = tokio::process::Command::new(interpreter);
+    let occurrence_id = config
+        .get("occurrence")
+        .filter(|value| !value.is_null())
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_str);
+    let status_path = scratch.path().join("exit-status");
+    let mut command = if occurrence_id.is_some() {
+        let mut command = tokio::process::Command::new("sh");
+        // Keep the recorded group leader alive after interpreter exit, so
+        // recovery can verify its identity before stopping descendants.
+        command.args(["-c", "read -r gate && [ \"$gate\" = run ] || exit 1; \"$@\" & child=$!; wait \"$child\"; result=$?; printf '%s' \"$result\" > \"$LOOM_SCRIPT_STATUS\"; while :; do sleep 3600; done", "loom-script", interpreter]);
+        command
+            .env("LOOM_SCRIPT_STATUS", &status_path)
+            .process_group(0);
+        command
+    } else {
+        tokio::process::Command::new(interpreter)
+    };
     if interpreter == "uv" {
         command.args(["run", "--quiet", "--script"]);
     }
@@ -1021,7 +1077,11 @@ async fn spawn_script(
         .env("WEAVER_WATCH", config.to_string())
         .env("WEAVER_WATCH_MODE", &mode)
         .env("PYTHONPATH", pythonpath)
-        .stdin(std::process::Stdio::null())
+        .stdin(if occurrence_id.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -1029,24 +1089,67 @@ async fn spawn_script(
     // for this spawn alone. The machine-local token would not do: shared
     // deployments reject it. The expiry backstops a round the budget cancels
     // before the revoke below runs.
-    let ttl = get_int(&state.db, "watch.default_timeout_secs", 600)
-        .await
-        .max(1)
-        + ENGINE_TOKEN_GRACE_SECS;
+    let ttl = if occurrence_id.is_some() {
+        config["timeout_secs"]
+            .as_i64()
+            .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS)
+    } else {
+        get_int(&state.db, "watch.default_timeout_secs", 600)
+            .await
+            .max(1)
+    } + ENGINE_TOKEN_GRACE_SECS;
     let token = crate::auth::create_engine_token(&state.db, ENGINE_TOKEN_NAME, Some(ttl)).await?;
     command.env("LOOM_TOKEN", &token.value);
     for key in WATCH_SCRIPT_STRIPPED_ENV {
         command.env_remove(key);
     }
     let started = std::time::Instant::now();
-    let out = command.output().await;
+    let (out, script_exit) = if let Some(id) = occurrence_id {
+        use tokio::io::AsyncWriteExt;
+        crate::script_process::token(&state.db, id, &token.id).await?;
+        let mut child = command.spawn()?;
+        let pid = child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("script child has no pid"))?;
+        let mut group = crate::script_process::GroupGuard(Some(pid));
+        crate::script_process::register(&state.db, id, pid).await?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("script gate has no stdin"))?;
+        stdin.write_all(b"run\n").await?;
+        drop(stdin);
+        let output = child.wait_with_output();
+        tokio::pin!(output);
+        let mut checks = tokio::time::interval(Duration::from_millis(20));
+        let code = loop {
+            tokio::select! {
+                result = &mut output => {
+                    let result = result?;
+                    anyhow::bail!("script guardian exited early: {}", result.status);
+                }
+                _ = checks.tick() => {
+                    match tokio::fs::read_to_string(&status_path).await {
+                        Ok(value) => { if let Ok(code) = value.parse::<i64>() { break code; } }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+        };
+        crate::script_process::stop(&state.db, id).await?;
+        group.disarm();
+        (output.await, Some(code))
+    } else {
+        (command.output().await, None)
+    };
     crate::auth::revoke_engine_token(&state.db, &token.id).await?;
     let out = out.map_err(|e| {
         anyhow::anyhow!("spawning {interpreter} failed: {e} (is {interpreter} installed?)")
     })?;
     Ok(ScriptOutput {
-        success: out.status.success(),
-        exit_code: out.status.code().map(i64::from),
+        success: script_exit.map_or_else(|| out.status.success(), |code| code == 0),
+        exit_code: script_exit.or_else(|| out.status.code().map(i64::from)),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         duration_ms: started.elapsed().as_millis() as i64,
@@ -1299,48 +1402,6 @@ pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<
     Ok(Some(session.id))
 }
 
-// ---------------------------------------------------------------------------
-// Schedule arithmetic (cron + `every` sugar)
-// ---------------------------------------------------------------------------
-
-/// The next fire time for a scheduled watch after `from`. A `cron` field is
-/// parsed with `croner` (standard 5-field crontab); an `every` field is the
-/// duration sugar (`30m`, `2h`, `45s`). A reactive (non-scheduled) watch
-/// has no next fire.
-fn next_fire(o: &Watch, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let trigger = o.trigger();
-    if let Some(cron) = trigger.cron.as_deref() {
-        return next_cron(cron, from);
-    }
-    if let Some(every) = trigger.every.as_deref() {
-        return parse_every(every).map(|d| from + d);
-    }
-    None
-}
-
-/// Next occurrence of a crontab expression strictly after `from`, or `None` if
-/// the expression doesn't parse (a bad cron never schedules rather than erroring
-/// every tick).
-fn next_cron(expr: &str, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    use std::str::FromStr;
-    let cron = croner::Cron::from_str(expr).ok()?;
-    cron.find_next_occurrence(&from, false).ok()
-}
-
-/// Parse the `every` duration sugar — a number with an `s`/`m`/`h` suffix
-/// (`30m`, `2h`, `45s`). No new dependency; the engine parses it itself.
-fn parse_every(spec: &str) -> Option<chrono::Duration> {
-    let spec = spec.trim();
-    let (num, unit) = spec.split_at(spec.find(|c: char| !c.is_ascii_digit())?);
-    let n: i64 = num.parse().ok()?;
-    match unit.trim() {
-        "s" | "sec" | "secs" => Some(chrono::Duration::seconds(n)),
-        "m" | "min" | "mins" => Some(chrono::Duration::minutes(n)),
-        "h" | "hr" | "hrs" => Some(chrono::Duration::hours(n)),
-        _ => None,
-    }
-}
-
 /// Parse an ISO-8601 timestamp (the [`weaver_core::db::now_iso`] format) to UTC.
 fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
@@ -1356,25 +1417,6 @@ fn iso(dt: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_every_handles_s_m_h() {
-        assert_eq!(parse_every("30m"), Some(chrono::Duration::minutes(30)));
-        assert_eq!(parse_every("2h"), Some(chrono::Duration::hours(2)));
-        assert_eq!(parse_every("45s"), Some(chrono::Duration::seconds(45)));
-        assert_eq!(parse_every("nonsense"), None);
-        assert_eq!(parse_every(""), None);
-    }
-
-    #[test]
-    fn next_cron_advances_to_the_future() {
-        let from = parse_iso("2026-06-08T10:30:00.000Z").unwrap();
-        // Every hour on the hour → next is 11:00.
-        let next = next_cron("0 * * * *", from).unwrap();
-        assert_eq!(iso(next), "2026-06-08T11:00:00.000Z");
-        // A malformed expression never schedules.
-        assert!(next_cron("not a cron", from).is_none());
-    }
 
     #[test]
     fn parse_round_result_is_lenient_but_requires_an_object() {
@@ -1886,6 +1928,301 @@ rnd.finish("counted to %d" % n)
             .filter(|e| e.kind == "cron")
             .count();
         assert_eq!(crons, 1, "no re-fire once the wake is consumed");
+    }
+
+    #[tokio::test]
+    async fn scheduled_script_commits_state_wake_and_noop_and_stops_descendants() {
+        if !python3_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("scheduled.py");
+        let pid_file = dir.path().join("child-pid");
+        std::fs::write(&script, r#"
+import subprocess
+from pathlib import Path
+from weaver_loom import Round
+rnd = Round()
+child = subprocess.Popen(['sleep', '3600'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+Path(rnd.params['pid_file']).write_text(str(child.pid))
+rnd.set_state({'count': 1, 'trigger': rnd.trigger})
+rnd.wake_in(30)
+rnd.finish('mechanical check complete')
+"#).unwrap();
+        let (state, _) = script_fixture(&script.display().to_string()).await;
+        let watch = watch_store::create(
+            &state.db,
+            &watch_store::NewWatch {
+                name: "scheduled-stateful".into(),
+                program: script.display().to_string(),
+                enabled: true,
+                trigger_spec: r#"{"every":"30m"}"#.into(),
+                params: json!({"pid_file":pid_file}).to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let run_id = fire(
+            &state,
+            &new_in_flight(),
+            &watch,
+            "manual",
+            false,
+            &TriggerCtx {
+                event: "pr.merged".into(),
+                session: Some("target-session".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let occurrence = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        execute_script_occurrence(&state, &occurrence)
+            .await
+            .unwrap();
+        let run = watch_store::recent_runs(&state.db, &watch.id, 1)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(run.id, run_id);
+        assert_eq!(run.outcome, "noop", "{}", run.summary);
+        assert_eq!(run.exit_code, Some(0));
+        let after = watch_store::get(&state.db, &watch.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.state(),
+            json!({"count":1,"trigger":{"event":"pr.merged","session":"target-session"}})
+        );
+        assert!(after.wake_at.is_some());
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ").unwrap().1.split_whitespace().next() != Some("Z")
+        });
+        assert!(!alive, "background child survived successful execution");
+        assert!(weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn interrupted_script_is_not_replayed_and_pending_pause_prevents_execution() {
+        if !python3_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("marker.py");
+        let marker = dir.path().join("must-not-exist");
+        std::fs::write(
+            &script,
+            format!(
+                "from pathlib import Path\nPath({:?}).write_text('replayed')\n",
+                marker.display().to_string()
+            ),
+        )
+        .unwrap();
+        let (state, _) = script_fixture(&script.display().to_string()).await;
+        let watch = watch_store::create(
+            &state.db,
+            &watch_store::NewWatch {
+                name: "recover-script".into(),
+                program: script.display().to_string(),
+                enabled: true,
+                trigger_spec: r#"{"every":"30m"}"#.into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        fire(
+            &state,
+            &new_in_flight(),
+            &watch,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let occurrence = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        assert!(crate::script_process::claim(&state.db, &occurrence)
+            .await
+            .unwrap());
+        let guardian = tokio::process::Command::new("sh")
+            .args(["-c", "sleep 3600 & wait"])
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = guardian.id().unwrap();
+        crate::script_process::register(&state.db, &occurrence.id, pid)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE watch_occurrences SET script_process = json_set(script_process,'$.owner.started','dead-owner') WHERE id = ?").bind(&occurrence.id).execute(&state.db).await.unwrap();
+        let running = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        execute_script_occurrence(&state, &running).await.unwrap();
+        assert!(!marker.exists());
+        assert_eq!(
+            watch_store::recent_runs(&state.db, &watch.id, 1)
+                .await
+                .unwrap()[0]
+                .outcome,
+            "error"
+        );
+        assert!(weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!guardian.wait_with_output().await.unwrap().status.success());
+        weaver_core::occurrence::enqueue(
+            &state.db,
+            &watch,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: Utc::now(),
+                reason: "schedule-test",
+                automatic: true,
+                dry_run: false,
+                trigger_context: json!({"event":"cron"}),
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        watch_store::set_enabled(&state.db, &watch.id, false)
+            .await
+            .unwrap();
+        let pending = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        execute_script_occurrence(&state, &pending).await.unwrap();
+        assert!(!marker.exists());
+        assert_eq!(
+            weaver_core::occurrence::history(&state.db, &watch.id, 10)
+                .await
+                .unwrap()[0]
+                .status,
+            weaver_core::occurrence::OccurrenceStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_script_timeout_kills_the_tree_and_releases_overlap() {
+        if !python3_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("blocked.py");
+        let pid_file = dir.path().join("child-pid");
+        std::fs::write(
+            &script,
+            r#"
+import subprocess
+import sys
+from pathlib import Path
+from weaver_loom import Round
+rnd = Round()
+if rnd.dry_run:
+    rnd.finish('dry run')
+    sys.exit(0)
+child = subprocess.Popen(['sleep', '3600'])
+Path(rnd.params['pid_file']).write_text(str(child.pid))
+child.wait()
+"#,
+        )
+        .unwrap();
+        let (state, _) = script_fixture(&script.display().to_string()).await;
+        let watch = watch_store::create(
+            &state.db,
+            &watch_store::NewWatch {
+                name: "scheduled-timeout".into(),
+                program: script.display().to_string(),
+                enabled: true,
+                trigger_spec: r#"{"every":"30m"}"#.into(),
+                params: json!({"pid_file":pid_file}).to_string(),
+                run_timeout_secs: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        fire(
+            &state,
+            &new_in_flight(),
+            &watch,
+            "manual",
+            false,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        let occurrence = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        execute_script_occurrence(&state, &occurrence)
+            .await
+            .unwrap();
+        assert_eq!(
+            watch_store::recent_runs(&state.db, &watch.id, 1)
+                .await
+                .unwrap()[0]
+                .outcome,
+            "error"
+        );
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            stat.rsplit_once(") ").unwrap().1.split_whitespace().next() != Some("Z")
+        });
+        assert!(!alive, "background child survived deadline");
+        assert!(weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .is_empty());
+        watch_store::set_enabled(&state.db, &watch.id, false)
+            .await
+            .unwrap();
+        fire(
+            &state,
+            &new_in_flight(),
+            &watch,
+            "run (dry)",
+            true,
+            &TriggerCtx::manual(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            weaver_core::occurrence::active(&state.db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let dry = weaver_core::occurrence::active(&state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        execute_script_occurrence(&state, &dry).await.unwrap();
+        assert_eq!(
+            watch_store::recent_runs(&state.db, &watch.id, 1)
+                .await
+                .unwrap()[0]
+                .outcome,
+            "noop"
+        );
     }
 
     /// A failing script errors the round with the stderr tail in the summary,

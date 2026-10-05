@@ -391,6 +391,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // on the `watch.enabled` master switch, which is on by default, so a
     // default loom runs it. Turning the switch off idles it cheaply.
     weaver_core::spawn_boxed(Box::pin(watch::run(state.clone())));
+    weaver_core::spawn_boxed(Box::pin(crate::web::scheduled::run(state.clone())));
     // Retire embedded code-server instances that have gone idle.
     weaver_core::spawn_boxed(Box::pin(crate::ide::reap_loop(state.editor_state())));
     // The Slack Socket Mode client. Always spawned; it self-gates on token

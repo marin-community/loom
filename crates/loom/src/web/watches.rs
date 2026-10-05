@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
-use weaver_api::{ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchView};
+use weaver_api::{
+    ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchStateView, WatchView,
+};
 use weaver_core::watch::{self as watch_store, Watch};
 
 use crate::agent;
@@ -24,6 +26,9 @@ use super::{ApiResult, AppError, AppState};
 // state.
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
+        register::<watches_operations::preview::Op, _, _>(preview_operation),
+        register::<watches_operations::occurrences::Op, _, _>(occurrences_operation),
+        register::<watches_operations::state::Op, _, _>(state_operation),
         register::<watches_operations::list::Op, _, _>(list_watches_operation),
         register::<watches_operations::get::Op, _, _>(get_watch_operation),
         register::<watches_operations::programs::Op, _, _>(programs_operation),
@@ -44,7 +49,7 @@ async fn watch_view(db: &Db, o: &Watch) -> ApiResult<WatchView> {
         .into_iter()
         .next()
         .map(|r| r.outcome);
-    Ok(WatchView::from_parts(o, last_outcome))
+    Ok(WatchView::from_parts(o, last_outcome)?)
 }
 
 /// Reject a capability set that isn't a subset of the known ladder, naming the
@@ -87,6 +92,19 @@ fn validate_program(program: &str) -> ApiResult<()> {
     Ok(())
 }
 
+fn program_capabilities(program: &str) -> Vec<String> {
+    crate::builtins::find(program).map_or_else(
+        || watch_store::NewWatch::default().capabilities,
+        |builtin| {
+            builtin
+                .default_capabilities
+                .iter()
+                .map(|cap| (*cap).to_string())
+                .collect()
+        },
+    )
+}
+
 fn program_views() -> Vec<ProgramView> {
     crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
 }
@@ -120,7 +138,7 @@ pub(super) async fn list_watches_operation(
     list_watches_core(&context.state).await
 }
 
-async fn create_watch_core(
+pub(super) async fn create_watch_core(
     st: &AppState,
     req: watches_operations::create::Input,
 ) -> ApiResult<WatchView> {
@@ -137,17 +155,16 @@ async fn create_watch_core(
     let defaults = watch_store::NewWatch::default();
     let program = req.program.unwrap_or(defaults.program);
     validate_program(&program)?;
-    let capabilities = req.capabilities.unwrap_or_else(|| {
-        crate::builtins::find(&program).map_or(defaults.capabilities, |builtin| {
-            builtin
-                .default_capabilities
-                .iter()
-                .map(|cap| (*cap).to_string())
-                .collect()
-        })
-    });
+    let capabilities = req
+        .capabilities
+        .unwrap_or_else(|| program_capabilities(&program));
     validate_capabilities(&capabilities)?;
-    let profile = req.profile.unwrap_or(defaults.profile);
+    let profile = req
+        .agent
+        .as_ref()
+        .map(|a| a.profile.clone())
+        .or(req.profile)
+        .unwrap_or(defaults.profile);
     validate_watch_profile(&st.db, &profile).await?;
     let params = json_text(req.params, &defaults.params);
 
@@ -155,6 +172,7 @@ async fn create_watch_core(
     // (register mode) unless the caller pinned an explicit trigger.
     let trigger_spec = match req.trigger {
         Some(t) => t.to_string(),
+        None if req.agent.is_some() => "{}".to_string(),
         None => {
             let params_value = serde_json::from_str(&params).unwrap_or_else(|_| json!({}));
             let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
@@ -162,6 +180,7 @@ async fn create_watch_core(
         }
     };
 
+    validate_definition(st, &trigger_spec, req.agent.as_ref(), req.run_timeout_secs).await?;
     let new = watch_store::NewWatch {
         name,
         trigger_spec,
@@ -174,6 +193,10 @@ async fn create_watch_core(
         effort: req.effort.unwrap_or(defaults.effort),
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
         enabled: req.enabled.unwrap_or(defaults.enabled),
+        agent: req.agent,
+        run_timeout_secs: req
+            .run_timeout_secs
+            .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS),
     };
     let o = watch_store::create(&st.db, &new).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch created");
@@ -226,6 +249,18 @@ async fn patch_watch_core(
 ) -> ApiResult<WatchView> {
     let key = req.key.as_str();
     let o = require_watch(&st.db, key).await?;
+    if o.agent_spec.is_some()
+        && (req.program.is_some()
+            || req.scope.is_some()
+            || req.params.is_some()
+            || req.capabilities.is_some()
+            || req.model.is_some()
+            || req.effort.is_some()
+            || req.cooldown_secs.is_some()
+            || req.profile.is_some())
+    {
+        return Err(AppError::bad_request("agent watches configure their task and profile through agent; script fields do not apply"));
+    }
 
     if let Some(program) = &req.program {
         validate_program(program)?;
@@ -236,9 +271,7 @@ async fn patch_watch_core(
     if let Some(profile) = &req.profile {
         validate_watch_profile(&st.db, profile).await?;
     }
-    if let Some(enabled) = req.enabled {
-        watch_store::set_enabled(&st.db, &o.id, enabled).await?;
-    }
+
     // An explicit trigger wins; otherwise, when the program changes, re-evaluate
     // the new script's manifest (with the effective params) so subscriptions
     // follow the script — the same reconcile create does.
@@ -254,19 +287,41 @@ async fn patch_watch_core(
             None => None,
         },
     };
+    let agent = req.agent.clone().or(o.agent()?);
+    validate_definition(
+        st,
+        trigger_spec.as_deref().unwrap_or(&o.trigger_spec),
+        agent.as_ref(),
+        req.run_timeout_secs,
+    )
+    .await?;
     let patch = watch_store::WatchUpdate {
         trigger_spec,
         scope: req.scope.map(|v| v.to_string()),
         program: req.program,
         params: req.params.map(|v| v.to_string()),
         capabilities: req.capabilities,
-        profile: req.profile,
+        profile: req
+            .agent
+            .as_ref()
+            .map(|a| a.profile.clone())
+            .or(req.profile),
         model: req.model,
         effort: req.effort,
         cooldown_secs: req.cooldown_secs,
+        agent_spec: req.agent.as_ref().map(serde_json::to_string).transpose()?,
+        run_timeout_secs: req.run_timeout_secs,
     };
     if !patch.is_empty() {
         watch_store::update(&st.db, &o.id, &patch).await?;
+    }
+    if let Some(enabled) = req.enabled {
+        watch_store::set_enabled(&st.db, &o.id, enabled).await?;
+        sqlx::query("UPDATE watches SET paused = ? WHERE id = ?")
+            .bind(!enabled)
+            .bind(&o.id)
+            .execute(&st.db)
+            .await?;
     }
     let o = require_watch(&st.db, &o.id).await?;
     watch_view(&st.db, &o).await
@@ -281,6 +336,15 @@ pub(super) async fn update_watch_operation(
 
 async fn delete_watch_core(st: &AppState, key: &str) -> ApiResult<WatchDeleteResult> {
     let o = require_watch(&st.db, key).await?;
+    if weaver_core::occurrence::active(&st.db)
+        .await?
+        .iter()
+        .any(|r| r.watch_id == o.id)
+    {
+        return Err(AppError::conflict(
+            "disable the watch and wait for its active agent to stop before deleting",
+        ));
+    }
     watch_store::delete(&st.db, &o.id).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch deleted");
     Ok(WatchDeleteResult {
@@ -408,7 +472,7 @@ async fn validate_watch_profile(db: &crate::Db, name: &str) -> ApiResult<()> {
     let profile = crate::profile::get(db, name)
         .await?
         .ok_or_else(|| AppError::bad_request(format!("unknown profile '{name}'")))?;
-    if !profile.is_automation_safe() || profile.protocol != "acp" {
+    if profile.retired || !profile.is_automation_safe() || profile.protocol != "acp" {
         return Err(AppError::bad_request(format!(
             "watch profile '{name}' must be automation-safe and use ACP"
         )));
@@ -440,4 +504,152 @@ fn json_text(value: Option<Value>, default: &str) -> String {
     value
         .map(|v| v.to_string())
         .unwrap_or_else(|| default.to_string())
+}
+
+async fn validate_definition(
+    st: &AppState,
+    trigger: &str,
+    agent: Option<&weaver_core::schedule::AgentTarget>,
+    timeout_secs: Option<i64>,
+) -> ApiResult<()> {
+    if timeout_secs.is_some_and(|value| !(1..=86400).contains(&value)) {
+        return Err(AppError::bad_request("timeout must be 1..86400 seconds"));
+    }
+    let trigger: watch_store::Trigger =
+        serde_json::from_str(trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
+    weaver_core::schedule::validate(&trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
+    if let Some(agent) = agent {
+        agent
+            .validate()
+            .map_err(|e| AppError::bad_request(e.to_string()))?;
+        validate_watch_profile(&st.db, &agent.profile).await?;
+    }
+    Ok(())
+}
+
+async fn preview_operation(
+    _context: OperationContext,
+    input: watches_operations::preview::Input,
+) -> ApiResult<Vec<String>> {
+    let trigger =
+        serde_json::from_value(input.trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
+    let mut now = chrono::Utc::now();
+    let mut times = Vec::new();
+    for _ in 0..5 {
+        let next = weaver_core::schedule::next(&trigger, now)
+            .map_err(|e| AppError::bad_request(e.to_string()))?
+            .ok_or_else(|| AppError::bad_request("a cron or interval is required"))?;
+        times.push(weaver_core::schedule::iso(next));
+        now = next;
+    }
+    Ok(times)
+}
+async fn occurrences_operation(
+    context: OperationContext,
+    input: watches_operations::occurrences::Input,
+) -> ApiResult<Vec<weaver_core::occurrence::Occurrence>> {
+    let watch = require_watch(&context.state.db, &input.key).await?;
+    Ok(weaver_core::occurrence::history(
+        &context.state.db,
+        &watch.id,
+        input.limit.unwrap_or(50).clamp(1, 1000),
+    )
+    .await?)
+}
+async fn state_operation(
+    context: OperationContext,
+    input: watches_operations::state::Input,
+) -> ApiResult<WatchStateView> {
+    let occurrence = super::scheduled::own_occurrence(&context.state, &input.branch).await?;
+    let watch = require_watch(&context.state.db, &occurrence.watch_id).await?;
+    if let Some(value) = input.value {
+        let version = input.expected_version.ok_or_else(|| {
+            AppError::bad_request("expected_version is required for state writes")
+        })?;
+        let version =
+            weaver_core::occurrence::state(&context.state.db, &occurrence, &value, version)
+                .await
+                .map_err(|e| AppError::conflict(e.to_string()))?;
+        return Ok(WatchStateView { value, version });
+    }
+    Ok(WatchStateView {
+        value: watch.state(),
+        version: watch.state_version,
+    })
+}
+
+pub(super) async fn reconcile_watch(
+    st: &AppState,
+    declared: watches_operations::create::Input,
+) -> ApiResult<()> {
+    let existing = watch_store::get_by_name(&st.db, declared.name.trim()).await?;
+    let Some(existing) = existing else {
+        let watch = create_watch_core(st, declared).await?;
+        sqlx::query("UPDATE watches SET deployment_managed = 1 WHERE id = ?")
+            .bind(watch.id)
+            .execute(&st.db)
+            .await?;
+        return Ok(());
+    };
+    let defaults = watch_store::NewWatch::default();
+    let agent = declared
+        .agent
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let profile = declared
+        .agent
+        .as_ref()
+        .map(|agent| agent.profile.clone())
+        .or(declared.profile)
+        .unwrap_or(defaults.profile);
+    validate_watch_profile(&st.db, &profile).await?;
+    let program = declared.program.unwrap_or(defaults.program);
+    validate_program(&program)?;
+    let capabilities = declared
+        .capabilities
+        .unwrap_or_else(|| program_capabilities(&program));
+    validate_capabilities(&capabilities)?;
+    let scope = json_text(declared.scope, &defaults.scope);
+    let params = json_text(declared.params, &defaults.params);
+    let trigger = match declared.trigger {
+        Some(trigger) => trigger.to_string(),
+        None if declared.agent.is_some() => "{}".into(),
+        None => {
+            let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
+            reconcile_trigger(st, &program, &serde_json::from_str(&params)?, &fallback).await
+        }
+    };
+    validate_definition(
+        st,
+        &trigger,
+        declared.agent.as_ref(),
+        declared.run_timeout_secs,
+    )
+    .await?;
+    let model = declared.model.unwrap_or_default();
+    let effort = declared.effort.unwrap_or_default();
+    let cooldown = declared.cooldown_secs.unwrap_or_default();
+    let timeout_secs = declared
+        .run_timeout_secs
+        .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS);
+    let enabled = declared.enabled.unwrap_or(false) && !existing.paused;
+    let patch = watch_store::WatchUpdate {
+        trigger_spec: (existing.trigger_spec != trigger).then_some(trigger),
+        agent_spec: (existing.agent_spec != agent).then(|| agent.unwrap_or_else(|| "null".into())),
+        program: (existing.program != program).then_some(program),
+        scope: (existing.scope != scope).then_some(scope),
+        params: (existing.params != params).then_some(params),
+        profile: (existing.profile != profile).then_some(profile),
+        capabilities: (existing.capabilities() != capabilities).then_some(capabilities),
+        model: (existing.model != model).then_some(model),
+        effort: (existing.effort != effort).then_some(effort),
+        cooldown_secs: (existing.cooldown_secs != cooldown).then_some(cooldown),
+        run_timeout_secs: (existing.run_timeout_secs != timeout_secs).then_some(timeout_secs),
+    };
+    if !patch.is_empty() {
+        watch_store::update(&st.db, &existing.id, &patch).await?;
+    }
+    watch_store::set_enabled(&st.db, &existing.id, enabled).await?;
+    Ok(())
 }

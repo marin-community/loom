@@ -4849,3 +4849,217 @@ async fn adopt_converts_a_terminal_builtin_session_to_acp() {
     );
     assert_eq!(view["status"], "running");
 }
+
+/// Scheduled tasks settle only after their ACP turn or deadline, and teardown
+/// releases the durable gate after the real test supervisor has stopped.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
+    for (name, goal, timeout, expected) in [
+        ("complete", "wait:700|say:jobs checked", 10, "ok"),
+        ("timeout", "wait:10000|say:too late", 1, "error"),
+    ] {
+        let ts = TestServer::start().await;
+        let watch = weaver_core::watch::create(
+            &ts.state.db,
+            &weaver_core::watch::NewWatch {
+                name: name.into(),
+                enabled: true,
+                run_timeout_secs: timeout,
+                agent: Some(weaver_core::schedule::AgentTarget {
+                    profile: "watch".into(),
+                    repo: "org/repo".into(),
+                    prompt: goal.into(),
+                    slack_channels: vec!["CGOOD".into()],
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        weaver_core::occurrence::enqueue(
+            &ts.state.db,
+            &watch,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: chrono::Utc::now(),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: json!({"event":"manual"}),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        let occurrence = weaver_core::occurrence::active(&ts.state.db)
+            .await
+            .unwrap()
+            .remove(0);
+        let reservation = loom::runs::reserve(
+            &ts.state.db,
+            loom::runs::NewRun {
+                subject: "scheduler-test",
+                source: "watch",
+                service_tag: "watch",
+                profile: "watch",
+                idempotency_key: &occurrence.id,
+                channel: None,
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap();
+        let run = match reservation {
+            loom::runs::Reservation::Created(run) => run,
+            _ => panic!("new reservation"),
+        };
+        weaver_core::occurrence::started(&ts.state.db, &occurrence, &run.id, &run.session_id)
+            .await
+            .unwrap();
+        start_new(&ts, &run.session_id, None, Some(goal)).await;
+        if expected == "ok" {
+            let session = session_mod::get(&ts.state.db, &run.session_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let error = ts.client.post("/api/branches/slack/post", json!({"branch":session.branch_id, "channel":"CBAD", "text":"unauthorized", "action_key":"notify"})).await.unwrap_err();
+            assert!(error.to_string().contains("destinations"));
+        }
+        let settled = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if weaver_core::occurrence::active(&ts.state.db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(settled.is_ok(), "scheduled {name} did not settle");
+        let runs = weaver_core::watch::recent_runs(&ts.state.db, &watch.id, 1)
+            .await
+            .unwrap();
+        assert_eq!(runs[0].outcome, expected);
+        assert!(!loom::backend::has_session(&format!("weaver-{}", run.session_id)).await);
+        let session = session_mod::get(&ts.state.db, &run.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.status, "done");
+        assert!(session.acp_inflight.is_none());
+        // Keeping the result visible must not prevent the next occurrence.
+        weaver_core::occurrence::enqueue(
+            &ts.state.db,
+            &watch,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: chrono::Utc::now(),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: json!({"event":"manual"}),
+            },
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            weaver_core::occurrence::active(&ts.state.db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        assert!(
+            loom::runs::require_watch_turn(&ts.state.db, &run.session_id, 0)
+                .await
+                .is_err()
+        );
+    }
+}
+
+/// Exercise dispatch through the same reservation, provision and ACP path as
+/// the daemon, with a cached fixture repository and no external services.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_watch_dispatches_agent_through_automation_launch() {
+    let _adapter = EnvVarSet::set("WEAVER_CLAUDE_ACP_CMD", &agent_cmd());
+    let ts = TestServer::start_with_app().await;
+    loom::repo::register(
+        &ts.state.db,
+        "org/repo",
+        "https://github.com/org/repo.git",
+        &ts.cwd(),
+    )
+    .await
+    .unwrap();
+    ts.client.post("/api/profiles/create", json!({
+        "name":"scheduled-test", "agent_kind":"claude", "model":"fake-fast", "protocol":"acp", "mode":"default",
+        "class":"automation", "strict":true, "env_clear":true, "prelude":"none", "turn_budget":1, "github_repositories":["org/repo"]
+    })).await.unwrap();
+    let watch = ts
+        .client
+        .post(
+            "/api/watches/create",
+            json!({
+                "name":"dispatch-test", "trigger":{"every":"1h"}, "run_timeout_secs":15,
+                "agent":{"profile":"scheduled-test", "repo":"org/repo", "prompt":"say:jobs checked"}
+            }),
+        )
+        .await
+        .unwrap();
+    let id = watch["id"].as_str().unwrap();
+    ts.client
+        .post("/api/watches/run", json!({"key":id}))
+        .await
+        .unwrap();
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("watch.enabled".into(), Some("true".into()))],
+    )
+    .await
+    .unwrap();
+    let occurrences = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let history = weaver_core::occurrence::history(&ts.state.db, id, 10)
+                .await
+                .unwrap();
+            if history.first().is_some_and(|occurrence| {
+                !matches!(
+                    occurrence.status,
+                    weaver_core::occurrence::OccurrenceStatus::Pending
+                        | weaver_core::occurrence::OccurrenceStatus::Dispatching
+                        | weaver_core::occurrence::OccurrenceStatus::Running
+                        | weaver_core::occurrence::OccurrenceStatus::Finishing
+                )
+            }) {
+                break history;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let occurrence = &occurrences[0];
+    let runs = weaver_core::watch::recent_runs(&ts.state.db, id, 1)
+        .await
+        .unwrap();
+    assert_eq!(runs[0].outcome, "ok", "{}", runs[0].summary);
+    let run = loom::runs::get(&ts.state.db, occurrence.run_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.source, "watch");
+    assert_eq!(run.idempotency_key, occurrence.id);
+    assert_eq!(run.status, "completed");
+    let session = session_mod::get(&ts.state.db, occurrence.session_id.as_deref().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.class, "automation");
+    assert_eq!(session.status, "done");
+    assert!(!loom::backend::has_session(&session.term_session).await);
+}

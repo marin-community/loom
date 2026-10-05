@@ -70,6 +70,15 @@ pub enum WatchCmd {
 pub struct AddOpts {
     /// The watch name (unique).
     name: String,
+    /// Agent target JSON: profile, repo, prompt, slack_channels.
+    #[arg(long)]
+    agent: Option<String>,
+    /// IANA time zone for cron (UTC by default).
+    #[arg(long)]
+    timezone: Option<String>,
+    /// Execution timeout in seconds (300 by default).
+    #[arg(long)]
+    run_timeout_secs: Option<i64>,
     /// Cron trigger: a standard 5-field crontab expression (e.g. "0 * * * *").
     #[arg(long, group = "trigger")]
     cron: Option<String>,
@@ -145,7 +154,7 @@ The engine runs this as a subprocess with WEAVER_API (the loom REST base URL)
 and WEAVER_WATCH (the round config JSON) set; `weaver_loom` is on
 PYTHONPATH. `Round.finish` prints the result the engine reads from stdout.
 
-Register:   loom watch add __NAME__ --program __PATH__ --every 15m
+Register:   loom watch add __NAME__ --program __PATH__ --on-event session.stale
 Try it:     loom watch run __NAME__ --dry-run
 """
 
@@ -198,7 +207,7 @@ pub(crate) async fn cmd_watch_new(name: String) -> Result<()> {
     println!("scaffolded {}", path.display());
     println!("  edit it, then register:");
     println!(
-        "    loom watch add {name} --program {} --cron \"0 * * * *\"",
+        "    loom watch add {name} --program {} --on-event session.stale",
         path.display()
     );
     Ok(())
@@ -223,6 +232,9 @@ pub(crate) fn build_trigger(opts: &AddOpts) -> Value {
     }
     if let Some(repo) = &opts.repo {
         t.insert("repo".into(), json!(repo));
+    }
+    if let Some(timezone) = &opts.timezone {
+        t.insert("timezone".into(), json!(timezone));
     }
     Value::Object(t)
 }
@@ -254,6 +266,13 @@ pub(crate) async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
 
     let o = client
         .invoke::<watches::create::Op>(&watches::create::Input {
+            agent: opts
+                .agent
+                .as_ref()
+                .map(|raw| serde_json::from_str(raw))
+                .transpose()
+                .context("invalid --agent JSON")?,
+            run_timeout_secs: opts.run_timeout_secs,
             name: opts.name.clone(),
             trigger: Some(build_trigger(&opts)),
             scope: Some(build_scope(&opts)?),
@@ -349,6 +368,9 @@ mod tests {
 
     fn empty_add(name: &str) -> AddOpts {
         AddOpts {
+            agent: None,
+            timezone: None,
+            run_timeout_secs: None,
             name: name.to_string(),
             cron: None,
             every: None,
