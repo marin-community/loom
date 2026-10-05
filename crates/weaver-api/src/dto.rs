@@ -2046,6 +2046,12 @@ impl WatchView {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WatchStateView {
+    pub value: Value,
+    pub version: i64,
+}
+
 /// One round in a watch's history (the audit trail), with `actions` parsed
 /// back into JSON for a UI to render. `stdout`/`stderr`/`exit_code`/
 /// `duration_ms` are the script's captured execution log.

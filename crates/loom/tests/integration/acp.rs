@@ -5001,8 +5001,11 @@ async fn scheduled_watch_dispatches_agent_through_automation_launch() {
                 .unwrap();
             if history.first().is_some_and(|occurrence| {
                 !matches!(
-                    occurrence.status.as_str(),
-                    "pending" | "dispatching" | "running" | "finishing"
+                    occurrence.status,
+                    weaver_core::occurrence::OccurrenceStatus::Pending
+                        | weaver_core::occurrence::OccurrenceStatus::Dispatching
+                        | weaver_core::occurrence::OccurrenceStatus::Running
+                        | weaver_core::occurrence::OccurrenceStatus::Finishing
                 )
             }) {
                 break history;

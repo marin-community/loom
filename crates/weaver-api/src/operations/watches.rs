@@ -250,7 +250,7 @@ pub mod state {
         pub value: Option<serde_json::Value>,
         pub expected_version: Option<i64>,
     }
-    pub type Output = serde_json::Value;
+    pub type Output = crate::WatchStateView;
 }
 
 static OPERATIONS: &[&OperationSpec] = &[

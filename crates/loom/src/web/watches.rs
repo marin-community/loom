@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use weaver_api::operations::agents as agents_operations;
 use weaver_api::operations::watches as watches_operations;
-use weaver_api::{ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchView};
+use weaver_api::{
+    ProgramView, WatchDeleteResult, WatchRunResult, WatchRunView, WatchStateView, WatchView,
+};
 use weaver_core::watch::{self as watch_store, Watch};
 
 use crate::agent;
@@ -514,8 +516,8 @@ async fn validate_agent_definition(
     st: &AppState,
     trigger: &str,
     agent: Option<&weaver_core::schedule::AgentTarget>,
-    grace: Option<i64>,
-    timeout: Option<i64>,
+    grace_secs: Option<i64>,
+    timeout_secs: Option<i64>,
 ) -> ApiResult<()> {
     let trigger: watch_store::Trigger =
         serde_json::from_str(trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
@@ -531,8 +533,8 @@ async fn validate_agent_definition(
             .map_err(|e| AppError::bad_request(e.to_string()))?;
         validate_watch_profile(&st.db, &agent.profile).await?;
     }
-    if grace.is_some_and(|v| !(0..=86400).contains(&v))
-        || timeout.is_some_and(|v| !(1..=86400).contains(&v))
+    if grace_secs.is_some_and(|v| !(0..=86400).contains(&v))
+        || timeout_secs.is_some_and(|v| !(1..=86400).contains(&v))
     {
         return Err(AppError::bad_request(
             "late grace must be 0..86400 seconds and timeout 1..86400 seconds",
@@ -573,7 +575,7 @@ async fn occurrences_operation(
 async fn state_operation(
     context: OperationContext,
     input: watches_operations::state::Input,
-) -> ApiResult<Value> {
+) -> ApiResult<WatchStateView> {
     let occurrence = super::scheduled::own_occurrence(&context.state, &input.branch).await?;
     let watch = require_watch(&context.state.db, &occurrence.watch_id).await?;
     if let Some(value) = input.value {
@@ -584,9 +586,12 @@ async fn state_operation(
             weaver_core::occurrence::state(&context.state.db, &occurrence, &value, version)
                 .await
                 .map_err(|e| AppError::conflict(e.to_string()))?;
-        return Ok(json!({"value": value, "version": version}));
+        return Ok(WatchStateView { value, version });
     }
-    Ok(json!({"value": watch.state(), "version": watch.state_version}))
+    Ok(WatchStateView {
+        value: watch.state(),
+        version: watch.state_version,
+    })
 }
 
 pub(super) async fn reconcile_watch(

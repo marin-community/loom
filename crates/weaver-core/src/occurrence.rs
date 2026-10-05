@@ -9,6 +9,21 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum OccurrenceStatus {
+    Pending,
+    Dispatching,
+    Running,
+    Finishing,
+    Ok,
+    Error,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Occurrence {
     pub id: String,
@@ -18,12 +33,12 @@ pub struct Occurrence {
     pub trigger_reason: String,
     pub definition: String,
     pub watch_run_id: i64,
-    pub status: String,
+    pub status: OccurrenceStatus,
     pub run_id: Option<String>,
     pub session_id: Option<String>,
     pub queued_at: String,
     pub deadline_at: String,
-    pub settlement_outcome: Option<String>,
+    pub settlement_outcome: Option<OccurrenceStatus>,
     pub settlement_summary: Option<String>,
 }
 
@@ -141,7 +156,12 @@ pub async fn started(db: &Db, occurrence: &Occurrence, run: &str, session: &str)
     .await?;
     Ok(())
 }
-pub async fn finish(db: &Db, occurrence: &Occurrence, outcome: &str, summary: &str) -> Result<()> {
+pub async fn finish(
+    db: &Db,
+    occurrence: &Occurrence,
+    outcome: OccurrenceStatus,
+    summary: &str,
+) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query("UPDATE watch_occurrences SET status = ? WHERE id = ?")
         .bind(outcome)
@@ -291,7 +311,9 @@ mod tests {
         assert!(state(&db, &occurrence, &serde_json::json!({}), 0)
             .await
             .is_err());
-        finish(&db, &occurrence, "ok", "done").await.unwrap();
+        finish(&db, &occurrence, OccurrenceStatus::Ok, "done")
+            .await
+            .unwrap();
         assert!(state(&db, &occurrence, &serde_json::json!({}), 1)
             .await
             .is_err());

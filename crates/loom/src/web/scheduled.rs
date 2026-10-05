@@ -6,7 +6,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use weaver_api::{SlackDeliveryStatus, SlackDeliveryView};
 use weaver_core::{
-    occurrence::{self, Occurrence},
+    occurrence::{self, Occurrence, OccurrenceStatus},
     watch::Watch,
 };
 
@@ -53,7 +53,7 @@ pub(crate) async fn run(state: AppState) {
                     let state = state.clone();
                     let task = tasks.spawn(async move {
                         if monitor(&state, &occurrence).await? { return Ok(()); }
-                        if matches!(occurrence.status.as_str(), "pending" | "dispatching") && enabled { launch(&state, &occurrence).await?; }
+                        if matches!(occurrence.status, OccurrenceStatus::Pending | OccurrenceStatus::Dispatching) && enabled { launch(&state, &occurrence).await?; }
                         Ok::<_, anyhow::Error>(())
                     });
                     processing.insert(task.id(), id);
@@ -108,23 +108,26 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
             result = &mut launch => break result,
             _ = &mut timeout => {
                 let current = load_current(state, &occurrence.id).await?;
-                settle(state, &current, "error", "Agent exceeded the occurrence deadline").await?;
+                settle(state, &current, OccurrenceStatus::Error, "Agent exceeded the occurrence deadline").await?;
                 stop(state, &current).await?;
                 // Provisioning may finish late. Its cancelled reservation prevents
                 // promotion; retain the overlap gate until that future drains.
-                let result = launch.await;
+                if let Err(error) = launch.await {
+                    tracing::warn!(error = %error.message, occurrence = %occurrence.id, "provisioning failed after occurrence deadline");
+                }
                 let current = load_current(state, &occurrence.id).await?;
-                close(state, &current, "error", "Agent exceeded the occurrence deadline").await?;
-                let _ = result;
+                close(state, &current, OccurrenceStatus::Error, "Agent exceeded the occurrence deadline").await?;
                 return Ok(());
             }
             _ = checks.tick() => {
                 let occurrence = load_current(state, &occurrence.id).await?;
                 if pending_invalid(state, &occurrence).await? {
-                    settle(state, &occurrence, "cancelled", "Definition changed during provisioning").await?;
+                    settle(state, &occurrence, OccurrenceStatus::Cancelled, "Definition changed during provisioning").await?;
                     stop(state, &occurrence).await?;
-                    let _ = launch.await;
-                    close(state, &load_current(state, &occurrence.id).await?, "cancelled", "Definition changed during provisioning").await?;
+                    if let Err(error) = launch.await {
+                        tracing::warn!(error = %error.message, occurrence = %occurrence.id, "provisioning failed after occurrence cancellation");
+                    }
+                    close(state, &load_current(state, &occurrence.id).await?, OccurrenceStatus::Cancelled, "Definition changed during provisioning").await?;
                     return Ok(());
                 }
             }
@@ -144,7 +147,7 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
                 close(
                     state,
                     &load_current(state, &occurrence.id).await?,
-                    "error",
+                    OccurrenceStatus::Error,
                     &run.summary,
                 )
                 .await?;
@@ -162,12 +165,18 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
                 close(
                     state,
                     &load_current(state, &occurrence.id).await?,
-                    "error",
+                    OccurrenceStatus::Error,
                     &error.message,
                 )
                 .await?;
             } else {
-                occurrence::finish(&state.db, occurrence, "error", &error.message).await?;
+                occurrence::finish(
+                    &state.db,
+                    occurrence,
+                    OccurrenceStatus::Error,
+                    &error.message,
+                )
+                .await?;
             }
         }
     }
@@ -176,11 +185,13 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
 
 /// Returns true when the occurrence has closed or is being torn down.
 async fn monitor(state: &AppState, occurrence: &Occurrence) -> Result<bool> {
-    if occurrence.status == "finishing" {
+    if occurrence.status == OccurrenceStatus::Finishing {
         close(
             state,
             occurrence,
-            occurrence.settlement_outcome.as_deref().unwrap_or("error"),
+            occurrence
+                .settlement_outcome
+                .unwrap_or(OccurrenceStatus::Error),
             occurrence
                 .settlement_summary
                 .as_deref()
@@ -205,26 +216,32 @@ async fn monitor(state: &AppState, occurrence: &Occurrence) -> Result<bool> {
         return Ok(false);
     }
     let (outcome, summary) = if cancelled {
-        ("cancelled", "Watch paused or removed")
+        (OccurrenceStatus::Cancelled, "Watch paused or removed")
     } else if expired {
-        ("error", "Agent exceeded the occurrence deadline")
+        (
+            OccurrenceStatus::Error,
+            "Agent exceeded the occurrence deadline",
+        )
     } else if completed {
         let reason =
             crate::chat::latest_stop_reason(&state.db, &session.as_ref().unwrap().id).await?;
         if reason.as_deref() == Some("end_turn") {
-            ("ok", "Agent completed")
+            (OccurrenceStatus::Ok, "Agent completed")
         } else {
-            ("error", "Agent stopped without completing")
+            (OccurrenceStatus::Error, "Agent stopped without completing")
         }
     } else {
-        ("error", "Agent session stopped")
+        (OccurrenceStatus::Error, "Agent session stopped")
     };
     close(state, occurrence, outcome, summary).await?;
     Ok(true)
 }
 
 async fn pending_invalid(state: &AppState, occurrence: &Occurrence) -> Result<bool> {
-    if !matches!(occurrence.status.as_str(), "pending" | "dispatching") {
+    if !matches!(
+        occurrence.status,
+        OccurrenceStatus::Pending | OccurrenceStatus::Dispatching
+    ) {
         return Ok(false);
     }
     if let Some(id) = occurrence.session_id.as_deref() {
@@ -254,7 +271,7 @@ async fn load_current(state: &AppState, id: &str) -> Result<Occurrence> {
 async fn settle(
     state: &AppState,
     occurrence: &Occurrence,
-    outcome: &str,
+    outcome: OccurrenceStatus,
     summary: &str,
 ) -> Result<()> {
     sqlx::query("UPDATE watch_occurrences SET status = 'finishing', settlement_outcome = COALESCE(settlement_outcome, ?), settlement_summary = COALESCE(settlement_summary, ?) WHERE id = ?")
@@ -284,13 +301,13 @@ async fn stop(state: &AppState, occurrence: &Occurrence) -> Result<()> {
 async fn close(
     state: &AppState,
     occurrence: &Occurrence,
-    outcome: &str,
+    outcome: OccurrenceStatus,
     summary: &str,
 ) -> Result<()> {
     settle(state, occurrence, outcome, summary).await?;
     stop(state, occurrence).await?;
     let current = load_current(state, &occurrence.id).await?;
-    let outcome = current.settlement_outcome.as_deref().unwrap_or(outcome);
+    let outcome = current.settlement_outcome.unwrap_or(outcome);
     let summary = current.settlement_summary.as_deref().unwrap_or(summary);
     if let Some(run) = &current.run_id {
         sqlx::query("UPDATE automation_runs SET status = 'completed', outcome = ?, summary = ?, updated_at = ? WHERE id = ?")
@@ -459,17 +476,21 @@ mod tests {
             load_current(&state, &occurrence.id)
                 .await
                 .unwrap()
-                .settlement_outcome
-                .as_deref(),
-            Some("error")
+                .settlement_outcome,
+            Some(OccurrenceStatus::Error)
         );
     }
     #[tokio::test]
     async fn restart_preserves_intended_result_during_settlement() {
         let (state, _, occurrence) = fixture().await;
-        settle(&state, &occurrence, "ok", "Job check complete")
-            .await
-            .unwrap();
+        settle(
+            &state,
+            &occurrence,
+            OccurrenceStatus::Ok,
+            "Job check complete",
+        )
+        .await
+        .unwrap();
         let occurrence = load_current(&state, &occurrence.id).await.unwrap();
         assert!(monitor(&state, &occurrence).await.unwrap());
         let result = weaver_core::watch::recent_runs(&state.db, &occurrence.watch_id, 1)
@@ -488,12 +509,12 @@ mod tests {
             .await
             .unwrap();
         let mut running = occurrence.clone();
-        running.status = "running".into();
+        running.status = OccurrenceStatus::Running;
         assert!(!monitor(&state, &running).await.unwrap());
         assert!(monitor(&state, &occurrence).await.unwrap());
         assert_eq!(
             load_current(&state, &occurrence.id).await.unwrap().status,
-            "cancelled"
+            OccurrenceStatus::Cancelled
         );
     }
     #[tokio::test]

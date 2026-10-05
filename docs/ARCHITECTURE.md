@@ -1155,7 +1155,7 @@ descriptors. Custom-server tools are filtered to the stamped rules; remote
 servers use ACP's HTTP transport directly and advertise their tools with MCP
 `tools/list` rather than passing through a Loom proxy process.
 One built-in `loom` MCP server exposes namespaced context, channel, artifact,
-session, messaging, permission, issue, and fixed-repository GitHub tools.
+session, watch, messaging, permission, issue, and fixed-repository GitHub tools.
 Resource tools return concise text plus
 machine-readable MCP `structuredContent`; their DTOs are the same ones used by
 the REST client and CLI. The ordinary first-party domains obtain their names,
