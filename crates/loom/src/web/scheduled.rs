@@ -86,7 +86,7 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
         },
         automation_context: None,
     };
-    let prompt = format!("{}\n\nScheduled watch context: occurrence={}, scheduled_at={}, deadline_at={}, trigger={}. Complete this task in one agent turn and report your result. Persistent memory is available through `loom watch state`; use its version for writes. Allowed Slack channels: {}. Use `loom branches slack post` with a stable action key when sending a message.\n", agent.prompt, occurrence.id, occurrence.scheduled_at, occurrence.deadline_at, occurrence.trigger_reason, agent.slack_channels.join(", "));
+    let prompt = format!("{}\n\nScheduled watch context: occurrence={}, scheduled_at={}, deadline_at={}, trigger={}. Complete this task using as many tool calls as needed, then report your result without waiting for another message. Persistent memory is available through `loom watch state`; use its version for writes. Allowed Slack channels: {}. Use `loom branches slack post` with a stable action key when sending a message.\n", agent.prompt, occurrence.id, occurrence.scheduled_at, occurrence.deadline_at, occurrence.trigger_reason, agent.slack_channels.join(", "));
     let request = weaver_api::operations::runs::create::Input {
         profile: agent.profile,
         idempotency_key: occurrence.id.clone(),
