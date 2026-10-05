@@ -97,13 +97,13 @@ pub async fn enqueue(
         watch.next_run_at.clone()
     };
     let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watch_occurrences WHERE watch_id = ? AND status IN ('pending','dispatching','running','finishing'))").bind(&watch.id).fetch_one(&mut *tx).await?;
-    let selected = if scheduled && watch.misfire_policy == "coalesce" {
+    let selected = if scheduled {
         schedule::latest_due(&watch.trigger(), due, now)?
     } else {
         due
     };
     let late =
-        scheduled && now.signed_duration_since(selected).num_seconds() > watch.late_grace_secs;
+        scheduled && now.signed_duration_since(selected).num_seconds() > schedule::LATE_GRACE_SECS;
     let run_id: i64 = sqlx::query_scalar("INSERT INTO watch_runs (watch_id,trigger_reason,trigger_event,started_at,outcome,summary,finished_at) VALUES (?,?,?,?,?,?,?) RETURNING id")
         .bind(&watch.id).bind(reason).bind(reason).bind(schedule::iso(now))
         .bind(if busy || late {"skipped"} else {"queued"})

@@ -76,13 +76,9 @@ pub struct AddOpts {
     /// IANA time zone for cron (UTC by default).
     #[arg(long)]
     timezone: Option<String>,
+    /// Execution timeout in seconds (300 by default).
     #[arg(long)]
     run_timeout_secs: Option<i64>,
-    #[arg(long)]
-    late_grace_secs: Option<i64>,
-    /// Missed-run policy: skip or coalesce.
-    #[arg(long)]
-    misfire_policy: Option<String>,
     /// Cron trigger: a standard 5-field crontab expression (e.g. "0 * * * *").
     #[arg(long, group = "trigger")]
     cron: Option<String>,
@@ -276,13 +272,6 @@ pub(crate) async fn cmd_watch_add(opts: AddOpts) -> Result<()> {
                 .map(|raw| serde_json::from_str(raw))
                 .transpose()
                 .context("invalid --agent JSON")?,
-            misfire_policy: opts
-                .misfire_policy
-                .as_ref()
-                .map(|raw| serde_json::from_value(json!(raw)))
-                .transpose()
-                .context("invalid --misfire-policy")?,
-            late_grace_secs: opts.late_grace_secs,
             run_timeout_secs: opts.run_timeout_secs,
             name: opts.name.clone(),
             trigger: Some(build_trigger(&opts)),
@@ -382,8 +371,6 @@ mod tests {
             agent: None,
             timezone: None,
             run_timeout_secs: None,
-            late_grace_secs: None,
-            misfire_policy: None,
             name: name.to_string(),
             cron: None,
             every: None,

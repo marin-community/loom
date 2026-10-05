@@ -54,13 +54,9 @@ pub fn valid_channel(channel: &str) -> bool {
         && channel.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum MisfirePolicy {
-    Skip,
-    #[default]
-    Coalesce,
-}
+pub const RUN_TIMEOUT_SECS: i64 = 300;
+pub const ARCHIVE_DELAY_SECS: i64 = 300;
+pub const LATE_GRACE_SECS: i64 = 600;
 
 pub fn interval(spec: &str) -> Result<Duration> {
     let split = spec

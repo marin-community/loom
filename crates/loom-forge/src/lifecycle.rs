@@ -597,6 +597,15 @@ pub async fn reconcile_interrupted_transitions(state: &AppState) {
                     tracing::warn!(session = %session.id, %error, "transition recovery: could not release interrupted handoff");
                 }
             }
+            "finishing" => {
+                // The durable watch occurrence retains ownership and retries stop.
+                if let Err(error) =
+                    session_mod::clear_interrupted_transition(&state.db, &session.id, "finishing")
+                        .await
+                {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: could not release scheduled completion");
+                }
+            }
             other => {
                 tracing::warn!(session = %session.id, transition = other, "transition recovery: unknown transition left intact");
             }

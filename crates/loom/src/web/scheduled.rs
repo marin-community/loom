@@ -286,18 +286,68 @@ async fn stop(state: &AppState, occurrence: &Occurrence) -> Result<()> {
             "Scheduled occurrence finishing",
         )
         .await?;
-        if let Some((session, branch)) = crate::session::with_branch(&state.db, id).await? {
-            crate::backend::kill_session_and_wait(&session.term_session).await?;
-            if session.status != "archived" {
-                crate::lifecycle::archive(state, &session, &branch).await?;
-            }
-            crate::backend::kill_session_and_wait(&session.term_session).await?;
-        } else {
-            crate::backend::kill_session_and_wait(&format!("weaver-{id}")).await?;
-        }
+        stop_session(state, id).await?;
     }
     Ok(())
 }
+
+async fn stop_session(state: &AppState, id: &str) -> Result<()> {
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+    let Some((session, branch)) = crate::session::with_branch(&state.db, id).await? else {
+        return crate::backend::kill_session_and_wait(&format!("weaver-{id}")).await;
+    };
+    let session = if session.lifecycle_transition.as_deref() == Some("finishing") {
+        crate::lifecycle::release_abandoned_transition(&state.db, &session).await?
+    } else {
+        session
+    };
+    crate::lifecycle::require_no_transition(&session)?;
+    if session.status == "archived" {
+        return crate::backend::kill_session_and_wait(&session.term_session).await;
+    }
+    if !crate::session::begin_transition(&state.db, id, "finishing", "Stopping scheduled agent")
+        .await?
+    {
+        anyhow::bail!("another lifecycle operation owns this session");
+    }
+    let result = async {
+        // A different daemon may have archived the row before our claim.
+        let session = crate::session::get(&state.db, id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("scheduled session disappeared"))?;
+        crate::backend::kill_session_and_wait(&session.term_session).await?;
+        crate::auth::revoke_session_tokens(&state.db, id).await?;
+        crate::session::set_inflight(&state.db, id, None).await?;
+        let status = if session.status == "archived" {
+            "archived"
+        } else {
+            "done"
+        };
+        if status == "done" {
+            crate::session::touch(&state.db, id).await?;
+        }
+        if !crate::session::complete_transition(&state.db, id, "finishing", status).await? {
+            anyhow::bail!("scheduled completion lost its lifecycle transition");
+        }
+        weaver_core::events::record(
+            &state.db,
+            &state.bus,
+            &branch.id,
+            "status",
+            json!({"status": status, "reason": "Scheduled occurrence finished"}),
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        if let Err(error) = crate::session::clear_transition(&state.db, id, "finishing").await {
+            tracing::warn!(%error, session = id, "could not release failed scheduled completion");
+        }
+    }
+    result
+}
+
 async fn close(
     state: &AppState,
     occurrence: &Occurrence,

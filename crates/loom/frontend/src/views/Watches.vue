@@ -47,6 +47,8 @@ import {
   promptOf,
   capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
+  calendarTrigger,
+  type ScheduleKind,
 } from '../lib/watch';
 import { useCommandScope, type Command } from '../lib/commands';
 import { me } from '../auth';
@@ -301,13 +303,12 @@ const draft = reactive({
   cooldown: 0,
   repo: '',
   channels: '',
-  scheduleKind: 'cron',
+  scheduleKind: 'every' as ScheduleKind | 'on',
+  time: '09:00',
   cron: '',
   every: '',
   timezone: 'UTC',
   timeoutSecs: 300,
-  graceSecs: 600,
-  misfire: 'coalesce' as 'skip' | 'coalesce',
 });
 
 function syncDraft(w: Watch) {
@@ -326,8 +327,11 @@ function syncDraft(w: Watch) {
   draft.every = triggerOf(w).every ?? '30m';
   draft.timezone = triggerOf(w).timezone ?? 'UTC';
   draft.timeoutSecs = w.run_timeout_secs;
-  draft.graceSecs = w.late_grace_secs;
-  draft.misfire = w.misfire_policy;
+  const calendar = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/.exec(draft.cron);
+  if (triggerOf(w).cron && calendar) {
+    draft.scheduleKind = calendar[3] === '1-5' ? 'weekdays' : 'daily';
+    draft.time = `${calendar[2].padStart(2, '0')}:${calendar[1].padStart(2, '0')}`;
+  }
 }
 
 function startEdit() {
@@ -352,7 +356,9 @@ async function saveConfig() {
         ? { cron: draft.cron, timezone: draft.timezone }
         : draft.scheduleKind === 'every'
           ? { every: draft.every }
-          : triggerOf(w);
+          : draft.scheduleKind === 'daily' || draft.scheduleKind === 'weekdays'
+            ? calendarTrigger(draft.scheduleKind, draft.time, draft.timezone)
+            : triggerOf(w);
     const body: WatchUpdateInput = w.agent
       ? {
           agent: {
@@ -367,8 +373,6 @@ async function saveConfig() {
           },
           trigger,
           run_timeout_secs: draft.timeoutSecs,
-          late_grace_secs: draft.graceSecs,
-          misfire_policy: draft.misfire,
         }
       : {
           params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
@@ -403,14 +407,16 @@ async function saveConfig() {
 // so this is for custom programs — or a second instance of a stock program
 // with its own name, prompt, and scope.
 const creating = ref(false);
-const scheduledForm = computed(() => form.triggerKind === 'cron' || form.triggerKind === 'every');
+const scheduledForm = computed(() => form.triggerKind !== 'auto' && form.triggerKind !== 'on');
 const previewTimes = ref<string[]>([]);
 async function previewSchedule() {
   try {
     previewTimes.value = await previewWatchSchedule(
-      form.triggerKind === 'cron'
-        ? { cron: form.cron, timezone: form.timezone }
-        : { every: form.every },
+      form.triggerKind === 'every'
+        ? { every: form.every }
+        : form.triggerKind === 'daily' || form.triggerKind === 'weekdays'
+          ? calendarTrigger(form.triggerKind, form.time, form.timezone)
+          : { cron: form.cron, timezone: form.timezone },
     );
   } catch (e) {
     error.value = (e as Error).message;
@@ -418,12 +424,14 @@ async function previewSchedule() {
 }
 
 const watchNameInput = ref<HTMLInputElement | null>(null);
-type TriggerKind = 'auto' | 'cron' | 'every' | 'on';
+type TriggerKind = 'auto' | 'on' | ScheduleKind;
 const form = reactive({
   name: '',
+  timeoutSecs: 300,
   timezone: 'UTC',
   slackChannels: '',
   triggerKind: 'auto' as TriggerKind,
+  time: '09:00',
   cron: '0 * * * *',
   every: '30m',
   on: 'pr.opened',
@@ -444,10 +452,12 @@ const form = reactive({
 
 function resetForm() {
   form.name = '';
+  form.timeoutSecs = 300;
   form.timezone = 'UTC';
   form.slackChannels = '';
   previewTimes.value = [];
   form.triggerKind = 'auto';
+  form.time = '09:00';
   form.cron = '0 * * * *';
   form.every = '30m';
   form.on = 'pr.opened';
@@ -546,7 +556,9 @@ async function create() {
     let trigger: WatchTrigger | undefined;
     if (form.triggerKind !== 'auto') {
       const t: WatchTrigger = {};
-      if (form.triggerKind === 'cron' && form.cron.trim()) t.cron = form.cron.trim();
+      if (form.triggerKind === 'daily' || form.triggerKind === 'weekdays')
+        Object.assign(t, calendarTrigger(form.triggerKind, form.time, form.timezone));
+      else if (form.triggerKind === 'cron' && form.cron.trim()) t.cron = form.cron.trim();
       else if (form.triggerKind === 'every' && form.every.trim()) t.every = form.every.trim();
       else if (form.triggerKind === 'on' && form.on.trim()) {
         t.on = form.on
@@ -587,6 +599,7 @@ async function create() {
       if (!form.prompt.trim() || !form.repo.trim())
         throw new Error('Scheduled agents require a prompt and repository (owner/name).');
       body = { name: body.name, enabled: true };
+      body.run_timeout_secs = form.timeoutSecs;
       body.agent = {
         profile: form.profile.trim(),
         repo: form.repo.trim(),
@@ -813,7 +826,7 @@ onActivated(() => {
             <label class="mb-1 block text-xs text-muted">Trigger — what wakes a round</label>
             <div class="mb-2 inline-flex overflow-hidden rounded border border-line text-xs">
               <button
-                v-for="k in ['auto', 'cron', 'every', 'on'] as const"
+                v-for="k in ['every', 'daily', 'weekdays', 'cron', 'auto', 'on'] as const"
                 :key="k"
                 type="button"
                 class="border-l border-line px-3 py-1 first:border-l-0"
@@ -828,10 +841,14 @@ onActivated(() => {
                   k === 'auto'
                     ? 'From script'
                     : k === 'cron'
-                      ? 'Cron'
+                      ? 'Advanced: cron'
                       : k === 'every'
-                        ? 'Every'
-                        : 'On events'
+                        ? 'Every…'
+                        : k === 'daily'
+                          ? 'Daily at…'
+                          : k === 'weekdays'
+                            ? 'Weekdays at…'
+                            : 'On events'
                 }}
               </button>
             </div>
@@ -839,6 +856,17 @@ onActivated(() => {
               Wakes on the events the script subscribes to (its manifest) — the recommended default,
               so the script decides what it reacts to.
             </p>
+            <label
+              v-else-if="form.triggerKind === 'daily' || form.triggerKind === 'weekdays'"
+              class="block text-xs text-muted"
+            >
+              Time of day
+              <input
+                v-model="form.time"
+                type="time"
+                class="ml-2 rounded bg-input px-2 py-1.5 text-sm"
+              />
+            </label>
             <input
               v-else-if="form.triggerKind === 'cron'"
               v-model="form.cron"
@@ -874,8 +902,11 @@ onActivated(() => {
           </div>
 
           <div v-if="scheduledForm" class="space-y-2">
-            <label class="block text-xs text-muted">Time zone (cron)</label>
+            <label v-if="form.triggerKind !== 'every'" class="block text-xs text-muted"
+              >Time zone</label
+            >
             <input
+              v-if="form.triggerKind !== 'every'"
               v-model="form.timezone"
               placeholder="UTC"
               class="w-full rounded bg-input px-2 py-1.5 text-sm"
@@ -888,6 +919,16 @@ onActivated(() => {
               placeholder="C0123456789"
               class="w-full rounded bg-input px-2 py-1.5 text-sm"
             />
+            <label class="block text-xs text-muted">
+              Timeout (seconds)
+              <input
+                v-model.number="form.timeoutSecs"
+                type="number"
+                min="1"
+                max="86400"
+                class="ml-2 rounded bg-input px-2 py-1.5 text-sm"
+              />
+            </label>
             <button type="button" class="text-xs text-accent" @click="previewSchedule">
               Preview next five runs
             </button>
@@ -1304,59 +1345,60 @@ onActivated(() => {
                 <template v-if="editing">
                   <label class="block"
                     >Schedule
-                    <select v-model="draft.scheduleKind" class="ml-2 rounded bg-input p-1">
-                      <option value="cron">Cron</option>
-                      <option value="every">Interval</option>
+                    <select
+                      v-model="draft.scheduleKind"
+                      aria-label="Schedule"
+                      class="ml-2 rounded bg-input p-1"
+                    >
+                      <option value="every">Every…</option>
+                      <option value="daily">Daily at…</option>
+                      <option value="weekdays">Weekdays at…</option>
+                      <option value="cron">Advanced: cron</option>
                     </select>
                     <input
                       v-if="draft.scheduleKind === 'cron'"
                       v-model="draft.cron"
                       class="ml-2 rounded bg-input p-1"
                     />
-                    <input v-else v-model="draft.every" class="ml-2 rounded bg-input p-1" />
+                    <input
+                      v-else-if="draft.scheduleKind === 'every'"
+                      v-model="draft.every"
+                      class="ml-2 rounded bg-input p-1"
+                    />
+                    <input
+                      v-else
+                      v-model="draft.time"
+                      type="time"
+                      aria-label="Time of day"
+                      class="ml-2 rounded bg-input p-1"
+                    />
                   </label>
-                  <label v-if="draft.scheduleKind === 'cron'" class="block"
+                  <label v-if="draft.scheduleKind !== 'every'" class="block"
                     >Time zone <input v-model="draft.timezone" class="rounded bg-input p-1"
                   /></label>
-                  <label class="block"
-                    >Repository <input v-model="draft.repo" class="rounded bg-input p-1"
-                  /></label>
-                  <label class="block"
-                    >Slack channel IDs <input v-model="draft.channels" class="rounded bg-input p-1"
-                  /></label>
-                  <label class="block"
-                    >Timeout (seconds)
+                  <label class="block">
+                    Timeout (seconds)
                     <input
                       v-model.number="draft.timeoutSecs"
                       type="number"
                       min="1"
                       max="86400"
                       class="rounded bg-input p-1"
+                    />
+                  </label>
+                  <label class="block"
+                    >Repository <input v-model="draft.repo" class="rounded bg-input p-1"
                   /></label>
                   <label class="block"
-                    >Late grace (seconds)
-                    <input
-                      v-model.number="draft.graceSecs"
-                      type="number"
-                      min="0"
-                      max="86400"
-                      class="rounded bg-input p-1"
+                    >Slack channel IDs <input v-model="draft.channels" class="rounded bg-input p-1"
                   /></label>
-                  <label class="block"
-                    >Missed runs
-                    <select v-model="draft.misfire" class="rounded bg-input p-1">
-                      <option value="coalesce">Run latest within grace</option>
-                      <option value="skip">Skip stale runs</option>
-                    </select></label
-                  >
                 </template>
                 <template v-else>
                   <p>Repository: {{ selected.agent.repo }}</p>
+                  <p>Timeout: {{ selected.run_timeout_secs }} seconds</p>
                   <p>Slack channels: {{ selected.agent.slack_channels?.join(', ') || 'None' }}</p>
-                  <p>
-                    Time zone: {{ triggerOf(selected).timezone || 'UTC' }} · Timeout:
-                    {{ selected.run_timeout_secs }}s · Late grace: {{ selected.late_grace_secs }}s ·
-                    Missed runs: {{ selected.misfire_policy }}
+                  <p v-if="triggerOf(selected).cron">
+                    Time zone: {{ triggerOf(selected).timezone || 'UTC' }}
                   </p>
                 </template>
               </div>

@@ -47,9 +47,7 @@ pub mod create {
         /// Agent prompt, launch profile, repository and allowed Slack channels.
         #[operand(json, default = None)]
         pub agent: Option<weaver_core::schedule::AgentTarget>,
-        #[operand(json, default = None)]
-        pub misfire_policy: Option<weaver_core::schedule::MisfirePolicy>,
-        pub late_grace_secs: Option<i64>,
+        /// Execution timeout in seconds (300 by default).
         pub run_timeout_secs: Option<i64>,
         /// Whether the watch fires as soon as it is created. Omitted clients get
         /// the model default (disabled); the loom UI sends `true` so a watcher
@@ -204,9 +202,7 @@ pub mod update {
         /// Agent prompt, launch profile, repository and allowed Slack channels.
         #[operand(json, default = None)]
         pub agent: Option<weaver_core::schedule::AgentTarget>,
-        #[operand(json, default = None)]
-        pub misfire_policy: Option<weaver_core::schedule::MisfirePolicy>,
-        pub late_grace_secs: Option<i64>,
+        /// Execution timeout in seconds (300 by default).
         pub run_timeout_secs: Option<i64>,
     }
 

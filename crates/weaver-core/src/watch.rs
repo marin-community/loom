@@ -58,8 +58,6 @@ pub struct Watch {
     pub revision: i64,
     pub deployment_managed: bool,
     pub paused: bool,
-    pub misfire_policy: String,
-    pub late_grace_secs: i64,
     pub run_timeout_secs: i64,
     pub state_version: i64,
 }
@@ -309,8 +307,6 @@ pub struct NewWatch {
     /// the loom create UI opts in to `true`.
     pub enabled: bool,
     pub agent: Option<crate::schedule::AgentTarget>,
-    pub misfire_policy: crate::schedule::MisfirePolicy,
-    pub late_grace_secs: i64,
     pub run_timeout_secs: i64,
 }
 
@@ -333,9 +329,7 @@ impl Default for NewWatch {
             cooldown_secs: 0,
             enabled: false,
             agent: None,
-            misfire_policy: Default::default(),
-            late_grace_secs: 600,
-            run_timeout_secs: 300,
+            run_timeout_secs: crate::schedule::RUN_TIMEOUT_SECS,
         }
     }
 }
@@ -347,9 +341,8 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     sqlx::query(
         "INSERT INTO watches
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
-            profile, model, effort, cooldown_secs, created_at, updated_at, agent_spec,
-            misfire_policy, late_grace_secs, run_timeout_secs)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            profile, model, effort, cooldown_secs, created_at, updated_at, agent_spec, run_timeout_secs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -366,11 +359,6 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     .bind(&now)
     .bind(&now)
     .bind(new.agent.as_ref().map(serde_json::to_string).transpose()?)
-    .bind(match new.misfire_policy {
-        crate::schedule::MisfirePolicy::Skip => "skip",
-        crate::schedule::MisfirePolicy::Coalesce => "coalesce",
-    })
-    .bind(new.late_grace_secs)
     .bind(new.run_timeout_secs)
     .execute(db)
     .await?;
@@ -449,8 +437,6 @@ pub struct WatchUpdate {
     pub effort: Option<String>,
     pub cooldown_secs: Option<i64>,
     pub agent_spec: Option<String>,
-    pub misfire_policy: Option<String>,
-    pub late_grace_secs: Option<i64>,
     pub run_timeout_secs: Option<i64>,
 }
 
@@ -458,8 +444,6 @@ impl WatchUpdate {
     /// Whether any field is set — lets a caller skip a no-op write.
     pub fn is_empty(&self) -> bool {
         self.agent_spec.is_none()
-            && self.misfire_policy.is_none()
-            && self.late_grace_secs.is_none()
             && self.run_timeout_secs.is_none()
             && self.trigger_spec.is_none()
             && self.scope.is_none()
@@ -493,8 +477,6 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
            effort        = COALESCE(?, effort),
            cooldown_secs = COALESCE(?, cooldown_secs),
            agent_spec = COALESCE(?, agent_spec),
-           misfire_policy = COALESCE(?, misfire_policy),
-           late_grace_secs = COALESCE(?, late_grace_secs),
            run_timeout_secs = COALESCE(?, run_timeout_secs),
            revision = revision + 1,
            next_run_at = CASE WHEN ? THEN NULL ELSE next_run_at END,
@@ -511,8 +493,6 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
     .bind(&patch.effort)
     .bind(patch.cooldown_secs)
     .bind(&patch.agent_spec)
-    .bind(&patch.misfire_policy)
-    .bind(patch.late_grace_secs)
     .bind(patch.run_timeout_secs)
     .bind(patch.trigger_spec.is_some())
     .bind(now_iso())
@@ -882,9 +862,7 @@ mod tests {
             revision: 1,
             deployment_managed: false,
             paused: false,
-            misfire_policy: "coalesce".into(),
-            late_grace_secs: 600,
-            run_timeout_secs: 300,
+            run_timeout_secs: crate::schedule::RUN_TIMEOUT_SECS,
             state_version: 0,
             id: "x".into(),
             name: "x".into(),

@@ -1284,17 +1284,22 @@ revision and definition, and launches through the automation reservation path
 with its ID as the idempotency key. Interrupted dispatch retries that key;
 external callers cannot select the scheduler's `watch` source.
 
-Five-field cron uses an IANA time zone (UTC by default), skips missing local
-times, and resolves a repeated local time to its first instant. Intervals use
-positive `s`, `m`, or `h` durations and preserve phase after downtime. Coalescing
-selects the latest missed time within the grace window; skip discards stale work.
-Overlap is recorded as skipped. A pause suppresses pending and future work;
-an agent already running finishes its turn. Resume seeds a future fire time.
+A schedule specifies when to run an agent with its prompt. The UI offers
+intervals, daily times, weekdays, and an advanced cron expression. Calendar
+schedules use an IANA time zone (UTC by default); the API and IaC accept
+five-field cron or an `every` duration such as `30m`.
+
+Missed runs coalesce into the latest scheduled run if it is no more than ten
+minutes late. Older runs and runs that overlap an active occurrence are skipped. Execution times out after
+five minutes unless the watch sets `run_timeout_secs`. Pausing suppresses pending
+and future work; resume starts with the next scheduled time.
 
 A completed ACP turn, stopped session, or occurrence deadline begins durable
-settlement. The loop confirms runtime teardown before releasing the overlap
-constraint. Each watch has history in `watches.runs` and occurrence/run/session
-identifiers in `watches.occurrences`. `watches.preview` shows five upcoming times.
+settlement. The loop stops the agent before releasing the overlap constraint.
+Completed sessions remain visible for about five minutes, then the retention reaper
+archives them through the shared lifecycle path. The `auto-archive: disabled`
+tag retains a session for inspection. Each watch has history in `watches.runs`
+and occurrence/run/session identifiers in `watches.occurrences`. `watches.preview` shows five upcoming times.
 
 Agents use branch-scoped `watches.state` for object-valued persistent memory,
 with a version check for replacement. `branches.slack.post` checks the owning

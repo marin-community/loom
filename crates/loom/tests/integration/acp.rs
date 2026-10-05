@@ -4944,7 +4944,27 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.status, "archived");
+        assert_eq!(session.status, "done");
+        assert!(session.acp_inflight.is_none());
+        // Keeping the result visible must not prevent the next occurrence.
+        weaver_core::occurrence::enqueue(
+            &ts.state.db,
+            &watch,
+            chrono::Utc::now(),
+            "manual",
+            false,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            weaver_core::occurrence::active(&ts.state.db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
         assert!(
             loom::runs::require_watch_turn(&ts.state.db, &run.session_id, 0)
                 .await
@@ -5032,6 +5052,6 @@ async fn scheduled_watch_dispatches_agent_through_automation_launch() {
         .unwrap()
         .unwrap();
     assert_eq!(session.class, "automation");
-    assert_eq!(session.status, "archived");
+    assert_eq!(session.status, "done");
     assert!(!loom::backend::has_session(&session.term_session).await);
 }

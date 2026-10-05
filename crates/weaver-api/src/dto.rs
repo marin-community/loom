@@ -1252,9 +1252,6 @@ pub struct DeploymentWatchReq {
     pub agent: weaver_core::schedule::AgentTarget,
     #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
-    pub misfire_policy: weaver_core::schedule::MisfirePolicy,
-    pub late_grace_secs: Option<i64>,
     pub run_timeout_secs: Option<i64>,
 }
 
@@ -1959,8 +1956,6 @@ pub struct WatchView {
     pub revision: i64,
     pub deployment_managed: bool,
     pub paused: bool,
-    pub misfire_policy: weaver_core::schedule::MisfirePolicy,
-    pub late_grace_secs: i64,
     pub run_timeout_secs: i64,
     pub state_version: i64,
     pub id: String,
@@ -2017,8 +2012,6 @@ impl WatchView {
             revision: o.revision,
             deployment_managed: o.deployment_managed,
             paused: o.paused,
-            misfire_policy: serde_json::from_value(Value::String(o.misfire_policy.clone()))?,
-            late_grace_secs: o.late_grace_secs,
             run_timeout_secs: o.run_timeout_secs,
             state_version: o.state_version,
             id: o.id.clone(),

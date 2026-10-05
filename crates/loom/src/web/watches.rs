@@ -173,14 +173,7 @@ pub(super) async fn create_watch_core(
         }
     };
 
-    validate_agent_definition(
-        st,
-        &trigger_spec,
-        req.agent.as_ref(),
-        req.late_grace_secs,
-        req.run_timeout_secs,
-    )
-    .await?;
+    validate_agent_definition(st, &trigger_spec, req.agent.as_ref(), req.run_timeout_secs).await?;
     let new = watch_store::NewWatch {
         name,
         trigger_spec,
@@ -194,9 +187,9 @@ pub(super) async fn create_watch_core(
         cooldown_secs: req.cooldown_secs.unwrap_or(defaults.cooldown_secs),
         enabled: req.enabled.unwrap_or(defaults.enabled),
         agent: req.agent,
-        misfire_policy: req.misfire_policy.unwrap_or_default(),
-        late_grace_secs: req.late_grace_secs.unwrap_or(600),
-        run_timeout_secs: req.run_timeout_secs.unwrap_or(300),
+        run_timeout_secs: req
+            .run_timeout_secs
+            .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS),
     };
     let o = watch_store::create(&st.db, &new).await?;
     tracing::info!(watch = %o.id, name = %o.name, "watch created");
@@ -292,7 +285,6 @@ async fn patch_watch_core(
         st,
         trigger_spec.as_deref().unwrap_or(&o.trigger_spec),
         agent.as_ref(),
-        req.late_grace_secs,
         req.run_timeout_secs,
     )
     .await?;
@@ -311,11 +303,6 @@ async fn patch_watch_core(
         effort: req.effort,
         cooldown_secs: req.cooldown_secs,
         agent_spec: req.agent.as_ref().map(serde_json::to_string).transpose()?,
-        misfire_policy: req.misfire_policy.map(|p| match p {
-            weaver_core::schedule::MisfirePolicy::Skip => "skip".into(),
-            _ => "coalesce".into(),
-        }),
-        late_grace_secs: req.late_grace_secs,
         run_timeout_secs: req.run_timeout_secs,
     };
     if !patch.is_empty() {
@@ -516,9 +503,11 @@ async fn validate_agent_definition(
     st: &AppState,
     trigger: &str,
     agent: Option<&weaver_core::schedule::AgentTarget>,
-    grace_secs: Option<i64>,
     timeout_secs: Option<i64>,
 ) -> ApiResult<()> {
+    if timeout_secs.is_some_and(|value| !(1..=86400).contains(&value)) {
+        return Err(AppError::bad_request("timeout must be 1..86400 seconds"));
+    }
     let trigger: watch_store::Trigger =
         serde_json::from_str(trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
     weaver_core::schedule::validate(&trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
@@ -532,13 +521,6 @@ async fn validate_agent_definition(
             .validate()
             .map_err(|e| AppError::bad_request(e.to_string()))?;
         validate_watch_profile(&st.db, &agent.profile).await?;
-    }
-    if grace_secs.is_some_and(|v| !(0..=86400).contains(&v))
-        || timeout_secs.is_some_and(|v| !(1..=86400).contains(&v))
-    {
-        return Err(AppError::bad_request(
-            "late grace must be 0..86400 seconds and timeout 1..86400 seconds",
-        ));
     }
     Ok(())
 }
@@ -612,23 +594,17 @@ pub(super) async fn reconcile_watch(
         st,
         &trigger,
         declared.agent.as_ref(),
-        declared.late_grace_secs,
         declared.run_timeout_secs,
     )
     .await?;
     let agent = serde_json::to_string(&declared.agent)?;
-    let grace = declared.late_grace_secs.unwrap_or(600);
-    let timeout = declared.run_timeout_secs.unwrap_or(300);
-    let policy = match declared.misfire_policy.unwrap_or_default() {
-        weaver_core::schedule::MisfirePolicy::Skip => "skip",
-        _ => "coalesce",
-    };
+    let timeout_secs = declared
+        .run_timeout_secs
+        .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS);
     let enabled = declared.enabled.unwrap_or(false) && !existing.paused;
     if existing.trigger_spec != trigger
         || existing.agent_spec.as_deref() != Some(agent.as_str())
-        || existing.late_grace_secs != grace
-        || existing.run_timeout_secs != timeout
-        || existing.misfire_policy != policy
+        || existing.run_timeout_secs != timeout_secs
     {
         watch_store::update(
             &st.db,
@@ -637,9 +613,7 @@ pub(super) async fn reconcile_watch(
                 trigger_spec: (existing.trigger_spec != trigger).then_some(trigger),
                 agent_spec: Some(agent),
                 profile: declared.agent.map(|a| a.profile),
-                misfire_policy: Some(policy.into()),
-                late_grace_secs: Some(grace),
-                run_timeout_secs: Some(timeout),
+                run_timeout_secs: Some(timeout_secs),
                 ..Default::default()
             },
         )

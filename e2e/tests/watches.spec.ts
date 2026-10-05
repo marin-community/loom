@@ -71,10 +71,10 @@ test.describe('watch panel', () => {
     await page.getByTestId('watch-new').click();
     const form = page.getByTestId('watch-form');
     await page.getByTestId('watch-name').fill('weekday-agent');
-    await page.getByRole('button', { name: 'Cron', exact: true }).click();
+    await page.getByRole('button', { name: 'Weekdays at…', exact: true }).click();
     await expect(page.getByTestId('watch-program')).toHaveCount(0);
     await expect(page.getByTestId('cap-nudge')).toHaveCount(0);
-    await form.getByPlaceholder('0 * * * *').fill('0 9 * * 1-5');
+    await form.getByLabel('Time of day').fill('09:00');
     await form.getByPlaceholder('UTC').fill('America/Los_Angeles');
     await form.getByPlaceholder('marin-community/marin').fill('org/repo');
     await form.getByPlaceholder('C0123456789').fill('C12345');
@@ -89,7 +89,10 @@ test.describe('watch panel', () => {
     await expect(page.getByText('Time zone: America/Los_Angeles')).toBeVisible();
     await page.getByTestId('watch-edit').click();
     await page.getByLabel('Repository', { exact: true }).fill('org/other');
+    await page.getByLabel('Schedule', { exact: true }).selectOption('daily');
+    await page.getByLabel('Time of day').fill('10:30');
     await page.getByTestId('watch-save').click();
+    await expect(page.getByText('daily at 10:30 America/Los_Angeles').first()).toBeVisible();
     await expect(page.getByText('Repository: org/other', { exact: true })).toBeVisible();
     await page.screenshot({ path: '/tmp/loom-agent-schedule.png', fullPage: true });
   });

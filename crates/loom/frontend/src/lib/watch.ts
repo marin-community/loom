@@ -53,7 +53,15 @@ export function capabilitiesFrom(ticked: Record<string, boolean>): string[] {
 export function triggerSummary(t: WatchTrigger | undefined | null): string {
   if (!t) return 'manual';
   const parts: string[] = [];
-  if (t.cron) parts.push(`cron ${t.cron}`);
+  if (t.cron) {
+    const calendar = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/.exec(t.cron);
+    if (calendar) {
+      const time = `${calendar[2].padStart(2, '0')}:${calendar[1].padStart(2, '0')}`;
+      parts.push(
+        `${calendar[3] === '1-5' ? 'weekdays' : 'daily'} at ${time} ${t.timezone ?? 'UTC'}`,
+      );
+    } else parts.push(`cron ${t.cron}`);
+  }
   if (t.every) parts.push(`every ${t.every}`);
   // The subscription set: the `on` list plus the legacy single `event`.
   const events = [...(t.on ?? [])];
@@ -74,4 +82,20 @@ export function scopeSummary(s: WatchScope | undefined | null): string {
 export function promptOf(o: Pick<Watch, 'params'>): string {
   const p = paramsOf(o).prompt;
   return typeof p === 'string' ? p : '';
+}
+
+export type ScheduleKind = 'every' | 'daily' | 'weekdays' | 'cron';
+
+export function calendarTrigger(
+  kind: 'daily' | 'weekdays',
+  time: string,
+  timezone: string,
+): WatchTrigger {
+  const match = /^(\d{2}):(\d{2})$/.exec(time);
+  if (!match || Number(match[1]) > 23 || Number(match[2]) > 59)
+    throw new Error('Choose a time of day.');
+  return {
+    cron: `${Number(match[2])} ${Number(match[1])} * * ${kind === 'weekdays' ? '1-5' : '*'}`,
+    timezone,
+  };
 }
