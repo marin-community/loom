@@ -1267,6 +1267,23 @@ pub struct DeploymentView {
     pub federations: Vec<FederationView>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SlackDeliveryStatus {
+    Posted,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SlackDeliveryView {
+    pub status: SlackDeliveryStatus,
+    pub posted: bool,
+    pub ts: Option<String>,
+    pub error: Option<String>,
+    pub retry_at: Option<String>,
+}
+
 /// One Slack thread, as an automation caller names it. `channel` is a Slack
 /// channel id (`C…`/`G…`/`D…`, never a `#name`) and `thread_ts` the message `ts`
 /// of the thread's root. The workspace is loom's own — a caller cannot address
@@ -1942,7 +1959,7 @@ pub struct WatchView {
     pub revision: i64,
     pub deployment_managed: bool,
     pub paused: bool,
-    pub misfire_policy: String,
+    pub misfire_policy: weaver_core::schedule::MisfirePolicy,
     pub late_grace_secs: i64,
     pub run_timeout_secs: i64,
     pub state_version: i64,
@@ -1994,13 +2011,13 @@ pub struct WatchView {
 impl WatchView {
     /// Build the view from a watch plus the most recent round's outcome,
     /// read from the run history.
-    pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
-        Self {
-            agent: o.agent().unwrap_or_default(),
+    pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            agent: o.agent()?,
             revision: o.revision,
             deployment_managed: o.deployment_managed,
             paused: o.paused,
-            misfire_policy: o.misfire_policy.clone(),
+            misfire_policy: serde_json::from_value(Value::String(o.misfire_policy.clone()))?,
             late_grace_secs: o.late_grace_secs,
             run_timeout_secs: o.run_timeout_secs,
             state_version: o.state_version,
@@ -2025,7 +2042,7 @@ impl WatchView {
             last_outcome,
             created_at: o.created_at.clone(),
             updated_at: o.updated_at.clone(),
-        }
+        })
     }
 }
 

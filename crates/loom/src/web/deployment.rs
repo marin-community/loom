@@ -183,16 +183,14 @@ async fn reconcile_deployment_core(
         }
         for name in crate::profile::deployment_managed_names(&st.db).await? {
             if !profile_names.contains(&name) {
-                let pending_retirement =
-                    weaver_core::occurrence::active(&st.db)
-                        .await?
-                        .iter()
-                        .any(|occurrence| {
-                            serde_json::from_str::<weaver_core::watch::Watch>(
-                                &occurrence.definition,
-                            )
-                            .is_ok_and(|watch| watch.profile == name)
-                        });
+                let definitions = weaver_core::occurrence::active(&st.db)
+                    .await?
+                    .into_iter()
+                    .map(|occurrence| {
+                        serde_json::from_str::<weaver_core::watch::Watch>(&occurrence.definition)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let pending_retirement = definitions.iter().any(|watch| watch.profile == name);
                 if pending_retirement {
                     continue;
                 }
@@ -237,7 +235,7 @@ async fn reconcile_deployment_core(
     let mut watches = Vec::new();
     for watch in weaver_core::watch::list(&st.db).await? {
         if watch_names.contains(&watch.name) {
-            watches.push(weaver_api::WatchView::from_parts(&watch, None));
+            watches.push(weaver_api::WatchView::from_parts(&watch, None)?);
         }
     }
     Ok(DeploymentView {

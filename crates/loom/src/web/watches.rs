@@ -47,7 +47,7 @@ async fn watch_view(db: &Db, o: &Watch) -> ApiResult<WatchView> {
         .into_iter()
         .next()
         .map(|r| r.outcome);
-    Ok(WatchView::from_parts(o, last_outcome))
+    Ok(WatchView::from_parts(o, last_outcome)?)
 }
 
 /// Reject a capability set that isn't a subset of the known ladder, naming the

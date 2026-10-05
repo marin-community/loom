@@ -116,7 +116,7 @@ pub mod slack {
             #[operand(context)]
             pub branch: String,
         }
-        pub type Output = serde_json::Value;
+        pub type Output = crate::SlackDeliveryView;
     }
 
     pub mod send {

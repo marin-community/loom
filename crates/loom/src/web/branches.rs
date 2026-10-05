@@ -476,7 +476,7 @@ async fn issues_list_operation(
 async fn slack_post_operation(
     context: OperationContext,
     input: ops::slack::post::Input,
-) -> ApiResult<serde_json::Value> {
+) -> ApiResult<weaver_api::SlackDeliveryView> {
     super::scheduled::slack_post(&context.state, input).await
 }
 

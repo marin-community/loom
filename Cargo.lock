@@ -1634,7 +1634,6 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
- "croner",
  "loom-launch",
  "serde",
  "serde_json",

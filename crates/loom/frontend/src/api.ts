@@ -8,6 +8,7 @@ import {
   type SessionSearchAttention,
   type SessionSearchStatus,
 } from './api/generated';
+import type { WatchTrigger } from './types';
 
 // A 401 on any non-auth route means the session lapsed (or was never there);
 // the app registers a handler that bounces to the login screen. Auth routes
@@ -964,5 +965,5 @@ export const getDiagnostics = () => invokeOperation('diagnostics.get', {});
  *  request), newest first. Operator-only, like the log endpoints. */
 export const getTasks = () => invokeOperation('tasks.list', {});
 
-export const previewWatchSchedule = (trigger: Record<string, unknown>) =>
+export const previewWatchSchedule = (trigger: WatchTrigger) =>
   invokeOperation('watches.preview', { trigger });

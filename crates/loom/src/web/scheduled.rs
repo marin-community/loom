@@ -2,12 +2,23 @@
 use super::{ApiResult, AppError, AppState};
 use anyhow::Result;
 use chrono::Utc;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::collections::HashMap;
+use weaver_api::{SlackDeliveryStatus, SlackDeliveryView};
 use weaver_core::{
     occurrence::{self, Occurrence},
     watch::Watch,
 };
+
+#[derive(sqlx::FromRow)]
+struct Delivery {
+    channel: String,
+    text: String,
+    status: String,
+    slack_ts: Option<String>,
+    error: Option<String>,
+    retry_at: Option<String>,
+}
 
 pub(crate) async fn run(state: AppState) {
     let mut tasks = tokio::task::JoinSet::new();
@@ -302,7 +313,7 @@ pub(super) async fn own_occurrence(state: &AppState, branch: &str) -> ApiResult<
 pub(super) async fn slack_post(
     state: &AppState,
     input: weaver_api::operations::branches::slack::post::Input,
-) -> ApiResult<Value> {
+) -> ApiResult<SlackDeliveryView> {
     let occurrence = own_occurrence(state, &input.branch).await?;
     let watch: Watch = serde_json::from_str(&occurrence.definition)?;
     let agent = watch
@@ -329,26 +340,36 @@ pub(super) async fn slack_post(
         .bind(&occurrence.id).bind(&input.action_key).bind(&input.channel).bind(&input.text).execute(&state.db).await?.rows_affected();
     let mut send = inserted > 0;
     if inserted == 0 {
-        let (channel, text, status, ts, error, retry_at): (String,String,String,Option<String>,Option<String>,Option<String>) = sqlx::query_as("SELECT channel,text,status,slack_ts,error,retry_at FROM watch_deliveries WHERE occurrence_id = ? AND action_key = ?").bind(&occurrence.id).bind(&input.action_key).fetch_one(&state.db).await?;
-        if channel != input.channel || text != input.text {
+        let delivery: Delivery = sqlx::query_as("SELECT channel,text,status,slack_ts,error,retry_at FROM watch_deliveries WHERE occurrence_id = ? AND action_key = ?").bind(&occurrence.id).bind(&input.action_key).fetch_one(&state.db).await?;
+        if delivery.channel != input.channel || delivery.text != input.text {
             return Err(AppError::conflict(
                 "action_key already belongs to another message",
             ));
         }
-        if status == "rejected" {
+        if delivery.status == "rejected" {
             send = sqlx::query("UPDATE watch_deliveries SET status = 'uncertain' WHERE occurrence_id = ? AND action_key = ? AND status = 'rejected' AND retry_at <= ?")
                 .bind(&occurrence.id).bind(&input.action_key).bind(weaver_core::db::now_iso()).execute(&state.db).await?.rows_affected() > 0;
         }
         if !send {
-            return Ok(
-                json!({"status": status, "ts": ts, "posted": status == "posted", "error": error, "retry_at": retry_at}),
-            );
+            return Ok(SlackDeliveryView {
+                status: serde_json::from_value(json!(delivery.status))?,
+                posted: delivery.status == "posted",
+                ts: delivery.slack_ts,
+                error: delivery.error,
+                retry_at: delivery.retry_at,
+            });
         }
     }
     match web.post_message(&input.channel, None, &input.text).await {
         Ok(ts) => {
             sqlx::query("UPDATE watch_deliveries SET status = 'posted', slack_ts = ? WHERE occurrence_id = ? AND action_key = ?").bind(&ts).bind(&occurrence.id).bind(&input.action_key).execute(&state.db).await?;
-            Ok(json!({"posted": true, "status": "posted", "ts": ts}))
+            Ok(SlackDeliveryView {
+                posted: true,
+                status: SlackDeliveryStatus::Posted,
+                ts: Some(ts),
+                error: None,
+                retry_at: None,
+            })
         }
         Err(error) => {
             if let Some(rejection) = error.downcast_ref::<crate::slack::SlackRejection>() {
@@ -364,9 +385,13 @@ pub(super) async fn slack_post(
                     .map(weaver_core::schedule::iso);
                 sqlx::query("UPDATE watch_deliveries SET status = 'rejected', error = ?, retry_at = ? WHERE occurrence_id = ? AND action_key = ?")
                     .bind(error.to_string()).bind(&retry_at).bind(&occurrence.id).bind(&input.action_key).execute(&state.db).await?;
-                return Ok(
-                    json!({"posted": false, "status": "rejected", "error": error.to_string(), "retry_at": retry_at}),
-                );
+                return Ok(SlackDeliveryView {
+                    posted: false,
+                    status: SlackDeliveryStatus::Rejected,
+                    ts: None,
+                    error: Some(error.to_string()),
+                    retry_at,
+                });
             }
             sqlx::query(
                 "UPDATE watch_deliveries SET error = ? WHERE occurrence_id = ? AND action_key = ?",
@@ -490,6 +515,6 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert!(error.message.contains("reserved"));
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
     }
 }

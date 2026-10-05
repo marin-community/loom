@@ -210,7 +210,7 @@ pub async fn tick_timer(state: &AppState) {
         if o.agent_spec.is_some() {
             continue;
         }
-        // Dynamic one-shot wake (any watch, scheduled or reactive): a round
+        // Dynamic one-shot wake for reactive programs: a round
         // asked to re-run at `wake_at`. Record the tick first and only clear the
         // column once it lands — a failed insert then leaves the wake set to retry
         // next pass, rather than silently losing it. The clear still happens in
@@ -241,40 +241,6 @@ pub async fn tick_timer(state: &AppState) {
                 continue;
             }
         }
-        let trigger = o.trigger();
-        if trigger.is_scheduled() && o.agent_spec.is_none() {
-            continue;
-        }
-        if !trigger.is_scheduled() {
-            continue;
-        }
-        // Seed a never-scheduled watch's next-fire without firing it now.
-        let next = match o.next_run_at.as_deref() {
-            Some(ts) => parse_iso(ts),
-            None => None,
-        };
-        let next = match next {
-            Some(n) => n,
-            None => {
-                if let Some(n) = next_fire(&o, now) {
-                    let _ = watch_store::set_schedule(&state.db, &o.id, None, Some(&iso(n))).await;
-                }
-                continue;
-            }
-        };
-        if next > now {
-            continue;
-        }
-        // Due: emit the cron tick (the dispatcher fires the round) and advance.
-        tracing::debug!(watch = %o.id, name = %o.name, "watch timer: cron due; emitting tick");
-        if let Err(e) =
-            events::record_system(&state.db, &state.bus, "cron", json!({ "watch": o.id })).await
-        {
-            tracing::warn!(watch = %o.id, "watch timer: recording cron tick failed: {e}");
-            continue;
-        }
-        let advanced = next_fire(&o, now).map(iso);
-        let _ = watch_store::set_schedule(&state.db, &o.id, None, advanced.as_deref()).await;
     }
 }
 
@@ -668,15 +634,12 @@ pub async fn fire(
 
     let _ = watch_store::finish_run(&state.db, run_id, &round.record()).await;
     tracing::info!(watch = %o.id, run = run_id, outcome = %round.outcome, "watch run completed");
-    // Stamp the schedule: last_run_at = now; advance next_run_at for a scheduled
-    // watch (a reactive one keeps None).
-    let next = next_fire(o, now).map(iso);
-    let _ = watch_store::set_schedule(&state.db, &o.id, Some(&iso(now)), next.as_deref()).await;
+    let _ = watch_store::set_schedule(&state.db, &o.id, Some(&iso(now)), None).await;
 
     // Persist the program's lookaside-state write and its dynamic-wake request.
     // These are how a round carries memory forward and self-schedules its next
     // look (e.g. an exponential-backoff recheck) — independent of the cron
-    // cadence above.
+    // scheduling.
     if let Some(new_state) = &round.state {
         let _ = watch_store::set_state(&state.db, &o.id, new_state).await;
     }
@@ -1343,48 +1306,6 @@ pub async fn ensure_warm_session(state: &AppState, o: &Watch) -> anyhow::Result<
     Ok(Some(session.id))
 }
 
-// ---------------------------------------------------------------------------
-// Schedule arithmetic (cron + `every` sugar)
-// ---------------------------------------------------------------------------
-
-/// The next fire time for a scheduled watch after `from`. A `cron` field is
-/// parsed with `croner` (standard 5-field crontab); an `every` field is the
-/// duration sugar (`30m`, `2h`, `45s`). A reactive (non-scheduled) watch
-/// has no next fire.
-fn next_fire(o: &Watch, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let trigger = o.trigger();
-    if let Some(cron) = trigger.cron.as_deref() {
-        return next_cron(cron, from);
-    }
-    if let Some(every) = trigger.every.as_deref() {
-        return parse_every(every).map(|d| from + d);
-    }
-    None
-}
-
-/// Next occurrence of a crontab expression strictly after `from`, or `None` if
-/// the expression doesn't parse (a bad cron never schedules rather than erroring
-/// every tick).
-fn next_cron(expr: &str, from: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    use std::str::FromStr;
-    let cron = croner::Cron::from_str(expr).ok()?;
-    cron.find_next_occurrence(&from, false).ok()
-}
-
-/// Parse the `every` duration sugar — a number with an `s`/`m`/`h` suffix
-/// (`30m`, `2h`, `45s`). No new dependency; the engine parses it itself.
-fn parse_every(spec: &str) -> Option<chrono::Duration> {
-    let spec = spec.trim();
-    let (num, unit) = spec.split_at(spec.find(|c: char| !c.is_ascii_digit())?);
-    let n: i64 = num.parse().ok()?;
-    match unit.trim() {
-        "s" | "sec" | "secs" => Some(chrono::Duration::seconds(n)),
-        "m" | "min" | "mins" => Some(chrono::Duration::minutes(n)),
-        "h" | "hr" | "hrs" => Some(chrono::Duration::hours(n)),
-        _ => None,
-    }
-}
-
 /// Parse an ISO-8601 timestamp (the [`weaver_core::db::now_iso`] format) to UTC.
 fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
@@ -1400,25 +1321,6 @@ fn iso(dt: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_every_handles_s_m_h() {
-        assert_eq!(parse_every("30m"), Some(chrono::Duration::minutes(30)));
-        assert_eq!(parse_every("2h"), Some(chrono::Duration::hours(2)));
-        assert_eq!(parse_every("45s"), Some(chrono::Duration::seconds(45)));
-        assert_eq!(parse_every("nonsense"), None);
-        assert_eq!(parse_every(""), None);
-    }
-
-    #[test]
-    fn next_cron_advances_to_the_future() {
-        let from = parse_iso("2026-06-08T10:30:00.000Z").unwrap();
-        // Every hour on the hour → next is 11:00.
-        let next = next_cron("0 * * * *", from).unwrap();
-        assert_eq!(iso(next), "2026-06-08T11:00:00.000Z");
-        // A malformed expression never schedules.
-        assert!(next_cron("not a cron", from).is_none());
-    }
 
     #[test]
     fn parse_round_result_is_lenient_but_requires_an_object() {

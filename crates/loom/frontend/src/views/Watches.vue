@@ -305,9 +305,9 @@ const draft = reactive({
   cron: '',
   every: '',
   timezone: 'UTC',
-  timeout: 300,
-  grace: 600,
-  misfire: 'coalesce',
+  timeoutSecs: 300,
+  graceSecs: 600,
+  misfire: 'coalesce' as 'skip' | 'coalesce',
 });
 
 function syncDraft(w: Watch) {
@@ -325,8 +325,8 @@ function syncDraft(w: Watch) {
   draft.cron = triggerOf(w).cron ?? '0 * * * *';
   draft.every = triggerOf(w).every ?? '30m';
   draft.timezone = triggerOf(w).timezone ?? 'UTC';
-  draft.timeout = w.run_timeout_secs;
-  draft.grace = w.late_grace_secs;
+  draft.timeoutSecs = w.run_timeout_secs;
+  draft.graceSecs = w.late_grace_secs;
   draft.misfire = w.misfire_policy;
 }
 
@@ -366,9 +366,9 @@ async function saveConfig() {
               .filter(Boolean),
           },
           trigger,
-          run_timeout_secs: draft.timeout,
-          late_grace_secs: draft.grace,
-          misfire_policy: draft.misfire as 'skip' | 'coalesce',
+          run_timeout_secs: draft.timeoutSecs,
+          late_grace_secs: draft.graceSecs,
+          misfire_policy: draft.misfire,
         }
       : {
           params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
@@ -737,7 +737,9 @@ onActivated(() => {
                 <OutcomeBadge :outcome="w.last_outcome" />
               </span>
               <span class="mt-1 flex items-baseline gap-2 pl-4">
-                <span class="min-w-0 truncate font-mono text-2xs text-faint">{{ w.program }}</span>
+                <span class="min-w-0 truncate font-mono text-2xs text-faint">{{
+                  w.agent ? w.agent.profile : w.program
+                }}</span>
                 <span class="ml-auto shrink-0 font-mono text-2xs text-faint">
                   {{ w.last_run_at ? timeAgo(w.last_run_at) : '' }}
                 </span>
@@ -1321,7 +1323,7 @@ onActivated(() => {
                   <label class="block"
                     >Timeout (seconds)
                     <input
-                      v-model.number="draft.timeout"
+                      v-model.number="draft.timeoutSecs"
                       type="number"
                       min="1"
                       max="86400"
@@ -1330,7 +1332,7 @@ onActivated(() => {
                   <label class="block"
                     >Late grace (seconds)
                     <input
-                      v-model.number="draft.grace"
+                      v-model.number="draft.graceSecs"
                       type="number"
                       min="0"
                       max="86400"
