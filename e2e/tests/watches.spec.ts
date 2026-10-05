@@ -66,6 +66,28 @@ test.describe('watch panel', () => {
     await expect(detail).toContainText('attention ≠ ok');
   });
 
+  test('creates and edits a mechanical schedule without an agent target', async ({ page, weaver }) => {
+    await page.goto(`${weaver.baseUrl}/watches`);
+    await page.getByTestId('watch-new').click();
+    await page.getByTestId('watch-name').fill('merge-check');
+    await page.getByRole('button', { name: 'Advanced: cron', exact: true }).click();
+    await page.getByLabel('Execution', { exact: true }).selectOption('script');
+    await page.getByTestId('watch-program').selectOption('builtin:archive-merged');
+    await page.getByTestId('watch-form').getByPlaceholder('0 * * * *').fill('15 10 * * *');
+    await page.getByTestId('watch-form').getByPlaceholder('UTC').fill('America/Los_Angeles');
+    await page.getByTestId('watch-create').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('daily at 10:15 America/Los_Angeles');
+    await page.getByTestId('watch-tab-config').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('builtin:archive-merged');
+    await page.getByTestId('watch-edit').click();
+    await page.getByLabel('Schedule', { exact: true }).selectOption('daily');
+    await page.getByLabel('Time of day').fill('11:15');
+    await page.getByLabel('Timeout (seconds)').fill('60');
+    await page.getByTestId('watch-save').click();
+    await expect(page.getByTestId('watch-detail')).toContainText('daily at 11:15 America/Los_Angeles');
+    await expect(page.getByText('Timeout: 60 seconds', {exact:true})).toBeVisible();
+  });
+
   test('creates, previews and edits an agent schedule and its task prompt', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/watches`);
     await page.getByTestId('watch-new').click();

@@ -223,7 +223,7 @@ pub mod preview {
 
 pub mod occurrences {
     use super::prelude::*;
-    /// Inspect durable agent occurrences, including launch and session identifiers.
+    /// Inspect durable occurrences, including agent launch and session identifiers.
     #[operation(id = "watches.occurrences", actor = User, scope = Global, risk = Read,
                 cli = "watch occurrences")]
     pub struct Input {

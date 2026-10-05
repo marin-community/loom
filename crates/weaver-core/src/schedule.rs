@@ -1,4 +1,4 @@
-//! Calendar arithmetic and the launch policy of scheduled agents.
+//! Calendar arithmetic and shared scheduling defaults.
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Duration, TimeZone, Utc};

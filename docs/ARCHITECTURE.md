@@ -1270,21 +1270,23 @@ builtins are stdlib-only and need neither).
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |
 
-## Scheduled watch agents
+## Scheduled watches
 
-Cron and interval watches carry an `agent` target: an automation-safe ACP
-profile, `owner/repo`, task prompt, and allowed Slack channel IDs. Reactive
-Python watch programs retain their event subscriptions and dynamic `wake_at`.
-Migration disables existing scheduled scripts and records the reason in history.
+Cron and interval watches choose a mechanical Python `program` or an `agent`
+target: an automation-safe ACP profile, `owner/repo`, task prompt, and allowed
+Slack channel IDs. Scripts execute directly; agents launch sessions. Existing
+scheduled scripts keep their enabled state and cadence through migration.
+Reactive scripts retain their event subscriptions and dynamic `wake_at`.
 
-The independent scheduled-agent loop queues an occurrence and advances its
+The independent scheduling loop queues an occurrence and advances its
 cadence in one SQLite transaction. A partial unique constraint keeps one active
 occurrence per watch, including manual runs. Each occurrence snapshots its
-revision and definition, and launches through the automation reservation path
-with its ID as the idempotency key. Interrupted dispatch retries that key;
+revision and definition, and dispatches to the chosen executor. Agents launch through the automation
+reservation path with the occurrence ID as the idempotency key. Interrupted
+agent dispatch retries that key;
 external callers cannot select the scheduler's `watch` source.
 
-A schedule specifies when to run an agent with its prompt. The UI offers
+The schedule and executor are separate choices. The UI offers
 intervals, daily times, weekdays, and an advanced cron expression. Calendar
 schedules use an IANA time zone (UTC by default); the API and IaC accept
 five-field cron or an `every` duration such as `30m`.
@@ -1293,6 +1295,14 @@ Missed runs coalesce into the latest scheduled run if it is no more than ten
 minutes late. Older runs and runs that overlap an active occurrence are skipped. Execution times out after
 five minutes unless the watch sets `run_timeout_secs`. Pausing suppresses pending
 and future work; resume starts with the next scheduled time.
+
+Scheduled scripts use the existing round contract for output, actions, state,
+and dynamic wakes. A durable process lease claims each script once. A gated
+process-group leader remains alive through execution and teardown; the daemon
+stops the entire group before releasing overlap. An interrupted script settles
+as an error without replaying potentially completed actions. Output, state,
+wake, and occurrence completion are committed together. Script execution does
+not create an agent session.
 
 A completed ACP turn, stopped session, or occurrence deadline begins durable
 settlement. The loop stops the agent before releasing the overlap constraint.
@@ -1311,7 +1321,7 @@ The `loom/watches/state@v1` capability in the `watch` MCP group exposes
 `messaging` group exposes `messaging_slack_post`. Profiles can select either
 capability or both; neither grants access to the other's operation.
 
-Deployment reconciliation applies profiles before named agent watches. It
+Deployment reconciliation applies profiles before named watches. It
 preserves IDs, state, history, runtime pause, and cadence when unchanged. Pruning
 pauses omitted managed watches and leaves operator-owned watches alone. Marin's
 `infra/loom` stack renders these definitions and confined prompt-file contents

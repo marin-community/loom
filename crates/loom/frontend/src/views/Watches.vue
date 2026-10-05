@@ -352,7 +352,7 @@ async function saveConfig() {
   error.value = '';
   notice.value = '';
   try {
-    const trigger: WatchTrigger =
+    const cadence: WatchTrigger =
       draft.scheduleKind === 'cron'
         ? { cron: draft.cron, timezone: draft.timezone }
         : draft.scheduleKind === 'every'
@@ -360,6 +360,13 @@ async function saveConfig() {
           : draft.scheduleKind === 'daily' || draft.scheduleKind === 'weekdays'
             ? calendarTrigger(draft.scheduleKind, draft.time, draft.timezone)
             : triggerOf(w);
+    const trigger = { ...triggerOf(w) };
+    if (draft.scheduleKind !== 'on') {
+      delete trigger.cron;
+      delete trigger.every;
+      delete trigger.timezone;
+      Object.assign(trigger, cadence);
+    }
     const body: WatchUpdateInput = w.agent
       ? {
           agent: {
@@ -376,14 +383,16 @@ async function saveConfig() {
           run_timeout_secs: draft.timeoutSecs,
         }
       : {
-          params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
+          params: { ...paramsOf(w), prompt: draft.prompt.trim() },
           capabilities: capabilitiesFrom(draft.capabilities),
           profile: draft.profile.trim() || 'watch',
           model: draft.model,
           effort: draft.effort,
           cooldown_secs: Number(draft.cooldown) || 0,
+          trigger,
+          run_timeout_secs: draft.timeoutSecs,
         };
-    if (w.agent && body.trigger) {
+    if (body.trigger) {
       const current = triggerOf(w);
       if (
         trigger.cron === current.cron &&
@@ -409,6 +418,7 @@ async function saveConfig() {
 // with its own name, prompt, and scope.
 const creating = ref(false);
 const scheduledForm = computed(() => form.triggerKind !== 'auto' && form.triggerKind !== 'on');
+const scheduledAgent = computed(() => scheduledForm.value && form.executor === 'agent');
 const previewTimes = ref<string[]>([]);
 async function previewSchedule() {
   try {
@@ -428,6 +438,7 @@ const watchNameInput = ref<HTMLInputElement | null>(null);
 type TriggerKind = 'auto' | 'on' | ScheduleKind;
 const form = reactive({
   name: '',
+  executor: 'agent' as 'agent' | 'script',
   timeoutSecs: 300,
   timezone: 'UTC',
   slackChannels: '',
@@ -453,6 +464,7 @@ const form = reactive({
 
 function resetForm() {
   form.name = '';
+  form.executor = 'agent';
   form.timeoutSecs = 300;
   form.timezone = 'UTC';
   form.slackChannels = '';
@@ -536,9 +548,9 @@ function applyProgramDefaults(programRef: string) {
     capabilities?: string[];
   };
   const t = defaults.trigger ?? {};
-  form.triggerKind = 'auto';
-  if (t.cron) form.cron = t.cron;
-  if (t.every) form.every = t.every;
+  if (!scheduledForm.value) form.triggerKind = 'auto';
+  if (!scheduledForm.value && t.cron) form.cron = t.cron;
+  if (!scheduledForm.value && t.every) form.every = t.every;
   if (Array.isArray(t.on) && t.on.length) form.on = t.on.join(', ');
   else if (t.event) form.on = t.level ? `${t.event}=${t.level}` : t.event;
   form.scopeAttention = defaults.scope?.attention ?? '';
@@ -586,6 +598,7 @@ async function create() {
       : {};
     if (form.prompt.trim()) params.prompt = form.prompt.trim();
 
+    if (trigger && form.triggerKind === 'cron') trigger.timezone = form.timezone;
     let body: WatchCreateInput = {
       name: form.name.trim(),
       scope,
@@ -596,7 +609,8 @@ async function create() {
       // New watches go live immediately; the per-row toggle disables later.
       enabled: true,
     };
-    if (scheduledForm.value) {
+    if (scheduledForm.value) body.run_timeout_secs = form.timeoutSecs;
+    if (scheduledAgent.value) {
       if (!form.prompt.trim() || !form.repo.trim())
         throw new Error('Scheduled agents require a prompt and repository (owner/name).');
       body = { name: body.name, enabled: true };
@@ -610,7 +624,6 @@ async function create() {
           .map((s) => s.trim())
           .filter(Boolean),
       };
-      if (trigger && form.triggerKind === 'cron') trigger.timezone = form.timezone;
       if (trigger) delete trigger.repo;
     }
     if (trigger !== undefined) body.trigger = trigger;
@@ -787,7 +800,19 @@ onActivated(() => {
             />
           </div>
 
-          <div v-if="!scheduledForm" class="grid grid-cols-2 gap-3">
+          <label v-if="scheduledForm" class="block text-xs text-muted">
+            Execution
+            <select
+              v-model="form.executor"
+              aria-label="Execution"
+              class="ml-2 rounded bg-input p-1"
+            >
+              <option value="agent">Agent prompt</option>
+              <option value="script">Mechanical script</option>
+            </select>
+          </label>
+
+          <div v-if="!scheduledAgent" class="grid grid-cols-2 gap-3">
             <div>
               <label class="mb-1 block text-xs text-muted">Program</label>
               <select
@@ -912,10 +937,11 @@ onActivated(() => {
               placeholder="UTC"
               class="w-full rounded bg-input px-2 py-1.5 text-sm"
             />
-            <label class="block text-xs text-muted"
+            <label v-if="scheduledAgent" class="block text-xs text-muted"
               >Allowed Slack channel IDs (comma separated)</label
             >
             <input
+              v-if="scheduledAgent"
               v-model="form.slackChannels"
               placeholder="C0123456789"
               class="w-full rounded bg-input px-2 py-1.5 text-sm"
@@ -937,14 +963,17 @@ onActivated(() => {
               <li v-for="time in previewTimes" :key="time">{{ time }}</li>
             </ul>
             <p class="text-xs text-faint">
-              Each occurrence launches an agent with the selected profile. The prompt defines its
-              task.
+              {{
+                scheduledAgent
+                  ? 'Each occurrence launches an agent with the selected profile.'
+                  : 'Each occurrence runs the selected script directly.'
+              }}
             </p>
           </div>
           <div>
             <label class="mb-1 block text-xs text-muted">
               {{
-                scheduledForm
+                scheduledAgent
                   ? 'Agent task prompt'
                   : 'Prompt — the judgement the stock program runs each round'
               }}
@@ -961,14 +990,14 @@ onActivated(() => {
           <div>
             <label class="mb-1 block text-xs text-muted">
               {{
-                scheduledForm
+                scheduledAgent
                   ? 'Agent repository (owner/name)'
                   : 'Repository — optional; pins the watch to one repo (blank = whole fleet)'
               }}
             </label>
             <input
               v-model="form.repo"
-              :placeholder="scheduledForm ? 'marin-community/marin' : '/home/you/code/project'"
+              :placeholder="scheduledAgent ? 'marin-community/marin' : '/home/you/code/project'"
               autocomplete="off"
               spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 font-mono text-sm outline-none ring-accent focus:ring-1"
@@ -978,7 +1007,7 @@ onActivated(() => {
           <div>
             <label class="mb-1 block text-xs text-muted">
               {{
-                scheduledForm
+                scheduledAgent
                   ? 'Agent profile — runs the task'
                   : 'Agent profile — automation-safe ACP profile for judgements'
               }}
@@ -993,7 +1022,7 @@ onActivated(() => {
             </select>
           </div>
 
-          <div v-if="!scheduledForm">
+          <div v-if="!scheduledAgent">
             <label class="mb-1 block text-xs text-muted">
               Capabilities — the intervention ladder (<code>observe</code> always on)
             </label>
@@ -1339,7 +1368,10 @@ onActivated(() => {
                 </div>
               </div>
 
-              <div v-if="selected.agent" class="mb-4 space-y-2 text-sm">
+              <div
+                v-if="selected.agent || triggerOf(selected).cron || triggerOf(selected).every"
+                class="mb-4 space-y-2 text-sm"
+              >
                 <p v-if="selected.deployment_managed" class="text-xs text-muted">
                   Managed by deployment · revision {{ selected.revision }}
                 </p>
@@ -1387,17 +1419,19 @@ onActivated(() => {
                       class="rounded bg-input p-1"
                     />
                   </label>
-                  <label class="block"
+                  <label v-if="selected.agent" class="block"
                     >Repository <input v-model="draft.repo" class="rounded bg-input p-1"
                   /></label>
-                  <label class="block"
+                  <label v-if="selected.agent" class="block"
                     >Slack channel IDs <input v-model="draft.channels" class="rounded bg-input p-1"
                   /></label>
                 </template>
                 <template v-else>
-                  <p>Repository: {{ selected.agent.repo }}</p>
+                  <p v-if="selected.agent">Repository: {{ selected.agent.repo }}</p>
                   <p>Timeout: {{ selected.run_timeout_secs }} seconds</p>
-                  <p>Slack channels: {{ selected.agent.slack_channels?.join(', ') || 'None' }}</p>
+                  <p v-if="selected.agent">
+                    Slack channels: {{ selected.agent.slack_channels?.join(', ') || 'None' }}
+                  </p>
                   <p v-if="triggerOf(selected).cron">
                     Time zone: {{ triggerOf(selected).timezone || 'UTC' }}
                   </p>

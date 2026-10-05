@@ -149,11 +149,7 @@ async fn reconcile_deployment_core(
     }
 
     for declared in &req.watches {
-        super::watches::reconcile_watch(
-            st,
-            serde_json::from_value(serde_json::to_value(declared)?)?,
-        )
-        .await?;
+        super::watches::reconcile_watch(st, declared.clone()).await?;
     }
     if req.prune {
         for watch in weaver_core::watch::list(&st.db).await? {

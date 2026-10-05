@@ -92,6 +92,19 @@ fn validate_program(program: &str) -> ApiResult<()> {
     Ok(())
 }
 
+fn program_capabilities(program: &str) -> Vec<String> {
+    crate::builtins::find(program).map_or_else(
+        || watch_store::NewWatch::default().capabilities,
+        |builtin| {
+            builtin
+                .default_capabilities
+                .iter()
+                .map(|cap| (*cap).to_string())
+                .collect()
+        },
+    )
+}
+
 fn program_views() -> Vec<ProgramView> {
     crate::builtins::BUILTINS.iter().map(|b| b.view()).collect()
 }
@@ -142,15 +155,9 @@ pub(super) async fn create_watch_core(
     let defaults = watch_store::NewWatch::default();
     let program = req.program.unwrap_or(defaults.program);
     validate_program(&program)?;
-    let capabilities = req.capabilities.unwrap_or_else(|| {
-        crate::builtins::find(&program).map_or(defaults.capabilities, |builtin| {
-            builtin
-                .default_capabilities
-                .iter()
-                .map(|cap| (*cap).to_string())
-                .collect()
-        })
-    });
+    let capabilities = req
+        .capabilities
+        .unwrap_or_else(|| program_capabilities(&program));
     validate_capabilities(&capabilities)?;
     let profile = req
         .agent
@@ -173,7 +180,7 @@ pub(super) async fn create_watch_core(
         }
     };
 
-    validate_agent_definition(st, &trigger_spec, req.agent.as_ref(), req.run_timeout_secs).await?;
+    validate_definition(st, &trigger_spec, req.agent.as_ref(), req.run_timeout_secs).await?;
     let new = watch_store::NewWatch {
         name,
         trigger_spec,
@@ -281,7 +288,7 @@ async fn patch_watch_core(
         },
     };
     let agent = req.agent.clone().or(o.agent()?);
-    validate_agent_definition(
+    validate_definition(
         st,
         trigger_spec.as_deref().unwrap_or(&o.trigger_spec),
         agent.as_ref(),
@@ -499,7 +506,7 @@ fn json_text(value: Option<Value>, default: &str) -> String {
         .unwrap_or_else(|| default.to_string())
 }
 
-async fn validate_agent_definition(
+async fn validate_definition(
     st: &AppState,
     trigger: &str,
     agent: Option<&weaver_core::schedule::AgentTarget>,
@@ -511,11 +518,6 @@ async fn validate_agent_definition(
     let trigger: watch_store::Trigger =
         serde_json::from_str(trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
     weaver_core::schedule::validate(&trigger).map_err(|e| AppError::bad_request(e.to_string()))?;
-    if trigger.is_scheduled() && agent.is_none() {
-        return Err(AppError::bad_request(
-            "cron and interval watches require an agent target",
-        ));
-    }
     if let Some(agent) = agent {
         agent
             .validate()
@@ -589,35 +591,64 @@ pub(super) async fn reconcile_watch(
             .await?;
         return Ok(());
     };
-    let trigger = declared.trigger.unwrap_or_else(|| json!({})).to_string();
-    validate_agent_definition(
+    let defaults = watch_store::NewWatch::default();
+    let agent = declared
+        .agent
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    let profile = declared
+        .agent
+        .as_ref()
+        .map(|agent| agent.profile.clone())
+        .or(declared.profile)
+        .unwrap_or(defaults.profile);
+    validate_watch_profile(&st.db, &profile).await?;
+    let program = declared.program.unwrap_or(defaults.program);
+    validate_program(&program)?;
+    let capabilities = declared
+        .capabilities
+        .unwrap_or_else(|| program_capabilities(&program));
+    validate_capabilities(&capabilities)?;
+    let scope = json_text(declared.scope, &defaults.scope);
+    let params = json_text(declared.params, &defaults.params);
+    let trigger = match declared.trigger {
+        Some(trigger) => trigger.to_string(),
+        None if declared.agent.is_some() => "{}".into(),
+        None => {
+            let fallback = program_default_trigger(&program).unwrap_or(defaults.trigger_spec);
+            reconcile_trigger(st, &program, &serde_json::from_str(&params)?, &fallback).await
+        }
+    };
+    validate_definition(
         st,
         &trigger,
         declared.agent.as_ref(),
         declared.run_timeout_secs,
     )
     .await?;
-    let agent = serde_json::to_string(&declared.agent)?;
+    let model = declared.model.unwrap_or_default();
+    let effort = declared.effort.unwrap_or_default();
+    let cooldown = declared.cooldown_secs.unwrap_or_default();
     let timeout_secs = declared
         .run_timeout_secs
         .unwrap_or(weaver_core::schedule::RUN_TIMEOUT_SECS);
     let enabled = declared.enabled.unwrap_or(false) && !existing.paused;
-    if existing.trigger_spec != trigger
-        || existing.agent_spec.as_deref() != Some(agent.as_str())
-        || existing.run_timeout_secs != timeout_secs
-    {
-        watch_store::update(
-            &st.db,
-            &existing.id,
-            &watch_store::WatchUpdate {
-                trigger_spec: (existing.trigger_spec != trigger).then_some(trigger),
-                agent_spec: Some(agent),
-                profile: declared.agent.map(|a| a.profile),
-                run_timeout_secs: Some(timeout_secs),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let patch = watch_store::WatchUpdate {
+        trigger_spec: (existing.trigger_spec != trigger).then_some(trigger),
+        agent_spec: (existing.agent_spec != agent).then(|| agent.unwrap_or_else(|| "null".into())),
+        program: (existing.program != program).then_some(program),
+        scope: (existing.scope != scope).then_some(scope),
+        params: (existing.params != params).then_some(params),
+        profile: (existing.profile != profile).then_some(profile),
+        capabilities: (existing.capabilities() != capabilities).then_some(capabilities),
+        model: (existing.model != model).then_some(model),
+        effort: (existing.effort != effort).then_some(effort),
+        cooldown_secs: (existing.cooldown_secs != cooldown).then_some(cooldown),
+        run_timeout_secs: (existing.run_timeout_secs != timeout_secs).then_some(timeout_secs),
+    };
+    if !patch.is_empty() {
+        watch_store::update(&st.db, &existing.id, &patch).await?;
     }
     watch_store::set_enabled(&st.db, &existing.id, enabled).await?;
     Ok(())

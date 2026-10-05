@@ -1244,16 +1244,7 @@ impl DeploymentSettingValue {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DeploymentWatchReq {
-    pub name: String,
-    pub trigger: Value,
-    pub agent: weaver_core::schedule::AgentTarget,
-    #[serde(default)]
-    pub enabled: bool,
-    pub run_timeout_secs: Option<i64>,
-}
+pub type DeploymentWatchReq = crate::operations::watches::create::Input;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentView {

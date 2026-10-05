@@ -615,15 +615,6 @@ async fn timer_queues_agent_occurrence_and_manual_run_obeys_overlap() {
         .await
         .unwrap();
     assert_eq!(result["outcome"], "skipped");
-    let error = ts
-        .client
-        .post(
-            "/api/watches/create",
-            json!({"name":"scheduled-script", "trigger":{"cron":"0 * * * *"}}),
-        )
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("agent"));
 }
 
 #[serial]
@@ -1859,4 +1850,94 @@ async fn pr_merged_event_scopes_round_to_one_session_and_logs_output() {
         .post("/api/sessions/delete", json!({ "session": merged_id }))
         .await
         .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scheduled_script_uses_the_queue_and_preserves_cadence() {
+    if !python3_available() {
+        return;
+    }
+    let ts = TestServer::start().await;
+    let state = engine_state(&ts).await;
+    let (session_id, _, _) = make_session(&ts, "mechanical survey").await;
+    let created = ts
+        .client
+        .post(
+            "/api/watches/create",
+            json!({
+                "name":"scheduled-script", "program":survey_program(), "enabled":true,
+                "trigger":{"every":"30m"}, "capabilities":["observe"], "run_timeout_secs":30
+            }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap();
+    let now = Utc::now();
+    watch_store::set_schedule(
+        &state.db,
+        id,
+        None,
+        Some(&weaver_core::schedule::iso(
+            now - chrono::Duration::seconds(1),
+        )),
+    )
+    .await
+    .unwrap();
+    weaver_core::occurrence::tick(&state.db, now).await.unwrap();
+    let occurrence = weaver_core::occurrence::active(&state.db)
+        .await
+        .unwrap()
+        .remove(0);
+    let next = watch_store::get(&state.db, id)
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run_at;
+    let result = ts
+        .client
+        .post("/api/watches/run", json!({"key":id}))
+        .await
+        .unwrap();
+    assert_eq!(result["outcome"], "skipped");
+    watch::execute_script_occurrence(&state, &occurrence)
+        .await
+        .unwrap();
+    let run = watch_store::recent_runs(&state.db, id, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|run| run.id == occurrence.watch_run_id)
+        .unwrap();
+    assert_eq!(run.outcome, "ok", "{}", run.summary);
+    assert_eq!(run.exit_code, Some(0));
+    assert!(surveyed_ids(&run).contains(&session_id));
+    assert!(weaver_core::occurrence::active(&state.db)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        watch_store::get(&state.db, id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run_at,
+        next
+    );
+    assert!(weaver_core::occurrence::history(&state.db, id, 10)
+        .await
+        .unwrap()[0]
+        .session_id
+        .is_none());
+    // Reprocessing the same snapshot must not run the script again.
+    watch::execute_script_occurrence(&state, &occurrence)
+        .await
+        .unwrap();
+    assert_eq!(
+        watch_store::recent_runs(&state.db, id, 10)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
 }

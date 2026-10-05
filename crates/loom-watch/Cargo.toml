@@ -9,6 +9,7 @@ loom-launch = { path = "../loom-launch" }
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }
 anyhow = "1"
+libc = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

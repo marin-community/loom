@@ -478,6 +478,32 @@ mod tests {
         MIGRATIONS.iter().map(|(v, _, _)| *v).collect()
     }
 
+    #[tokio::test]
+    async fn scheduling_migration_keeps_enabled_scripts_and_their_due_time() {
+        let pool = empty_pool().await;
+        for (_, _, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version < 20) {
+            sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO watches (id,name,enabled,trigger_spec,program,next_run_at) VALUES ('legacy','merge-check',1,'{\"every\":\"30m\"}','builtin:archive-merged','2026-10-05T10:00:00.000Z')").execute(&pool).await.unwrap();
+        let (_, _, sql) = MIGRATIONS
+            .iter()
+            .find(|(version, _, _)| *version == 20)
+            .unwrap();
+        sqlx::raw_sql(sql).execute(&pool).await.unwrap();
+        let watch = crate::watch::get(&pool, "legacy").await.unwrap().unwrap();
+        assert!(watch.enabled);
+        assert_eq!(
+            watch.next_run_at.as_deref(),
+            Some("2026-10-05T10:00:00.000Z")
+        );
+        assert!(watch.agent().unwrap().is_none());
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-05T10:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        crate::occurrence::tick(&pool, now).await.unwrap();
+        assert_eq!(crate::occurrence::active(&pool).await.unwrap().len(), 1);
+    }
+
     /// A fresh database ends up with the current schema, every migration
     /// recorded, and no `notes` table (created by the baseline, dropped by 0002).
     #[tokio::test]

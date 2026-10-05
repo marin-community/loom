@@ -51,6 +51,9 @@ pub struct Occurrence {
     pub deadline_at: String,
     pub settlement_outcome: Option<OccurrenceStatus>,
     pub settlement_summary: Option<String>,
+    pub automatic: bool,
+    pub dry_run: bool,
+    pub trigger_context: String,
 }
 
 pub async fn active(db: &Db) -> Result<Vec<Occurrence>> {
@@ -76,14 +79,29 @@ pub async fn history(db: &Db, watch: &str, limit: i64) -> Result<Vec<Occurrence>
 
 /// Claim one occurrence and advance its cadence in one write transaction. The
 /// definition revision prevents a timer holding an old snapshot from firing it.
+pub struct EnqueueRequest<'a> {
+    pub due: DateTime<Utc>,
+    pub reason: &'a str,
+    pub automatic: bool,
+    pub dry_run: bool,
+    pub trigger_context: serde_json::Value,
+}
+
 pub async fn enqueue(
     db: &Db,
     snapshot: &Watch,
-    due: DateTime<Utc>,
-    reason: &str,
-    automatic: bool,
+    request: &EnqueueRequest<'_>,
     now: DateTime<Utc>,
 ) -> Result<Option<i64>> {
+    let EnqueueRequest {
+        due,
+        reason,
+        automatic,
+        dry_run,
+        ..
+    } = request;
+    let (due, reason, automatic, dry_run) = (*due, *reason, *automatic, *dry_run);
+    let global_cooldown = crate::config::get_int(db, "watch.default_cooldown_secs", 0).await;
     let mut tx = db.begin().await?;
     let claimed = sqlx::query("UPDATE watches SET last_run_at = last_run_at WHERE id = ? AND revision = ? AND (? = 0 OR (enabled = 1 AND paused = 0))")
         .bind(&snapshot.id).bind(snapshot.revision).bind(automatic).execute(&mut *tx).await?.rows_affected();
@@ -115,21 +133,35 @@ pub async fn enqueue(
     };
     let late =
         scheduled && now.signed_duration_since(selected).num_seconds() > schedule::LATE_GRACE_SECS;
+    let cooldown_secs = if watch.agent_spec.is_none() && automatic {
+        watch::round_cooldown(&watch, reason, global_cooldown)
+    } else {
+        0
+    };
+    let cooling = cooldown_secs > 0
+        && watch
+            .last_run_at
+            .as_deref()
+            .map(DateTime::parse_from_rfc3339)
+            .transpose()?
+            .is_some_and(|last| now.signed_duration_since(last).num_seconds() < cooldown_secs);
     let run_id: i64 = sqlx::query_scalar("INSERT INTO watch_runs (watch_id,trigger_reason,trigger_event,started_at,outcome,summary,finished_at) VALUES (?,?,?,?,?,?,?) RETURNING id")
         .bind(&watch.id).bind(reason).bind(reason).bind(schedule::iso(now))
-        .bind(if busy || late {"skipped"} else {"queued"})
-        .bind(if busy {"Previous agent occurrence is still active"} else if late {"Missed occurrence exceeds late grace"} else {"Queued agent occurrence"})
-        .bind((busy || late).then(|| schedule::iso(now))).fetch_one(&mut *tx).await?;
-    sqlx::query("UPDATE watches SET next_run_at = ?, last_run_at = ? WHERE id = ?")
-        .bind(next)
-        .bind(schedule::iso(now))
-        .bind(&watch.id)
-        .execute(&mut *tx)
-        .await?;
-    if !busy && !late {
-        sqlx::query("INSERT INTO watch_occurrences (id,watch_id,revision,scheduled_at,trigger_reason,definition,watch_run_id,status,queued_at,deadline_at) VALUES (?,?,?,?,?,?,?,'pending',?,?)")
+        .bind(if busy || late || cooling {"skipped"} else {"queued"})
+        .bind(if busy {"Previous occurrence is still active"} else if late {"Missed occurrence exceeds late grace"} else if cooling {"Script cooldown has not elapsed"} else {"Queued occurrence"})
+        .bind((busy || late || cooling).then(|| schedule::iso(now))).fetch_one(&mut *tx).await?;
+    sqlx::query(
+        "UPDATE watches SET next_run_at = ?, last_run_at = COALESCE(?, last_run_at) WHERE id = ?",
+    )
+    .bind(next)
+    .bind((!busy && !late && !cooling).then(|| schedule::iso(now)))
+    .bind(&watch.id)
+    .execute(&mut *tx)
+    .await?;
+    if !busy && !late && !cooling {
+        sqlx::query("INSERT INTO watch_occurrences (id,watch_id,revision,scheduled_at,trigger_reason,definition,watch_run_id,status,queued_at,deadline_at,automatic,dry_run,trigger_context) VALUES (?,?,?,?,?,?,?,'pending',?,?,?,?,?)")
             .bind(crate::branch::new_id()).bind(&watch.id).bind(watch.revision).bind(schedule::iso(selected)).bind(reason).bind(serde_json::to_string(&watch)?).bind(run_id).bind(schedule::iso(now))
-            .bind(schedule::iso(now + Duration::seconds(watch.run_timeout_secs))).execute(&mut *tx).await?;
+            .bind(schedule::iso(now + Duration::seconds(watch.run_timeout_secs))).bind(automatic).bind(dry_run).bind(request.trigger_context.to_string()).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(Some(run_id))
@@ -137,14 +169,26 @@ pub async fn enqueue(
 
 pub async fn tick(db: &Db, now: DateTime<Utc>) -> Result<()> {
     for watch in watch::list_enabled(db).await? {
-        if watch.agent_spec.is_none() || watch.paused || !watch.trigger().is_scheduled() {
+        if watch.paused || !watch.trigger().is_scheduled() {
             continue;
         }
         match watch.next_run_at.as_deref() {
             Some(time) => {
                 let due = DateTime::parse_from_rfc3339(time)?.with_timezone(&Utc);
                 if due <= now {
-                    enqueue(db, &watch, due, "schedule", true, now).await?;
+                    enqueue(
+                        db,
+                        &watch,
+                        &EnqueueRequest {
+                            due,
+                            reason: "schedule",
+                            automatic: true,
+                            dry_run: false,
+                            trigger_context: serde_json::json!({"event":"cron"}),
+                        },
+                        now,
+                    )
+                    .await?;
                 }
             }
             None => {
@@ -264,9 +308,13 @@ mod tests {
         enqueue(
             &db,
             &watch,
-            now + Duration::minutes(18),
-            "manual",
-            false,
+            &EnqueueRequest {
+                due: now + Duration::minutes(18),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: serde_json::json!({"event":"manual"}),
+            },
             now,
         )
         .await
@@ -290,24 +338,90 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(enqueue(&db, &watch, now, "manual", false, now)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(enqueue(
+            &db,
+            &watch,
+            &EnqueueRequest {
+                due: now,
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: serde_json::json!({"event":"manual"})
+            },
+            now
+        )
+        .await
+        .unwrap()
+        .is_none());
         let watch = watch::get(&db, &watch.id).await.unwrap().unwrap();
         watch::set_enabled(&db, &watch.id, false).await.unwrap();
-        assert!(enqueue(&db, &watch, now, "event", true, now)
-            .await
-            .unwrap()
-            .is_none());
+        assert!(enqueue(
+            &db,
+            &watch,
+            &EnqueueRequest {
+                due: now,
+                reason: "event",
+                automatic: true,
+                dry_run: false,
+                trigger_context: serde_json::json!({"event":"event"})
+            },
+            now
+        )
+        .await
+        .unwrap()
+        .is_none());
         assert!(active(&db).await.unwrap().is_empty());
     }
     #[tokio::test]
-    async fn state_requires_live_owner_and_current_version() {
+    async fn script_cooldown_skips_do_not_postpone_the_next_eligible_run() {
         let (db, watch, now) = fixture().await;
-        enqueue(&db, &watch, now, "manual", false, now)
+        watch::update(
+            &db,
+            &watch.id,
+            &WatchUpdate {
+                agent_spec: Some("null".into()),
+                trigger_spec: Some(r#"{"every":"1m"}"#.into()),
+                cooldown_secs: Some(180),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        tick(&db, now).await.unwrap();
+        tick(&db, now + Duration::minutes(1)).await.unwrap();
+        let first = active(&db).await.unwrap().remove(0);
+        finish(&db, &first, OccurrenceStatus::Ok, "done")
             .await
             .unwrap();
+        for minute in [2, 3] {
+            tick(&db, now + Duration::minutes(minute)).await.unwrap();
+            assert!(active(&db).await.unwrap().is_empty());
+            assert_eq!(
+                watch::recent_runs(&db, &watch.id, 1).await.unwrap()[0].outcome,
+                "skipped"
+            );
+        }
+        tick(&db, now + Duration::minutes(4)).await.unwrap();
+        assert_eq!(active(&db).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn state_requires_live_owner_and_current_version() {
+        let (db, watch, now) = fixture().await;
+        enqueue(
+            &db,
+            &watch,
+            &EnqueueRequest {
+                due: now,
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: serde_json::json!({"event":"manual"}),
+            },
+            now,
+        )
+        .await
+        .unwrap();
         let occurrence = active(&db).await.unwrap().remove(0);
         assert!(state(&db, &occurrence, &serde_json::json!({}), 0)
             .await

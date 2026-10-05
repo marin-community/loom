@@ -4880,9 +4880,13 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
         weaver_core::occurrence::enqueue(
             &ts.state.db,
             &watch,
-            chrono::Utc::now(),
-            "manual",
-            false,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: chrono::Utc::now(),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: json!({"event":"manual"}),
+            },
             chrono::Utc::now(),
         )
         .await
@@ -4950,9 +4954,13 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
         weaver_core::occurrence::enqueue(
             &ts.state.db,
             &watch,
-            chrono::Utc::now(),
-            "manual",
-            false,
+            &weaver_core::occurrence::EnqueueRequest {
+                due: chrono::Utc::now(),
+                reason: "manual",
+                automatic: false,
+                dry_run: false,
+                trigger_context: json!({"event":"manual"}),
+            },
             chrono::Utc::now(),
         )
         .await

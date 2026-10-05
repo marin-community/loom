@@ -1,4 +1,4 @@
-//! Scheduled agents share the automation launch path and the session lifecycle.
+//! One occurrence runtime dispatches scheduled scripts and agents.
 use super::{ApiResult, AppError, AppState};
 use anyhow::Result;
 use chrono::Utc;
@@ -52,6 +52,12 @@ pub(crate) async fn run(state: AppState) {
                     let id = occurrence.id.clone();
                     let state = state.clone();
                     let task = tasks.spawn(async move {
+                        let watch: Watch = serde_json::from_str(&occurrence.definition)?;
+                        if watch.agent()?.is_none() {
+                            if enabled { crate::watch::execute_script_occurrence(&state, &occurrence).await?; }
+                            else { crate::watch::recover_script_occurrence(&state, &occurrence).await?; }
+                            return Ok(());
+                        }
                         if monitor(&state, &occurrence).await? { return Ok(()); }
                         if matches!(occurrence.status, OccurrenceStatus::Pending | OccurrenceStatus::Dispatching) && enabled { launch(&state, &occurrence).await?; }
                         Ok::<_, anyhow::Error>(())
@@ -255,8 +261,7 @@ async fn pending_invalid(state: &AppState, occurrence: &Occurrence) -> Result<bo
     let watch = weaver_core::watch::get(&state.db, &occurrence.watch_id).await?;
     Ok(watch.as_ref().is_none_or(|watch| {
         watch.revision != occurrence.revision
-            || ((!watch.enabled || watch.paused)
-                && !matches!(occurrence.trigger_reason.as_str(), "run" | "manual"))
+            || ((!watch.enabled || watch.paused) && occurrence.automatic)
     }))
 }
 
@@ -509,9 +514,20 @@ mod tests {
         )
         .await
         .unwrap();
-        occurrence::enqueue(&state.db, &watch, Utc::now(), "event", true, Utc::now())
-            .await
-            .unwrap();
+        occurrence::enqueue(
+            &state.db,
+            &watch,
+            &occurrence::EnqueueRequest {
+                due: Utc::now(),
+                reason: "event",
+                automatic: true,
+                dry_run: false,
+                trigger_context: json!({"event":"event"}),
+            },
+            Utc::now(),
+        )
+        .await
+        .unwrap();
         let occurrence = occurrence::active(&state.db).await.unwrap().remove(0);
         (state, watch, occurrence)
     }

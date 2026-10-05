@@ -2,6 +2,7 @@
 
 pub mod builtins;
 pub mod monitor;
+mod script_process;
 pub mod tasks;
 pub mod watch;
 
