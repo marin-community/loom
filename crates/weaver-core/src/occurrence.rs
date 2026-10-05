@@ -77,8 +77,6 @@ pub async fn history(db: &Db, watch: &str, limit: i64) -> Result<Vec<Occurrence>
     .await?)
 }
 
-/// Claim one occurrence and advance its cadence in one write transaction. The
-/// definition revision prevents a timer holding an old snapshot from firing it.
 pub struct EnqueueRequest<'a> {
     pub due: DateTime<Utc>,
     pub reason: &'a str,
@@ -87,6 +85,8 @@ pub struct EnqueueRequest<'a> {
     pub trigger_context: serde_json::Value,
 }
 
+/// Claim one occurrence and advance its cadence in one write transaction. The
+/// definition revision prevents a timer holding an old snapshot from firing it.
 pub async fn enqueue(
     db: &Db,
     snapshot: &Watch,

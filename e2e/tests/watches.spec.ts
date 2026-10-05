@@ -116,7 +116,6 @@ test.describe('watch panel', () => {
     await page.getByTestId('watch-save').click();
     await expect(page.getByText('daily at 10:30 America/Los_Angeles').first()).toBeVisible();
     await expect(page.getByText('Repository: org/other', { exact: true })).toBeVisible();
-    await page.screenshot({ path: '/tmp/loom-agent-schedule.png', fullPage: true });
   });
 
   test('uses the mailbox command grammar for selection, tabs, and creation', async ({

@@ -915,9 +915,6 @@ pub async fn get_or(db: &Db, key: &str, default: &str) -> String {
     get(db, key).await.unwrap_or_else(|| default.to_string())
 }
 
-/// Read a boolean setting. Accepts `true`/`1`/`yes`/`on` (case-insensitively)
-/// as true and `false`/`0`/`no`/`off` as false; anything else falls back to
-/// `default`.
 /// Read an integer setting, using the supplied default for absent or invalid values.
 pub async fn get_int(db: &Db, key: &str, default: i64) -> i64 {
     get(db, key)
@@ -926,6 +923,9 @@ pub async fn get_int(db: &Db, key: &str, default: i64) -> i64 {
         .unwrap_or(default)
 }
 
+/// Read a boolean setting. Accepts `true`/`1`/`yes`/`on` (case-insensitively)
+/// as true and `false`/`0`/`no`/`off` as false; anything else falls back to
+/// `default`.
 pub async fn get_bool(db: &Db, key: &str, default: bool) -> bool {
     match get(db, key).await {
         Some(v) => match v.trim().to_ascii_lowercase().as_str() {
