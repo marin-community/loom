@@ -1301,7 +1301,10 @@ with a version check for replacement. `branches.slack.post` checks the owning
 occurrence's destination snapshot and reserves an action key before contacting
 Slack. Definite rejections allow a later retry with that key; 429 responses
 persist `Retry-After`. Ambiguous delivery remains uncertain and is not reposted.
-The `loom/messaging/watch@v1` capability exposes both tools.
+The `loom/watches/state@v1` capability in the `watch` MCP group exposes
+`watch_state`. The separate `loom/messaging/post@v1` capability in the
+`messaging` group exposes `messaging_slack_post`. Profiles can select either
+capability or both; neither grants access to the other's operation.
 
 Deployment reconciliation applies profiles before named agent watches. It
 preserves IDs, state, history, runtime pause, and cadence when unchanged. Pruning

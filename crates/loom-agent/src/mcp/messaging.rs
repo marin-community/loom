@@ -1,9 +1,9 @@
-//! Explicit outbound messaging to a Slack thread routed to this session.
+//! Explicit outbound messaging to routed threads and allowed Slack channels.
 
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use weaver_api::operations::{branches, watches};
+use weaver_api::operations::branches;
 
 use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ToolFuture};
@@ -14,7 +14,6 @@ fn exports() -> &'static [Export] {
         vec![
             export::<branches::slack::send::Op>("slack_send"),
             export::<branches::slack::post::Op>("slack_post"),
-            export::<watches::state::Op>("watch_state"),
         ]
     })
 }
@@ -34,11 +33,12 @@ fn capability_sets() -> &'static [CapabilitySet] {
     SETS.get_or_init(|| {
         vec![
             CapabilitySet {
-                name: "loom/messaging/watch@v1",
+                name: "loom/messaging/post@v1",
                 group: "messaging",
                 version: "v1",
-                description: "Scheduled agent memory and messages to allowed Slack channels.",
-                tools: &["slack_post", "watch_state"],
+                description:
+                    "Post messages to allowed Slack channels from an active scheduled agent.",
+                tools: &["slack_post"],
             },
             CapabilitySet {
                 name: "loom/messaging/slack@v1",
@@ -77,6 +77,6 @@ mod tests {
             expand_tool_set("loom/messaging/slack@v1").unwrap(),
             vec!["mcp__loom__messaging_slack_send"]
         );
-        assert_eq!(tools().as_array().unwrap().len(), 3);
+        assert_eq!(tools().as_array().unwrap().len(), 2);
     }
 }
