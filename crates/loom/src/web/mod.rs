@@ -98,6 +98,7 @@ mod repo_env;
 mod repos;
 mod restricted_github;
 mod reviews;
+pub(crate) mod scheduled;
 mod scope;
 mod scratch;
 mod self_context;

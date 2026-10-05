@@ -207,6 +207,9 @@ pub async fn tick_timer(state: &AppState) {
     };
     let now = Utc::now();
     for o in watches {
+        if o.agent_spec.is_some() {
+            continue;
+        }
         // Dynamic one-shot wake (any watch, scheduled or reactive): a round
         // asked to re-run at `wake_at`. Record the tick first and only clear the
         // column once it lands — a failed insert then leaves the wake set to retry
@@ -239,6 +242,9 @@ pub async fn tick_timer(state: &AppState) {
             }
         }
         let trigger = o.trigger();
+        if trigger.is_scheduled() && o.agent_spec.is_none() {
+            continue;
+        }
         if !trigger.is_scheduled() {
             continue;
         }
@@ -551,6 +557,44 @@ pub async fn fire(
     dry_run: bool,
     ctx: &TriggerCtx,
 ) -> Option<i64> {
+    if o.trigger().is_scheduled() && o.agent_spec.is_none() {
+        return record_skipped(
+            state,
+            o,
+            trigger_reason,
+            &ctx.event,
+            "Scheduled watches require an agent target",
+        )
+        .await;
+    }
+    if o.agent_spec.is_some() {
+        if dry_run {
+            return record_skipped(
+                state,
+                o,
+                trigger_reason,
+                &ctx.event,
+                "Agent dry run: no session launched",
+            )
+            .await;
+        }
+        return match weaver_core::occurrence::enqueue(
+            &state.db,
+            o,
+            Utc::now(),
+            trigger_reason,
+            !trigger_reason.starts_with("run") && trigger_reason != "manual",
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%error, "agent watch enqueue failed");
+                None
+            }
+        };
+    }
     // 1. No-overlap: claim the in-flight slot or drop silently. A dropped round
     //    is intentionally not a run row — it never started.
     {

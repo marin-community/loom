@@ -43,7 +43,7 @@ test.describe('watch panel', () => {
   test('lists a watch and auto-selects it into the detail pane', async ({ page, weaver }) => {
     await weaver.seedWatch({
       name: 'status-check',
-      trigger: { cron: '0 * * * *' },
+      trigger: { on: ['session.attention'] },
       scope: { attention: '!ok' },
       params: { prompt: 'flag stuck sessions' },
     });
@@ -62,8 +62,23 @@ test.describe('watch panel', () => {
     // trigger and scope readable as chips.
     const detail = page.getByTestId('watch-detail');
     await expect(detail).toContainText('status-check');
-    await expect(detail).toContainText('cron 0 * * * *');
+    await expect(detail).toContainText('on session.attention');
     await expect(detail).toContainText('attention ≠ ok');
+  });
+
+  test('shows and edits an agent schedule and its task prompt', async ({ page, weaver }) => {
+    await weaver.seedWatch({ name: 'weekday-agent', trigger: { cron: '0 9 * * 1-5', timezone: 'America/Los_Angeles' },
+      agent: { profile: 'watch', repo: 'org/repo', prompt: 'Check jobs', slack_channels: ['C12345'] } });
+    await page.goto(`${weaver.baseUrl}/watches`);
+    await page.getByTestId('watch-tab-script').click();
+    await expect(page.getByText('Check jobs', { exact: true })).toBeVisible();
+    await page.getByTestId('watch-tab-config').click();
+    await expect(page.getByText('Time zone: America/Los_Angeles')).toBeVisible();
+    await page.getByTestId('watch-edit').click();
+    await page.getByLabel('Repository', { exact: true }).fill('org/other');
+    await page.getByTestId('watch-save').click();
+    await expect(page.getByText('Repository: org/other', { exact: true })).toBeVisible();
+    await page.screenshot({ path: '/tmp/loom-agent-schedule.png', fullPage: true });
   });
 
   test('uses the mailbox command grammar for selection, tabs, and creation', async ({

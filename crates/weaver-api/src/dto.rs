@@ -1245,7 +1245,22 @@ impl DeploymentSettingValue {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeploymentWatchReq {
+    pub name: String,
+    pub trigger: Value,
+    pub agent: weaver_core::schedule::AgentTarget,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub misfire_policy: weaver_core::schedule::MisfirePolicy,
+    pub late_grace_secs: Option<i64>,
+    pub run_timeout_secs: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DeploymentView {
+    pub watches: Vec<WatchView>,
     pub settings: Vec<SettingView>,
     pub remote_mcps: Vec<RemoteMcpView>,
     pub profiles: Vec<ProfileView>,
@@ -1923,6 +1938,14 @@ pub struct ChangeSetDto {
 /// re-parses strings; `capabilities` is a real array.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchView {
+    pub agent: Option<weaver_core::schedule::AgentTarget>,
+    pub revision: i64,
+    pub deployment_managed: bool,
+    pub paused: bool,
+    pub misfire_policy: String,
+    pub late_grace_secs: i64,
+    pub run_timeout_secs: i64,
+    pub state_version: i64,
     pub id: String,
     pub name: String,
     pub enabled: bool,
@@ -1973,6 +1996,14 @@ impl WatchView {
     /// read from the run history.
     pub fn from_parts(o: &Watch, last_outcome: Option<String>) -> Self {
         Self {
+            agent: o.agent().unwrap_or_default(),
+            revision: o.revision,
+            deployment_managed: o.deployment_managed,
+            paused: o.paused,
+            misfire_policy: o.misfire_policy.clone(),
+            late_grace_secs: o.late_grace_secs,
+            run_timeout_secs: o.run_timeout_secs,
+            state_version: o.state_version,
             id: o.id.clone(),
             name: o.name.clone(),
             enabled: o.enabled,

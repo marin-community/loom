@@ -11,6 +11,7 @@ import {
 import { useRouter } from 'vue-router';
 import {
   createWatch,
+  previewWatchSchedule,
   deleteWatch,
   getWatch,
   listProfiles,
@@ -298,10 +299,19 @@ const draft = reactive({
   model: '',
   effort: '',
   cooldown: 0,
+  repo: '',
+  channels: '',
+  scheduleKind: 'cron',
+  cron: '',
+  every: '',
+  timezone: 'UTC',
+  timeout: 300,
+  grace: 600,
+  misfire: 'coalesce',
 });
 
 function syncDraft(w: Watch) {
-  draft.prompt = promptOf(w);
+  draft.prompt = w.agent?.prompt ?? promptOf(w);
   draft.capabilities = Object.fromEntries(
     GRANTABLE_CAPABILITIES.map((c) => [c, w.capabilities.includes(c)]),
   );
@@ -309,6 +319,15 @@ function syncDraft(w: Watch) {
   draft.model = w.model;
   draft.effort = w.effort;
   draft.cooldown = w.cooldown_secs;
+  draft.repo = w.agent?.repo ?? '';
+  draft.channels = w.agent?.slack_channels?.join(', ') ?? '';
+  draft.scheduleKind = triggerOf(w).every ? 'every' : triggerOf(w).cron ? 'cron' : 'on';
+  draft.cron = triggerOf(w).cron ?? '0 * * * *';
+  draft.every = triggerOf(w).every ?? '30m';
+  draft.timezone = triggerOf(w).timezone ?? 'UTC';
+  draft.timeout = w.run_timeout_secs;
+  draft.grace = w.late_grace_secs;
+  draft.misfire = w.misfire_policy;
 }
 
 function startEdit() {
@@ -328,14 +347,47 @@ async function saveConfig() {
   error.value = '';
   notice.value = '';
   try {
-    const body: WatchUpdateInput = {
-      params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
-      capabilities: capabilitiesFrom(draft.capabilities),
-      profile: draft.profile.trim() || 'watch',
-      model: draft.model,
-      effort: draft.effort,
-      cooldown_secs: Number(draft.cooldown) || 0,
-    };
+    const trigger: WatchTrigger =
+      draft.scheduleKind === 'cron'
+        ? { cron: draft.cron, timezone: draft.timezone }
+        : draft.scheduleKind === 'every'
+          ? { every: draft.every }
+          : triggerOf(w);
+    const body: WatchUpdateInput = w.agent
+      ? {
+          agent: {
+            ...w.agent,
+            prompt: draft.prompt.trim(),
+            profile: draft.profile.trim(),
+            repo: draft.repo.trim(),
+            slack_channels: draft.channels
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean),
+          },
+          trigger,
+          run_timeout_secs: draft.timeout,
+          late_grace_secs: draft.grace,
+          misfire_policy: draft.misfire as 'skip' | 'coalesce',
+        }
+      : {
+          params: draft.prompt.trim() ? { prompt: draft.prompt.trim() } : {},
+          capabilities: capabilitiesFrom(draft.capabilities),
+          profile: draft.profile.trim() || 'watch',
+          model: draft.model,
+          effort: draft.effort,
+          cooldown_secs: Number(draft.cooldown) || 0,
+        };
+    if (w.agent && body.trigger) {
+      const current = triggerOf(w);
+      if (
+        trigger.cron === current.cron &&
+        trigger.every === current.every &&
+        (trigger.timezone ?? 'UTC') === (current.timezone ?? 'UTC')
+      ) {
+        delete body.trigger;
+      }
+    }
     adopt(await updateWatch(w.id, body));
     editing.value = false;
     notice.value = 'Saved.';
@@ -351,10 +403,26 @@ async function saveConfig() {
 // so this is for custom programs — or a second instance of a stock program
 // with its own name, prompt, and scope.
 const creating = ref(false);
+const scheduledForm = computed(() => form.triggerKind === 'cron' || form.triggerKind === 'every');
+const previewTimes = ref<string[]>([]);
+async function previewSchedule() {
+  try {
+    previewTimes.value = await previewWatchSchedule(
+      form.triggerKind === 'cron'
+        ? { cron: form.cron, timezone: form.timezone }
+        : { every: form.every },
+    );
+  } catch (e) {
+    error.value = (e as Error).message;
+  }
+}
+
 const watchNameInput = ref<HTMLInputElement | null>(null);
 type TriggerKind = 'auto' | 'cron' | 'every' | 'on';
 const form = reactive({
   name: '',
+  timezone: 'UTC',
+  slackChannels: '',
   triggerKind: 'auto' as TriggerKind,
   cron: '0 * * * *',
   every: '30m',
@@ -376,6 +444,9 @@ const form = reactive({
 
 function resetForm() {
   form.name = '';
+  form.timezone = 'UTC';
+  form.slackChannels = '';
+  previewTimes.value = [];
   form.triggerKind = 'auto';
   form.cron = '0 * * * *';
   form.every = '30m';
@@ -502,7 +573,7 @@ async function create() {
       : {};
     if (form.prompt.trim()) params.prompt = form.prompt.trim();
 
-    const body: WatchCreateInput = {
+    let body: WatchCreateInput = {
       name: form.name.trim(),
       scope,
       program: programRef || 'builtin:status',
@@ -512,6 +583,22 @@ async function create() {
       // New watches go live immediately; the per-row toggle disables later.
       enabled: true,
     };
+    if (scheduledForm.value) {
+      if (!form.prompt.trim() || !form.repo.trim())
+        throw new Error('Scheduled agents require a prompt and repository (owner/name).');
+      body = { name: body.name, enabled: true };
+      body.agent = {
+        profile: form.profile.trim(),
+        repo: form.repo.trim(),
+        prompt: form.prompt.trim(),
+        slack_channels: form.slackChannels
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean),
+      };
+      if (trigger && form.triggerKind === 'cron') trigger.timezone = form.timezone;
+      if (trigger) delete trigger.repo;
+    }
     if (trigger !== undefined) body.trigger = trigger;
     const made = await createWatch(body);
     creatingNew.value = false;
@@ -784,9 +871,39 @@ onActivated(() => {
             </div>
           </div>
 
+          <div v-if="scheduledForm" class="space-y-2">
+            <label class="block text-xs text-muted">Time zone (cron)</label>
+            <input
+              v-model="form.timezone"
+              placeholder="UTC"
+              class="w-full rounded bg-input px-2 py-1.5 text-sm"
+            />
+            <label class="block text-xs text-muted"
+              >Allowed Slack channel IDs (comma separated)</label
+            >
+            <input
+              v-model="form.slackChannels"
+              placeholder="C0123456789"
+              class="w-full rounded bg-input px-2 py-1.5 text-sm"
+            />
+            <button type="button" class="text-xs text-accent" @click="previewSchedule">
+              Preview next five runs
+            </button>
+            <ul class="text-xs text-muted">
+              <li v-for="time in previewTimes" :key="time">{{ time }}</li>
+            </ul>
+            <p class="text-xs text-faint">
+              Each occurrence launches an agent with the selected profile. The prompt defines its
+              task.
+            </p>
+          </div>
           <div>
             <label class="mb-1 block text-xs text-muted">
-              Prompt — the judgement the stock program runs each round
+              {{
+                scheduledForm
+                  ? 'Agent task prompt'
+                  : 'Prompt — the judgement the stock program runs each round'
+              }}
             </label>
             <textarea
               v-model="form.prompt"
@@ -799,11 +916,15 @@ onActivated(() => {
 
           <div>
             <label class="mb-1 block text-xs text-muted">
-              Repository — optional; pins the watch to one repo (blank = whole fleet)
+              {{
+                scheduledForm
+                  ? 'Agent repository (owner/name)'
+                  : 'Repository — optional; pins the watch to one repo (blank = whole fleet)'
+              }}
             </label>
             <input
               v-model="form.repo"
-              placeholder="/home/you/code/project"
+              :placeholder="scheduledForm ? 'marin-community/marin' : '/home/you/code/project'"
               autocomplete="off"
               spellcheck="false"
               class="w-full rounded bg-input px-2 py-1.5 font-mono text-sm outline-none ring-accent focus:ring-1"
@@ -915,8 +1036,11 @@ onActivated(() => {
             </div>
             <div class="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <span class="meta-chip">{{ triggerSummary(triggerOf(selected)) }}</span>
+              <span v-if="selected.deployment_managed" class="meta-chip">Deployment managed</span>
               <span class="meta-chip">{{ scopeSummary(scopeOf(selected)) }}</span>
-              <span class="font-mono text-faint">{{ selected.program }}</span>
+              <span class="font-mono text-faint">{{
+                selected.agent ? selected.agent.profile : selected.program
+              }}</span>
               <span
                 v-if="triggerOf(selected).repo || scopeOf(selected).repo"
                 :title="triggerOf(selected).repo || scopeOf(selected).repo"
@@ -936,7 +1060,10 @@ onActivated(() => {
                 >
               </span>
             </div>
-            <p v-if="programInfo" class="mt-2 max-w-3xl text-xs leading-relaxed text-faint">
+            <p
+              v-if="programInfo && !selected.agent"
+              class="mt-2 max-w-3xl text-xs leading-relaxed text-faint"
+            >
               {{ programInfo.description }}
             </p>
 
@@ -1102,7 +1229,11 @@ onActivated(() => {
 
           <!-- Script: the program source, read-only for builtins. -->
           <div v-else-if="tab === 'script'" class="p-5">
-            <template v-if="programInfo">
+            <pre
+              v-if="selected.agent"
+              class="whitespace-pre-wrap rounded border border-line bg-input p-3 text-sm"
+              >{{ selected.agent.prompt }}</pre>
+            <template v-else-if="programInfo">
               <p class="mb-2 text-xs text-faint">
                 <span class="font-mono">{{ programInfo.program }}</span> — {{ programInfo.title }}.
                 A stock script shipped inside loom; the source is read-only. Start a custom watch
@@ -1160,16 +1291,81 @@ onActivated(() => {
                 </div>
               </div>
 
+              <div v-if="selected.agent" class="mb-4 space-y-2 text-sm">
+                <p v-if="selected.deployment_managed" class="text-xs text-muted">
+                  Managed by deployment · revision {{ selected.revision }}
+                </p>
+                <template v-if="editing">
+                  <label class="block"
+                    >Schedule
+                    <select v-model="draft.scheduleKind" class="ml-2 rounded bg-input p-1">
+                      <option value="cron">Cron</option>
+                      <option value="every">Interval</option>
+                    </select>
+                    <input
+                      v-if="draft.scheduleKind === 'cron'"
+                      v-model="draft.cron"
+                      class="ml-2 rounded bg-input p-1"
+                    />
+                    <input v-else v-model="draft.every" class="ml-2 rounded bg-input p-1" />
+                  </label>
+                  <label v-if="draft.scheduleKind === 'cron'" class="block"
+                    >Time zone <input v-model="draft.timezone" class="rounded bg-input p-1"
+                  /></label>
+                  <label class="block"
+                    >Repository <input v-model="draft.repo" class="rounded bg-input p-1"
+                  /></label>
+                  <label class="block"
+                    >Slack channel IDs <input v-model="draft.channels" class="rounded bg-input p-1"
+                  /></label>
+                  <label class="block"
+                    >Timeout (seconds)
+                    <input
+                      v-model.number="draft.timeout"
+                      type="number"
+                      min="1"
+                      max="86400"
+                      class="rounded bg-input p-1"
+                  /></label>
+                  <label class="block"
+                    >Late grace (seconds)
+                    <input
+                      v-model.number="draft.grace"
+                      type="number"
+                      min="0"
+                      max="86400"
+                      class="rounded bg-input p-1"
+                  /></label>
+                  <label class="block"
+                    >Missed runs
+                    <select v-model="draft.misfire" class="rounded bg-input p-1">
+                      <option value="coalesce">Run latest within grace</option>
+                      <option value="skip">Skip stale runs</option>
+                    </select></label
+                  >
+                </template>
+                <template v-else>
+                  <p>Repository: {{ selected.agent.repo }}</p>
+                  <p>Slack channels: {{ selected.agent.slack_channels?.join(', ') || 'None' }}</p>
+                  <p>
+                    Time zone: {{ triggerOf(selected).timezone || 'UTC' }} · Timeout:
+                    {{ selected.run_timeout_secs }}s · Late grace: {{ selected.late_grace_secs }}s ·
+                    Missed runs: {{ selected.misfire_policy }}
+                  </p>
+                </template>
+              </div>
               <dl class="grid grid-cols-[8rem_1fr] gap-x-3 gap-y-2 text-sm">
                 <dt class="text-faint">Trigger</dt>
                 <dd class="font-mono">{{ triggerSummary(triggerOf(selected)) }}</dd>
                 <dt class="text-faint">Scope</dt>
                 <dd class="font-mono">{{ scopeSummary(scopeOf(selected)) }}</dd>
-                <dt class="text-faint">Program</dt>
-                <dd class="font-mono">{{ selected.program }}</dd>
+                <dt v-if="!selected.agent" class="text-faint">Program</dt>
+                <dd v-if="!selected.agent" class="font-mono">{{ selected.program }}</dd>
 
                 <dt class="text-faint">Agent profile</dt>
-                <dd v-if="!editing" class="font-mono">{{ selected.profile }}</dd>
+                <dd v-if="!editing" class="font-mono">
+                  {{ selected.agent?.profile || selected.profile }}
+                </dd>
                 <dd v-else>
                   <select
                     v-model="draft.profile"
@@ -1185,59 +1381,60 @@ onActivated(() => {
                   </select>
                 </dd>
 
-                <dt class="pt-1 text-faint">Capabilities</dt>
-                <dd>
-                  <div v-if="!editing" class="flex flex-wrap gap-1.5">
-                    <span v-for="c in selected.capabilities" :key="c" class="meta-chip">{{
-                      c
-                    }}</span>
-                  </div>
-                  <div v-else class="flex flex-wrap gap-3">
-                    <label
-                      v-for="c in GRANTABLE_CAPABILITIES"
-                      :key="c"
-                      class="flex items-center gap-1.5 text-sm text-muted"
-                    >
-                      <input
-                        type="checkbox"
-                        v-model="draft.capabilities[c]"
-                        :data-testid="`cap-${c}`"
-                        class="accent-accent"
-                      />
-                      <span class="font-mono">{{ c }}</span>
-                    </label>
-                  </div>
-                </dd>
+                <template v-if="!selected.agent">
+                  <dt class="pt-1 text-faint">Capabilities</dt>
+                  <dd>
+                    <div v-if="!editing" class="flex flex-wrap gap-1.5">
+                      <span v-for="c in selected.capabilities" :key="c" class="meta-chip">{{
+                        c
+                      }}</span>
+                    </div>
+                    <div v-else class="flex flex-wrap gap-3">
+                      <label
+                        v-for="c in GRANTABLE_CAPABILITIES"
+                        :key="c"
+                        class="flex items-center gap-1.5 text-sm text-muted"
+                      >
+                        <input
+                          type="checkbox"
+                          v-model="draft.capabilities[c]"
+                          :data-testid="`cap-${c}`"
+                          class="accent-accent"
+                        />
+                        <span class="font-mono">{{ c }}</span>
+                      </label>
+                    </div>
+                  </dd>
 
-                <dt class="text-faint">Model / effort</dt>
-                <dd v-if="!editing" class="font-mono">
-                  {{ selected.model || 'default' }} / {{ selected.effort || 'default' }}
-                </dd>
-                <dd v-else class="flex gap-2">
-                  <input
-                    v-model="draft.model"
-                    placeholder="default"
-                    class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
-                  />
-                  <input
-                    v-model="draft.effort"
-                    placeholder="default"
-                    class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
-                  />
-                </dd>
+                  <dt class="text-faint">Model / effort</dt>
+                  <dd v-if="!editing" class="font-mono">
+                    {{ selected.model || 'default' }} / {{ selected.effort || 'default' }}
+                  </dd>
+                  <dd v-else class="flex gap-2">
+                    <input
+                      v-model="draft.model"
+                      placeholder="default"
+                      class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
+                    />
+                    <input
+                      v-model="draft.effort"
+                      placeholder="default"
+                      class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
+                    />
+                  </dd>
 
-                <dt class="text-faint">Cooldown</dt>
-                <dd v-if="!editing" class="font-mono">{{ selected.cooldown_secs }}s</dd>
-                <dd v-else>
-                  <input
-                    v-model.number="draft.cooldown"
-                    type="number"
-                    min="0"
-                    class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
-                  />
-                  <span class="ml-1 text-xs text-faint">seconds</span>
-                </dd>
-
+                  <dt class="text-faint">Cooldown</dt>
+                  <dd v-if="!editing" class="font-mono">{{ selected.cooldown_secs }}s</dd>
+                  <dd v-else>
+                    <input
+                      v-model.number="draft.cooldown"
+                      type="number"
+                      min="0"
+                      class="w-28 rounded bg-input px-2 py-1 font-mono text-sm outline-none ring-accent focus:ring-1"
+                    />
+                    <span class="ml-1 text-xs text-faint">seconds</span>
+                  </dd>
+                </template>
                 <dt class="pt-1 text-faint">Prompt</dt>
                 <dd>
                   <p
@@ -1245,7 +1442,11 @@ onActivated(() => {
                     data-testid="watch-prompt"
                     class="whitespace-pre-wrap text-sm text-fg"
                   >
-                    {{ promptOf(selected) || '— (no prompt; the program decides)' }}
+                    {{
+                      selected.agent?.prompt ||
+                      promptOf(selected) ||
+                      '— (no prompt; the program decides)'
+                    }}
                   </p>
                   <textarea
                     v-else
@@ -1260,13 +1461,20 @@ onActivated(() => {
             </section>
 
             <!-- Warm session: its live terminal when warm mode is on. -->
-            <section v-if="selected.warm_session_id" class="mt-5" data-testid="watch-warm-terminal">
+            <section
+              v-if="!selected.agent && selected.warm_session_id"
+              class="mt-5"
+              data-testid="watch-warm-terminal"
+            >
               <h3 class="mb-2 text-2xs font-semibold uppercase tracking-wider text-muted">
                 Warm session
               </h3>
               <AgentTerminal :id="selected.warm_session_id" />
             </section>
-            <section v-else class="mt-5 rounded border border-dashed border-line bg-surface p-4">
+            <section
+              v-else-if="!selected.agent"
+              class="mt-5 rounded border border-dashed border-line bg-surface p-4"
+            >
               <h3 class="mb-1 text-2xs font-semibold uppercase tracking-wider text-muted">
                 Warm session
               </h3>

@@ -54,6 +54,14 @@ pub struct Watch {
     pub wake_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    pub agent_spec: Option<String>,
+    pub revision: i64,
+    pub deployment_managed: bool,
+    pub paused: bool,
+    pub misfire_policy: String,
+    pub late_grace_secs: i64,
+    pub run_timeout_secs: i64,
+    pub state_version: i64,
 }
 
 /// The parsed trigger — a watch's **subscription manifest**: what wakes a round.
@@ -69,7 +77,10 @@ pub struct Watch {
 /// (`{"event":"attention","level":"blocked"}`) is still parsed and folded into
 /// the subscription set, so watches predating the manifest keep working.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Trigger {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,6 +212,13 @@ impl Scope {
 }
 
 impl Watch {
+    pub fn agent(&self) -> Result<Option<crate::schedule::AgentTarget>> {
+        self.agent_spec
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(Into::into)
+    }
     /// Parse the trigger; an unparseable spec yields the empty (never-matching,
     /// never-scheduled) trigger rather than erroring a whole round.
     pub fn trigger(&self) -> Trigger {
@@ -290,6 +308,10 @@ pub struct NewWatch {
     /// `false` so a bare `NewWatch` (CLI / seeds / tests) starts disabled;
     /// the loom create UI opts in to `true`.
     pub enabled: bool,
+    pub agent: Option<crate::schedule::AgentTarget>,
+    pub misfire_policy: crate::schedule::MisfirePolicy,
+    pub late_grace_secs: i64,
+    pub run_timeout_secs: i64,
 }
 
 impl Default for NewWatch {
@@ -310,6 +332,10 @@ impl Default for NewWatch {
             effort: String::new(),
             cooldown_secs: 0,
             enabled: false,
+            agent: None,
+            misfire_policy: Default::default(),
+            late_grace_secs: 600,
+            run_timeout_secs: 300,
         }
     }
 }
@@ -321,8 +347,9 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     sqlx::query(
         "INSERT INTO watches
            (id, name, enabled, trigger_spec, scope, program, params, capabilities,
-            profile, model, effort, cooldown_secs, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            profile, model, effort, cooldown_secs, created_at, updated_at, agent_spec,
+            misfire_policy, late_grace_secs, run_timeout_secs)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&new.name)
@@ -338,6 +365,13 @@ pub async fn create(db: &Db, new: &NewWatch) -> Result<Watch> {
     .bind(new.cooldown_secs)
     .bind(&now)
     .bind(&now)
+    .bind(new.agent.as_ref().map(serde_json::to_string).transpose()?)
+    .bind(match new.misfire_policy {
+        crate::schedule::MisfirePolicy::Skip => "skip",
+        crate::schedule::MisfirePolicy::Coalesce => "coalesce",
+    })
+    .bind(new.late_grace_secs)
+    .bind(new.run_timeout_secs)
     .execute(db)
     .await?;
     get(db, &id)
@@ -389,7 +423,8 @@ pub async fn list_enabled(db: &Db) -> Result<Vec<Watch>> {
 }
 
 pub async fn set_enabled(db: &Db, id: &str, enabled: bool) -> Result<()> {
-    sqlx::query("UPDATE watches SET enabled = ?, updated_at = ? WHERE id = ?")
+    sqlx::query("UPDATE watches SET next_run_at = CASE WHEN enabled = 0 AND ? = 1 THEN NULL ELSE next_run_at END, enabled = ?, updated_at = ? WHERE id = ?")
+        .bind(enabled)
         .bind(enabled)
         .bind(now_iso())
         .bind(id)
@@ -413,12 +448,20 @@ pub struct WatchUpdate {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub cooldown_secs: Option<i64>,
+    pub agent_spec: Option<String>,
+    pub misfire_policy: Option<String>,
+    pub late_grace_secs: Option<i64>,
+    pub run_timeout_secs: Option<i64>,
 }
 
 impl WatchUpdate {
     /// Whether any field is set — lets a caller skip a no-op write.
     pub fn is_empty(&self) -> bool {
-        self.trigger_spec.is_none()
+        self.agent_spec.is_none()
+            && self.misfire_policy.is_none()
+            && self.late_grace_secs.is_none()
+            && self.run_timeout_secs.is_none()
+            && self.trigger_spec.is_none()
             && self.scope.is_none()
             && self.program.is_none()
             && self.params.is_none()
@@ -449,6 +492,12 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
            model         = COALESCE(?, model),
            effort        = COALESCE(?, effort),
            cooldown_secs = COALESCE(?, cooldown_secs),
+           agent_spec = COALESCE(?, agent_spec),
+           misfire_policy = COALESCE(?, misfire_policy),
+           late_grace_secs = COALESCE(?, late_grace_secs),
+           run_timeout_secs = COALESCE(?, run_timeout_secs),
+           revision = revision + 1,
+           next_run_at = CASE WHEN ? THEN NULL ELSE next_run_at END,
            updated_at    = ?
          WHERE id = ?",
     )
@@ -461,6 +510,11 @@ pub async fn update(db: &Db, id: &str, patch: &WatchUpdate) -> Result<()> {
     .bind(&patch.model)
     .bind(&patch.effort)
     .bind(patch.cooldown_secs)
+    .bind(&patch.agent_spec)
+    .bind(&patch.misfire_policy)
+    .bind(patch.late_grace_secs)
+    .bind(patch.run_timeout_secs)
+    .bind(patch.trigger_spec.is_some())
     .bind(now_iso())
     .bind(id)
     .execute(db)
@@ -824,6 +878,14 @@ mod tests {
     #[test]
     fn capabilities_default_to_observe_plus_grants() {
         let o = Watch {
+            agent_spec: None,
+            revision: 1,
+            deployment_managed: false,
+            paused: false,
+            misfire_policy: "coalesce".into(),
+            late_grace_secs: 600,
+            run_timeout_secs: 300,
+            state_version: 0,
             id: "x".into(),
             name: "x".into(),
             enabled: false,

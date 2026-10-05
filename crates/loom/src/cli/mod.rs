@@ -61,6 +61,7 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<branches::issues::list::Op>(),
         bind::<branches::list::Op>(),
         bind::<branches::slack::send::Op>(),
+        bind::<branches::slack::post::Op>(),
         bind::<branches::status::set::Op>(),
         bind::<branches::tags::delete::Op>(),
         bind::<branches::tags::set::Op>(),
@@ -191,6 +192,9 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<watches::run::Op>(),
         bind::<watches::runs::Op>(),
         bind::<watches::update::Op>(),
+        bind::<watches::preview::Op>(),
+        bind::<watches::occurrences::Op>(),
+        bind::<watches::state::Op>(),
     ]
 }
 

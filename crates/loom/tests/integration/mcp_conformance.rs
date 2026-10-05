@@ -122,7 +122,7 @@ async fn builtin_server_speaks_mcp_stdio() {
     assert_eq!(values[0]["result"]["serverInfo"]["name"], "loom");
     assert_eq!(values[1]["id"], 2);
     let tools = values[1]["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 44);
+    assert_eq!(tools.len(), 46);
     assert!(tools.iter().any(|tool| tool["name"] == "channel_send"));
     assert!(tools.iter().any(|tool| tool["name"] == "session_history"));
     assert!(tools

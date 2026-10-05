@@ -963,3 +963,6 @@ export const getDiagnostics = () => invokeOperation('diagnostics.get', {});
 /** Recent detached background tasks (the `@loom` webhook launches that run off the
  *  request), newest first. Operator-only, like the log endpoints. */
 export const getTasks = () => invokeOperation('tasks.list', {});
+
+export const previewWatchSchedule = (trigger: Record<string, unknown>) =>
+  invokeOperation('watches.preview', { trigger });

@@ -396,6 +396,7 @@ export interface SseQueue {
  *  `event`/`level` are the legacy single-event shape, still honoured. An
  *  optional `repo` pins it to one repository. Mirrors weaver-core's `Trigger`. */
 export interface WatchTrigger {
+  timezone?: string;
   cron?: string;
   every?: string;
   on?: string[];

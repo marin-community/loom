@@ -1224,6 +1224,10 @@ mod tests {
                 "sha256:021c51cdef86f5a7a718295d78417769756dc22f1a826636afa56e654a7d679d",
             ),
             (
+                "loom/messaging/watch@v1",
+                "sha256:42b482dab110cfdc146b5c2689c1415575f57607aea61e8194b5bb165f37eb60",
+            ),
+            (
                 "loom/messaging/slack@v1",
                 "sha256:89d1f86e4c28cf1c73287493609abbf347ff99a257e611107e62067840b854f4",
             ),

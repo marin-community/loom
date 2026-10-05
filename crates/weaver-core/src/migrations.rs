@@ -118,6 +118,11 @@ const MIGRATIONS: &[(i64, &str, &str)] = &[
         "activate_pr_labeller",
         include_str!("../migrations/0019_activate_pr_labeller.sql"),
     ),
+    (
+        20,
+        "scheduled_agents",
+        include_str!("../migrations/0020_scheduled_agents.sql"),
+    ),
 ];
 
 /// Latest core schema version compiled into this binary.

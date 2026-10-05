@@ -302,6 +302,24 @@ pub struct SlackWeb {
     base: String,
 }
 
+/// Slack explicitly rejected the request, so retrying cannot duplicate a post.
+#[derive(Debug)]
+pub enum SlackRejection {
+    RateLimited { retry_secs: u64 },
+    Rejected(String),
+}
+impl std::fmt::Display for SlackRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited { retry_secs } => {
+                write!(f, "Slack rate limited; retry after {retry_secs}s")
+            }
+            Self::Rejected(message) => write!(f, "Slack rejected the request: {message}"),
+        }
+    }
+}
+impl std::error::Error for SlackRejection {}
+
 async fn slack_response(method: &str, response: reqwest::Response) -> Result<Value> {
     // HTTP 429 carries a `Retry-After` (seconds); include it in the error
     // so the caller can back off.
@@ -310,11 +328,11 @@ async fn slack_response(method: &str, response: reqwest::Response) -> Result<Val
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("1");
-        return Err(anyhow!(
-            "slack {method}: rate limited (retry after {retry}s)"
-        ));
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1);
+        return Err(SlackRejection::RateLimited { retry_secs: retry }.into());
     }
+    let definite_response = response.status().is_success();
     let value: Value = response
         .json()
         .await
@@ -324,6 +342,9 @@ async fn slack_response(method: &str, response: reqwest::Response) -> Result<Val
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        if definite_response {
+            return Err(SlackRejection::Rejected(err.to_string()).into());
+        }
         return Err(anyhow!("slack {method}: {err}"));
     }
     Ok(value)

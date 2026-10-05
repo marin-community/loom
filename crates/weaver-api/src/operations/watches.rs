@@ -44,6 +44,13 @@ pub mod create {
         pub model: Option<String>,
         pub effort: Option<String>,
         pub cooldown_secs: Option<i64>,
+        /// Agent prompt, launch profile, repository and allowed Slack channels.
+        #[operand(json, default = None)]
+        pub agent: Option<weaver_core::schedule::AgentTarget>,
+        #[operand(json, default = None)]
+        pub misfire_policy: Option<weaver_core::schedule::MisfirePolicy>,
+        pub late_grace_secs: Option<i64>,
+        pub run_timeout_secs: Option<i64>,
         /// Whether the watch fires as soon as it is created. Omitted clients get
         /// the model default (disabled); the loom UI sends `true` so a watcher
         /// picked from the builtin registry is live without a separate manual
@@ -194,9 +201,56 @@ pub mod update {
         pub model: Option<String>,
         pub effort: Option<String>,
         pub cooldown_secs: Option<i64>,
+        /// Agent prompt, launch profile, repository and allowed Slack channels.
+        #[operand(json, default = None)]
+        pub agent: Option<weaver_core::schedule::AgentTarget>,
+        #[operand(json, default = None)]
+        pub misfire_policy: Option<weaver_core::schedule::MisfirePolicy>,
+        pub late_grace_secs: Option<i64>,
+        pub run_timeout_secs: Option<i64>,
     }
 
     pub type Output = WatchView;
+}
+
+pub mod preview {
+    use super::prelude::*;
+    /// Validate a schedule and show its next five fire times.
+    #[operation(id = "watches.preview", actor = User, scope = Global, risk = Read,
+                cli = "watch preview")]
+    pub struct Input {
+        #[operand(json)]
+        pub trigger: serde_json::Value,
+    }
+    pub type Output = Vec<String>;
+}
+
+pub mod occurrences {
+    use super::prelude::*;
+    /// Inspect durable agent occurrences, including launch and session identifiers.
+    #[operation(id = "watches.occurrences", actor = User, scope = Global, risk = Read,
+                cli = "watch occurrences")]
+    pub struct Input {
+        #[operand(positional)]
+        pub key: String,
+        pub limit: Option<i64>,
+    }
+    pub type Output = Vec<weaver_core::occurrence::Occurrence>;
+}
+
+pub mod state {
+    use super::prelude::*;
+    /// Read or atomically replace the active scheduled agent's persistent state.
+    #[operation(id = "watches.state", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/watches/state@v1"], cli = "watch state")]
+    pub struct Input {
+        #[operand(context)]
+        pub branch: String,
+        #[operand(json, default = None)]
+        pub value: Option<serde_json::Value>,
+        pub expected_version: Option<i64>,
+    }
+    pub type Output = serde_json::Value;
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
@@ -208,6 +262,9 @@ static OPERATIONS: &[&OperationSpec] = &[
     delete::SPEC,
     run::SPEC,
     runs::SPEC,
+    preview::SPEC,
+    occurrences::SPEC,
+    state::SPEC,
 ];
 
 pub(super) const fn bundle() -> OperationBundle {

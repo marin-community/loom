@@ -3118,16 +3118,13 @@ impl Task {
     /// its `automation.turn_cap` turns: tag the branch `blocked` (recorded on
     /// the bus so it reaches SSE) and return the refusal as an error. Warm
     /// (watch-managed) sessions are exempt; 0 disables the cap. Only *new*
-    /// turns are gated — an in-flight turn is never interrupted — and a
-    /// lookup failure never blocks one.
+    /// turns are gated — an in-flight turn is never interrupted. Missing
+    /// sessions and lookup failures refuse turns so cancellation stays fenced.
     async fn refuse_if_turn_capped(&self) -> Result<()> {
-        let Some(session) = session::get(&self.db, &self.session_id)
-            .await
-            .ok()
-            .flatten()
-        else {
-            return Ok(());
-        };
+        let session = session::get(&self.db, &self.session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("session no longer exists"))?;
+        crate::runs::require_watch_turn(&self.db, &self.session_id, session.turn_count).await?;
         if session.class != "automation" || session.managed_by.is_some() {
             return Ok(());
         }

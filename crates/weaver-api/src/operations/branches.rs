@@ -101,6 +101,24 @@ pub mod slack {
     //! Explicit outbound messaging to a routed Slack thread.
     pub(super) use super::prelude;
 
+    pub mod post {
+        use super::prelude::*;
+        /// Post to an allowed Slack channel from an active scheduled agent.
+        /// Reusing an action key returns the previous delivery or its uncertain status.
+        #[operation(id = "branches.slack.post", actor = SessionSelf, scope = Branch,
+                    risk = ExternalWrite, grants = ["loom/branches/slack-post@v1"],
+                    cli = "branches slack post")]
+        pub struct Input {
+            #[operand(positional)]
+            pub text: String,
+            pub channel: String,
+            pub action_key: String,
+            #[operand(context)]
+            pub branch: String,
+        }
+        pub type Output = serde_json::Value;
+    }
+
     pub mod send {
         use super::prelude::*;
 
@@ -235,6 +253,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     update::SPEC,
     status::set::SPEC,
     slack::send::SPEC,
+    slack::post::SPEC,
     events::list::SPEC,
     events::create::SPEC,
     tags::set::SPEC,

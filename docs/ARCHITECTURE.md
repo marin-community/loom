@@ -1269,3 +1269,42 @@ builtins are stdlib-only and need neither).
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |
+
+## Scheduled watch agents
+
+Cron and interval watches carry an `agent` target: an automation-safe ACP
+profile, `owner/repo`, task prompt, and allowed Slack channel IDs. Reactive
+Python watch programs retain their event subscriptions and dynamic `wake_at`.
+Migration disables existing scheduled scripts and records the reason in history.
+
+The independent scheduled-agent loop queues an occurrence and advances its
+cadence in one SQLite transaction. A partial unique constraint keeps one active
+occurrence per watch, including manual runs. Each occurrence snapshots its
+revision and definition, and launches through the automation reservation path
+with its ID as the idempotency key. Interrupted dispatch retries that key;
+external callers cannot select the scheduler's `watch` source.
+
+Five-field cron uses an IANA time zone (UTC by default), skips missing local
+times, and resolves a repeated local time to its first instant. Intervals use
+positive `s`, `m`, or `h` durations and preserve phase after downtime. Coalescing
+selects the latest missed time within the grace window; skip discards stale work.
+Overlap is recorded as skipped. A pause suppresses pending and future work;
+an agent already running finishes its turn. Resume seeds a future fire time.
+
+A completed ACP turn, stopped session, or occurrence deadline begins durable
+settlement. The loop confirms runtime teardown before releasing the overlap
+constraint. Each watch has history in `watches.runs` and occurrence/run/session
+identifiers in `watches.occurrences`. `watches.preview` shows five upcoming times.
+
+Agents use branch-scoped `watches.state` for object-valued persistent memory,
+with a version check for replacement. `branches.slack.post` checks the owning
+occurrence's destination snapshot and reserves an action key before contacting
+Slack. Definite rejections allow a later retry with that key; 429 responses
+persist `Retry-After`. Ambiguous delivery remains uncertain and is not reposted.
+The `loom/messaging/watch@v1` capability exposes both tools.
+
+Deployment reconciliation applies profiles before named agent watches. It
+preserves IDs, state, history, runtime pause, and cadence when unchanged. Pruning
+pauses omitted managed watches and leaves operator-owned watches alone. Marin's
+`infra/loom` stack renders these definitions and confined prompt-file contents
+into the deployment manifest.

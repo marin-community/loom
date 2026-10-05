@@ -3,14 +3,20 @@
 use std::sync::OnceLock;
 
 use serde_json::Value;
-use weaver_api::operations::branches;
+use weaver_api::operations::{branches, watches};
 
 use super::dispatch::{export, Export};
 use super::{Adapter, CapabilitySet, ToolFuture};
 
 fn exports() -> &'static [Export] {
     static EXPORTS: OnceLock<Vec<Export>> = OnceLock::new();
-    EXPORTS.get_or_init(|| vec![export::<branches::slack::send::Op>("slack_send")])
+    EXPORTS.get_or_init(|| {
+        vec![
+            export::<branches::slack::send::Op>("slack_send"),
+            export::<branches::slack::post::Op>("slack_post"),
+            export::<watches::state::Op>("watch_state"),
+        ]
+    })
 }
 
 pub(super) const ADAPTER: Adapter = Adapter {
@@ -26,13 +32,22 @@ pub(super) const ADAPTER: Adapter = Adapter {
 fn capability_sets() -> &'static [CapabilitySet] {
     static SETS: OnceLock<Vec<CapabilitySet>> = OnceLock::new();
     SETS.get_or_init(|| {
-        vec![CapabilitySet {
-            name: "loom/messaging/slack@v1",
-            group: "messaging",
-            version: "v1",
-            description: "Send a one-off message to a Slack thread routed to this session.",
-            tools: &["slack_send"],
-        }]
+        vec![
+            CapabilitySet {
+                name: "loom/messaging/watch@v1",
+                group: "messaging",
+                version: "v1",
+                description: "Scheduled agent memory and messages to allowed Slack channels.",
+                tools: &["slack_post", "watch_state"],
+            },
+            CapabilitySet {
+                name: "loom/messaging/slack@v1",
+                group: "messaging",
+                version: "v1",
+                description: "Send a one-off message to a Slack thread routed to this session.",
+                tools: &["slack_send"],
+            },
+        ]
     })
 }
 
@@ -57,11 +72,11 @@ mod tests {
 
     #[test]
     fn slack_surface_is_explicit_and_canonical() {
-        assert_eq!(capability_sets().len(), 1);
+        assert_eq!(capability_sets().len(), 2);
         assert_eq!(
             expand_tool_set("loom/messaging/slack@v1").unwrap(),
             vec!["mcp__loom__messaging_slack_send"]
         );
-        assert_eq!(tools().as_array().unwrap().len(), 1);
+        assert_eq!(tools().as_array().unwrap().len(), 3);
     }
 }

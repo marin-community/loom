@@ -883,7 +883,7 @@ pub async fn remove(db: &Db, name: &str) -> Result<bool> {
     }
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let watch_referenced: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watches WHERE profile = ?)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM watches WHERE profile = ? AND NOT (deployment_managed = 1 AND paused = 1 AND enabled = 0))")
             .bind(name)
             .fetch_one(&mut *tx)
             .await?;
@@ -1627,6 +1627,8 @@ mod tests {
         .unwrap();
 
         assert!(remove(&db, "github_comment").await.is_err());
+        sqlx::query("UPDATE watches SET deployment_managed = 1, paused = 1, enabled = 0 WHERE name = 'profile-owner'").execute(&db).await.unwrap();
+        assert!(remove(&db, "github_comment").await.unwrap());
     }
 
     #[tokio::test]
