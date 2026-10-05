@@ -14,7 +14,7 @@ use weaver_core::{
 struct Delivery {
     channel: String,
     text: String,
-    status: String,
+    status: SlackDeliveryStatus,
     slack_ts: Option<String>,
     error: Option<String>,
     retry_at: Option<String>,
@@ -413,14 +413,14 @@ pub(super) async fn slack_post(
                 "action_key already belongs to another message",
             ));
         }
-        if delivery.status == "rejected" {
+        if delivery.status == SlackDeliveryStatus::Rejected {
             send = sqlx::query("UPDATE watch_deliveries SET status = 'uncertain' WHERE occurrence_id = ? AND action_key = ? AND status = 'rejected' AND retry_at <= ?")
                 .bind(&occurrence.id).bind(&input.action_key).bind(weaver_core::db::now_iso()).execute(&state.db).await?.rows_affected() > 0;
         }
         if !send {
             return Ok(SlackDeliveryView {
-                status: serde_json::from_value(json!(delivery.status))?,
-                posted: delivery.status == "posted",
+                status: delivery.status,
+                posted: delivery.status == SlackDeliveryStatus::Posted,
                 ts: delivery.slack_ts,
                 error: delivery.error,
                 retry_at: delivery.retry_at,

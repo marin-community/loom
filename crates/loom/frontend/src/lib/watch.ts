@@ -54,12 +54,9 @@ export function triggerSummary(t: WatchTrigger | undefined | null): string {
   if (!t) return 'manual';
   const parts: string[] = [];
   if (t.cron) {
-    const calendar = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/.exec(t.cron);
+    const calendar = calendarSchedule(t.cron);
     if (calendar) {
-      const time = `${calendar[2].padStart(2, '0')}:${calendar[1].padStart(2, '0')}`;
-      parts.push(
-        `${calendar[3] === '1-5' ? 'weekdays' : 'daily'} at ${time} ${t.timezone ?? 'UTC'}`,
-      );
+      parts.push(`${calendar.kind} at ${calendar.time} ${t.timezone ?? 'UTC'}`);
     } else parts.push(`cron ${t.cron}`);
   }
   if (t.every) parts.push(`every ${t.every}`);
@@ -97,5 +94,17 @@ export function calendarTrigger(
   return {
     cron: `${Number(match[2])} ${Number(match[1])} * * ${kind === 'weekdays' ? '1-5' : '*'}`,
     timezone,
+  };
+}
+
+export function calendarSchedule(
+  cron: string | undefined,
+): { kind: 'daily' | 'weekdays'; time: string } | null {
+  if (!cron) return null;
+  const match = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/.exec(cron);
+  if (!match) return null;
+  return {
+    kind: match[3] === '1-5' ? 'weekdays' : 'daily',
+    time: `${match[2].padStart(2, '0')}:${match[1].padStart(2, '0')}`,
   };
 }

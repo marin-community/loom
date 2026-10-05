@@ -14,6 +14,17 @@ use sqlx::FromRow;
 )]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "TEXT", rename_all = "snake_case")]
+pub enum SlackDeliveryStatus {
+    Posted,
+    Rejected,
+    Uncertain,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "TEXT", rename_all = "snake_case")]
 pub enum OccurrenceStatus {
     Pending,
     Dispatching,

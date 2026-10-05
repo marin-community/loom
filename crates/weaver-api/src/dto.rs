@@ -1264,13 +1264,7 @@ pub struct DeploymentView {
     pub federations: Vec<FederationView>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SlackDeliveryStatus {
-    Posted,
-    Rejected,
-    Uncertain,
-}
+pub use weaver_core::occurrence::SlackDeliveryStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SlackDeliveryView {

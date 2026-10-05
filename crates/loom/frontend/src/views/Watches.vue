@@ -48,6 +48,7 @@ import {
   capabilitiesFrom,
   GRANTABLE_CAPABILITIES,
   calendarTrigger,
+  calendarSchedule,
   type ScheduleKind,
 } from '../lib/watch';
 import { useCommandScope, type Command } from '../lib/commands';
@@ -327,10 +328,10 @@ function syncDraft(w: Watch) {
   draft.every = triggerOf(w).every ?? '30m';
   draft.timezone = triggerOf(w).timezone ?? 'UTC';
   draft.timeoutSecs = w.run_timeout_secs;
-  const calendar = /^(\d{1,2}) (\d{1,2}) \* \* (\*|1-5)$/.exec(draft.cron);
-  if (triggerOf(w).cron && calendar) {
-    draft.scheduleKind = calendar[3] === '1-5' ? 'weekdays' : 'daily';
-    draft.time = `${calendar[2].padStart(2, '0')}:${calendar[1].padStart(2, '0')}`;
+  const calendar = calendarSchedule(triggerOf(w).cron);
+  if (calendar) {
+    draft.scheduleKind = calendar.kind;
+    draft.time = calendar.time;
   }
 }
 
