@@ -83,16 +83,17 @@ enum HostCmd {
         cmd: ServerCmd,
     },
 
-    /// Manage watches: periodic / triggered watch programs over the fleet.
+    /// Manage agent schedules and reactive watch programs.
     ///
-    /// A watch wakes on a trigger (a cron tick or a session event),
+    /// Cron and interval tasks use --agent JSON with a profile, repo and prompt.
+    /// A script watch wakes on a session event or one-shot recheck,
     /// surveys the fleet, and acts — marking a session, nudging a stuck one,
     /// escalating to you. Author one as a plain file an agent can edit, then
     /// register it and iterate with `--dry-run`:
     ///
     ///     loom watch programs                 # the builtin programs that ship with loom
     ///     loom watch new test-watch          # scaffold ~/.weaver/watches/test-watch.py
-    ///     loom watch add status --cron "0 * * * *" --capabilities observe,judge,mark
+    ///     loom watch add status --on-event session.stale --capabilities observe,mark
     ///     loom watch run status --dry-run     # simulate; mutating actions are stubbed
     ///     loom watch enable status            # arm it
     ///     loom watch ls                       # the fleet of watchers

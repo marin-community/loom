@@ -211,7 +211,7 @@ pub(crate) async fn cmd_watch_new(name: String) -> Result<()> {
     println!("scaffolded {}", path.display());
     println!("  edit it, then register:");
     println!(
-        "    loom watch add {name} --program {} --cron \"0 * * * *\"",
+        "    loom watch add {name} --program {} --on-event session.stale",
         path.display()
     );
     Ok(())

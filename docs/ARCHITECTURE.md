@@ -1191,8 +1191,8 @@ registry so the secret never rides `settings.get`.
 
 ## Watches
 
-A **watch** is a periodic / triggered program over the fleet: it
-wakes on a trigger (a cron tick or a session event), surveys the sessions in
+A **script watch** is a reactive program over the fleet: it
+wakes on a session event or a one-shot recheck, surveys the sessions in
 scope, and acts within an explicit capability set. The engine (`loom::watch`,
 spawned in `server::serve`, self-gated on the
 `watch.enabled` setting) runs each **round** under non-optional guardrails
