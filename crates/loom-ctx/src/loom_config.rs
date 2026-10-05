@@ -81,6 +81,24 @@ pub struct LoomConfig {
     pub host_gid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Arbitrary shell `loom-entrypoint` runs on every server boot, after the
+    /// pinned runtime installs — the generic hook for optional tools loom
+    /// knows nothing about (e.g. a pinned `npm install -g`). Fail-soft: a
+    /// failure warns and the daemon still starts. Not a secret: it's a
+    /// command an operator authors, though one *may* embed a token in it —
+    /// treat the rendered `.env` as private either way.
+    ///
+    /// Docker Compose interpolates `$VAR` in `.env` values against the host,
+    /// so an install command must use absolute container paths (the examples
+    /// use `/home/app/...`) and `$$` for a literal `$` — never `$HOME`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_cmd: Option<String>,
+    /// Comma-separated `name=source` pairs naming skills to copy into every
+    /// installed harness's global skills dir on boot (sources typically
+    /// staged under `/home/app/.local/share/loom/skills/` by `install_cmd`).
+    /// Sources with spaces work; commas separate pairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_skills: Option<String>,
 }
 
 /// One field's identity in the shared `loom config` contract: its stable
@@ -219,6 +237,18 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: false,
         get_fn: |c| c.image.as_deref(),
         set_fn: |c, v| c.image = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_INSTALL_CMD",
+        secret: false,
+        get_fn: |c| c.install_cmd.as_deref(),
+        set_fn: |c, v| c.install_cmd = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_INSTALL_SKILLS",
+        secret: false,
+        get_fn: |c| c.install_skills.as_deref(),
+        set_fn: |c, v| c.install_skills = Some(v),
     },
 ];
 

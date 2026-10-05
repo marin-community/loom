@@ -795,6 +795,18 @@ When skipping, record one concise sentence in the PR/testing notes explaining
 why. Do not add a checklist, scoring framework, or automation for this
 decision.
 
+### Optional OCR pass
+
+If the `ocr` CLI from [open-code-review](https://github.com/alibaba/open-code-review)
+is on PATH — an optional install, never a requirement (see
+[deploy/README.md](../deploy/README.md#optional-tool-installs)) — the same
+decision also admits running the installed `open-code-review` skill over the
+branch diff and triaging its findings alongside the lint review. The deploy's
+canonical install is the delegate skill, which needs no OCR-side LLM: OCR
+supplies file selection and rules (`ocr delegate preview`, `ocr delegate
+rule`), and you perform the review yourself. It is a complement, not a
+replacement: without `ocr` on PATH, nothing changes.
+
 ### Inputs
 
 Pick the diff that applies, typically the current branch versus its merge-base

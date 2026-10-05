@@ -28,6 +28,7 @@ use loom::cli::host::deployment::{run_deployment, DeploymentCmd};
 use loom::cli::host::federation::{run_federation, FederationCmd};
 use loom::cli::host::server::{cmd_open, run_server, ServerCmd};
 use loom::cli::host::setup::{run_setup, SetupCmd};
+use loom::cli::host::skills::{run_skills, SkillsCmd};
 use loom::cli::host::tokens::{run_token, TokenCmd};
 use loom::cli::support::configure_agent_client;
 use loom::client;
@@ -113,6 +114,14 @@ enum HostCmd {
     Token {
         #[command(subcommand)]
         cmd: TokenCmd,
+    },
+    /// Install an agent skill into every installed harness's global skills
+    /// directory.
+    ///
+    ///     loom skills install open-code-review-delegate ~/skills/open-code-review-delegate/SKILL.md
+    Skills {
+        #[command(subcommand)]
+        cmd: SkillsCmd,
     },
     /// Authenticate this CLI and save a named client context.
     Login {
@@ -869,6 +878,7 @@ async fn run_host_cli(command: HostCmd) -> Result<()> {
         HostCmd::Server { cmd } => run_server(cmd).await,
         HostCmd::Watch { cmd } => run_watch(cmd).await,
         HostCmd::Token { cmd } => run_token(cmd).await,
+        HostCmd::Skills { cmd } => run_skills(cmd).await,
         HostCmd::Login {
             name,
             url,

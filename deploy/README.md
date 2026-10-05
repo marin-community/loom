@@ -111,6 +111,8 @@ and why; you don't hand-edit `.env` itself.
 | `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `OPENAI_API_KEY` | for Codex | API key for the Codex agents; only needed if you launch the `codex` runtime. Alternatively log in interactively (see [first-run](#agent-authentication)). |
+| `LOOM_INSTALL_CMD` | no | Arbitrary shell the entrypoint runs on every boot after the runtime installs — the generic hook for optional tools (see [Optional tool installs](#optional-tool-installs)). Fail-soft: a failure warns and the daemon still starts. |
+| `LOOM_INSTALL_SKILLS` | no | Comma-separated `name=source` pairs; each source (a `SKILL.md` file or a skill directory) is copied into every installed harness's global skills dir (see [Optional tool installs](#optional-tool-installs)). |
 | `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | GitHub OAuth app — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
 | `LOOM_TLS_EMAIL` | no | ACME contact for cert-expiry notices; only used if you uncomment the global block in the Caddyfile. |
 | `LOOM_TLS_CERT_FILE` / `_KEY_FILE` | no | Paths to a pre-generated certificate/key pair, in place of Caddy's automatic HTTPS. Both or neither. See [Bring your own certificate](#bring-your-own-certificate). |
@@ -507,6 +509,69 @@ The agent tooling the image ships splits by how it updates:
   stack. `docker build` and `docker run` with in-container paths work; a
   `docker run -v <worktree-path>:…` bind mount does **not**, because that path
   exists in the loom container, not on the host the daemon resolves it against.
+
+## Optional tool installs
+
+Two entrypoint hooks make a tool loom knows nothing about available to every
+agent harness, without an image rebuild. Both run on every `loom server` boot,
+after the pinned Claude/Codex runtime installs, and both are **fail-soft** — a
+failed optional install warns in the boot log and the daemon still starts,
+unlike the pinned runtimes above. Set them as `loom.toml` fields —
+`install_cmd` and `install_skills`, rendered into `.env` by
+`loom config render-env` like every other field in the table above.
+
+- **`LOOM_INSTALL_CMD`** — arbitrary shell. Install the tool the same way you
+  would by hand; exact pins keep it idempotent, and everything lands on the
+  persisted `loom_home` volume, so every session container sees it. The
+  command is also the right place to *stage* any companion skill payload under
+  the conventional `/home/app/.local/share/loom/skills/`, so the next hook has a
+  known path to point at. Use absolute paths and `$$` for a literal `$` —
+  Compose interpolates `$VAR` in `.env` values against the *host*, so
+  `$HOME` in a command silently resolves to the wrong home.
+- **`LOOM_INSTALL_SKILLS`** — comma-separated `name=source` pairs. For each,
+  the entrypoint runs `loom skills install <name> <source>`, which detects
+  which harnesses are *actually installed* (the same PATH checks the agent
+  picker uses) and copies the payload into each one's user-level skills
+  directory: `~/.claude/skills/<name>/` (Claude) and `~/.codex/skills/<name>/`
+  (Codex, honoring `CODEX_HOME`). A file source lands as `<name>/SKILL.md`; a
+  directory source keeps its inner layout. Identical content is skipped, so
+  re-running every boot is a no-op.
+
+The canonical example — [open-code-review](https://github.com/alibaba/open-code-review)
+(`ocr`), whose npm package ships only the CLI launcher, with its agent skills
+published in the GitHub repo instead. The example installs the **delegate**
+skill (`open-code-review-delegate`): the harness's own model performs the
+review and OCR supplies only the deterministic parts — file selection and
+rule resolution — so no OCR-side LLM endpoint or API key is needed. One tag
+pins binary and skill together, so they can't drift:
+
+```toml
+# loom.toml — rendered into deploy/standalone/.env by `loom config render-env`
+install_cmd = """
+  npm install -g @alibaba-group/open-code-review@1.12.11 &&
+  mkdir -p /home/app/.local/share/loom/skills/open-code-review-delegate &&
+  curl -fsSL https://raw.githubusercontent.com/alibaba/open-code-review/v1.12.11/skills/open-code-review-delegate/SKILL.md \
+    -o /home/app/.local/share/loom/skills/open-code-review-delegate/SKILL.md
+  """
+install_skills = "open-code-review-delegate=/home/app/.local/share/loom/skills/open-code-review-delegate"
+```
+
+(A raw-compose deploy that skips `loom.toml` sets the same values as
+`LOOM_INSTALL_CMD` / `LOOM_INSTALL_SKILLS` in the `loom` service's
+`environment:` — the docker-compose.yml wiring carries either through.)
+
+With that, every installed harness gets an `open-code-review-delegate` skill
+that drives the pinned `ocr` CLI. The tool stays optional by construction:
+agents without it (or a deploy without the flags) behave exactly as before.
+Upstream also publishes a full `open-code-review` skill (OCR calls its own
+configured LLM); stage and install that one the same way if you prefer it.
+
+The same skill copier works on a host (non-docker) loom, for any skill from
+any source — loom owns placement, never content:
+
+```sh
+loom skills install open-code-review-delegate ~/skills/open-code-review-delegate/SKILL.md
+```
 
 ## Operations
 
