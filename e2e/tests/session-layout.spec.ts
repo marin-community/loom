@@ -377,6 +377,46 @@ test.describe('durable session workbench', () => {
     await expect(row.getByTestId('session-preview')).toContainText(goal);
   });
 
+  test('row actions menu paints above the rows it drops across', async ({ page, weaver }) => {
+    await weaver.seedSession({ goal: 'Row hosting the open menu', name: 'menu-host' });
+    await weaver.seedSession({ goal: 'Row the menu drops across', name: 'menu-neighbour' });
+
+    await page.goto(weaver.baseUrl);
+    const rows = page.locator('[data-testid="session-card"]');
+    await expect(rows).toHaveCount(2);
+
+    // Expand the first row's Details panel, then open its ⋯ menu. The panel
+    // and the next row's Details button come later in the DOM, so the menu
+    // must out-stack them, not hide behind them.
+    await rows.nth(0).getByTestId('session-details-toggle').click();
+    await expect(rows.nth(0).getByTestId('session-preview')).toBeVisible();
+    await rows.nth(0).getByTestId('row-actions').click();
+    const menu = page.getByTestId('row-actions-menu');
+    await expect(menu).toBeVisible();
+
+    const menuBox = await menu.boundingBox();
+    expect(menuBox).not.toBeNull();
+    for (const covered of [
+      rows.nth(0).getByTestId('session-preview'),
+      rows.nth(1).getByTestId('session-details-toggle'),
+    ]) {
+      const box = await covered.boundingBox();
+      expect(box).not.toBeNull();
+      const left = Math.max(box!.x, menuBox!.x);
+      const right = Math.min(box!.x + box!.width, menuBox!.x + menuBox!.width);
+      const top = Math.max(box!.y, menuBox!.y);
+      const bottom = Math.min(box!.y + box!.height, menuBox!.y + menuBox!.height);
+      expect(right - left).toBeGreaterThan(0);
+      expect(bottom - top).toBeGreaterThan(0);
+      const point = { x: (left + right) / 2, y: (top + bottom) / 2 };
+      const topElementIsMenu = await page.evaluate(({ x, y }) => {
+        const element = document.elementFromPoint(x, y);
+        return element?.closest('[data-testid="row-actions-menu"]') != null;
+      }, point);
+      expect(topElementIsMenu).toBe(true);
+    }
+  });
+
   test('session details persist a GitHub access override', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: 'Adjust repository access',

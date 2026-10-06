@@ -117,7 +117,7 @@ function onKeydown(event: KeyboardEvent) {
     >
       Clear
     </button>
-    <div class="relative z-10 shrink-0">
+    <div class="relative shrink-0">
       <button
         ref="trigger"
         type="button"
@@ -127,7 +127,7 @@ function onKeydown(event: KeyboardEvent) {
         :aria-controls="menuId"
         :disabled="!!busy"
         :class="[
-          'rounded px-1.5 py-0.5 text-sm leading-none text-faint transition-colors',
+          'relative z-10 rounded px-1.5 py-0.5 text-sm leading-none text-faint transition-colors',
           'hover:bg-subtle hover:text-fg focus-visible:opacity-100 disabled:opacity-50',
           open ? 'bg-subtle text-fg opacity-100' : 'opacity-0 group-hover:opacity-100',
         ]"
