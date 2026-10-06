@@ -13,6 +13,7 @@ import {
 import {
   getSessionChat,
   promptSession,
+  queueSession,
   forceQueuedSession,
   retractQueuedSession,
   interruptSession,
@@ -410,6 +411,7 @@ watch(
 const draft = ref('');
 const composerInput = ref<HTMLTextAreaElement | null>(null);
 const sending = ref(false);
+const queueing = ref(false);
 const editingQueued = ref(false);
 const sendError = ref('');
 const composerVisible = computed(() => canSend(props.session));
@@ -458,7 +460,13 @@ async function onAttachmentPick(event: Event) {
 }
 
 async function submitPrompt() {
-  if (!draft.value.trim() || sending.value || editingQueued.value || uploadingAttachment.value)
+  if (
+    !draft.value.trim() ||
+    sending.value ||
+    queueing.value ||
+    editingQueued.value ||
+    uploadingAttachment.value
+  )
     return;
   const local = localCommand(draft.value);
   if (local) {
@@ -504,8 +512,50 @@ async function submitPrompt() {
   }
 }
 
+// Local slash commands act on the dashboard immediately; there is nothing to
+// defer to a later turn, so the Queue button stands down for them.
+const draftIsLocalCommand = computed(() => localCommand(draft.value) !== null);
+
+// Send interrupts a live turn; Queue leaves it running and hands the text to
+// the server's durable next-turn queue instead.
+async function queuePrompt() {
+  if (
+    !draft.value.trim() ||
+    draftIsLocalCommand.value ||
+    sending.value ||
+    queueing.value ||
+    editingQueued.value ||
+    uploadingAttachment.value
+  )
+    return;
+  const restoreComposerFocus = document.activeElement === composerInput.value;
+  queueing.value = true;
+  sendError.value = '';
+  const text = draft.value;
+  try {
+    await queueSession(id.value, text, [...selectedFiles.value]);
+    draft.value = '';
+    selectedFiles.value = [];
+    // The queued copy is server-owned: the pending section renders it, so
+    // reconcile against the snapshot instead of adding an optimistic twin.
+    await load({ preserve: true });
+    autoFollow();
+  } catch (e) {
+    sendError.value = (e as Error).message ?? 'Failed to queue';
+  } finally {
+    queueing.value = false;
+    if (
+      restoreComposerFocus &&
+      (!document.activeElement || document.activeElement === document.body)
+    ) {
+      await nextTick();
+      composerInput.value?.focus();
+    }
+  }
+}
+
 async function forceQueued() {
-  if (sending.value || editingQueued.value) return;
+  if (sending.value || queueing.value || editingQueued.value) return;
   sending.value = true;
   sendError.value = '';
   try {
@@ -520,7 +570,7 @@ async function forceQueued() {
 }
 
 async function editQueued() {
-  if (!pendingPrompt.value || sending.value || editingQueued.value) return;
+  if (!pendingPrompt.value || sending.value || queueing.value || editingQueued.value) return;
   editingQueued.value = true;
   sendError.value = '';
   let moved = false;
@@ -1645,7 +1695,7 @@ function goTo(anchor: string) {
                     type="button"
                     class="acp-prompt-action"
                     data-testid="acp-edit-queued"
-                    :disabled="sending || editingQueued"
+                    :disabled="sending || queueing || editingQueued"
                     title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
                     @click="editQueued"
                   >
@@ -1655,7 +1705,7 @@ function goTo(anchor: string) {
                     type="button"
                     class="acp-prompt-action"
                     data-testid="acp-force-queued"
-                    :disabled="sending || editingQueued"
+                    :disabled="sending || queueing || editingQueued"
                     :title="
                       turnLive
                         ? 'Stop the running turn and send all queued feedback as the next turn'
@@ -1787,7 +1837,7 @@ function goTo(anchor: string) {
         ref="composerInput"
         v-model="draft"
         rows="4"
-        :disabled="sending || editingQueued"
+        :disabled="sending || queueing || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
         autocomplete="off"
         data-testid="acp-composer-input"
@@ -1992,10 +2042,32 @@ function goTo(anchor: string) {
             Stop
           </button>
           <button
+            v-if="turnLive"
+            type="button"
+            class="btn-secondary px-3 py-1 text-xs"
+            data-testid="acp-composer-queue"
+            :disabled="
+              sending ||
+              queueing ||
+              editingQueued ||
+              uploadingAttachment ||
+              !draft.trim() ||
+              draftIsLocalCommand
+            "
+            :title="
+              draftIsLocalCommand
+                ? 'Local commands run immediately and cannot be queued'
+                : 'Queue for the agent’s next turn instead of interrupting the current one'
+            "
+            @click="queuePrompt"
+          >
+            {{ queueing ? 'Queueing…' : 'Queue' }}
+          </button>
+          <button
             type="submit"
             class="btn-primary px-3 py-1 text-sm"
             data-testid="acp-composer-send"
-            :disabled="sending || editingQueued || uploadingAttachment || !draft.trim()"
+            :disabled="sending || queueing || editingQueued || uploadingAttachment || !draft.trim()"
           >
             {{ sending ? 'Sending…' : 'Send' }}
           </button>

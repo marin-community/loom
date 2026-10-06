@@ -718,6 +718,16 @@ export const promptSession = (id: string, text: string, files: string[] = []) =>
     session: id,
   });
 
+/** Queue a user message as next-turn feedback, leaving a live turn running
+ * instead of cancelling it. Dispatched immediately when the session is idle. */
+export const queueSession = (id: string, text: string, files: string[] = []) =>
+  invokeOperation('sessions.prompt.create', {
+    text,
+    send_now: false,
+    files,
+    session: id,
+  });
+
 /** Send all durable next-turn feedback now, stopping a live turn first. */
 export const forceQueuedSession = (id: string) =>
   invokeOperation('sessions.prompt.create', {
