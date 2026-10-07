@@ -34,6 +34,7 @@ import {
 } from '../api';
 import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
 import { effectiveAttention } from '../lib/sessionState';
+import { sessionPathSegments } from '../lib/sessionTitle';
 import { useLayoutCommands } from '../lib/layoutCommands';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
@@ -50,6 +51,7 @@ type SessionSort = 'manual' | 'name' | 'activity' | 'created';
 interface SessionTreeRow {
   session: SessionSummary;
   depth: number;
+  parentTitle: string | null;
 }
 
 const liveSessions = computed(() =>
@@ -333,13 +335,13 @@ function directSessionComparison(left: SessionSummary, right: SessionSummary) {
   return 0;
 }
 function nameParentOf(session: SessionSummary, input: SessionSummary[]) {
-  const path = sessionName(session).split(/\s+\/\s+/);
+  const path = sessionPathSegments(sessionName(session));
   if (path.length < 2) return undefined;
   const candidates = input
     .filter((candidate) => candidate.id !== session.id)
     .map((candidate) => ({
       session: candidate,
-      path: sessionName(candidate).split(/\s+\/\s+/),
+      path: sessionPathSegments(sessionName(candidate)),
     }))
     .filter(
       (candidate) =>
@@ -413,18 +415,19 @@ function sessionTree(input: SessionSummary[]): SessionTreeRow[] {
 
   const rows: SessionTreeRow[] = [];
   const emitted = new Set<string>();
-  function append(session: SessionSummary, depth: number) {
+  function append(session: SessionSummary, depth: number, parentTitle: string | null) {
     if (emitted.has(session.id)) return;
     emitted.add(session.id);
-    rows.push({ session, depth });
+    rows.push({ session, depth, parentTitle });
+    const label = sessionName(session);
     for (const child of [...(children.get(session.id) ?? [])].sort(compare)) {
-      append(child, depth + 1);
+      append(child, depth + 1, label);
     }
   }
-  for (const root of [...roots].sort(compare)) append(root, 0);
+  for (const root of [...roots].sort(compare)) append(root, 0, null);
   // Corrupt legacy ancestry can contain a cycle. Keep every row operable by
   // projecting any unvisited nodes as roots rather than dropping the cycle.
-  for (const session of [...input].sort(compare)) append(session, 0);
+  for (const session of [...input].sort(compare)) append(session, 0, null);
   return rows;
 }
 const groupedSessions = computed(() =>
@@ -1633,6 +1636,7 @@ function scrollSpaces(direction: number) {
               :all-groups="allGroups"
               :all-sessions="sessions"
               :parent-session="parentSessionOf(row.session)"
+              :parent-title="row.parentTitle ?? ''"
               :dragging="draggingId === row.session.id"
               :drop-before="
                 dropGroupId === (display.group?.id ?? row.session.placement?.group_id) &&
