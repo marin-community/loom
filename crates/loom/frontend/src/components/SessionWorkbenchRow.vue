@@ -15,6 +15,7 @@ import {
   quietTags,
   signalChips,
 } from '../lib/sessionState';
+import { sessionTitleParts } from '../lib/sessionTitle';
 import { timeAgo } from '../lib/time';
 
 interface GroupOption {
@@ -39,6 +40,7 @@ const props = defineProps({
   allGroups: { type: Array as PropType<GroupOption[]>, default: () => [] },
   allSessions: { type: Array as PropType<SessionSummary[]>, default: () => [] },
   parentSession: { type: Object as PropType<SessionSummary | undefined>, default: undefined },
+  parentTitle: { type: String, default: '' },
   dragging: { type: Boolean, default: false },
   dropBefore: { type: Boolean, default: false },
   clearingTag: { type: String, default: '' },
@@ -71,15 +73,12 @@ const detailsPanel = ref<HTMLElement>();
 const moveButton = ref<HTMLButtonElement>();
 const destinationSelect = ref<HTMLSelectElement>();
 
-function title() {
-  const task = props.session.branch.title || props.session.branch.name;
-  if (!props.qualified || !props.session.placement) return task;
-  return `${props.session.placement.group_name} / ${task}`;
-}
 const titleParts = computed(() =>
-  title()
-    .split(/\s+\/\s+/)
-    .filter((part) => part.length > 0),
+  sessionTitleParts(props.session.branch.title || props.session.branch.name, {
+    group:
+      props.qualified && props.session.placement ? props.session.placement.group_name : undefined,
+    parentTitle: props.parentTitle,
+  }),
 );
 
 const positionOptions = computed(() => {
@@ -183,9 +182,9 @@ function onKeydown(event: KeyboardEvent) {
           class="session-mailbox-primary stretched-link min-w-0 truncate font-mono text-xs font-medium leading-4 text-fg hover:text-accent"
           @click="emit('recordOpen', $event)"
         >
-          <template v-for="(part, index) in titleParts" :key="`${part}-${index}`">
+          <template v-for="(part, index) in titleParts" :key="`${part.text}-${index}`">
             <span v-if="index" class="text-faint"> / </span>
-            <span :class="index < titleParts.length - 1 ? 'text-muted' : ''">{{ part }}</span>
+            <span :class="part.muted ? 'text-muted' : ''">{{ part.text }}</span>
           </template>
         </router-link>
         <span
