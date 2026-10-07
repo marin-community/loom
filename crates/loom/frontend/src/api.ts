@@ -196,6 +196,11 @@ export const decidePermissionRequest = (
  *  produced a usable session. */
 export const listRuns = () => invokeOperation('runs.list', {});
 export const archiveSession = (id: string) => invokeOperation('sessions.archive', { session: id });
+/** Suspend a session: stop its runtime to free memory, keeping the session,
+ *  worktree, and branch in place. */
+export const suspendSession = (id: string) => invokeOperation('sessions.suspend', { session: id });
+/** Wake a suspended session: restart its runtime and resume the agent. */
+export const wakeSession = (id: string) => invokeOperation('sessions.wake', { session: id });
 /** Delete a session outright (the irreversible counterpart of `archiveSession`).
  *  `sessions.delete` answers `200` with a `{ deleted, kind, warnings }` result
  *  where the legacy `DELETE` answered `204` with an empty body; no caller reads

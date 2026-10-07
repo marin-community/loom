@@ -102,6 +102,7 @@ const SEARCH_STATUSES = new Set<SessionSearchStatus>([
   'created',
   'running',
   'orphaned',
+  'suspended',
   'done',
   'error',
   'archived',
@@ -1168,7 +1169,15 @@ function scrollSpaces(direction: number) {
       >
         <option value="">Any status</option>
         <option
-          v-for="status in ['running', 'created', 'orphaned', 'error', 'done', 'archived']"
+          v-for="status in [
+            'running',
+            'created',
+            'orphaned',
+            'suspended',
+            'error',
+            'done',
+            'archived',
+          ]"
           :key="status"
         >
           {{ status }}

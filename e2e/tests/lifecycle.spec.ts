@@ -133,4 +133,75 @@ test.describe('session lifecycle actions', () => {
       .poll(async () => (await weaver.getSession(s.id)).branch.tags)
       .not.toContainEqual(expect.objectContaining({ key: 'auto-archive' }));
   });
+
+  test('suspend stops the runtime and wake brings it straight back', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({
+      goal: 'Suspend this session to free memory',
+      name: 'suspend-task',
+    });
+
+    // Suspend is a fleet row ⋯ action.
+    await page.goto(`${weaver.baseUrl}/`);
+    const row = page.locator(`[data-session-id="${s.id}"]`);
+    await row.hover();
+    await page.getByTestId('row-actions').click();
+    await page.getByTestId('row-action-suspend').click();
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).status)
+      .toBe('suspended');
+
+    // The detail page reads as parked: no remedy chip shouts beside the
+    // badge, but the Details popover offers Wake directly above Archive.
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('status-badge')).toHaveText(/suspended/i);
+    await expect(page.getByTestId('conversation-state')).toHaveText(/suspended/i);
+    await expect(page.getByTestId('remedy-wake')).toHaveCount(0);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await expect(page.getByTestId('action-wake')).toBeVisible();
+    await expect(page.getByTestId('action-suspend')).toHaveCount(0);
+    const order = await page
+      .locator('[data-testid^="action-"]')
+      .evaluateAll((els) => els.map((el) => el.getAttribute('data-testid')));
+    expect(order.indexOf('action-wake')).toBeLessThan(order.indexOf('action-archive'));
+
+    // Wake is the matching row action; running is the silent default again.
+    await page.goto(`${weaver.baseUrl}/`);
+    const parked = page.locator(`[data-session-id="${s.id}"]`);
+    await parked.hover();
+    await page.getByTestId('row-actions').click();
+    await page.getByTestId('row-action-wake').click();
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).status)
+      .toBe('running');
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await expect(page.getByTestId('conversation-state')).toHaveText(/working/i);
+
+    // Sending into a suspended session wakes it too. A shell runtime respawns
+    // in tens of milliseconds, so the foot's waking strip (unit-covered in
+    // `sessionState.test.mjs`) is not assertable here — pin the contract the
+    // strip narrates instead: the runtime returns and the message lands in it.
+    await page.goto(`${weaver.baseUrl}/`);
+    await parked.hover();
+    await page.getByTestId('row-actions').click();
+    await page.getByTestId('row-action-suspend').click();
+    await expect
+      .poll(async () => (await weaver.getSession(s.id)).status)
+      .toBe('suspended');
+    // Sending into a suspended session wakes it too. A shell runtime respawns
+    // in tens of milliseconds, so the foot's waking strip (unit-covered in
+    // `sessionState.test.mjs`) is not assertable here — pin the contract the
+    // strip narrates instead: the runtime returns and the message lands in it.
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    // A terminal session opens on its Agent tab; the composer lives in the
+    // Conversation tab.
+    await page.getByRole('tab', { name: 'Conversation' }).click();
+    const composer = page.getByTestId('composer-input');
+    await composer.fill('echo woken by a message');
+    await composer.press('Enter');
+    await expect(page.getByTestId('conversation-state')).toHaveText(/working/i);
+    await expect(page.getByTestId('waking-progress')).toHaveCount(0);
+  });
 });

@@ -17,6 +17,7 @@ import { useFollowFoot } from '../lib/followFoot';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { localTime } from '../lib/time';
 import MarkdownView from './MarkdownView.vue';
+import TransitionProgressStrip from './TransitionProgressStrip.vue';
 
 // The Conversation tab for a *terminal-backend* session (`protocol='terminal'`):
 // the agent's chat with the model, rendered for review and — while the agent is
@@ -743,6 +744,10 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
       }}</span>
       <span>{{ convState.label }}<span v-if="agentWorking">…</span></span>
     </div>
+
+    <!-- The runtime-change progress strip (handoff / waking / suspending) —
+         same banner, same words, as the ACP conversation's foot. -->
+    <TransitionProgressStrip :session="session" />
 
     <!-- Composer — send a new prompt straight to the agent's terminal. Enter
          sends; Shift+Enter inserts a newline. Hidden once the agent is gone, so

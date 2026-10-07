@@ -98,18 +98,46 @@ async fn usable_session(state: &AppState, target: &session::Session) -> bool {
     }
 }
 
+/// A submitted review is a wake signal: a suspended target comes back first
+/// (the outbox retries on the next drain if the wake fails), then the delivery
+/// proceeds against the live runtime.
+async fn wake_if_suspended(state: &AppState, target: &session::Session) -> session::Session {
+    if !session::is_suspended(&target.status) {
+        return target.clone();
+    }
+    match crate::lifecycle::wake(state, target).await {
+        Ok(refreshed) => refreshed,
+        Err(error) => {
+            tracing::warn!(
+                review_session = %target.id,
+                %error,
+                "review delivery: waking suspended session failed; outbox will retry"
+            );
+            target.clone()
+        }
+    }
+}
+
 async fn delivery_session(
     state: &AppState,
     review: &review::Review,
 ) -> Result<Option<session::Session>> {
     if let Some(target) = session::get(&state.db, &review.session_id).await? {
+        let target = wake_if_suspended(state, &target).await;
         if usable_session(state, &target).await {
             return Ok(Some(target));
         }
     }
     let fallback = session::active_for_branch(&state.db, &review.branch_id).await?;
     match fallback {
-        Some(target) if usable_session(state, &target).await => Ok(Some(target)),
+        Some(target) => {
+            let target = wake_if_suspended(state, &target).await;
+            if usable_session(state, &target).await {
+                Ok(Some(target))
+            } else {
+                Ok(None)
+            }
+        }
         _ => Ok(None),
     }
 }

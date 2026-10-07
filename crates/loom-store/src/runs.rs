@@ -184,11 +184,17 @@ pub async fn route_channel(db: &Db, run_id: &str) -> Result<ChannelAction> {
             .await?;
             ChannelAction::Launch(run)
         }
+        // Reuse the owned session while it is live — or dormant: a suspended
+        // owner is woken by the delivery itself (`prompt_channel_run`), so it
+        // still routes through Prompt; falling into the catch-all would mint a
+        // duplicate session and strand the suspended one on its branch slot.
         Some(owner)
-            if owner.session_status.as_deref() == Some("running")
-                && owner.session_protocol.as_deref() == Some("acp") =>
+            if matches!(
+                owner.session_status.as_deref(),
+                Some("running" | "suspended")
+            ) && owner.session_protocol.as_deref() == Some("acp") =>
         {
-            if owner.owner_run_id == run.id {
+            if owner.owner_run_id == run.id && owner.session_status.as_deref() == Some("running") {
                 sqlx::query(
                     "UPDATE automation_runs SET status = 'running', session_id = ?, updated_at = ?
                      WHERE id = ?",
@@ -737,6 +743,91 @@ mod tests {
         };
         assert!(retry.summary.is_empty());
         assert_eq!(retry.outcome, None);
+    }
+
+    #[tokio::test]
+    async fn a_suspended_channel_session_is_woken_not_replaced() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let first = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "grafana",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "suspend-owner",
+                channel: Some("operator"),
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        assert!(matches!(
+            route_channel(&db, &first.id).await.unwrap(),
+            ChannelAction::Launch(_)
+        ));
+
+        // The channel's session materialized as an ACP session and later went
+        // dormant — a state the delivery itself can wake.
+        let branch = weaver_core::branch::upsert(&db, "/r", "weaver/suspend-owner", "main")
+            .await
+            .unwrap();
+        crate::session::insert(
+            &db,
+            &crate::session::NewSession {
+                id: first.session_id.clone(),
+                branch_id: branch.id,
+                work_dir: "/w".to_string(),
+                term_session: format!("weaver-{}", first.session_id),
+                agent_kind: "claude".to_string(),
+                model: String::new(),
+                effort: String::new(),
+                status: "suspended".to_string(),
+                github_repo: None,
+                parent_branch_id: None,
+                managed_by: None,
+                created_by: None,
+                protocol: "acp".to_string(),
+                origin: "automation".to_string(),
+                class: "automation".to_string(),
+                tracking_issue_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let second = match reserve(
+            &db,
+            NewRun {
+                subject: "subject",
+                source: "grafana",
+                service_tag: "grafana",
+                profile: "default",
+                idempotency_key: "suspend-delivery",
+                channel: Some("operator"),
+                request_json: "{}",
+            },
+        )
+        .await
+        .unwrap()
+        {
+            Reservation::Created(run) => run,
+            Reservation::Existing(_) => unreachable!(),
+        };
+        // A dormant owner routes through Prompt (whose delivery wakes it),
+        // never through the catch-all that would mint a duplicate session and
+        // strand the suspended one on its branch slot.
+        let ChannelAction::Prompt(delivery) = route_channel(&db, &second.id).await.unwrap() else {
+            panic!("a suspended channel session must be woken by the delivery, not replaced");
+        };
+        assert_eq!(
+            delivery.session_id, first.session_id,
+            "the suspended session is reused, not duplicated"
+        );
     }
 
     #[tokio::test]

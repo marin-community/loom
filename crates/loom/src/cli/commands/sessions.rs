@@ -217,6 +217,11 @@ pub enum SessionCmd {
     Adopt { session: String },
     /// Recover a session: restart a failed ACP runtime, or rebuild an archive.
     Recover { session: String },
+    /// Suspend a session: stop its runtime to free memory, keep everything
+    /// else in place for a fast wake.
+    Suspend { session: String },
+    /// Wake a suspended session: restart its runtime and resume the agent.
+    Wake { session: String },
     /// Replace the provider behind a live ACP session, preserving its worktree
     /// and canonical conversation journal.
     Handoff {
@@ -404,6 +409,8 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
         SessionCmd::Archive { session } => cmd_archive(session).await,
         SessionCmd::Adopt { session } => cmd_adopt(session).await,
         SessionCmd::Recover { session } => cmd_recover(session).await,
+        SessionCmd::Suspend { session } => cmd_suspend(session).await,
+        SessionCmd::Wake { session } => cmd_wake(session).await,
         SessionCmd::Handoff {
             session,
             profile,
@@ -766,6 +773,11 @@ pub(crate) fn wake_reason(ws: &SessionView, key: &str, lifecycle_only: bool) -> 
     if status == "orphaned" {
         return Some(format!(
             "session {key} is orphaned — its terminal was lost (try `loom sessions adopt {key}`)"
+        ));
+    }
+    if status == "suspended" {
+        return Some(format!(
+            "session {key} is suspended — its runtime is stopped (try `loom sessions wake {key}`)"
         ));
     }
     if !lifecycle_only && branch_attention(ws) != "ok" {
@@ -1245,6 +1257,34 @@ pub(crate) async fn cmd_recover(key: String) -> Result<()> {
     Ok(())
 }
 
+pub(crate) async fn cmd_suspend(key: String) -> Result<()> {
+    let client = client::default()?;
+    let res = client
+        .invoke::<sessions::suspend::Op>(&sessions::suspend::Input {
+            session: key.clone(),
+        })
+        .await?;
+    if res.suspended {
+        println!("suspended {key} (runtime stopped; session, worktree, and branch kept)");
+    }
+    for w in &res.warnings {
+        eprintln!("  warning: {w}");
+    }
+    Ok(())
+}
+
+pub(crate) async fn cmd_wake(key: String) -> Result<()> {
+    let client = client::default()?;
+    let ws = client
+        .invoke::<sessions::wake::Op>(&sessions::wake::Input { session: key })
+        .await?;
+    // Wake is idempotent: a session that was never suspended passes through.
+    println!("session {} is awake  ({})", ws.id, ws.branch.name);
+    println!("  status:  {}", ws.status);
+    println!("  attach:  loom attach {}", ws.id);
+    Ok(())
+}
+
 pub(crate) async fn cmd_handoff(
     key: String,
     profile: Option<String>,
@@ -1343,7 +1383,7 @@ mod tests {
         for s in ["done", "error", "archived"] {
             assert!(is_terminal_status(s), "{s} should be terminal");
         }
-        for s in ["created", "running", "orphaned"] {
+        for s in ["created", "running", "orphaned", "suspended"] {
             assert!(!is_terminal_status(s), "{s} should not be terminal");
         }
     }
