@@ -729,6 +729,47 @@ test.describe('acp conversation', () => {
     ).toBeVisible({ timeout: 20_000 });
   });
 
+  test('Queue defers a message to the next turn without stopping the live one', async ({
+    page,
+    weaver,
+  }) => {
+    const conv = page.getByTestId('acp-conversation');
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-queue-button',
+    });
+    const input = page.getByTestId('acp-composer-input');
+    // Keep the turn live comfortably beyond scheduling jitter so the queue click
+    // lands mid-turn, then let it end normally so the queue drains by itself.
+    await input.fill('wait:15000|say:first turn done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await input.fill('say:queued feedback');
+    await page.getByTestId('acp-composer-queue').click();
+    await expect(page.getByTestId('acp-queued')).toHaveText(
+      'queued · agent hasn’t seen this yet',
+    );
+    await expect(page.getByTestId('acp-pending')).toContainText('say:queued feedback');
+    await expect(input).toHaveValue('');
+    // Unlike Send, Queue leaves the running turn alone.
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+    await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(0);
+
+    // The normal turn end drains the durable queue into the next turn.
+    await expect(conv.getByText('first turn done', { exact: true })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(page.getByTestId('acp-queued')).toBeHidden({
+      timeout: 15_000,
+    });
+    await expect(conv.getByText('queued feedback', { exact: true })).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
   test('ArrowUp and Edit pull unseen queued feedback back into the composer', async ({
     page,
     weaver,
