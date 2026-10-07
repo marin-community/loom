@@ -163,6 +163,52 @@ pub enum AcpPromptEffort<'a> {
     Prefer(&'a str),
 }
 
+#[derive(Debug)]
+pub enum LaunchValidationError {
+    Validation(anyhow::Error),
+    Relay {
+        error: anyhow::Error,
+        validation: Option<anyhow::Error>,
+    },
+}
+
+impl std::fmt::Display for LaunchValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(error) => write!(f, "{error}"),
+            Self::Relay { validation, .. } => {
+                f.write_str("ACP validation relay failed")?;
+                if let Some(validation) = validation {
+                    write!(f, "; ACP validation also failed: {validation:#}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for LaunchValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Validation(error) | Self::Relay { error, .. } => Some(error.as_ref()),
+        }
+    }
+}
+
+fn finish_launch_validation(
+    validation: Result<()>,
+    cleanup: Result<()>,
+) -> std::result::Result<(), LaunchValidationError> {
+    match (validation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(LaunchValidationError::Validation(error)),
+        (validation, Err(error)) => Err(LaunchValidationError::Relay {
+            error: error.context("cleaning up ACP validation relay"),
+            validation: validation.err(),
+        }),
+    }
+}
+
 /// Open and configure a disposable ACP session without sending a prompt.
 ///
 /// Validates the model/effort/mode selectors against the real adapter
@@ -173,9 +219,11 @@ pub async fn validate_launch(
     transient_sessions: &crate::backend::TransientSessionRegistry,
     launch: AcpLaunch,
     timeout: Duration,
-) -> Result<()> {
+) -> std::result::Result<(), LaunchValidationError> {
     if !matches!(launch.new_or_load, NewOrLoad::New { .. }) {
-        bail!("ACP launch validation requires a fresh session");
+        return Err(LaunchValidationError::Validation(anyhow!(
+            "ACP launch validation requires a fresh session"
+        )));
     }
 
     let relay_name = format!(
@@ -197,7 +245,11 @@ pub async fn validate_launch(
         &launch.cwd,
         crate::backend::memory_max_gb(db).await,
     )
-    .await?;
+    .await
+    .map_err(|error| LaunchValidationError::Relay {
+        error: error.context("starting ACP validation relay"),
+        validation: None,
+    })?;
 
     let operation = async {
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
@@ -208,14 +260,7 @@ pub async fn validate_launch(
         Err(_) => Err(anyhow!("timed out validating ACP launch after {timeout:?}")),
     };
     let cleanup = crate::backend::kill_session_and_wait(&relay_name).await;
-    match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(cleanup)) => Err(cleanup.context("cleaning up ACP validation relay")),
-        (Err(error), Err(cleanup)) => Err(anyhow!(
-            "{error}; failed to clean up ACP validation relay: {cleanup}"
-        )),
-    }
+    finish_launch_validation(result, cleanup)
 }
 
 /// Run one isolated prompt through an ordinary ACP adapter launch. Model and
@@ -3823,6 +3868,37 @@ mod tests {
     };
     use crate::acp::wire::{ContentBlock, ToolCallContent};
     use serde_json::json;
+
+    #[test]
+    fn validation_cleanup_failure_keeps_both_errors() {
+        let cleanup =
+            anyhow::anyhow!("Docker removal timed out").context("removing validation container");
+        let validation =
+            anyhow::anyhow!("adapter rejected mode").context("setting ACP launch mode");
+        let error = super::finish_launch_validation(Err(validation), Err(cleanup)).unwrap_err();
+        let super::LaunchValidationError::Relay {
+            error: cleanup,
+            validation: Some(validation),
+        } = error
+        else {
+            panic!("cleanup failure must be classified as a relay error");
+        };
+        assert_eq!(
+            cleanup.chain().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "cleaning up ACP validation relay",
+                "removing validation container",
+                "Docker removal timed out",
+            ]
+        );
+        assert_eq!(
+            validation
+                .chain()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["setting ACP launch mode", "adapter rejected mode"]
+        );
+    }
 
     #[test]
     fn compaction_prompt_detection_requires_the_exact_command() {

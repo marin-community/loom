@@ -407,9 +407,7 @@ pub async fn kill_session(name: &str) -> Result<()> {
 pub async fn kill_session_and_wait(name: &str) -> Result<()> {
     let stopped = tokio::time::timeout(STOP_DEADLINE, async {
         kill_session(name).await?;
-        while has_session(name).await {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        wait_until_stopped(|| has_session(name)).await;
         Ok::<(), anyhow::Error>(())
     })
     .await;
@@ -421,10 +419,24 @@ pub async fn kill_session_and_wait(name: &str) -> Result<()> {
         ),
     }
     remove_runtime(name).await?;
-    if has_session(name).await {
-        bail!("terminal {name} is still alive after its runtime was removed");
-    }
+    // Docker may acknowledge a second removal while the first is still in
+    // progress; the supervisor socket can remain live until that removal ends.
+    tokio::time::timeout(STOP_DEADLINE, wait_until_stopped(|| has_session(name)))
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("terminal {name} is still alive after runtime removal was requested")
+        })?;
     Ok(())
+}
+
+async fn wait_until_stopped<F, Fut>(mut is_alive: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    while is_alive().await {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 }
 
 /// Remove a session's runtime through the configured runner, bounded by
@@ -474,6 +486,20 @@ fn key_bytes(key: &str) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn waits_for_removal_in_progress_to_release_the_supervisor() {
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_until_stopped(|| async {
+                checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(checks.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
 
     #[test]
     fn frame_paste_wraps_in_bracketed_markers_and_normalizes_newlines() {
