@@ -795,11 +795,7 @@ async fn create_inner(
             std::time::Duration::from_secs(30),
         )
         .await
-        .map_err(|error| {
-            ProvisionError::invalid(format!(
-                "profile '{profile_name}' is not available for this launch: {error}"
-            ))
-        })?;
+        .map_err(|error| map_launch_validation_error(&profile_name, error))?;
     }
 
     // Build title/goal/description; an optional GitHub issue seeds all three.
@@ -1475,6 +1471,22 @@ async fn create_inner(
     Ok(Provisioned { session, branch })
 }
 
+fn map_launch_validation_error(
+    profile_name: &str,
+    error: crate::acp::LaunchValidationError,
+) -> ProvisionError {
+    match error {
+        crate::acp::LaunchValidationError::Validation(error) => ProvisionError::invalid(format!(
+            "profile '{profile_name}' is not available for this launch: {error}"
+        )),
+        relay @ crate::acp::LaunchValidationError::Relay { .. } => {
+            ProvisionError::Internal(anyhow::Error::new(relay).context(format!(
+                "could not validate profile '{profile_name}' because the ACP relay failed"
+            )))
+        }
+    }
+}
+
 /// Session-specific operating context appended after the goal. This short
 /// command map reaches agents whose provider does not inject the primer.
 /// `loom summary` recovers context but is not a mandatory first turn.
@@ -1660,6 +1672,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(token_owner, "owner");
+    }
+
+    #[test]
+    fn relay_cleanup_failure_is_internal_with_its_cause_chain() {
+        let error = crate::acp::LaunchValidationError::Relay {
+            error: anyhow::anyhow!("Docker daemon stalled")
+                .context("cleaning up ACP validation relay"),
+            validation: None,
+        };
+        let mapped = map_launch_validation_error("prose-cleanup", error);
+        let ProvisionError::Internal(error) = mapped else {
+            panic!("relay cleanup must not be an invalid profile selection");
+        };
+        assert_eq!(
+            error.chain().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "could not validate profile 'prose-cleanup' because the ACP relay failed",
+                "ACP validation relay failed",
+                "cleaning up ACP validation relay",
+                "Docker daemon stalled",
+            ]
+        );
+    }
+
+    #[test]
+    fn unavailable_launch_selector_remains_invalid() {
+        let error = crate::acp::LaunchValidationError::Validation(anyhow::anyhow!(
+            "launch mode 'auto' is not available"
+        ));
+        let mapped = map_launch_validation_error("prose-cleanup", error);
+        let ProvisionError::Invalid(message, _) = mapped else {
+            panic!("unavailable selector must remain an invalid selection");
+        };
+        assert!(message.contains("profile 'prose-cleanup' is not available for this launch"));
     }
 
     #[test]
