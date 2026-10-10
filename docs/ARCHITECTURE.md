@@ -698,6 +698,25 @@ artifacts, and channels without opening arbitrary shell-command egress. A plain
 workspace-write `network_access = true` without the proxy would be broader than
 the control-plane requirement.
 
+For shared caches outside the workspace, configure absolute writable roots in
+an operator-managed profile's `CODEX_CONFIG`. For example (replace the paths
+with directories on the agent host):
+
+```sh
+loom profiles env set codex CODEX_CONFIG --value '{"sandbox_workspace_write":{"writable_roots":["/home/user/.cache/uv","/home/user/.cache/cargo-build"]}}'
+```
+
+This command replaces `CODEX_CONFIG`; merge these roots into any existing
+configuration. Set `UV_CACHE_DIR` and `CARGO_TARGET_DIR` in the profile as needed
+so tools use those directories. Loom forwards the roots as codex-acp's
+`additionalDirectories` on both `session/new` and `session/load`: the adapter
+constructs its sandbox policy for each turn, so a home config's writable roots
+alone do not supply these grants. Roots must be absolute paths; duplicates are
+removed. These are filesystem write grants, independent of Loom API permissions.
+Profile edits apply to new sessions or an explicit handoff; recovery keeps the
+session's saved launch configuration. Transient summary prompts do not inherit
+these extra filesystem grants.
+
 **Lifecycle** is driven by that protocol. A `terminal` session's lifecycle rides
 Claude Code's hooks, so that path merges a `hooks` block into the worktree's
 `.claude/settings.local.json` (see `loom::agent::install_hooks` and

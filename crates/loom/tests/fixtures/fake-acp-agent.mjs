@@ -28,6 +28,7 @@
 //                        `FAKE_ACP_COMPACT_DELAY` ms
 //   permission:NAME      a session/request_permission that BLOCKS the turn until the
 //                        client answers (exercises both auto-answer and REST-answer)
+//   directories          echo the additionalDirectories supplied at new/load
 //   resources            echo the names of supplied resource_link blocks
 //   poison               make this adapter reject this and every later prompt;
 //                        only a process restart clears the failure
@@ -43,6 +44,7 @@ import { createInterface } from "node:readline";
 const JSONRPC = "2.0";
 let sessionId = null;
 let sessionCounter = 0;
+let additionalDirectories = [];
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
 const agentName = process.env.FAKE_ACP_AGENT_NAME || "fake-acp-agent";
@@ -195,6 +197,7 @@ function askPermission(name) {
 
 async function handleLoad(id, params) {
   sessionId = params.sessionId;
+  additionalDirectories = params.additionalDirectories || [];
   // Replay a tiny scripted history as the spec's load notifications.
   notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "earlier question" } });
   notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "earlier answer" } });
@@ -209,7 +212,9 @@ async function handleLoad(id, params) {
 }
 
 async function runToken(tok) {
-  if (tok.startsWith("say:")) {
+  if (tok === "directories") {
+    notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: JSON.stringify(additionalDirectories) } });
+  } else if (tok.startsWith("say:")) {
     const text = tok.slice(4);
     const half = Math.ceil(text.length / 2);
     notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: text.slice(0, half) } });
@@ -463,6 +468,7 @@ function handleMessage(msg) {
       break;
     case "session/new":
       sessionId = "fake-session-" + ++sessionCounter;
+      additionalDirectories = msg.params.additionalDirectories || [];
       respond(msg.id, {
         sessionId,
         modes: { currentModeId: currentMode, availableModes: MODES },

@@ -448,8 +448,16 @@ pub fn initialize_params() -> Value {
 
 /// `session/new` params. `meta` is the optional `_meta` object (adapter options
 /// such as `{"claudeCode":{"options":{...}}}`).
-pub fn new_session_params(cwd: &str, mcp_servers: &[Value], meta: Option<&Value>) -> Value {
+pub fn new_session_params(
+    cwd: &str,
+    mcp_servers: &[Value],
+    additional_directories: &[String],
+    meta: Option<&Value>,
+) -> Value {
     let mut v = serde_json::json!({ "cwd": cwd, "mcpServers": mcp_servers });
+    if !additional_directories.is_empty() {
+        v["additionalDirectories"] = serde_json::json!(additional_directories);
+    }
     if let Some(meta) = meta {
         v["_meta"] = meta.clone();
     }
@@ -461,10 +469,14 @@ pub fn load_session_params(
     session_id: &str,
     cwd: &str,
     mcp_servers: &[Value],
+    additional_directories: &[String],
     meta: Option<&Value>,
 ) -> Value {
     let mut value =
         serde_json::json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
+    if !additional_directories.is_empty() {
+        value["additionalDirectories"] = serde_json::json!(additional_directories);
+    }
     if let Some(meta) = meta {
         value["_meta"] = meta.clone();
     }
@@ -546,14 +558,16 @@ mod tests {
             "args": ["mcp", "serve"],
             "env": [],
         })];
-        let params = load_session_params("session-1", "/worktree", &servers, Some(&meta));
+        let params = load_session_params("session-1", "/worktree", &servers, &[], Some(&meta));
         assert_eq!(params["sessionId"], "session-1");
         assert_eq!(params["_meta"], meta);
         assert_eq!(params["mcpServers"], json!(servers));
 
-        let fresh = new_session_params("/worktree", &servers, None);
+        let fresh = new_session_params("/worktree", &servers, &[], None);
         assert_eq!(fresh["mcpServers"], json!(servers));
         assert!(fresh.get("_meta").is_none());
+        assert!(fresh.get("additionalDirectories").is_none());
+        assert!(params.get("additionalDirectories").is_none());
     }
 
     #[test]

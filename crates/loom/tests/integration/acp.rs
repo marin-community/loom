@@ -95,6 +95,7 @@ async fn start_new_with_env(
     make_session(ts, id).await;
     let cwd = ts.repo_path().to_path_buf();
     let launch = AcpLaunch {
+        additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env,
@@ -115,6 +116,7 @@ async fn start_new_with_env(
 fn transient_launch(ts: &TestServer, env: Vec<(String, String)>) -> AcpLaunch {
     let cwd = ts.repo_path().to_path_buf();
     AcpLaunch {
+        additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env,
@@ -138,6 +140,7 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
     make_session(&ts, "acp-setup-timeout").await;
     let cwd = ts.repo_path().to_path_buf();
     let launch = AcpLaunch {
+        additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env: vec![(
@@ -619,6 +622,7 @@ async fn launch_model_and_effort_replace_adapter_config_defaults() {
     make_session(&ts, "acp-launch-config").await;
     let cwd = ts.repo_path().to_path_buf();
     let launch = AcpLaunch {
+        additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env: vec![],
@@ -654,6 +658,7 @@ async fn load_preserves_adapter_restored_model_and_effort() {
     make_session(&ts, "acp-load-config").await;
     let cwd = ts.repo_path().to_path_buf();
     let launch = AcpLaunch {
+        additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
         cwd: cwd.clone(),
         env: vec![],
@@ -4733,6 +4738,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
         "the mode boots via INITIAL_AGENT_MODE, not a claude-id set_mode"
     );
     assert_eq!(launch.goal.as_deref(), Some("ship it"));
+    assert!(launch.additional_directories.is_empty());
     match &launch.new_or_load {
         NewOrLoad::New { meta, .. } => assert!(meta.is_none(), "codex takes no _meta"),
         NewOrLoad::Load { .. } => panic!("a fresh launch opens session/new"),
@@ -4761,7 +4767,7 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     // disabled; a goalless launch seeds the primer.
     let operator = [(
         "CODEX_CONFIG".to_string(),
-        r#"{"model":"mine","approvals_reviewer":"auto_review"}"#.to_string(),
+        r#"{"model":"mine","approvals_reviewer":"auto_review","sandbox_workspace_write":{"writable_roots":["/shared/uv","/shared/cargo","/shared/uv"]}}"#.to_string(),
     )];
     let launch = loom::agent::build_acp_launch(
         &ts.state.db,
@@ -4775,16 +4781,48 @@ async fn codex_acp_launch_maps_the_adapter_contract() {
     assert_eq!(cfg["approvals_reviewer"], "auto_review");
     assert_eq!(cfg["features"]["apps"], false);
     assert_eq!(launch.goal.as_deref(), Some("orient first"));
+    assert_eq!(
+        launch.additional_directories,
+        ["/shared/uv", "/shared/cargo"]
+    );
 
     let loaded = loom::agent::build_acp_launch(
         &ts.state.db,
-        &spec(None, &[], "bypassPermissions"),
+        &spec(None, &operator, "agent"),
         loom::agent::AcpOpen::Load("existing-acp-session".to_string()),
     )
     .await
     .unwrap();
     assert_eq!(loaded.initial_model, None);
     assert_eq!(loaded.initial_effort, None);
+    assert_eq!(loaded.additional_directories, launch.additional_directories);
+}
+
+/// The adapter must receive writable roots on both session/new and session/load.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acp_new_and_load_forward_additional_directories() {
+    let ts = TestServer::start().await;
+    for (id, load) in [("roots-new", false), ("roots-load", true)] {
+        make_session(&ts, id).await;
+        let mut launch = transient_launch(&ts, vec![]);
+        launch.additional_directories = vec!["/shared/uv".to_string(), "/shared/cargo".to_string()];
+        launch.goal = Some("directories".to_string());
+        if load {
+            launch.new_or_load = NewOrLoad::Load {
+                acp_session_id: "existing-acp-session".to_string(),
+                meta: None,
+            };
+        }
+        acp::start(&ts.state.acp_ctx(), id, launch).await.unwrap();
+        poll_chat(&ts, id, Duration::from_secs(15), |blocks| {
+            blocks.iter().any(|block| {
+                block["kind"] == "agent_message"
+                    && block["payload"]["text"] == r#"["/shared/uv","/shared/cargo"]"#
+            })
+        })
+        .await;
+    }
 }
 
 /// K. Phase 7, adopt-after-the-flip: an orphaned *terminal* session whose
