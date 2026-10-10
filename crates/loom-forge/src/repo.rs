@@ -231,20 +231,6 @@ async fn registered_for_root(db: &Db, repo_root: &Path) -> Result<Option<Managed
     }))
 }
 
-/// Whether `repo_root` is an allowlisted (registered) managed repo — the gate
-/// that decides whether a session's committed `.weaver/config.toml` `[setup]`
-/// script may run. A registered repo's stored `path` is the managed clone
-/// (`<repos_dir>/<owner>/<name>`); the launch resolves the worktree's repo root
-/// by canonicalizing that path, so we compare canonicalized paths on both sides.
-/// A repo not in the `repos` table (e.g. a local bind-mounted checkout) is not
-/// allowlisted, and its setup script is never executed (the design's privileged
-/// code-execution boundary, §6.4).
-pub async fn is_allowlisted(db: &Db, repo_root: &Path) -> Result<bool> {
-    let allowed = registered_for_root(db, repo_root).await?.is_some();
-    tracing::debug!(repo = %repo_root.display(), allowed, "checked repo allowlist");
-    Ok(allowed)
-}
-
 /// Resolve the GitHub slug for a repository without requiring GitHub
 /// credentials. Managed clones use their registered identity; local checkouts
 /// fall back to parsing the configured `origin` URL.

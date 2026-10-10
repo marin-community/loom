@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex as StdMutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -129,7 +129,6 @@ struct MetadataSource {
     created_by: Option<String>,
     creator_credential: (bool, Option<String>),
     repo_env_generation: Vec<(String, String)>,
-    repo_config_generation: Option<(u64, u64)>,
     metadata_agent: String,
 }
 
@@ -263,21 +262,6 @@ async fn metadata_source(
         .into_iter()
         .map(|entry| (entry.name, entry.updated_at))
         .collect();
-    let repo_config_path =
-        std::path::Path::new(&branch.repo_root).join(weaver_core::repo_config::CONFIG_REL_PATH);
-    let repo_config_generation = match std::fs::metadata(repo_config_path) {
-        Ok(metadata) => Some((
-            metadata.len(),
-            metadata
-                .modified()?
-                .duration_since(UNIX_EPOCH)?
-                .as_nanos()
-                .try_into()
-                .context("repo config modified time exceeds u64")?,
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
     Ok(MetadataSource {
         goal: branch.goal.clone(),
         restricted: session.policy_restricted,
@@ -291,7 +275,6 @@ async fn metadata_source(
         created_by: session.created_by.clone(),
         creator_credential,
         repo_env_generation,
-        repo_config_generation,
         metadata_agent: session.agent_kind.clone(),
     })
 }
@@ -337,12 +320,10 @@ async fn known_secret_values(db: &Db, session: &Session, branch: &Branch) -> Res
     let repo = repo_env::pairs(db, &branch.repo_root)
         .await
         .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect());
-    let repo_file = weaver_core::repo_config::load(std::path::Path::new(&branch.repo_root))
-        .map(|config| config.env.into_values().collect());
     let creator_token = launching_user_token(db, session.created_by.as_deref())
         .await
         .map(|value| value.into_iter().collect());
-    collect_secret_sources([source_profile, repo, repo_file, creator_token])
+    collect_secret_sources([source_profile, repo, creator_token])
 }
 
 fn redact_known_secrets(mut text: String, secrets: &[String]) -> String {
@@ -1066,7 +1047,6 @@ mod tests {
             created_by: Some("alice".into()),
             creator_credential: (true, Some("2026-07-26T00:00:00Z".into())),
             repo_env_generation: vec![("REGISTRY_TOKEN".into(), "2026-07-26T00:00:00Z".into())],
-            repo_config_generation: Some((128, 1_722_000_000_000_000_000)),
             metadata_agent: "codex".into(),
         }
     }
@@ -1215,10 +1195,6 @@ mod tests {
             },
             MetadataSource {
                 repo_env_generation: vec![("REGISTRY_TOKEN".into(), "2026-07-26T00:01:00Z".into())],
-                ..source.clone()
-            },
-            MetadataSource {
-                repo_config_generation: Some((129, 1_722_000_000_000_000_001)),
                 ..source.clone()
             },
             MetadataSource {

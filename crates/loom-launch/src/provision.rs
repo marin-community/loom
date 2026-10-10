@@ -17,7 +17,7 @@ use crate::auth::{Grant, Principal};
 use crate::runtime::{configure_session_github_auth, layer_launch_environment, set_env};
 use crate::scratch::{prepare_initial_scratch, scratch_note, write_prepared_initial_scratch};
 use crate::session::{self as session_mod, NewSession, Session};
-use crate::{agent, config, db, events, git, github, repo, setup, AppState, Db};
+use crate::{agent, db, events, git, github, repo, AppState};
 use weaver_api::operations::sessions;
 
 #[derive(Debug)]
@@ -302,104 +302,6 @@ async fn fetch_launch_issue(
     app.issue(&slug.owner, &slug.name, number).await
 }
 
-/// The configured wall-clock budget for a repo setup run.
-async fn setup_timeout(db: &Db) -> std::time::Duration {
-    let secs = config::get(db, "setup.timeout_secs")
-        .await
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(config::DEFAULT_SETUP_TIMEOUT_SECS as u64)
-        .max(1);
-    std::time::Duration::from_secs(secs)
-}
-
-fn repo_setup_for_profile(
-    cfg: &weaver_core::repo_config::RepoConfig,
-    restricted: bool,
-) -> Option<String> {
-    (!restricted).then(|| cfg.setup.script()).flatten()
-}
-
-/// Run a registered repo's `[setup]` script in the worktree before the agent
-/// starts, recording its lifecycle as `setup` events (so the session view shows
-/// it) and capturing full output to `setup.log` in the run dir. The caller has
-/// already confirmed the repo is allowlisted. Returns the outcome; the caller
-/// decides whether to launch the agent or leave the session in an error state.
-async fn run_repo_setup(
-    st: &AppState,
-    branch_id: &str,
-    work_dir: &std::path::Path,
-    run_dir: &std::path::Path,
-    script: &str,
-    env: &[(String, String)],
-) -> setup::SetupOutcome {
-    let timeout = setup_timeout(&st.db).await;
-    tracing::info!(branch = branch_id, work_dir = %work_dir.display(), timeout_secs = timeout.as_secs(), "running repo [setup] script");
-    events::record(
-        &st.db,
-        &st.bus,
-        branch_id,
-        "setup",
-        json!({ "phase": "started", "timeout_secs": timeout.as_secs() }),
-    )
-    .await
-    .ok();
-
-    let log_path = run_dir.join("setup.log");
-    let outcome = setup::run(work_dir, script, env, timeout, Some(&log_path))
-        .await
-        .unwrap_or_else(|e| setup::SetupOutcome {
-            success: false,
-            timed_out: false,
-            exit_code: None,
-            output: format!("failed to start setup: {e}"),
-            duration: std::time::Duration::ZERO,
-        });
-
-    // The full output lives in setup.log; the event carries a bounded tail so the
-    // timeline stays light.
-    let tail = tail_chars(&outcome.output, 4000);
-    events::record(
-        &st.db,
-        &st.bus,
-        branch_id,
-        "setup",
-        json!({
-            "phase": "finished",
-            "success": outcome.success,
-            "timed_out": outcome.timed_out,
-            "exit_code": outcome.exit_code,
-            "duration_ms": outcome.duration.as_millis() as u64,
-            "summary": outcome.summary(),
-            "output": tail,
-        }),
-    )
-    .await
-    .ok();
-    if outcome.success {
-        tracing::info!(branch = branch_id, "repo setup succeeded");
-    } else {
-        tracing::warn!(branch = branch_id, summary = %outcome.summary(), "repo setup failed");
-    }
-    outcome
-}
-
-/// The last `max` chars of `s` (whole string when shorter), prefixed with an
-/// elision marker when truncated. Keeps a setup-output event payload bounded.
-fn tail_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let tail: String = s
-        .chars()
-        .rev()
-        .take(max)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    format!("…(truncated)\n{tail}")
-}
-
 fn legacy_launch_selection(req: &sessions::launch::Input) -> LaunchSelection {
     let nonempty = |value: &Option<String>| {
         value
@@ -638,31 +540,6 @@ async fn create_inner(
     let repo_root = repo_root.canonicalize().unwrap_or(repo_root);
     tracing::debug!(repo_root = %repo_root.display(), "resolved repo root");
 
-    // The repo's committed `.weaver/config.toml`, read from its primary checkout.
-    // It supplies agent/model/effort defaults (below an explicit request, above
-    // the operator's global default), the `[env]` layer exported into the
-    // terminal, and the `[setup]` bootstrap run for allowlisted repos. A malformed
-    // file is a hard error *only* for an allowlisted repo (whose setup would run),
-    // so the breakage is visible at create time; for any other repo it would have
-    // supplied mere defaults, so we log and proceed with an empty config.
-    let repo_cfg = match weaver_core::repo_config::load(&repo_root) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            if repo::is_allowlisted(&st.db, &repo_root)
-                .await
-                .unwrap_or(false)
-            {
-                return Err(ProvisionError::invalid(format!(
-                    "repo .weaver/config.toml is invalid: {e}"
-                )));
-            }
-            tracing::warn!(repo = %repo_root.display(), error = %e,
-                "ignoring malformed .weaver/config.toml");
-            weaver_core::repo_config::RepoConfig::default()
-        }
-    };
-    tracing::debug!(repo_root = %repo_root.display(), "loaded repo config");
-
     // A GitHub App token is repository-scoped. A managed slug gives both the
     // preflight and issue seeding an exact installation target; local paths
     // resolve their registered identity or origin without contacting GitHub.
@@ -686,13 +563,11 @@ async fn create_inner(
         .map_err(|error| ProvisionError::invalid(error.to_string()))?;
     let runtime = agent.clone();
     tracing::debug!(agent = %agent, runtime = %runtime, "resolved agent runtime");
-    // The resolved launch environment: selected profile < per-repo repo_env <
-    // the repo file's [env]. It is needed before provisioning so a real agent
-    // launch can stop cleanly when the selected profile has no App access.
+    // Resolve the profile and repository tool environment before provisioning
+    // so launch can stop cleanly when the selected profile has no App access.
     let mut extra_env = layer_launch_environment(
         &st.db,
         &repo_root,
-        &repo_cfg,
         &profile_name,
         profile_environment,
         launch_profile.strict,
@@ -1158,105 +1033,6 @@ async fn create_inner(
                 tracing::debug!(%username, "no commit identity registered, using shared identity")
             }
             Err(e) => tracing::warn!(%username, "failed to resolve commit identity: {e}"),
-        }
-    }
-
-    // Per-repo setup: run the repo's committed `[setup]` script in the worktree
-    // before the agent starts — but ONLY for an allowlisted (registered) repo,
-    // because a setup script is arbitrary, privileged code (it runs with the
-    // shared container's credentials; design §6.4). A non-allowlisted repo's
-    // script is never executed (recorded as skipped); a failed run leaves the
-    // session in a visible error state instead of launching a half-provisioned
-    // worktree.
-    if let Some(script) = repo_setup_for_profile(&repo_cfg, launch_profile.restricted) {
-        tracing::debug!(branch = %branch.id, repo = %repo_root.display(), "repo declares a [setup] script");
-        if repo::is_allowlisted(&st.db, &repo_root)
-            .await
-            .unwrap_or(false)
-        {
-            let outcome =
-                run_repo_setup(&st, &branch.id, &work_dir, &run_dir, &script, &extra_env).await;
-            if !outcome.success {
-                tracing::warn!(branch = %branch.id, "repo setup failed, aborting launch before agent start");
-                // Record a visible error session state instead of launching into a
-                // half-provisioned worktree. The worktree is left intact for
-                // inspection; full output is in run dir's setup.log.
-                let session = crate::session_layout::insert_session(
-                    &st.db,
-                    &st.bus,
-                    &NewSession {
-                        id: session_id.clone(),
-                        branch_id: branch.id.clone(),
-                        work_dir: work_dir.display().to_string(),
-                        term_session: term_session.clone(),
-                        agent_kind: agent.clone(),
-                        model: model.clone(),
-                        effort: effort.clone(),
-                        status: "error".to_string(),
-                        github_repo: github_repo.clone(),
-                        parent_branch_id: parent.as_ref().map(|b| b.id.clone()),
-                        managed_by: None,
-                        created_by: created_by.clone(),
-                        protocol: protocol.clone(),
-                        origin: origin.to_string(),
-                        class: class.clone(),
-                        tracking_issue_id: tracking_issue,
-                    },
-                    &launch_policy,
-                )
-                .await?;
-                tracing::info!(
-                    branch = %branch.id,
-                    session = %session.id,
-                    status = %session.status,
-                    agent = %session.agent_kind,
-                    "session created"
-                );
-                let note = outcome.summary();
-                tags::set(
-                    &st.db,
-                    &branch.id,
-                    tags::ATTENTION_KEY,
-                    "blocked",
-                    &note,
-                    "loom",
-                )
-                .await
-                .ok();
-                events::record_tag(
-                    &st.db,
-                    &st.bus,
-                    &branch.id,
-                    tags::ATTENTION_KEY,
-                    "blocked",
-                    &note,
-                    "loom",
-                )
-                .await
-                .ok();
-                events::record(
-                    &st.db,
-                    &st.bus,
-                    &branch.id,
-                    "status",
-                    json!({ "status": "error", "reason": "repo setup failed" }),
-                )
-                .await
-                .ok();
-                return Ok(Provisioned { session, branch });
-            }
-        } else {
-            tracing::info!(repo = %repo_root.display(),
-                "skipping .weaver/config.toml [setup]: repo is not allowlisted");
-            events::record(
-                &st.db,
-                &st.bus,
-                &branch.id,
-                "setup",
-                json!({ "phase": "skipped", "reason": "repo not allowlisted" }),
-            )
-            .await
-            .ok();
         }
     }
 
@@ -1728,17 +1504,6 @@ mod tests {
         assert_eq!(selection.overrides.protocol.as_deref(), Some(""));
         assert_eq!(selection.overrides.mode, None);
         assert_eq!(selection.overrides.class, None);
-    }
-
-    #[test]
-    fn restricted_profile_ignores_repository_setup() {
-        let mut cfg = weaver_core::repo_config::RepoConfig::default();
-        cfg.setup.script = Some("touch should-not-run".to_string());
-        assert_eq!(
-            repo_setup_for_profile(&cfg, false).as_deref(),
-            Some("touch should-not-run")
-        );
-        assert!(repo_setup_for_profile(&cfg, true).is_none());
     }
 
     #[tokio::test]

@@ -14,7 +14,6 @@ pub mod github;
 pub mod issue;
 pub mod migrations;
 pub mod occurrence;
-pub mod repo_config;
 pub mod review;
 pub mod schedule;
 pub mod tags;

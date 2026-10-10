@@ -42,8 +42,7 @@ use serde_json::{json, Value};
 
 use crate::db::Db;
 use crate::runtime::{
-    configure_session_github_auth, layer_launch_environment, repo_cfg_or_default, set_env,
-    stamp_github_auth_mode,
+    configure_session_github_auth, layer_launch_environment, set_env, stamp_github_auth_mode,
 };
 use crate::session::{self as session_mod, NewSession, Session};
 use crate::AppState;
@@ -69,12 +68,10 @@ pub async fn resume_environment(
     st: &AppState,
     session: &Session,
     repo_root: &std::path::Path,
-    cfg: &weaver_core::repo_config::RepoConfig,
 ) -> Vec<(String, String)> {
     let mut env = crate::runtime::launch_environment(
         &st.db,
         repo_root,
-        cfg,
         &session.profile,
         session.policy_strict,
         session.policy_restricted,
@@ -782,11 +779,10 @@ pub async fn create_warm_session(
     };
 
     let term_session = format!("weaver-{session_id}");
-    let repo_cfg = repo_cfg_or_default(&repo_root);
+
     let mut extra_env = layer_launch_environment(
         &st.db,
         &repo_root,
-        &repo_cfg,
         &launch_profile.name,
         profile_environment,
         launch_profile.strict,
@@ -1164,8 +1160,7 @@ pub async fn adopt_terminal_into_acp(
         "adopting terminal session into acp");
     let work_dir = PathBuf::from(&session.work_dir);
     let repo_root = PathBuf::from(&branch.repo_root);
-    let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(st, session, &repo_root).await;
     rotate_session_token(&st.db, session, &mut extra_env).await?;
     let run_dir = db::run_dir(&session.id);
     let primer_file = stamped_primer_file(&run_dir, &session.policy_prelude);
@@ -1300,8 +1295,7 @@ pub async fn adopt_acp(
     } else {
         // The relay is gone — respawn the adapter and reopen the conversation.
         let repo_root = PathBuf::from(&branch.repo_root);
-        let repo_cfg = repo_cfg_or_default(&repo_root);
-        let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
+        let mut extra_env = resume_environment(st, session, &repo_root).await;
         rotate_session_token(&st.db, session, &mut extra_env).await?;
         let runtime = session.agent_kind.clone();
         let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
@@ -1574,12 +1568,9 @@ pub async fn resume_agent(
     let work_dir = PathBuf::from(&session.work_dir);
     // Restore the persisted positional prompt and any optional system primer.
     let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
-    // Re-launch with the same layered env the session started with, so a resumed
-    // session keeps its per-repo / config-file environment (not just the global
-    // agent_env).
+    // Rebuild the profile and repository tool environment for the resumed session.
     let repo_root = PathBuf::from(&branch.repo_root);
-    let repo_cfg = repo_cfg_or_default(&repo_root);
-    let mut extra_env = resume_environment(st, session, &repo_root, &repo_cfg).await;
+    let mut extra_env = resume_environment(st, session, &repo_root).await;
     rotate_session_token(&st.db, session, &mut extra_env).await?;
     let runtime = session.agent_kind.clone();
     tracing::info!(session = %session.id, branch = %branch.id, runtime = %runtime, work_dir = %work_dir.display(), "relaunching agent terminal for resume");

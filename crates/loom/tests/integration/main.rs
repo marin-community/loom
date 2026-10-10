@@ -29,6 +29,7 @@ mod mcp_conformance;
 mod pane;
 mod profiles;
 mod recover;
+mod repo_config;
 mod repos;
 mod reviews;
 mod scratch;

@@ -3,7 +3,6 @@
 pub mod handoff;
 pub mod metadata_assist;
 pub mod provision;
-pub mod setup;
 
 pub use loom_forge::AppState;
 pub use loom_forge::{

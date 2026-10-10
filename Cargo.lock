@@ -1759,7 +1759,6 @@ dependencies = [
  "axum",
  "chrono",
  "hex",
- "libc",
  "loom-forge",
  "percent-encoding",
  "regex",
@@ -3849,7 +3848,6 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
- "toml",
  "tracing",
 ]
 

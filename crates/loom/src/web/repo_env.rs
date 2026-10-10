@@ -1,7 +1,6 @@
 use weaver_api::operations::repos::env as ops;
 use weaver_api::RepoEnvView;
 
-use crate::agent_env;
 use crate::db::Db;
 use crate::repo_env;
 
@@ -49,7 +48,7 @@ async fn env_set_operation(
     input: ops::set::Input,
 ) -> ApiResult<ops::set::Output> {
     let st = context.state;
-    if let Err(why) = agent_env::validate_name(&input.name) {
+    if let Err(why) = repo_env::validate_name(&input.name) {
         return Err(AppError::bad_request(why));
     }
     let repo_root = resolve_repo_root(input.repo_root.as_deref(), input.cwd.as_deref()).await?;

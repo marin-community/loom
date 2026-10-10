@@ -1,11 +1,8 @@
 //! Per-repo environment variables, stored in the `repo_env` table.
 //!
-//! These layer on top of the operator's global [`crate::agent_env`] when a
-//! session launches against a repo: the resolved env is
-//! `agent_env` < `repo_env` < the repo's own `.weaver/config.toml` `[env]`
-//! ([`weaver_core::repo_config`]), so a per-repo value overrides a global one and
-//! the committed repo file overrides both. They are exported into the interactive
-//! agent terminal alongside loom's `WEAVER_*` / `LOOM_TOKEN`.
+//! Repository tool variables overlay the selected profile for ordinary sessions.
+//! Strict profiles keep their declared values; restricted profiles omit this layer.
+//! Codex control variables belong exclusively to administrator-managed profiles.
 //!
 //! Values are **write-only**: the API returns names and timestamps but never the
 //! value, because these hold per-repo secrets (a registry token, a database URL)
@@ -13,17 +10,22 @@
 //! not isolation: in loom's single shared container any agent can still read the
 //! exported environment. See the shared-loom design §6.4.
 //!
-//! Names are validated as POSIX shell identifiers and may not use loom's reserved
-//! `WEAVER_`/`LOOM_` prefixes or GitHub client token names — the same rule as
-//! `agent_env`, reused via
-//! [`crate::agent_env::validate_name`], since `repo_env` is exported by the same
-//! launch script.
-
 use anyhow::Result;
 use sqlx::Row;
 use weaver_api::RepoEnvVarView;
 
 use crate::db::{now_iso, Db};
+
+/// Repository tool configuration must not supply Codex's launch policy.
+pub fn validate_name(name: &str) -> std::result::Result<(), String> {
+    crate::agent_env::validate_name(name)?;
+    if name.starts_with("CODEX_") || matches!(name, "INITIAL_AGENT_MODE" | "DEFAULT_AUTH_REQUEST") {
+        return Err(format!(
+            "name '{name}' is reserved for administrator-managed agent configuration"
+        ));
+    }
+    Ok(())
+}
 
 /// The variables' metadata for a repo, ordered by name. Never includes values.
 pub async fn list(db: &Db, repo_root: &str) -> Result<Vec<RepoEnvVarView>> {
@@ -56,7 +58,7 @@ pub async fn pairs(db: &Db, repo_root: &str) -> Result<Vec<(String, String)>> {
 }
 
 /// Upsert one variable for a repo. The caller is expected to
-/// [`crate::agent_env::validate_name`] first; this only touches the database.
+/// [`validate_name`] first; this only touches the database.
 pub async fn set(db: &Db, repo_root: &str, name: &str, value: &str) -> Result<()> {
     let now = now_iso();
     sqlx::query(
@@ -90,9 +92,8 @@ pub async fn remove(db: &Db, repo_root: &str, name: &str) -> Result<bool> {
 
 /// Overlay `over` onto `base` in place: a name already present is overwritten
 /// (the higher layer wins) keeping its position; a new name is appended. The
-/// launch env is built by layering each source in priority order — global
-/// `agent_env`, then `repo_env`, then the repo file's `[env]` — so the last
-/// writer of any name wins, while preserving a stable export order.
+/// launch env overlays permitted repository values onto the selected profile,
+/// preserving a stable export order.
 pub fn layer(base: &mut Vec<(String, String)>, over: impl IntoIterator<Item = (String, String)>) {
     for (key, value) in over {
         match base.iter_mut().find(|(name, _)| *name == key) {

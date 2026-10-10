@@ -67,7 +67,7 @@ and the rule for placing a new module.
 | `crates/loom-policy/src/profile.rs` | named launch policy, including provider-neutral `mcp_access` resolution and the restricted-profile trust boundary |
 | `crates/loom-core/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
 | `crates/loom-launch/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
-| `crates/loom-launch/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree/setup lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
+| `crates/loom-launch/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
 | `crates/loom-ctx/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
 | `crates/loom-store/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom-store/src/channels.rs` | same-id session channels and custom communication contexts: atomic creation, append-only typed messages, per-subject subscriptions/read markers, lifecycle, and runtime-delivery receipts |
@@ -261,10 +261,9 @@ sessions and chat in local SQLite.
   `weaver-core::config::REGISTRY`; reads resolve in that order. Both binaries
   use the same helpers. Personal overrides use `user_preferences`, keyed by
   username and preference key. See
-  [configuration policy](configuration.md). **Per-repo** conventions instead
-  live in a committed `.weaver/config.toml` read by
-  `weaver-core::repo_config` — distinct from global settings, and resolved
-  repo-file → builtin-default like a repo's own `WEAVER.md`.
+  [configuration policy](configuration.md). Repository workflow instructions
+  live in `WEAVER.md` and `AGENTS.md`.
+  Launch policy belongs to administrator-managed profiles.
 - **Worktrees** live under `<repo>/.worktrees/<slug>` on `weaver/<slug>`
   (unless `--branch` reused an existing branch).
 - **Which repo a session forks from** is either a local checkout (`CreateReq.cwd`
@@ -1121,7 +1120,7 @@ Profiles select reviewed built-in MCP capability sets such as
 `loom/github/comment@v1`; the MCP registry expands them into exact permissions at
 session creation and derives the trusted aggregate-server command from those stamped
 rules. Repository/profile data never supplies executable MCP configuration.
-Restricted launch and recovery omit repository environment/setup and Claude
+Restricted launch and recovery omit repository environment and Claude
 user/project/local settings. Repository reads are path-scoped, and GitHub
 mutations use a fixed MCP bridge backed by a session-scoped REST endpoint. Loom
 uses the configured GitHub App client to call GitHub's REST API against the
