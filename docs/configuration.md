@@ -111,9 +111,8 @@ This precedence applies only to registered, non-secret global settings. Secrets
 stay in the environment, profile secret references, or the credential-specific
 store and are never returned by the settings API.
 
-Loom ignores `.weaver/config.toml`, including its setup, environment, and agent
-sections. Launch policy belongs to administrator-managed profiles. Repository
-workflow instructions belong in `WEAVER.md` and `AGENTS.md`.
+Launch policy belongs to administrator-managed profiles. Repository workflow
+instructions belong in `WEAVER.md` and `AGENTS.md`.
 
 Per-repository tool environment values can be stored with `loom repos env set`.
 They cannot set `CODEX_*`, `INITIAL_AGENT_MODE`, or `DEFAULT_AUTH_REQUEST`;

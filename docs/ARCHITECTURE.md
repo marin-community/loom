@@ -263,8 +263,7 @@ sessions and chat in local SQLite.
   username and preference key. See
   [configuration policy](configuration.md). Repository workflow instructions
   live in `WEAVER.md` and `AGENTS.md`.
-  Loom does not read `.weaver/config.toml` or execute repository setup scripts;
-  launch policy belongs to administrator-managed profiles.
+  Launch policy belongs to administrator-managed profiles.
 - **Worktrees** live under `<repo>/.worktrees/<slug>` on `weaver/<slug>`
   (unless `--branch` reused an existing branch).
 - **Which repo a session forks from** is either a local checkout (`CreateReq.cwd`
