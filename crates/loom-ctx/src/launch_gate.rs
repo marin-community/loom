@@ -1,9 +1,9 @@
-//! Namespaced serialization for launch and attachment invariants.
+//! Namespaced serialization for launch, attachment, and channel delivery invariants.
 //!
 //! Git stores refs and worktree metadata in one repository-wide namespace.
 //! Provisioning two sessions concurrently against the same checkout therefore
 //! races clone/fetch, branch selection, and `git worktree add`. Profile
-//! admission and per-session Scratch mutation have similar check-then-write
+//! admission, channel delivery, and per-session Scratch mutation have similar check-then-write
 //! boundaries. One namespaced registry keeps those domains independent.
 
 use std::collections::HashMap;
@@ -20,6 +20,7 @@ enum LaunchGateKey {
     Session(String),
     Managed(String),
     Scratch(PathBuf),
+    ChannelDelivery(String, String),
 }
 
 #[derive(Clone, Default)]
@@ -116,6 +117,20 @@ impl RepoLaunchGate {
             .await
     }
 
+    /// Serialize a channel binding's acceptance check, runtime enqueue, and
+    /// delivery receipt so overlapping retries cannot enqueue the same notice.
+    pub async fn acquire_channel_delivery(
+        &self,
+        message_id: &str,
+        binding_id: &str,
+    ) -> RepoLaunchPermit {
+        self.acquire_key(LaunchGateKey::ChannelDelivery(
+            message_id.to_string(),
+            binding_id.to_string(),
+        ))
+        .await
+    }
+
     /// Serialize limit validation and file mutation for one worktree's Scratch.
     ///
     /// Completed and replacement sessions can share a worktree, so the path is
@@ -133,6 +148,25 @@ impl RepoLaunchGate {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn channel_delivery_serializes_matching_receipts_only() {
+        let gate = RepoLaunchGate::default();
+        let owner = gate.acquire_channel_delivery("notice", "parent").await;
+        let mut first = Box::pin(gate.acquire_channel_delivery("notice", "parent"));
+        let mut second = Box::pin(gate.acquire_channel_delivery("notice", "parent"));
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        let mut different_binding = Box::pin(gate.acquire_channel_delivery("notice", "observer"));
+        assert!(futures_util::poll!(different_binding.as_mut()).is_ready());
+        let mut different_message = Box::pin(gate.acquire_channel_delivery("other", "parent"));
+        assert!(futures_util::poll!(different_message.as_mut()).is_ready());
+        drop(owner);
+        let first = first.await;
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
+        drop(first);
+        second.await;
+    }
 
     #[tokio::test]
     async fn same_repo_waits_until_the_agent_start_permit_drops() {

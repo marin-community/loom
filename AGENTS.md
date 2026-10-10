@@ -85,16 +85,41 @@ when you're ready to land. The rules it enforces:
 - **Open a PR; never push to or merge `main`.** Branch →
   `./scripts/pre-commit.sh` + relevant tests → the documented lint-review
   decision → `gh pr create`. A weaver worktree is already on its own branch;
-  finishing means opening the PR, not integrating it yourself.
+  finishing means opening the PR, not integrating it yourself. If delegated
+  scope ends at a candidate commit or review, the immediate parent owns the
+  push/PR disposition; hand off within that scope.
 - **Write in the project's voice** — no self-attribution in commits or PRs
   ("Generated with…", "Co-Authored-By: <tool>", and the like).
 - **Keep the branch synced with `main`** when it falls behind or conflicts.
 - **Drive the PR to green, then hand off — local green is not CI green.** CI runs
   more than the local gate (Playwright `e2e/`, CodeQL, a clean-checkout SPA
   build). After pushing, block on `gh pr checks <n> --watch --fail-fast`, fix
-  failures until green, and address any comments already present. Only **then**
-  raise `loom status set --tag attention --message "ready for review"` and hand off to the
-  coordinator/human final reviewer; while CI runs you are `ok`, not done.
+  failures until green, and address any comments already present. Then hand off
+  the verified scope. Local green alone is not a claim of CI or integration
+  readiness.
+
+## Delegated review and handoff
+
+A delegated worker or reviewer hands work to its **immediate parent**, which
+owns review follow-ups and repairs. `ready-for-review`, `approval`,
+`request-changes`, `failedchecks`, and `context` are agent review outcomes and
+remain `ok`; they do not request human attention. Publish a typed result on your
+**own** channel with `loom channels send --kind result "<outcome, resources,
+checks, limits, and required follow-up>"`. That handoff wakes the parent;
+ordinary status updates or ending a turn do not.
+
+For an agent-owned blocker, keep `ok` and send a typed `parent_help` result with
+the concrete blocker and help needed. The parent handles it or escalates through
+the agent hierarchy. Use `attention` or `blocked` only for a genuinely unresolved
+human decision or access requirement after that escalation. Do not ask the user
+to manage workers, reviewers, or agent-owned repairs.
+Human review requests identify a concrete unresolved decision and reviewable
+resources; they are not the default outcome of finishing an agent review.
+
+Before ending a delegated turn, verify your own channel is open with its session
+delivery binding and correct parentage, save the handoff state, and send the
+typed result. If waiting on children, save state and end the turn instead of
+busy polling. Completion of a child turn alone is not integration readiness.
 
 ## Conventions
 

@@ -1238,7 +1238,10 @@ mod tests {
             assert!(matches!(
                 parsed.cmd,
                 Cmd::Registered(RegisteredCliCommand::Sessions(
-                    SessionCmd::Interrupt { session }
+                    SessionCmd::Interrupt {
+                        session,
+                        retry_notice: None,
+                    }
                 )) if session == "task-1"
             ));
         }

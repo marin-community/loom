@@ -555,6 +555,10 @@ pub mod interrupt {
     pub struct Input {
         #[operand(context)]
         pub session: String,
+        /// Retry the parent notice for this system interruption receipt, without
+        /// interrupting the child again. Omit for a new interruption.
+        #[serde(default)]
+        pub retry_notice: Option<String>,
     }
 
     pub type Output = SessionInterruptResult;

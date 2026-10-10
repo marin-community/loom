@@ -573,6 +573,26 @@ backends: `send` cancels a live turn and starts the message as a normal prompt,
 and `preview` renders the last journal blocks as compact plain text instead of
 a vt100 screen capture.
 
+A successful `sessions.interrupt` writes a system interruption receipt on the
+child's channel, then sends a system-authored ordinary message to its immediate
+parent's open channel. Its `payload.event_type` is `child_interrupted`; the
+authenticated `actor` is the native channel subject (`kind`/`id`), and source
+channel/message IDs link the notice to the receipt. This is an interruption
+request, never a result or an assertion that work is complete. Delivery queues
+behind an active ACP parent turn and wakes an idle parent. The interrupted child
+is excluded from delivery even if subscribed to the parent channel.
+
+The receipt ID is returned as `interruption_message_id`. A notice persistence or
+delivery failure returns an explicit partial-success error (`interrupted: true`)
+with that ID as `retry_notice`. `loom sessions interrupt <child> --retry-notice
+<receipt>` retries only the linked notice: it does not cancel or resume the
+child. The parent message is idempotent per receipt; existing delivery receipts
+skip bindings already accepted by a runtime. As with other channel deliveries,
+acceptance and its receipt are separate writes, so a crash between them can
+redeliver. Missing or archived parents are skipped. If saving the child receipt
+itself fails, the response reports interruption success but no durable retry ID;
+inspect the child before making another interruption request.
+
 **Embedded editor.** The optional editor is a lazy per-session code-server
 process rooted at the worktree and bound to loopback with its own authentication
 disabled. It is reachable only through Loom's authenticated same-origin

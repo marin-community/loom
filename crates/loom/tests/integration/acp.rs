@@ -1584,6 +1584,415 @@ async fn child_result_waits_for_parent_acp_turn() {
     }));
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_interruption_queues_for_active_parent_and_wakes_idle_parent() {
+    let ts = TestServer::start().await;
+    let parent = "interrupt-parent";
+    let child = "interrupt-child";
+    start_new(&ts, parent, None, None).await;
+    start_new(&ts, child, None, None).await;
+    sqlx::query("UPDATE sessions SET parent_session_id = ? WHERE id = ?")
+        .bind(parent)
+        .bind(child)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    // Even an explicit child subscription must not resume the interrupted child.
+    loom::channels::set_subscription(
+        &ts.state.db,
+        parent,
+        &loom::channels::Subject::new(loom::channels::SubjectKind::Session, child),
+        loom::channels::SubscriptionMode::Deliver,
+    )
+    .await
+    .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({
+                "session": parent, "text": "wait:3000|say:parent finished normally",
+            }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({
+                "session": child, "text": "wait:3000|say:must be cancelled",
+            }),
+        )
+        .await
+        .unwrap();
+    let first = ts
+        .client
+        .post("/api/sessions/interrupt", json!({"session": child}))
+        .await
+        .unwrap();
+    assert_eq!(first["interrupted"], true);
+    let queued = session_mod::get(&ts.state.db, parent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(queued
+        .pending_prompt
+        .as_deref()
+        .is_some_and(|text| text.contains(child)));
+    let chat = poll_chat(&ts, parent, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(
+        |b| b["kind"] == "agent_message" && b["payload"]["text"] == "parent finished normally"
+    ));
+    assert!(!blocks
+        .iter()
+        .any(|b| b["kind"] == "turn_end" && b["payload"]["stop_reason"] == "cancelled"));
+    assert!(blocks.iter().any(|b| b["kind"] == "user_message"
+        && b["payload"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(child))));
+
+    // An idle parent dispatches the notice as a new turn, with no manual send.
+    ts.client
+        .post("/api/sessions/interrupt", json!({"session": child}))
+        .await
+        .unwrap();
+    let chat = poll_chat(&ts, parent, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 3
+    })
+    .await;
+    assert_eq!(
+        count_kind(chat["blocks"].as_array().unwrap(), "user_message"),
+        3
+    );
+    let child_chat = poll_chat(&ts, child, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 1
+    })
+    .await;
+    let blocks = child_chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "user_message"), 1);
+    assert!(blocks
+        .iter()
+        .any(|b| b["kind"] == "turn_end" && b["payload"]["stop_reason"] == "cancelled"));
+    let notices = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({"channel": parent, "peek": true}),
+        )
+        .await
+        .unwrap();
+    let notices = notices.as_array().unwrap();
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert_eq!(notice["kind"], "message");
+        assert_eq!(notice["author_kind"], "system");
+        assert_eq!(notice["payload"]["event_type"], "child_interrupted");
+        assert_eq!(notice["payload"]["parent_session_id"], parent);
+        assert_eq!(notice["payload"]["actor"]["kind"], "user");
+        assert_eq!(notice["payload"]["mechanism"], "acp_cancel");
+        assert_eq!(notice["deliveries"].as_array().unwrap().len(), 1);
+        assert_eq!(notice["deliveries"][0]["target_session_id"], parent);
+        assert_eq!(notice["deliveries"][0]["state"], "delivered");
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_interruption_notice_failure_is_durable_and_retry_does_not_cancel_again() {
+    let ts = TestServer::start().await;
+    let parent = "notice-failure-parent";
+    let child = "notice-failure-child";
+    make_session(&ts, parent).await;
+    start_new(&ts, child, None, None).await;
+    sqlx::query("UPDATE sessions SET parent_session_id = ? WHERE id = ?")
+        .bind(parent)
+        .bind(child)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER reject_interrupt_notice BEFORE INSERT ON channel_messages
+        WHEN NEW.channel_id = 'notice-failure-parent'
+        BEGIN SELECT RAISE(FAIL, 'injected notice failure'); END",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let response = http
+        .post(format!("http://{}/api/sessions/interrupt", ts.addr))
+        .json(&json!({"session": child}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let response: Value = response.json().await.unwrap();
+    assert_eq!(response["interrupted"], true);
+    let receipt_id = response["interruption_message_id"].as_str().unwrap();
+    let receipt = loom::channels::refresh_message(&ts.state.db, receipt_id)
+        .await
+        .unwrap();
+    assert_eq!(receipt.kind, "system");
+    assert_eq!(receipt.author_kind, "system");
+    assert_eq!(receipt.payload["child_session_id"], child);
+    sqlx::query("DROP TRIGGER reject_interrupt_notice")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    // A later child turn must survive every retry of the old notice.
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({
+                "session": child, "text": "wait:3000|say:child continued explicitly",
+            }),
+        )
+        .await
+        .unwrap();
+    let request = json!({"session": child, "retry_notice": receipt_id});
+    let response = http
+        .post(format!("http://{}/api/sessions/interrupt", ts.addr))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let notices = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({"channel": parent, "peek": true}),
+        )
+        .await
+        .unwrap();
+    let notice = &notices[0];
+    assert_eq!(notice["deliveries"][0]["state"], "failed");
+    assert_eq!(notice["payload"]["source_message_id"], receipt_id);
+    acp::start(&ts.state.acp_ctx(), parent, transient_launch(&ts, vec![]))
+        .await
+        .unwrap();
+    // Release a batch of overlapping HTTP retries against the same failed
+    // binding. They must produce one runtime input, not just one durable item.
+    let permit = ts
+        .state
+        .launch_gate
+        .acquire_channel_delivery(
+            notice["id"].as_str().unwrap(),
+            &weaver_api::channel_session_binding_id(parent),
+        )
+        .await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(9));
+    let mut retries = Vec::new();
+    for _ in 0..8 {
+        let barrier = barrier.clone();
+        let http = http.clone();
+        let request = request.clone();
+        let addr = ts.addr;
+        retries.push(tokio::spawn(async move {
+            barrier.wait().await;
+            let response = http
+                .post(format!("http://{addr}/api/sessions/interrupt"))
+                .json(&request)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            response.json::<Value>().await.unwrap()
+        }));
+    }
+    barrier.wait().await;
+    drop(permit);
+    for retry in retries {
+        let retried = retry.await.unwrap();
+        assert_eq!(retried["parent_notice_message_id"], notice["id"]);
+    }
+    let chat = poll_chat(&ts, parent, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 1
+    })
+    .await;
+    assert_eq!(
+        count_kind(chat["blocks"].as_array().unwrap(), "user_message"),
+        1
+    );
+    let child_chat = poll_chat(&ts, child, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 1
+    })
+    .await;
+    assert!(child_chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["kind"] == "agent_message"
+            && b["payload"]["text"] == "child continued explicitly"));
+    let notices = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({"channel": parent, "peek": true}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(notices.as_array().unwrap().len(), 1);
+    assert_eq!(notices[0]["deliveries"][0]["state"], "delivered");
+    assert_eq!(notices[0]["deliveries"][0]["attempts"], 2);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_interruption_failure_has_no_notice_and_unavailable_parent_is_graceful() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "failed-interrupt").await;
+    let http = reqwest::Client::new();
+    let failure = http
+        .post(format!("http://{}/api/sessions/interrupt", ts.addr))
+        .json(&json!({"session": "failed-interrupt"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failure.status(), reqwest::StatusCode::CONFLICT);
+    let messages = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({"channel": "failed-interrupt", "peek": true}),
+        )
+        .await
+        .unwrap();
+    assert!(messages.as_array().unwrap().is_empty());
+    start_new(&ts, "no-parent-child", None, None).await;
+    let root = ts
+        .client
+        .post(
+            "/api/sessions/interrupt",
+            json!({"session": "no-parent-child"}),
+        )
+        .await
+        .unwrap();
+    assert!(root["parent_notice_message_id"].is_null());
+    make_session(&ts, "closed-parent").await;
+    sqlx::query(
+        "UPDATE sessions SET parent_session_id = 'closed-parent' WHERE id = 'no-parent-child'",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    loom::channels::set_subscription(
+        &ts.state.db,
+        "closed-parent",
+        &loom::channels::Subject::new(loom::channels::SubjectKind::Session, "closed-parent"),
+        loom::channels::SubscriptionMode::Observe,
+    )
+    .await
+    .unwrap();
+    let unbound = http
+        .post(format!("http://{}/api/sessions/interrupt", ts.addr))
+        .json(&json!({"session": "no-parent-child"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unbound.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let unbound: Value = unbound.json().await.unwrap();
+    assert_eq!(unbound["interrupted"], true);
+    assert!(unbound["retry_notice"].is_string());
+    let undelivered = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({
+                "channel": "closed-parent", "peek": true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        undelivered.as_array().unwrap().len(),
+        1,
+        "an unbound parent's notice remains durable"
+    );
+    assert!(undelivered[0]["deliveries"].as_array().unwrap().is_empty());
+    sqlx::query("UPDATE channels SET state = 'archived' WHERE id = 'closed-parent'")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let closed = ts
+        .client
+        .post(
+            "/api/sessions/interrupt",
+            json!({"session": "no-parent-child"}),
+        )
+        .await
+        .unwrap();
+    assert!(closed["parent_notice_message_id"].is_null());
+    sqlx::query("DELETE FROM channels WHERE id = 'closed-parent'")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let missing = ts
+        .client
+        .post(
+            "/api/sessions/interrupt",
+            json!({"session": "no-parent-child"}),
+        )
+        .await
+        .unwrap();
+    assert!(missing["parent_notice_message_id"].is_null());
+    sqlx::query(
+        "UPDATE sessions SET parent_session_id = 'absent-parent' WHERE id = 'no-parent-child'",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let absent = ts
+        .client
+        .post(
+            "/api/sessions/interrupt",
+            json!({"session": "no-parent-child"}),
+        )
+        .await
+        .unwrap();
+    assert!(absent["parent_notice_message_id"].is_null());
+    sqlx::query("UPDATE sessions SET parent_session_id = id WHERE id = 'no-parent-child'")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let self_parent = ts
+        .client
+        .post(
+            "/api/sessions/interrupt",
+            json!({"session": "no-parent-child"}),
+        )
+        .await
+        .unwrap();
+    assert!(self_parent["parent_notice_message_id"].is_null());
+
+    sqlx::query(
+        "CREATE TRIGGER reject_interrupt_receipt BEFORE INSERT ON channel_messages
+        WHEN NEW.channel_id = 'no-parent-child'
+        BEGIN SELECT RAISE(FAIL, 'injected receipt failure'); END",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let partial = http
+        .post(format!("http://{}/api/sessions/interrupt", ts.addr))
+        .json(&json!({"session": "no-parent-child"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(partial.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+    let partial: Value = partial.json().await.unwrap();
+    assert_eq!(partial["interrupted"], true);
+    assert!(
+        partial["interruption_message_id"].is_null(),
+        "a failed durable write cannot invent a retry receipt"
+    );
+}
+
 /// Retracting unseen feedback is serialized by the ACP task: either the browser
 /// gets the exact durable text back for editing, or a turn boundary wins and the
 /// request conflicts. It can never both dispatch and return the same prompt.

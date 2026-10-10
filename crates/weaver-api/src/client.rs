@@ -265,6 +265,7 @@ impl Client {
         let result = self
             .invoke::<interrupt::Op>(&interrupt::Input {
                 session: key.to_string(),
+                retry_notice: None,
             })
             .await?;
         Ok(serde_json::to_value(result)?)
