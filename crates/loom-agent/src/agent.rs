@@ -1194,6 +1194,7 @@ pub async fn build_acp_launch(
             "1".to_string(),
         ));
     }
+    let mut additional_directories = Vec::new();
     if is_codex {
         // Adapter-contract env, deferring to any operator-provided value.
         push_env_default(
@@ -1202,7 +1203,8 @@ pub async fn build_acp_launch(
             r#"{"methodId":"api-key"}"#,
         );
         let codex_mode = codex_acp_mode(spec.mode);
-        configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
+        additional_directories =
+            configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
     }
     let mcp_servers =
@@ -1233,6 +1235,7 @@ pub async fn build_acp_launch(
         env,
         env_clear: spec.env_clear,
         mcp_servers,
+        additional_directories,
         new_or_load,
         // Codex boots directly in its mapped mode via `INITIAL_AGENT_MODE`; a
         // post-setup `session/set_mode` would re-send a claude-flavored id it
@@ -1353,7 +1356,7 @@ fn configure_codex_acp(
     model: &str,
     effort: &str,
     codex_mode: &str,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let mut config = match env
         .iter()
         .rev()
@@ -1409,12 +1412,30 @@ fn configure_codex_acp(
         }
     }
 
+    // The adapter supplies its own sandbox policy on every turn. Configured
+    // writable roots must also travel in the ACP session's additionalDirectories.
+    let mut additional_directories: Vec<String> = config
+        .get("sandbox_workspace_write")
+        .and_then(|sandbox| sandbox.get("writable_roots"))
+        .map(|roots| serde_json::from_value(roots.clone()))
+        .transpose()
+        .context("CODEX_CONFIG.sandbox_workspace_write.writable_roots must be an array of paths")?
+        .unwrap_or_default();
+    anyhow::ensure!(
+        additional_directories
+            .iter()
+            .all(|root| Path::new(root).is_absolute()),
+        "CODEX_CONFIG.sandbox_workspace_write.writable_roots must contain absolute paths"
+    );
+    let mut seen = HashSet::new();
+    additional_directories.retain(|root| seen.insert(root.clone()));
+
     env.retain(|(name, _)| name != "CODEX_CONFIG");
     env.push((
         "CODEX_CONFIG".to_string(),
         Value::Object(config.clone()).to_string(),
     ));
-    Ok(())
+    Ok(additional_directories)
 }
 
 fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
@@ -2089,6 +2110,7 @@ fn transient_prompt_launch(incoming: &AcpLaunch) -> AcpLaunch {
     launch.env = env.into_iter().collect();
     launch.env_clear = true;
     launch.mcp_servers.clear();
+    launch.additional_directories.clear();
     launch.goal = None;
     launch.mode = Some("plan".to_string());
     launch.initial_model = None;
@@ -2526,6 +2548,7 @@ mod tests {
             ],
             env_clear: false,
             mcp_servers: vec![json!({"name":"loom"})],
+            additional_directories: vec!["/shared/cache".to_string()],
             new_or_load: NewOrLoad::New {
                 cwd: PathBuf::from("/worktree"),
                 meta: Some(json!({"provider":"options"})),
@@ -2553,6 +2576,7 @@ mod tests {
             assert!(!summary.env.iter().any(|(name, _)| name == denied));
         }
         assert!(summary.mcp_servers.is_empty());
+        assert!(summary.additional_directories.is_empty());
         assert!(summary.goal.is_none());
         assert_eq!(summary.mode.as_deref(), Some("plan"));
         assert!(summary.initial_model.is_none());
@@ -2574,6 +2598,7 @@ mod tests {
             ],
             env_clear: true,
             mcp_servers: vec![json!({"name":"github"})],
+            additional_directories: Vec::new(),
             new_or_load: NewOrLoad::New {
                 cwd: PathBuf::from("/worktree"),
                 meta: Some(json!({
@@ -2864,6 +2889,25 @@ mod tests {
                 config["features"]["network_proxy"]["domains"][host],
                 "allow"
             );
+        }
+    }
+
+    #[test]
+    fn codex_acp_rejects_invalid_writable_roots() {
+        for roots in [
+            serde_json::json!("/cache"),
+            serde_json::json!([1]),
+            serde_json::json!(["relative/cache"]),
+            serde_json::json!([""]),
+            Value::Null,
+        ] {
+            let mut env = vec![(
+                "CODEX_CONFIG".to_string(),
+                serde_json::json!({"sandbox_workspace_write": {"writable_roots": roots}})
+                    .to_string(),
+            )];
+            let error = configure_codex_acp(&mut env, "", "", "agent").unwrap_err();
+            assert!(error.to_string().contains("writable_roots"), "{error:#}");
         }
     }
 

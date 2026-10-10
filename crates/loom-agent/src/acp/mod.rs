@@ -113,6 +113,8 @@ pub struct AcpLaunch {
     pub env_clear: bool,
     /// Provider-neutral ACP v1 stdio MCP server descriptors.
     pub mcp_servers: Vec<Value>,
+    /// Operator-approved writable directories outside the session workspace.
+    pub additional_directories: Vec<String>,
     /// Open a fresh session or reload an existing one.
     pub new_or_load: NewOrLoad,
     /// The initial permission posture (`bypassPermissions`, `acceptEdits`,
@@ -377,7 +379,12 @@ impl AcpPromptClient {
         let opened = self
             .request(
                 method::SESSION_NEW,
-                wire::new_session_params(&cwd.to_string_lossy(), &launch.mcp_servers, meta),
+                wire::new_session_params(
+                    &cwd.to_string_lossy(),
+                    &launch.mcp_servers,
+                    &launch.additional_directories,
+                    meta,
+                ),
             )
             .await?;
         let opened: wire::NewSessionResult =
@@ -2067,6 +2074,7 @@ impl Task {
                 let params = wire::new_session_params(
                     &cwd.to_string_lossy(),
                     &launch.mcp_servers,
+                    &launch.additional_directories,
                     meta.as_ref(),
                 );
                 self.stream
@@ -2109,6 +2117,7 @@ impl Task {
                     acp_session_id,
                     &launch.cwd.to_string_lossy(),
                     &launch.mcp_servers,
+                    &launch.additional_directories,
                     meta.as_ref(),
                 );
                 self.stream
