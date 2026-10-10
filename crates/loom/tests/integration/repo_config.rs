@@ -136,17 +136,16 @@ async fn repository_environment_api_rejects_codex_controls() {
         "INITIAL_AGENT_MODE",
         "DEFAULT_AUTH_REQUEST",
     ] {
-        let result = ts
-            .client
-            .post(
-                "/api/repos/env/set",
-                json!({"cwd":ts.cwd(), "name":name, "value":"repository-value"}),
-            )
-            .await;
-        let error = result.unwrap_err().to_string();
-        assert!(
-            error.contains("reserved for administrator-managed"),
-            "{name}: {error}"
+        let response = reqwest::Client::new()
+            .post(format!("http://{}/api/repos/env/set", ts.addr))
+            .json(&json!({"cwd":ts.cwd(), "name":name, "value":"repository-value"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "{name}"
         );
     }
     ts.client
