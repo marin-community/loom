@@ -6,7 +6,7 @@ or an unrestricted developer environment. Loom supplies the security envelope;
 the workflow owns task semantics, stale-write checks, and prose policy.
 
 The stock `github_comment` profile uses Claude over ACP with no Loom prelude,
-no repository environment or setup script, no Claude user/project/local
+no repository environment, no Claude user/project/local
 settings, repository-scoped read tools, and a fixed GitHub issue/PR MCP tool.
 The profile selects that reviewed tool as `loom/github/comment@v1`; Loom expands
 the set into exact tool permissions when it stamps the session and launches the

@@ -34,37 +34,9 @@ impl GithubAuthMode {
 /// legible without adding a per-session lock registry.
 pub static LIFECYCLE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn config_env_pairs(cfg: &weaver_core::repo_config::RepoConfig) -> Vec<(String, String)> {
-    // Invalid shell identifiers and Loom's reserved prefixes could corrupt the
-    // export or shadow the environment inherited by every agent process.
-    cfg.env
-        .iter()
-        .filter(|(name, _)| match crate::agent_env::validate_name(name) {
-            Ok(()) => true,
-            Err(why) => {
-                tracing::warn!(name = %name, why = %why,
-                    "ignoring .weaver/config.toml [env] entry");
-                false
-            }
-        })
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// Load a repo's `.weaver/config.toml`, logging and degrading to the empty
-/// config on a parse error.
-pub fn repo_cfg_or_default(repo_root: &std::path::Path) -> weaver_core::repo_config::RepoConfig {
-    weaver_core::repo_config::load(repo_root).unwrap_or_else(|error| {
-        tracing::warn!(repo = %repo_root.display(), %error,
-            "ignoring malformed .weaver/config.toml");
-        weaver_core::repo_config::RepoConfig::default()
-    })
-}
-
 pub async fn layer_launch_environment(
     db: &Db,
     repo_root: &std::path::Path,
-    cfg: &weaver_core::repo_config::RepoConfig,
     profile_name: &str,
     mut env: Vec<(String, String)>,
     strict: bool,
@@ -82,19 +54,17 @@ pub async fn layer_launch_environment(
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|(name, _)| !crate::agent_env::is_github_token_name(name));
-    let config_pairs = config_env_pairs(cfg);
+        .filter(|(name, _)| crate::repo_env::validate_name(name).is_ok());
     if strict {
         // A strict profile's declared names are policy, not defaults. Repo
         // layers may add variables but cannot replace a profile-owned value.
-        for (name, value) in repo_pairs.chain(config_pairs) {
+        for (name, value) in repo_pairs {
             if !env.iter().any(|(existing, _)| existing == &name) {
                 env.push((name, value));
             }
         }
     } else {
         crate::repo_env::layer(&mut env, repo_pairs);
-        crate::repo_env::layer(&mut env, config_pairs);
     }
     tracing::debug!(repo = %repo_root_str, profile = profile_name, strict, env_vars = env.len(), "layered launch environment");
     env
@@ -103,7 +73,6 @@ pub async fn layer_launch_environment(
 pub async fn launch_environment(
     db: &Db,
     repo_root: &std::path::Path,
-    cfg: &weaver_core::repo_config::RepoConfig,
     profile_name: &str,
     strict: bool,
     restricted: bool,
@@ -111,7 +80,7 @@ pub async fn launch_environment(
     let env = crate::profile::env_pairs(db, profile_name)
         .await
         .unwrap_or_default();
-    layer_launch_environment(db, repo_root, cfg, profile_name, env, strict, restricted).await
+    layer_launch_environment(db, repo_root, profile_name, env, strict, restricted).await
 }
 
 /// Load the launching user's Loom-stored PAT into the image adapter's direct
@@ -339,12 +308,8 @@ mod tests {
         crate::repo_env::set(&db, &repo.display().to_string(), "REPO_SECRET", "leak")
             .await
             .unwrap();
-        let mut restricted_cfg = weaver_core::repo_config::RepoConfig::default();
-        restricted_cfg
-            .env
-            .insert("COMMITTED_SECRET".to_string(), "leak".to_string());
         assert_eq!(
-            launch_environment(&db, repo, &restricted_cfg, "github_comment", true, true).await,
+            launch_environment(&db, repo, "github_comment", true, true).await,
             vec![("ANTHROPIC_API_KEY".to_string(), "profile-token".to_string())]
         );
 
@@ -359,11 +324,21 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut strict_cfg = weaver_core::repo_config::RepoConfig::default();
-        strict_cfg
-            .env
-            .insert("SHARED_TOKEN".to_string(), "committed".to_string());
-        let strict = launch_environment(&db, repo, &strict_cfg, "default", true, false).await;
+        for name in [
+            "CODEX_CONFIG",
+            "CODEX_HOME",
+            "INITIAL_AGENT_MODE",
+            "DEFAULT_AUTH_REQUEST",
+        ] {
+            crate::repo_env::set(&db, &repo.display().to_string(), name, "legacy-policy")
+                .await
+                .unwrap();
+        }
+        for strict in [false, true] {
+            let env = launch_environment(&db, repo, "default", strict, false).await;
+            assert!(!env.iter().any(|(_, value)| value == "legacy-policy"));
+        }
+        let strict = launch_environment(&db, repo, "default", true, false).await;
         assert_eq!(
             strict
                 .iter()
@@ -371,12 +346,10 @@ mod tests {
                 .map(|(_, value)| value.as_str()),
             Some("profile")
         );
-        assert!(!strict.iter().any(|(name, _)| name == "CARGO_TARGET_DIR"));
 
         let legacy_snapshot = layer_launch_environment(
             &db,
             repo,
-            &weaver_core::repo_config::RepoConfig::default(),
             "default",
             vec![
                 ("GH_TOKEN".to_string(), "legacy-profile-token".to_string()),

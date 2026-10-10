@@ -573,11 +573,9 @@ async fn handoff_session_inner(
             session.work_dir
         )));
     }
-    let repo_cfg = runtime::repo_cfg_or_default(&repo_root);
     let mut extra_env = runtime::layer_launch_environment(
         &st.db,
         &repo_root,
-        &repo_cfg,
         &plan.profile,
         plan.profile_environment.clone(),
         plan.strict,

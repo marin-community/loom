@@ -10,7 +10,7 @@ should apply:
 | User | **Settings → Account** and **Preferences** | Personal sign-in, password, API tokens, optional interactive-session GitHub PAT, and terminal appearance |
 | Session profile | **Settings → Agents & profiles** or a deployment manifest | Agent/model policy, instructions, GitHub repository allowlists, shared environment, and write-only session secrets |
 | Deployment | The **Administration** settings; deployment IaC for the production source | Approved users and roles, GitHub organization admission, the Loom GitHub App, Slack App, federations, runtime policy, and machine-wide credentials or files |
-| Repository | `.weaver/config.toml`, `WEAVER.md`, and `AGENTS.md` | Non-secret repository setup, environment, and workflow instructions |
+| Repository | `WEAVER.md` and `AGENTS.md` | Repository workflow instructions |
 
 The Administration section is visible only to admins. Users can launch and
 operate sessions, repositories, reviews, per-session shells, and shared layout;
@@ -109,9 +109,16 @@ same provenance.
 
 This precedence applies only to registered, non-secret global settings. Secrets
 stay in the environment, profile secret references, or the credential-specific
-store and are never returned by the settings API. Per-repository setup,
-environment, and agent defaults belong in committed `.weaver/config.toml`; a
-repo-specific session primer belongs in `WEAVER.md`.
+store and are never returned by the settings API.
+
+Loom ignores `.weaver/config.toml`, including its setup, environment, and agent
+sections. Launch policy belongs to administrator-managed profiles. Repository
+workflow instructions belong in `WEAVER.md` and `AGENTS.md`.
+
+Per-repository tool environment values can be stored with `loom repos env set`.
+They cannot set `CODEX_*`, `INITIAL_AGENT_MODE`, or `DEFAULT_AUTH_REQUEST`;
+existing stored values with those names are excluded at launch and recovery.
+Configure those controls through the administrator-managed profile environment.
 
 ## Deployment manifests
 
