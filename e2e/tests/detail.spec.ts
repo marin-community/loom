@@ -224,6 +224,31 @@ test.describe('session detail view', () => {
     await expect(links.getByText('example.test/doc/0', { exact: true })).toHaveCount(0);
   });
 
+  test('a surfaced loom link opens in this window while an outside link stays new-tab', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'Route links by origin', name: 'local-links' });
+    await weaver.setStatus(
+      s,
+      'attention',
+      `Backlog at ${weaver.baseUrl}/issues and upstream at https://example.test/remote`,
+    );
+
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByText('Surfaced links (2)', { exact: true }).click();
+
+    const links = page.getByTestId('session-links');
+    const local = links.getByRole('link').filter({ hasText: '/issues' });
+    const remote = links.getByRole('link', { name: 'example.test/remote' });
+    await expect(local).not.toHaveAttribute('target', '_blank');
+    await expect(remote).toHaveAttribute('target', '_blank');
+
+    await local.click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/issues`);
+  });
+
   test('sets the browser tab title to the open session', async ({ page, weaver }) => {
     const s = await weaver.seedSession({
       goal: 'Name my tab',

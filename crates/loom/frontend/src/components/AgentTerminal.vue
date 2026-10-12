@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onActivated, onUnmounted, nextTick } from 'vue';
+import { useRouter } from 'vue-router';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
@@ -15,6 +16,7 @@ import {
   fetchTerminalConfig,
   ensureFontLoaded,
 } from '../lib/terminalConfig';
+import { openLocalLink } from '../lib/localLinks';
 import { operationPath } from '../api';
 
 // A real terminal in the browser: xterm.js bridged over a WebSocket to the
@@ -30,6 +32,8 @@ import { operationPath } from '../api';
 // path (`wsPath`, e.g. the operator scratch shell at `/api/shell/terminal`).
 // Exactly one is expected; `wsPath` wins when both are set.
 const props = defineProps<{ id?: string; wsPath?: string; autofocus?: boolean }>();
+
+const router = useRouter();
 
 const host = ref<HTMLElement | null>(null);
 type ConnState = 'connecting' | 'open' | 'reconnecting' | 'error';
@@ -101,12 +105,13 @@ const OP_RESIZE = 0x01;
 // Open a URL only if it is http(s); reject javascript:/data:/file: which an
 // untrusted agent could otherwise emit. Shared by the OSC 8 linkHandler (for
 // explicit hyperlinks) and the web-links addon (which linkifies bare URLs that
-// appear in plain output).
+// appear in plain output). A href back at this loom server opens in the
+// existing window; anything else opens a new tab.
 function openSafeUrl(uri: string) {
   try {
     const u = new URL(uri);
     if (u.protocol === 'http:' || u.protocol === 'https:') {
-      window.open(uri, '_blank', 'noopener,noreferrer');
+      if (!openLocalLink(router, uri)) window.open(uri, '_blank', 'noopener,noreferrer');
     }
   } catch {
     /* ignore unparseable URIs */

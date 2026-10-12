@@ -22,6 +22,7 @@ import {
 } from '../lib/sessionState';
 import { timeAgo } from '../lib/time';
 import { useSessionActions } from '../lib/sessionActions';
+import { isLocalHref, openLocalLink } from '../lib/localLinks';
 import StatusBadge from './StatusBadge.vue';
 import SignalChip from './SignalChip.vue';
 import TagPill from './TagPill.vue';
@@ -192,6 +193,13 @@ const surfacedLinks = computed<SurfacedLink[]>(() => {
   }
   return links;
 });
+
+// A link back at this loom server follows the hand-typed-link rule: it opens
+// in the existing window (SPA route when known), while an outside URL keeps
+// the new tab the anchor's target already asks for.
+function openSurfacedLink(e: MouseEvent, href: string) {
+  if (openLocalLink(router, href)) e.preventDefault();
+}
 
 function statusEventLine(event: WeaverEvent): string {
   const data = eventData(event);
@@ -653,9 +661,10 @@ async function submitHandoff() {
                     <li v-for="link in surfacedLinks" :key="link.href" class="min-w-0">
                       <a
                         :href="link.href"
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        :target="isLocalHref(link.href) ? undefined : '_blank'"
+                        :rel="isLocalHref(link.href) ? undefined : 'noopener noreferrer'"
                         class="block truncate text-accent hover:underline"
+                        @click="openSurfacedLink($event, link.href)"
                         >{{ link.label }}</a
                       >
                       <span class="text-2xs text-faint">{{ link.source }}</span>

@@ -10,6 +10,7 @@ import { ref, shallowRef, watch, onMounted, nextTick } from 'vue';
 import type { Router } from 'vue-router';
 import { parseMarkdown, loadSanitizer, type RenderContext } from '../markdown';
 import type { RenderCtx } from '../markdown-render';
+import { openLocalLink } from './localLinks';
 import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from '../types';
 
@@ -79,9 +80,11 @@ export function useMarkdownDoc(
 /**
  * Route an in-document link click. Heading permalinks / in-doc `#` anchors scroll
  * the target into view (never touching the SPA's hash router); smartdoc chips
- * (`data-issue` / `data-artifact`) push their internal route. Returns true when
- * the click was a document link we handled — so a caller can then fall through to
- * its own behaviour (e.g. a comment hit-test) only on a plain, non-link click.
+ * (`data-issue` / `data-artifact`) and any other href on this loom server open
+ * in the existing window — the SPA route through the router, other same-origin
+ * paths as a same-window load. Returns true when the click was a document link
+ * we handled — so a caller can then fall through to its own behaviour (e.g. a
+ * comment hit-test) only on a plain, non-link click.
  */
 export function routeDocLink(e: MouseEvent, router: Router, body: HTMLElement | null): boolean {
   const anchor = (e.target as HTMLElement).closest('a');
@@ -93,7 +96,12 @@ export function routeDocLink(e: MouseEvent, router: Router, body: HTMLElement | 
     router.push(href);
     return true;
   }
-  if (!href.startsWith('#')) return true; // external/other: let the <a> do its thing
+  if (!href.startsWith('#')) {
+    // A loom link opens in this window; anything else is external and keeps
+    // the new-tab target the renderer already stamped on it.
+    if (openLocalLink(router, href)) e.preventDefault();
+    return true;
+  }
   e.preventDefault();
   const id = decodeURIComponent(href.slice(1));
   body?.querySelector(`[id="${CSS.escape(id)}"]`)?.scrollIntoView({
