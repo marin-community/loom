@@ -85,6 +85,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
     let mut risk = None;
     let mut io = None;
     let mut grants = Vec::new();
+    let mut capabilities = Vec::new();
     let mut cli = None;
     let mut cli_aliases = Vec::new();
     let mut view_ty = None;
@@ -100,6 +101,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
             "risk" => risk = Some(as_ident(&entry.value)?),
             "io" => io = Some(as_ident(&entry.value)?),
             "grants" => grants = as_string_list(&entry.value)?,
+            "capabilities" => capabilities = as_string_list(&entry.value)?,
             "cli" => cli = Some(as_string(&entry.value)?),
             "cli_alias" => cli_aliases.push(as_string(&entry.value)?),
             "view" => view_ty = Some(as_ident(&entry.value)?),
@@ -168,6 +170,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
         }
     };
 
+    let capability_literals = capabilities.iter().map(|name| LitStr::new(name, span));
     let grant_literals = grants.iter().map(|grant| LitStr::new(grant, span));
 
     // `Scoped` derives from `scope`: every operation's resource check reduces
@@ -265,6 +268,7 @@ pub fn expand(args: TokenStream, item: TokenStream) -> syn::Result<TokenStream> 
                     risk: ::weaver_api::operations::OperationRisk::#risk,
                     io: ::weaver_api::operations::Io::#io,
                     grants: &[#(#grant_literals),*],
+                    capabilities: &[#(#capability_literals),*],
                     cli: #cli_tokens,
                     schema: <#input_ty as ::weaver_api::operations::Operands>::schema,
                     output_schema: || {

@@ -287,7 +287,8 @@ pub mod write {
     /// from a file or stdin is a convenience the command line applies before
     /// sending.
     #[operation(id = "artifacts.write", actor = SessionSelf, scope = Branch, risk = Write,
-                grants = ["loom/artifacts/write@v1"], cli = "artifacts write")]
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts write",
+                capabilities = ["x-loom-atomic-base-rev"])]
     pub struct Input {
         /// The artifact's name.
         #[operand(positional)]

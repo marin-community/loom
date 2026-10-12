@@ -79,43 +79,110 @@ pub struct NewRevision<'a> {
 /// a later write can retitle without a separate verb; passing the existing
 /// values is a no-op.
 pub async fn write(db: &Db, new: &NewRevision<'_>) -> Result<Artifact> {
-    let NewRevision {
+    write_resolved(
+        db,
+        &WriteRevision {
+            repo_root: new.repo_root,
+            scope: match new.branch_id {
+                Some(id) => WriteScope::ExactBranch(id),
+                None => WriteScope::Shared,
+            },
+            name: new.name,
+            kind: Some(new.kind),
+            title: Some(new.title),
+            content: new.content,
+            author: new.author,
+            base_rev: None,
+        },
+    )
+    .await
+}
+
+/// How a write resolves a name. Branch views fall back to the shared artifact;
+/// internal callers can target an exact branch to create a shadowing artifact.
+#[derive(Debug, Clone, Copy)]
+pub enum WriteScope<'a> {
+    Branch(&'a str),
+    Shared,
+    ExactBranch(&'a str),
+}
+
+/// An artifact edit, including its optional compare-and-swap prerequisite.
+/// Omitted metadata preserves the resolved envelope's values.
+pub struct WriteRevision<'a> {
+    pub repo_root: &'a str,
+    pub scope: WriteScope<'a>,
+    pub name: &'a str,
+    pub kind: Option<&'a str>,
+    pub title: Option<&'a str>,
+    pub content: &'a str,
+    pub author: &'a str,
+    pub base_rev: Option<i64>,
+}
+
+/// A rejected prerequisite. No storage changes have been made.
+#[derive(Debug)]
+pub struct RevisionConflict {
+    pub latest: i64,
+}
+
+impl std::fmt::Display for RevisionConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "stale artifact revision (latest: {})", self.latest)
+    }
+}
+
+impl std::error::Error for RevisionConflict {}
+
+/// Resolve identity, compare the prerequisite, preserve metadata and append
+/// under one immediate transaction. Return this write's envelope snapshot,
+/// even if another writer commits before the caller constructs its response.
+pub async fn write_resolved(db: &Db, new: &WriteRevision<'_>) -> Result<Artifact> {
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let WriteRevision {
         repo_root,
-        branch_id,
+        scope,
         name,
         kind,
         title,
         content,
         author,
+        base_rev,
     } = *new;
+    let (branch_id, fallback) = match scope {
+        WriteScope::Branch(id) => (Some(id), true),
+        WriteScope::ExactBranch(id) => (Some(id), false),
+        WriteScope::Shared => (None, false),
+    };
+    let existing = sqlx::query_as::<_, Artifact>(&format!(
+        "{SELECT_WITH_REV} WHERE a.repo_root = ? AND a.name = ?
+         AND (a.branch_id IS ? OR (? AND a.branch_id IS NULL))
+         ORDER BY a.branch_id IS NOT NULL DESC LIMIT 1"
+    ))
+    .bind(repo_root)
+    .bind(name)
+    .bind(branch_id)
+    .bind(fallback)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let latest = existing.as_ref().map_or(0, |a| a.rev);
+    if base_rev.is_some_and(|expected| expected != latest) {
+        tx.rollback().await?;
+        return Err(RevisionConflict { latest }.into());
+    }
+    let kind = kind
+        .or_else(|| existing.as_ref().map(|a| a.kind.as_str()))
+        .unwrap_or("markdown");
+    let title = title
+        .or_else(|| existing.as_ref().map(|a| a.title.as_str()))
+        .unwrap_or_default();
+    let branch_id = existing
+        .as_ref()
+        .map_or(branch_id, |a| a.branch_id.as_deref());
     let now = now_iso();
-    let mut tx = crate::db::begin_immediate(db).await?;
-
-    // Find (or create) the envelope. The lookup is exact on (repo, branch, name)
-    // — a write targets one specific scope, it never resolves shared-vs-scoped.
-    let existing: Option<(i64,)> =
-        match branch_id {
-            Some(bid) => {
-                sqlx::query_as(
-                    "SELECT id FROM artifacts WHERE repo_root = ? AND branch_id = ? AND name = ?",
-                )
-                .bind(repo_root)
-                .bind(bid)
-                .bind(name)
-                .fetch_optional(&mut *tx)
-                .await?
-            }
-            None => sqlx::query_as(
-                "SELECT id FROM artifacts WHERE repo_root = ? AND branch_id IS NULL AND name = ?",
-            )
-            .bind(repo_root)
-            .bind(name)
-            .fetch_optional(&mut *tx)
-            .await?,
-        };
-
-    let artifact_id = match existing {
-        Some((id,)) => {
+    let artifact_id = match &existing {
+        Some(a) => {
+            let id = a.id;
             sqlx::query("UPDATE artifacts SET kind = ?, title = ?, updated_at = ? WHERE id = ?")
                 .bind(kind)
                 .bind(title)
@@ -153,15 +220,7 @@ pub async fn write(db: &Db, new: &NewRevision<'_>) -> Result<Artifact> {
         }
     };
 
-    let next_rev: i64 = {
-        let max: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = ?")
-                .bind(artifact_id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .flatten();
-        max.unwrap_or(0) + 1
-    };
+    let next_rev = latest + 1;
 
     sqlx::query(
         "INSERT INTO artifact_versions (artifact_id, rev, author, content, created_at)
@@ -175,11 +234,12 @@ pub async fn write(db: &Db, new: &NewRevision<'_>) -> Result<Artifact> {
     .execute(&mut *tx)
     .await?;
 
+    let persisted = sqlx::query_as::<_, Artifact>(&format!("{SELECT_WITH_REV} WHERE a.id = ?"))
+        .bind(artifact_id)
+        .fetch_one(&mut *tx)
+        .await?;
     tx.commit().await?;
-
-    get_by_id(db, artifact_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("artifact vanished after write"))
+    Ok(persisted)
 }
 
 /// Fetch one envelope by id (with its latest `rev`).
