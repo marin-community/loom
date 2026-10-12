@@ -270,67 +270,52 @@ async fn write_operation(
 ) -> ApiResult<write::Output> {
     let st = context.state.clone();
     let branch = require_branch(&st.db, &input.branch).await?;
-    let existing = if input.repo {
-        artifact::get_shared(&st.db, &branch.repo_root, &input.name).await?
-    } else {
-        artifact::get(&st.db, &branch.repo_root, &branch.id, &input.name).await?
-    };
-    // Optimistic-concurrency guard: this checks business state (a concurrent write),
-    // which authorize() has no way to express.
-    if let Some(base_rev) = input.base_rev {
-        let latest = existing.as_ref().map_or(0, |a| a.rev);
-        if base_rev != latest {
-            return Err(AppError::conflict("stale").with_fields(json!({ "latest": latest })));
-        }
-    }
-    let title = input
-        .title
-        .clone()
-        .or_else(|| existing.as_ref().map(|a| a.title.clone()))
-        .unwrap_or_default();
+    write_for_branch(context, input, branch).await
+}
+
+async fn write_for_branch(
+    context: OperationContext,
+    input: write::Input,
+    branch: Branch,
+) -> ApiResult<write::Output> {
+    let st = context.state.clone();
     let author = if context.principal.is_human() {
         "user"
     } else {
         "agent"
     };
-    // `repo: true` writes the repo-shared scope explicitly; otherwise write
-    // into whatever scope the name already resolved to (a shared artifact
-    // edited from a branch writes a new shared revision, not a branch copy),
-    // defaulting to this branch's own scope for a brand-new name.
-    let scope: Option<String> = if input.repo {
-        None
-    } else {
-        existing
-            .as_ref()
-            .and_then(|a| a.branch_id.clone())
-            .or_else(|| Some(branch.id.clone()))
-    };
-    // Omitting `kind` keeps whatever the artifact already is; only a new
-    // artifact falls back to markdown.
-    let kind = input
-        .kind
-        .clone()
-        .or_else(|| existing.as_ref().map(|a| a.kind.clone()))
-        .unwrap_or_else(|| "markdown".to_string());
-    let a = artifact::write(
+    let a = artifact::write_resolved(
         &st.db,
-        &artifact::NewRevision {
+        &artifact::WriteRevision {
             repo_root: &branch.repo_root,
-            branch_id: scope.as_deref(),
+            scope: if input.repo {
+                artifact::WriteScope::Shared
+            } else {
+                artifact::WriteScope::Branch(&branch.id)
+            },
             name: &input.name,
-            kind: &kind,
-            title: &title,
+            kind: input.kind.as_deref(),
+            title: input.title.as_deref(),
             content: &input.content,
             author,
+            base_rev: input.base_rev,
         },
     )
-    .await?;
+    .await
+    .map_err(
+        |error| match error.downcast_ref::<artifact::RevisionConflict>() {
+            Some(conflict) => {
+                AppError::conflict("stale").with_fields(json!({ "latest": conflict.latest }))
+            }
+            None => AppError::from(error),
+        },
+    )?;
     // `goal` is the canonical goal artifact — keep the denormalized
     // `branches.goal` cache column in sync with what was just written.
     if a.name == "goal" {
         branch_mod::sync_goal_cache(&st.db, &branch.id).await?;
     }
-    if existing.is_none() {
+    if a.rev == 1 {
         tracing::info!(artifact = %a.name, rev = a.rev, "artifact created");
     } else {
         tracing::info!(artifact = %a.name, rev = a.rev, "artifact updated");
@@ -347,7 +332,7 @@ async fn write_operation(
     // A wired thread's status card links the session's documents — refresh it so
     // a new doc appears there without waiting for a status write.
     crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
-    artifact_view(&st.db, &branch.repo_root, &a, None).await
+    artifact_view(&st.db, &branch.repo_root, &a, Some(a.rev)).await
 }
 
 async fn delete_operation(
@@ -697,5 +682,435 @@ mod tests {
         .unwrap_err();
         assert_eq!(stale.status, axum::http::StatusCode::CONFLICT);
         assert_eq!(stale.fields.unwrap()["latest"], 2);
+    }
+    fn edit(branch: &Branch, name: &str, content: &str, base_rev: Option<i64>) -> write::Input {
+        write::Input {
+            name: name.to_string(),
+            content: content.to_string(),
+            title: None,
+            kind: None,
+            base_rev,
+            repo: false,
+            branch: branch.id.clone(),
+        }
+    }
+
+    // Both requests enter the real operation's mutation phase while a writer
+    // holds the permit. Polling queues them in FIFO order without sleeps or
+    // scheduler timing; only branch-key validation has already completed.
+    async fn race(
+        st: &AppState,
+        branch: &Branch,
+        first: write::Input,
+        second: write::Input,
+    ) -> (ApiResult<ArtifactView>, ApiResult<ArtifactView>) {
+        let writer = weaver_core::db::begin_immediate(&st.db).await.unwrap();
+        let mut first = Box::pin(write_for_branch(
+            session_context(st.clone(), &branch.id),
+            first,
+            branch.clone(),
+        ));
+        let mut second = Box::pin(write_for_branch(
+            session_context(st.clone(), &branch.id),
+            second,
+            branch.clone(),
+        ));
+        assert!(futures_util::poll!(&mut first).is_pending());
+        assert!(futures_util::poll!(&mut second).is_pending());
+        writer.commit().await.unwrap();
+        tokio::join!(first, second)
+    }
+
+    async fn assert_conflict(error: AppError, latest: i64) {
+        let response = error.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body, json!({"error": "stale", "latest": latest}));
+    }
+
+    async fn fixture() -> (AppState, Branch) {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_mod::upsert(&db, "/r", "weaver/a", "main")
+            .await
+            .unwrap();
+        (test_state(db), branch)
+    }
+
+    #[tokio::test]
+    async fn atomic_claim_rejects_concurrent_reorder_and_promotion() {
+        for stale in ["pending=[B,A]; active=null", "pending=[A]; active=B"] {
+            let (st, branch) = fixture().await;
+            let mut seed = edit(
+                &branch,
+                "change-queue.json",
+                "pending=[A,B]; active=null",
+                Some(0),
+            );
+            seed.title = Some("Changes".into());
+            seed.kind = Some("json".into());
+            write_operation(session_context(st.clone(), &branch.id), seed)
+                .await
+                .unwrap();
+            let mut loser = edit(&branch, "change-queue.json", stale, Some(1));
+            loser.title = Some("stale title".into());
+            loser.kind = Some("markdown".into());
+            let (claim, rejected) = race(
+                &st,
+                &branch,
+                edit(
+                    &branch,
+                    "change-queue.json",
+                    "pending=[B]; active=A",
+                    Some(1),
+                ),
+                loser,
+            )
+            .await;
+            let claim = claim.unwrap();
+            assert_eq!(claim.meta.rev, 2);
+            assert_eq!(claim.content, "pending=[B]; active=A");
+            assert_eq!(claim.meta.title, "Changes");
+            assert_eq!(claim.meta.kind, "json");
+            assert_conflict(rejected.unwrap_err(), 2).await;
+            let current = artifact::get_by_id(&st.db, claim.meta.id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(artifact_meta(&current)).unwrap(),
+                serde_json::to_value(&claim.meta).unwrap()
+            );
+            assert_eq!(
+                artifact::history(&st.db, current.id).await.unwrap().len(),
+                2
+            );
+            let events: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = 'artifact_written'")
+                    .fetch_one(&st.db)
+                    .await
+                    .unwrap();
+            assert_eq!(events, 2, "the losing request emits no event");
+        }
+    }
+
+    #[tokio::test]
+    async fn atomic_two_promotions_have_one_winner() {
+        let (st, branch) = fixture().await;
+        write_operation(
+            session_context(st.clone(), &branch.id),
+            edit(&branch, "queue", "pending=[A,B]; active=null", Some(0)),
+        )
+        .await
+        .unwrap();
+        let (first, second) = race(
+            &st,
+            &branch,
+            edit(&branch, "queue", "pending=[B]; active=A", Some(1)),
+            edit(&branch, "queue", "pending=[A]; active=B", Some(1)),
+        )
+        .await;
+        assert_eq!(first.unwrap().content, "pending=[B]; active=A");
+        assert_conflict(second.unwrap_err(), 2).await;
+    }
+
+    #[tokio::test]
+    async fn atomic_creation_allocates_one_identity_and_version() {
+        let (st, branch) = fixture().await;
+        let before: i64 = sqlx::query_scalar("SELECT next_id FROM artifact_id_sequence")
+            .fetch_one(&st.db)
+            .await
+            .unwrap();
+        let (first, second) = race(
+            &st,
+            &branch,
+            edit(&branch, "goal", "winner", Some(0)),
+            edit(&branch, "goal", "loser", Some(0)),
+        )
+        .await;
+        let first = first.unwrap();
+        assert_eq!(first.meta.id, before);
+        assert_eq!(first.meta.rev, 1);
+        assert_conflict(second.unwrap_err(), 1).await;
+        let after: i64 = sqlx::query_scalar("SELECT next_id FROM artifact_id_sequence")
+            .fetch_one(&st.db)
+            .await
+            .unwrap();
+        assert_eq!(after, before + 1);
+        assert_eq!(
+            artifact::list_for_repo(&st.db, "/r").await.unwrap().len(),
+            1
+        );
+        assert_eq!(
+            artifact::history(&st.db, first.meta.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            branch_mod::get(&st.db, &branch.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .goal,
+            "winner"
+        );
+        let events: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE kind = 'artifact_written'")
+                .fetch_one(&st.db)
+                .await
+                .unwrap();
+        assert_eq!(events, 1);
+    }
+
+    #[tokio::test]
+    async fn atomic_branch_view_resolves_shared_inside_the_transaction() {
+        let (st, branch) = fixture().await;
+        let mut shared = edit(&branch, "queue", "shared", Some(0));
+        shared.repo = true;
+        // The shared artifact does not exist until the first queued request
+        // commits. The branch-view request must then resolve that identity.
+        let (created, rejected) = race(
+            &st,
+            &branch,
+            shared,
+            edit(&branch, "queue", "branch stale creation", Some(0)),
+        )
+        .await;
+        let created = created.unwrap();
+        assert_eq!(created.meta.branch_id, None);
+        assert_conflict(rejected.unwrap_err(), 1).await;
+        let updated = write_operation(
+            session_context(st.clone(), &branch.id),
+            edit(&branch, "queue", "shared update", Some(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.meta.id, created.meta.id);
+        assert_eq!(updated.meta.branch_id, None);
+
+        // A shadow is created after the branch edit has been queued. Identity
+        // and omitted metadata must resolve to the new branch envelope under
+        // the writer lock, rather than the formerly visible shared envelope.
+        let writer = weaver_core::db::begin_immediate(&st.db).await.unwrap();
+        let new = artifact::NewRevision {
+            repo_root: "/r",
+            branch_id: Some(&branch.id),
+            name: "queue",
+            kind: "json",
+            title: "Branch queue",
+            content: "branch",
+            author: "agent",
+        };
+        let mut shadow = Box::pin(artifact::write(&st.db, &new));
+        let mut branch_edit = Box::pin(write_for_branch(
+            session_context(st.clone(), &branch.id),
+            edit(&branch, "queue", "new shadow update", Some(1)),
+            branch.clone(),
+        ));
+        assert!(futures_util::poll!(&mut shadow).is_pending());
+        assert!(futures_util::poll!(&mut branch_edit).is_pending());
+        writer.commit().await.unwrap();
+        let (shadow, branch_edit) = tokio::join!(shadow, branch_edit);
+        let shadow = shadow.unwrap();
+        let branch_edit = branch_edit.unwrap();
+        assert_eq!(branch_edit.meta.id, shadow.id);
+        assert_eq!(branch_edit.meta.rev, 2);
+        assert_eq!(branch_edit.meta.title, "Branch queue");
+        assert_eq!(branch_edit.meta.kind, "json");
+        let mut shared_edit = edit(&branch, "queue", "shared independent", Some(2));
+        shared_edit.repo = true;
+        let (local, shared) = race(
+            &st,
+            &branch,
+            edit(&branch, "queue", "branch update", Some(2)),
+            shared_edit,
+        )
+        .await;
+        let local = local.unwrap();
+        let shared = shared.unwrap();
+        assert_eq!(local.meta.id, shadow.id);
+        assert_eq!(local.meta.title, "Branch queue");
+        assert_eq!(local.meta.kind, "json");
+        assert_eq!(local.content, "branch update");
+        assert_eq!(shared.meta.id, created.meta.id);
+        assert_eq!(shared.content, "shared independent");
+    }
+
+    #[tokio::test]
+    async fn stale_write_changes_no_metadata_sequence_goal_cache_or_events() {
+        let (st, branch) = fixture().await;
+        write_operation(
+            session_context(st.clone(), &branch.id),
+            edit(&branch, "goal", "current", Some(0)),
+        )
+        .await
+        .unwrap();
+        async fn snapshot(db: &Db) -> Vec<Vec<String>> {
+            let mut rows = Vec::new();
+            for table in [
+                "artifacts",
+                "artifact_versions",
+                "artifact_id_sequence",
+                "branches",
+                "events",
+            ] {
+                // SQLite's JSON export captures every column, including all
+                // timestamps, rather than checking only the latest content.
+                let columns: Vec<String> =
+                    sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+                        .bind(table)
+                        .fetch_all(db)
+                        .await
+                        .unwrap();
+                let fields = columns
+                    .iter()
+                    .map(|c| format!("'{c}', {c}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let values: Vec<String> = sqlx::query_scalar(&format!(
+                    "SELECT json_object({fields}) FROM {table} ORDER BY rowid"
+                ))
+                .fetch_all(db)
+                .await
+                .unwrap();
+                rows.push(values);
+            }
+            rows
+        }
+        let before = snapshot(&st.db).await;
+        let mut stale = edit(&branch, "goal", "stale", Some(0));
+        stale.title = Some("stale title".into());
+        stale.kind = Some("image".into());
+        assert_conflict(
+            write_operation(session_context(st.clone(), &branch.id), stale)
+                .await
+                .unwrap_err(),
+            1,
+        )
+        .await;
+        assert_eq!(snapshot(&st.db).await, before);
+        assert_conflict(
+            write_operation(
+                session_context(st.clone(), &branch.id),
+                edit(&branch, "absent", "stale", Some(5)),
+            )
+            .await
+            .unwrap_err(),
+            0,
+        )
+        .await;
+        assert_eq!(snapshot(&st.db).await, before);
+    }
+
+    #[tokio::test]
+    async fn unguarded_responses_keep_their_own_revision_and_content() {
+        let (st, branch) = fixture().await;
+        let mut first_edit = edit(&branch, "queue", "first", None);
+        first_edit.title = Some("First title".into());
+        first_edit.kind = Some("json".into());
+        let (first, second) = race(
+            &st,
+            &branch,
+            first_edit,
+            edit(&branch, "queue", "second", None),
+        )
+        .await;
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!((first.meta.rev, first.content.as_str()), (1, "first"));
+        assert_eq!((second.meta.rev, second.content.as_str()), (2, "second"));
+        assert_eq!(second.meta.title, "First title");
+        assert_eq!(second.meta.kind, "json");
+        // Explicitly reconstruct the first response after the second commit,
+        // using the same revision-pinned view path as the write operation.
+        let envelope = Artifact {
+            id: first.meta.id,
+            repo_root: "/r".into(),
+            branch_id: first.meta.branch_id,
+            name: first.meta.name,
+            kind: first.meta.kind,
+            title: first.meta.title,
+            rev: first.meta.rev,
+            created_at: first.meta.created_at,
+            updated_at: first.meta.updated_at,
+        };
+        let late = artifact_view(&st.db, "/r", &envelope, Some(envelope.rev))
+            .await
+            .unwrap();
+        assert_eq!((late.meta.rev, late.content.as_str()), (1, "first"));
+    }
+
+    #[tokio::test]
+    async fn openapi_advertises_the_atomic_write_behavior_tested_here() {
+        let (st, branch) = fixture().await;
+        crate::auth::add_user(
+            &st.db,
+            "atomic-test",
+            None,
+            None,
+            None,
+            crate::auth::UserRole::Admin,
+        )
+        .await
+        .unwrap();
+        let (token, _) = crate::auth::create_token(&st.db, "atomic-test", "test", None)
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                super::super::router(st)
+                    .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{address}/api/openapi.json"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let document: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(
+            document["paths"]["/api/artifacts/write"]["post"]["x-loom-atomic-base-rev"],
+            json!(true)
+        );
+        assert!(document["paths"]["/api/artifacts/get"]["post"]
+            .get("x-loom-atomic-base-rev")
+            .is_none());
+        let url = format!("http://{address}/api/artifacts/write");
+        let input = edit(&branch, "queue", "winner", Some(0));
+        let created = client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), reqwest::StatusCode::OK);
+        let created: ArtifactView = created.json().await.unwrap();
+        assert_eq!((created.meta.rev, created.content.as_str()), (1, "winner"));
+        let rejected = client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&input)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            rejected.json::<serde_json::Value>().await.unwrap(),
+            json!({"error": "stale", "latest": 1})
+        );
+        server.abort();
     }
 }

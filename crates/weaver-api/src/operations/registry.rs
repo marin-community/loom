@@ -349,6 +349,8 @@ pub struct OperationSpec {
     pub risk: OperationRisk,
     pub io: Io,
     pub grants: &'static [&'static str],
+    /// Boolean OpenAPI extensions advertising supported operation semantics.
+    pub capabilities: &'static [&'static str],
     pub cli: Option<CliProjection>,
     /// JSON Schema for what a caller may pass, context fields elided.
     pub schema: fn() -> Value,
@@ -481,6 +483,7 @@ mod tests {
             risk: OperationRisk::Write,
             io: Io::Json,
             grants: &[],
+            capabilities: &[],
             cli: None,
             schema,
             output_schema: schema,

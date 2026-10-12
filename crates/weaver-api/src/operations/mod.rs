@@ -641,6 +641,9 @@ pub fn openapi_document(version: &str) -> Value {
                 },
             },
         });
+        for capability in operation.capabilities {
+            definition[*capability] = json!(true);
+        }
         if let Some(cli) = operation.cli {
             definition["x-loom-cli"] = json!(cli.invocation());
         }
