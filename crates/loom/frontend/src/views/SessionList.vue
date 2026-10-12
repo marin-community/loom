@@ -23,9 +23,11 @@ import {
   createSessionSpace,
   deleteSessionGroup,
   deleteSessionSpace,
+  getPreferences,
   getSession,
   listSessionSummaries,
   moveSessions,
+  patchPreferences,
   reorderSessionLayout,
   restoreSessionGroups,
   setSessionGroupPreference,
@@ -36,6 +38,14 @@ import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automati
 import { effectiveAttention } from '../lib/sessionState';
 import { sessionPathSegments } from '../lib/sessionTitle';
 import { useLayoutCommands } from '../lib/layoutCommands';
+import {
+  FILTER_PREFERENCE_KEYS as FILTER_PREFERENCES,
+  FILTER_QUERY_KEYS,
+  adoptFleetLinkPreference,
+  adoptFleetLinkPreferences,
+  preferenceSnapshot,
+  type FilterPreferenceKey,
+} from '../lib/fleetLink';
 import { useFleet } from '../lib/sessionsStore';
 import { beginSessionOpen, recordSessionListReturn } from '../lib/workbenchMetrics';
 import { useCommandScope, type Command } from '../lib/commands';
@@ -142,7 +152,72 @@ watch(
     sessionSort.value = sortFromQuery(sort);
   },
 );
-function updateFilters() {
+// The four selects are per-operator preferences and saved on change
+// A deep link like `/?status=error` still wins.
+// The four selects are per-operator preferences and saved on change
+// A deep link like `/?status=error` still wins.
+// The key mapping and the shared saved-selection snapshot the shell links
+// read live in lib/fleetLink.
+// Bumped on every select change, so a restore whose preference fetch was in
+// flight while the operator adjusted a select discards its stale snapshot.
+let filterAdjustmentSeq = 0;
+// Preference saves, in issue order; a restore queues on this so it never
+// reads a snapshot older than a save it already knows about.
+let preferencePatchChain: Promise<unknown> = Promise.resolve();
+function savedFilterPreferences(): Promise<Record<string, string>> {
+  return getPreferences().then(preferenceSnapshot);
+}
+async function restoreFilterPreferences() {
+  const beforeAdjustment = filterAdjustmentSeq;
+  let saved: Record<string, string>;
+  try {
+    await preferencePatchChain;
+    saved = await savedFilterPreferences();
+  } catch {
+    // Best-effort: without a snapshot there is nothing to rehydrate, and the
+    // unfiltered list is the pre-preference behavior.
+    return;
+  }
+  if (
+    route.path !== '/' ||
+    filterAdjustmentSeq !== beforeAdjustment ||
+    FILTER_QUERY_KEYS.some((key) => key in route.query)
+  ) {
+    return;
+  }
+  const additions = adoptFleetLinkPreferences(saved);
+  if (Object.keys(additions).length) {
+    router.replace({ query: { ...route.query, ...additions } });
+  }
+}
+// The rail "Sessions" link and the view tabs navigate between `/` URLs without
+// deactivating this component, so onActivated alone never fires for them;
+// restore on every arrival at a filter-less list too. The guards inside make
+// repeated runs no-ops.
+watch(
+  () => route.fullPath,
+  () => {
+    if (route.path === '/') void restoreFilterPreferences();
+  },
+);
+function persistFilterPreference(key: FilterPreferenceKey, value: string) {
+  // An empty selection (and manual sort) clears the key back to the inherited
+  // default so the list reopens unfiltered. Best-effort: a failed patch only
+  // costs the selection surviving into the next visit — the URL still carries
+  // it for this one. The shell links adopt the new target optimistically.
+  adoptFleetLinkPreference(key, value);
+  const settled = preferencePatchChain.then(() =>
+    patchPreferences({ [FILTER_PREFERENCES[key]]: value || null }).catch(() => {}),
+  );
+  preferencePatchChain = settled;
+}
+function updateFilters(key: Exclude<FilterPreferenceKey, 'sort'>) {
+  filterAdjustmentSeq++;
+  const value = {
+    status: statusFilter.value,
+    attention: attentionFilter.value,
+    creator: creatorFilter.value,
+  }[key];
   router.replace({
     query: {
       ...route.query,
@@ -151,14 +226,18 @@ function updateFilters() {
       creator: creatorFilter.value || undefined,
     },
   });
+  persistFilterPreference(key, value);
 }
 function updateSort() {
+  filterAdjustmentSeq++;
   router.replace({
     query: {
       ...route.query,
       sort: sessionSort.value === 'manual' ? undefined : sessionSort.value,
     },
   });
+  // Manual is the no-selection default, so clear the key rather than pin it.
+  persistFilterPreference('sort', sessionSort.value === 'manual' ? '' : sessionSort.value);
 }
 
 const searchText = ref('');
@@ -241,6 +320,7 @@ watch(
 watch([sessions, layout], () => queueSearch(false));
 onActivated(() => {
   recordSessionListReturn();
+  void restoreFilterPreferences();
   if (view.value === 'history') void loadHistory();
   queueSearch(true);
 });
@@ -1164,7 +1244,7 @@ function scrollSpaces(direction: number) {
         aria-label="Filter by status"
         data-testid="status-filter"
         class="rounded border border-line bg-input px-2 py-1.5 text-xs"
-        @change="updateFilters"
+        @change="updateFilters('status')"
       >
         <option value="">Any status</option>
         <option
@@ -1179,7 +1259,7 @@ function scrollSpaces(direction: number) {
         aria-label="Filter by attention"
         data-testid="attention-filter"
         class="rounded border border-line bg-input px-2 py-1.5 text-xs"
-        @change="updateFilters"
+        @change="updateFilters('attention')"
       >
         <option value="">Any attention</option>
         <option value="needs">Needs attention</option>
@@ -1192,7 +1272,7 @@ function scrollSpaces(direction: number) {
         aria-label="Filter by creator"
         data-testid="creator-filter"
         class="rounded border border-line bg-input px-2 py-1.5 text-xs"
-        @change="updateFilters"
+        @change="updateFilters('creator')"
       >
         <option value="">Everyone</option>
         <option value="mine-and-ops">Mine + Ops</option>

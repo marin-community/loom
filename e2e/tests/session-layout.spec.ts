@@ -74,6 +74,19 @@ async function seedAutomationSession(baseUrl: string, repoPath: string): Promise
   return (await response.json()) as { id: string };
 }
 
+// A waiter for the preferences patch that saves one workbench key, so a test
+// can observe the save itself rather than racing the server round trip.
+function savedPreferenceResponse(page: Page, key: string, value: string | null) {
+  return page.waitForResponse(
+    (response) =>
+      response.ok() &&
+      new URL(response.url()).pathname === '/api/preferences/patch' &&
+      (response.request().postDataJSON() as { changes?: Record<string, unknown> })?.changes?.[
+        key
+      ] === value,
+  );
+}
+
 let failedRunProfileSequence = 0;
 
 async function createFailedRun(baseUrl: string) {
@@ -552,6 +565,103 @@ test.describe('durable session workbench', () => {
       ]);
   });
 
+  test('@workbench filter and sort selections persist across visits', async ({ page, weaver }) => {
+    const calm = await weaver.seedSession({ goal: 'Calm work', name: 'calm-task' });
+    const broken = await weaver.seedSession({ goal: 'Broken work', name: 'broken-task' });
+    const update = await fetch(`${weaver.baseUrl}/api/sessions/update`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ session: broken.id, status: 'error' }),
+    });
+    expect(update.ok).toBe(true);
+
+    await page.goto(weaver.baseUrl);
+    const savedStatus = savedPreferenceResponse(page, 'workbench.status_filter', 'error');
+    await page.getByTestId('status-filter').selectOption('error');
+    await savedStatus;
+    const savedSort = savedPreferenceResponse(page, 'workbench.sort', 'name');
+    await page.getByTestId('session-sort').selectOption('name');
+    await savedSort;
+    await expect(page.locator(`[data-session-id="${broken.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-session-id="${calm.id}"]`)).toHaveCount(0);
+
+    // The rail "Sessions" link targets the saved selections directly — the
+    // href already carries them, so clicking lands without the bare-then-
+    // rewritten bounce.
+    const railSessions = page
+      .getByRole('navigation', { name: 'Primary' })
+      .getByRole('link', { name: 'Sessions', exact: true });
+    await expect(railSessions).toHaveAttribute('href', /\?status=error/);
+    await expect(page.getByTestId('status-bar-sessions')).toHaveAttribute(
+      'href',
+      /\?status=error/,
+    );
+    await railSessions.click();
+    await expect(page).toHaveURL(/status=error/);
+    await expect(page.getByTestId('status-filter')).toHaveValue('error');
+    await expect(page.getByTestId('session-sort')).toHaveValue('name');
+
+    // Opening a session and returning to the bare list rehydrates both from the
+    // saved preferences, not from the URL.
+    await page.locator(`[data-session-id="${broken.id}"]`).getByRole('link').first().click();
+    await expect(page).toHaveURL(new RegExp(`/s/${broken.id}`));
+    await page.goto(weaver.baseUrl);
+    await expect(page.getByTestId('status-filter')).toHaveValue('error');
+    await expect(page.getByTestId('session-sort')).toHaveValue('name');
+    await expect(page.locator(`[data-session-id="${broken.id}"]`)).toBeVisible();
+    await expect(page.locator(`[data-session-id="${calm.id}"]`)).toHaveCount(0);
+
+    // So does a refresh of the bare list.
+    await page.reload();
+    await expect(page.getByTestId('status-filter')).toHaveValue('error');
+    await expect(page.locator(`[data-session-id="${calm.id}"]`)).toHaveCount(0);
+
+    // And clicking the rail link again while already on the filtered list is a
+    // same-destination navigation — nothing bounces.
+    await expect(railSessions).toHaveAttribute('href', /\?status=error/);
+    await railSessions.click();
+    await expect(page).toHaveURL(/status=error/);
+    await expect(page.getByTestId('status-filter')).toHaveValue('error');
+    await expect(page.getByTestId('session-sort')).toHaveValue('name');
+
+    // Clearing a filter saves the cleared state, not the last non-empty one —
+    // and the link drops the cleared param from its target.
+    const clearedStatus = savedPreferenceResponse(page, 'workbench.status_filter', null);
+    await page.getByTestId('status-filter').selectOption('');
+    await clearedStatus;
+    await expect(railSessions).toHaveAttribute('href', /\?sort=name$/);
+    await expect(page.locator(`[data-session-id="${calm.id}"]`)).toBeVisible();
+    await page.goto(weaver.baseUrl);
+    await expect(page.getByTestId('status-filter')).toHaveValue('');
+    await expect(page.locator(`[data-session-id="${calm.id}"]`)).toBeVisible();
+    await expect(page.getByTestId('session-sort')).toHaveValue('name');
+
+    // Manual sort is the no-selection default: choosing it clears the saved
+    // override rather than pinning an explicit `manual` value.
+    const clearedSort = savedPreferenceResponse(page, 'workbench.sort', null);
+    await page.getByTestId('session-sort').selectOption('manual');
+    await clearedSort;
+    await expect(railSessions).toHaveAttribute('href', /^\/$/);
+    await page.goto(weaver.baseUrl);
+    await expect(page.getByTestId('session-sort')).toHaveValue('manual');
+  });
+
+  test('@workbench history badge tracks background archives', async ({ page, weaver }) => {
+    const background = await weaver.seedSession({
+      goal: 'Archived behind the UI',
+      name: 'background-task',
+    });
+
+    await page.goto(weaver.baseUrl);
+    const badge = page.getByTestId('history-view');
+    await expect(badge).toContainText(/\s0\s*$/);
+
+    // Archive out-of-band — no UI action triggers a refresh, so only the poll
+    // noticing the session leave the active fleet can update the badge.
+    await weaver.archiveSession(background.id);
+    await expect(badge).toContainText(/\s1\s*$/);
+  });
+
   test('@workbench pointer, keyboard, undo, preference, and SSE share one layout', async ({
     page,
     weaver,
@@ -661,13 +771,16 @@ test.describe('durable session workbench', () => {
     await expect(page.getByTestId('confirm-dialog')).toContainText('2 selected sessions');
     await page.getByTestId('confirm-dialog').getByTestId('confirm-dialog-confirm').click();
 
-    // Archived summaries are not part of the recurring snapshot, but widened
-    // server search can still render a cold result before History is opened.
+    // Archived summaries never ride the recurring snapshot, but widened
+    // server search can still render a cold result.
     await search.fill('Normal searchable');
     await expect(normalRow).toHaveCount(0);
     await page.getByTestId('search-history').check();
     await expect(normalRow).toBeVisible();
     await search.fill('');
+
+    // The History badge counts archived work without the view being opened.
+    await expect(page.getByTestId('history-view')).toContainText(/\s2\s*$/);
 
     await page.getByTestId('history-view').click();
     const archivedNormal = page.locator(`[data-session-id="${normal.id}"]`);

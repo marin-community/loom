@@ -47,11 +47,21 @@ opens the session without changing its group, and returning to the workbench
 restores the current view.
 
 The shell polls a compact summary of active sessions. It fetches archived
-summaries only when History opens, and fetches full goal, launch, policy, and
-runtime context only for the current desktop mailbox cursor, a row disclosure,
-or a session page. Cursor changes are debounced and each fetched detail is
-reused by row disclosure. Search still matches goal text on the server, so this
-transport hierarchy does not weaken discovery.
+summaries once at startup — so the History count is correct before the view is
+opened — after explicit mutations, and whenever a poll snapshot shows a session
+crossing the live/archived boundary, so background archives are counted too;
+the poll itself never transfers history. It fetches full goal, launch, policy,
+and runtime context only for the current desktop mailbox cursor, a row
+disclosure, or a session page. Cursor changes are debounced and each fetched
+detail is reused by row disclosure. Search still matches goal text on the
+server, so this transport hierarchy does not weaken discovery.
+
+The status, attention, and creator filters and the sort order of the session
+list are per-operator preferences: each change is saved on the user, and the
+saved values reapply whenever the list is opened without explicit filter query
+params, so the view survives navigating into a session and back or a refresh.
+A deep link such as `/?status=error` applies for that visit only — it wins
+over the saved selections but does not overwrite them.
 
 ## Launch
 

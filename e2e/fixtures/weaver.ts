@@ -295,6 +295,14 @@ function deleteAllAutomationRuns(dbPath: string) {
   runPrivateSql(dbPath, 'DELETE FROM automation_runs;');
 }
 
+/** Per-operator UI preferences persist server-side, so a test that changes a
+ *  workbench filter or sort order would otherwise leak into every later test's
+ *  bare session-list visit. Clear the table between tests to keep ordering
+ *  irrelevant. */
+function deleteUserPreferences(dbPath: string) {
+  runPrivateSql(dbPath, 'DELETE FROM user_preferences;');
+}
+
 /** Delete every watch on a server, best-effort — watches aren't tied
  *  to a session, so the per-test wipe clears them explicitly. */
 async function deleteAllWatches(baseUrl: string) {
@@ -713,12 +721,14 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
     // panel regardless of ordering.
     await deleteAllWatches(baseUrl);
     deleteAllAutomationRuns(childEnv.WEAVER_DB!);
+    deleteUserPreferences(childEnv.WEAVER_DB!);
 
     await use(fixture);
 
     // Reset for the next test in this worker.
     await deleteAllSessions(baseUrl);
     deleteAllAutomationRuns(childEnv.WEAVER_DB!);
+    deleteUserPreferences(childEnv.WEAVER_DB!);
     await deleteAllWatches(baseUrl);
     await deleteAllIssues(baseUrl);
   },
