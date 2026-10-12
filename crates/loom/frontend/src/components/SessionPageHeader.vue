@@ -392,7 +392,18 @@ async function submitHandoff() {
         <!-- An issue/PR is a frequent work destination, not merely metadata.
              Existing associations open directly; their adjacent edit affordance
              and the empty states own configuration. -->
-        <div class="hidden sm:block">
+        <div class="hidden shrink-0 items-center gap-1.5 sm:flex">
+          <!-- The git branch this session works on, parked left of the PR that
+               carries it — the two names you reach for together in the terminal.
+               The full name rides along in the tooltip when it truncates. -->
+          <span
+            v-if="ws.branch.branch"
+            class="pill max-w-56 font-mono"
+            data-testid="session-branch-chip"
+            :title="ws.branch.branch"
+          >
+            <span class="min-w-0 truncate">{{ ws.branch.branch }}</span>
+          </span>
           <GithubAssociations :ws="ws" @reload="emit('reload')" />
         </div>
 

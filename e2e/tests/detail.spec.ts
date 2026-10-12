@@ -286,6 +286,7 @@ test.describe('session detail view', () => {
     const prPill = page.getByTestId('pr-association-pill');
     const issuePill = page.getByTestId('issue-association-pill');
     await expect(page.getByTestId('github-associations')).toBeVisible();
+    await expect(page.getByTestId('session-branch-chip')).toHaveText(s.branch.branch);
     await expect(prPill).toHaveText('PR —');
     await expect(issuePill).toHaveText('Issue —');
 
