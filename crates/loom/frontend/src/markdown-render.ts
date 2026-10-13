@@ -19,6 +19,7 @@
 import { h, cloneVNode, isVNode, type VNode } from 'vue';
 import type Token from 'markdown-it/lib/token.mjs';
 import { resolveUrl, type RenderContext, type Sanitizer } from './markdown';
+import { isLocalHref } from './lib/localLinks';
 import CodeBlock from './components/CodeBlock.vue';
 import MermaidBlock from './components/MermaidBlock.vue';
 
@@ -35,15 +36,16 @@ function attrsToProps(attrs: [string, string][] | null): Record<string, unknown>
   return props;
 }
 
-/** Props for a generic open tag. Links get the new-tab treatment for off-page
- *  hrefs (matching the old DOMPurify hook): an in-page `#` anchor and the
- *  internal smartdoc SPA links (which arrive as `html_inline`, not `link_open`)
- *  are left same-tab. */
+/** Props for a generic open tag. Off-page hrefs get the new-tab treatment
+ *  (matching the DOMPurify hook in markdown.ts); in-page `#` anchors and
+ *  hrefs on this loom server stay same-tab — the click router (markdownDoc)
+ *  routes loom links through the SPA. The internal smartdoc SPA links arrive
+ *  as `html_inline`, not `link_open`, so they never pass through here. */
 function elementProps(tok: Token): Record<string, unknown> {
   const props = attrsToProps(tok.attrs);
   if (tok.tag === 'a') {
     const href = typeof props.href === 'string' ? props.href : '';
-    if (href && !href.startsWith('#')) {
+    if (href && !href.startsWith('#') && !isLocalHref(href)) {
       props.target = '_blank';
       props.rel = 'noopener noreferrer';
     }

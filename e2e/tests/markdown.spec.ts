@@ -14,6 +14,8 @@ test.describe('rich markdown rendering', () => {
     '',
     'Some **bold** text and an [external link](https://example.com).',
     '',
+    'A [local doc](other.md) beside this one.',
+    '',
     '| Col A | Col B |',
     '| ----- | ----- |',
     '| one   | two   |',
@@ -67,6 +69,10 @@ test.describe('rich markdown rendering', () => {
       '_blank',
     );
 
+    // A link back at this loom server opens in the existing window instead.
+    const localLink = body.locator('a', { hasText: 'local doc' });
+    await expect(localLink).not.toHaveAttribute('target', '_blank');
+
     // The relative image resolves to the session's raw-bytes endpoint.
     await expect(body.locator('img')).toHaveAttribute(
       'src',
@@ -94,6 +100,10 @@ test.describe('rich markdown rendering', () => {
     // …and Preview flips back to the rendered view.
     await page.getByRole('button', { name: 'Preview', exact: true }).click();
     await expect(page.locator('.markdown-body h1')).toContainText('Design Doc');
+
+    // The local link routes in this same window (no new tab, no reload).
+    await body.locator('a', { hasText: 'local doc' }).click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${session.id}/artifacts/other.md`);
   });
 
   test('a broken mermaid diagram errors inline, never leaking into the page body', async ({

@@ -12,6 +12,7 @@ import type MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from './types';
 import { operationPath } from './api';
+import { isLocalHref } from './lib/localLinks';
 
 /** Where to resolve image sources: relative paths use the session's raw
  *  worktree endpoint; `artifact:<name>` uses the stored artifact's raw image
@@ -314,9 +315,10 @@ export async function parseMarkdown(src: string, ctx: RenderContext): Promise<To
  *  literal HTML (`html: true`), plus the chips/checkboxes the smartdoc, anchor,
  *  and task-list plugins produce as `html_inline`. Same policy as the old
  *  whole-document sanitise — external links open in a new tab with the opener
- *  neutralised, and the smartdoc `data-*` / `target` attributes survive. The link
- *  hook is added and removed around each call so it never bleeds into another
- *  DOMPurify user (e.g. MermaidBlock's SVG sanitise). */
+ *  neutralised, while in-page anchors, the smartdoc `data-*` links, and hrefs on
+ *  this loom server stay same-tab. The link hook is added and removed around
+ *  each call so it never bleeds into another DOMPurify user (e.g. MermaidBlock's
+ *  SVG sanitise). */
 export type Sanitizer = (html: string) => string;
 
 let sanitizerPromise: Promise<Sanitizer> | null = null;
@@ -327,8 +329,10 @@ export function loadSanitizer(): Promise<Sanitizer> {
     const linkHook = (node: Element) => {
       if (node.tagName !== 'A') return;
       const href = node.getAttribute('href');
-      const internal = node.hasAttribute('data-issue') || node.hasAttribute('data-artifact');
-      if (href && !href.startsWith('#') && !internal) {
+      if (!href || href.startsWith('#')) return;
+      const internal =
+        node.hasAttribute('data-issue') || node.hasAttribute('data-artifact') || isLocalHref(href);
+      if (!internal) {
         node.setAttribute('target', '_blank');
         node.setAttribute('rel', 'noopener noreferrer');
       }
