@@ -14,6 +14,7 @@ import {
 } from './lib/commands';
 import { acceptConfirmation, cancelConfirmation, confirmation } from './lib/confirmation';
 import { useFleet } from './lib/sessionsStore';
+import { clearFleetLink, primeFleetLink } from './lib/fleetLink';
 
 // The workbench shell (docs/loom-ui.md): nav rail on the left, a thin status
 // bar pinned to the bottom, and the view filling everything between — no top
@@ -32,7 +33,23 @@ const authed = computed(() => me.authenticated);
 // refetch round-trip) and there is exactly one request per tick. Start it once
 // authenticated; stop on sign-out so the login screen never polls.
 const { startFleetPoll, stopFleetPoll, sessionById } = useFleet();
-watch(authed, (ok) => (ok ? startFleetPoll() : stopFleetPoll()), { immediate: true });
+// The fleet-link snapshot (lib/fleetLink) primes alongside: the shell's
+// "Sessions" links target the operator's saved selections, so it must be
+// loaded before the session list is ever opened, and dropped on sign-out so a
+// different operator's links never inherit it.
+watch(
+  authed,
+  (ok) => {
+    if (ok) {
+      startFleetPoll();
+      primeFleetLink();
+    } else {
+      stopFleetPoll();
+      clearFleetLink();
+    }
+  },
+  { immediate: true },
+);
 
 // The browser tab title tracks what you're looking at, composed here in one
 // place so every route reads "Loom - <Section>" consistently and several open

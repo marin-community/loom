@@ -11,8 +11,15 @@ use crate::profile;
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError, AppState};
 
-const PERSONAL_PREFERENCE_KEYS: &[&str] =
-    &["terminal.theme", "terminal.font", "terminal.font_size"];
+const PERSONAL_PREFERENCE_KEYS: &[&str] = &[
+    "terminal.theme",
+    "terminal.font",
+    "terminal.font_size",
+    "workbench.status_filter",
+    "workbench.attention_filter",
+    "workbench.creator_filter",
+    "workbench.sort",
+];
 
 // ---------------------------------------------------------------------------
 // Settings
@@ -173,7 +180,7 @@ async fn get_preferences_operation(
     preferences_envelope(&context.state.db, &context.principal.username).await
 }
 
-/// `preferences.patch`. The three personal keys are the whole allowlist; a
+/// `preferences.patch`. The personal keys are the whole allowlist; a
 /// value that is not a JSON scalar, or that `config::validate` refuses for its
 /// key, fails the whole patch rather than applying the rest.
 async fn patch_preferences_operation(

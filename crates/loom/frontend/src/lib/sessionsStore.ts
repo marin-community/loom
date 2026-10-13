@@ -31,10 +31,13 @@ let inflight: Promise<void> | null = null;
 let refreshRequested = false;
 
 // Pull the compact active fleet only. Archived history is both much larger and
-// operationally cold, so `loadHistory` fetches it when that view is opened
-// instead of transferring it on every three-second tick. Concurrent callers
-// coalesce onto one in-flight loop. A request arriving while a snapshot is
-// loading marks the loop dirty and guarantees one trailing fetch.
+// operationally cold, so it never rides the three-second tick: it is fetched
+// once when the poll starts — the History badge and the status bar's archived
+// count are visible before the view is ever opened — after explicit mutations,
+// and whenever the active snapshot shows a session crossing the live/archived
+// boundary, so background archives and recoveries are picked up too. Concurrent
+// callers coalesce onto one in-flight loop. A request arriving while a snapshot
+// is loading marks the loop dirty and guarantees one trailing fetch.
 async function refreshActive(): Promise<void> {
   refreshRequested = true;
   if (inflight) return inflight;
@@ -55,7 +58,20 @@ async function refreshActive(): Promise<void> {
           return;
         }
         delete nextErrors[resource];
-        if (resource === 'sessions') activeSessions.value = result.value as SessionSummary[];
+        if (resource === 'sessions') {
+          const next = result.value as SessionSummary[];
+          const nextIds = new Set(next.map((session) => session.id));
+          const leftTheFleet = activeSessions.value.some((session) => !nextIds.has(session.id));
+          const returnedFromHistory = archivedSessions.value.some((session) =>
+            nextIds.has(session.id),
+          );
+          activeSessions.value = next;
+          // An archived snapshot that just went stale: a session left the
+          // active fleet (archived or deleted elsewhere) or an archived one
+          // reappeared (recovered). Reload it so the counts stay correct
+          // without ever putting history on the tick.
+          if (leftTheFleet || returnedFromHistory) void loadHistory().catch(() => {});
+        }
         if (resource === 'runs') runs.value = result.value as AutomationRun[];
         if (resource === 'layout') layout.value = result.value as SessionLayout;
       });
@@ -101,8 +117,8 @@ async function loadHistory(): Promise<void> {
   return historyInflight;
 }
 
-// Explicit mutations refresh any history snapshot the operator has disclosed;
-// the background timer below intentionally stays on the active projection.
+// Explicit mutations refresh the history snapshot too; the background timer
+// below intentionally stays on the active projection.
 async function refresh(): Promise<void> {
   await refreshActive();
   if (historyLoaded) await loadHistory();
@@ -126,6 +142,9 @@ const POLL_MS = 3000;
 function startFleetPoll(): void {
   if (timer !== undefined) return;
   refreshActive();
+  // One history fetch up front so the archived counts are right from the
+  // start; the tick below stays on the active projection.
+  void loadHistory().catch(() => {});
   timer = window.setInterval(refreshActive, POLL_MS);
   layoutEvents = openTopic('layout');
   layoutEvents.on('session_layout', () => void refreshActive());

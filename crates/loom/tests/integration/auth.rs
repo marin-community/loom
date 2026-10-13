@@ -695,6 +695,144 @@ async fn user_role_keeps_operations_and_diagnostics_but_not_administration() {
 
 #[tokio::test]
 #[serial]
+async fn workbench_filter_preferences_round_trip_per_user() {
+    let ts = TestServer::start_api_only().await;
+    let http = reqwest::Client::new();
+    let added: Value = http
+        .post(url(&ts, "/api/auth/users/create"))
+        .json(&json!({
+            "username": "alice",
+            "github_login": "alice-gh",
+            "github_user_id": 101
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(added["role"], "user");
+    let (user_token, _) = loom::auth::create_token(&ts.state.db, "alice", "alice-api", None)
+        .await
+        .unwrap();
+
+    // The session-list selections save like terminal.theme does: per key, with
+    // the cleared state represented by a `null` back to the inherited default.
+    let saved: Value = http
+        .post(url(&ts, "/api/preferences/patch"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "changes": {
+            "workbench.status_filter": "error",
+            "workbench.attention_filter": "needs",
+            "workbench.creator_filter": "mine",
+            "workbench.sort": "name"
+        } }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let preference = |envelope: &Value, key: &str| {
+        envelope["preferences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|preference| preference["key"] == key)
+            .unwrap_or_else(|| panic!("missing preference {key}"))
+            .clone()
+    };
+    for (key, value) in [
+        ("workbench.status_filter", "error"),
+        ("workbench.attention_filter", "needs"),
+        ("workbench.creator_filter", "mine"),
+        ("workbench.sort", "name"),
+    ] {
+        assert_eq!(preference(&saved, key)["value"], value);
+        assert_eq!(preference(&saved, key)["is_overridden"], true);
+    }
+
+    // The overrides are alice's alone: a second operator's envelope still
+    // reports the inherited defaults.
+    let bob: Value = http
+        .post(url(&ts, "/api/auth/users/create"))
+        .json(&json!({
+            "username": "bob",
+            "github_login": "bob-gh",
+            "github_user_id": 102
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bob["role"], "user");
+    let (bob_token, _) = loom::auth::create_token(&ts.state.db, "bob", "bob-api", None)
+        .await
+        .unwrap();
+    let bobs: Value = http
+        .post(url(&ts, "/api/preferences/get"))
+        .bearer_auth(&bob_token)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for (key, inherited) in [
+        ("workbench.status_filter", ""),
+        ("workbench.attention_filter", ""),
+        ("workbench.creator_filter", ""),
+        ("workbench.sort", "manual"),
+    ] {
+        let row = preference(&bobs, key);
+        assert_eq!(row["value"], inherited);
+        assert_eq!(row["is_overridden"], false);
+    }
+
+    let cleared: Value = http
+        .post(url(&ts, "/api/preferences/patch"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "changes": {
+            "workbench.status_filter": null,
+            "workbench.attention_filter": null,
+            "workbench.creator_filter": null,
+            "workbench.sort": null
+        } }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for (key, inherited) in [
+        ("workbench.status_filter", ""),
+        ("workbench.attention_filter", ""),
+        ("workbench.creator_filter", ""),
+        ("workbench.sort", "manual"),
+    ] {
+        let row = preference(&cleared, key);
+        assert_eq!(row["value"], inherited);
+        assert_eq!(row["inherited_value"], inherited);
+        assert_eq!(row["is_overridden"], false);
+    }
+
+    // The four keys are enums: a value outside the advertised options is
+    // refused rather than stored.
+    let response = http
+        .post(url(&ts, "/api/preferences/patch"))
+        .bearer_auth(&user_token)
+        .json(&json!({ "changes": { "workbench.sort": "bogus" } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+#[serial]
 async fn absurd_token_expiry_is_a_bad_request_not_a_panic() {
     let ts = TestServer::start().await;
     let response = reqwest::Client::new()

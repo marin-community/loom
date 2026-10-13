@@ -9,6 +9,7 @@ import {
   githubStateChip,
 } from '../lib/githubStatus';
 import { effectiveAttention } from '../lib/sessionState';
+import { fleetRoute } from '../lib/fleetLink';
 import { useFleet } from '../lib/sessionsStore';
 import { useCommandRegistry } from '../lib/commands';
 import KeyHint from './KeyHint.vue';
@@ -104,7 +105,7 @@ onUnmounted(() => clearInterval(clockTimer));
       :class="online ? '' : 'opacity-50'"
       :title="online ? '' : 'Last known counts — server unreachable'"
     >
-      <router-link to="/" class="hover:text-fg" data-testid="status-bar-sessions">
+      <router-link :to="fleetRoute" class="hover:text-fg" data-testid="status-bar-sessions">
         {{ live.length }} active session{{ live.length === 1 ? '' : 's' }}
       </router-link>
       <router-link

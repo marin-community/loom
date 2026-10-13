@@ -449,6 +449,45 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "workbench.status_filter",
+        label: "Session status filter",
+        description: "Status filter the session list reopens with. Blank means \
+            any status.",
+        kind: SettingKind::Enum,
+        default: "",
+        group: "Workbench",
+        options: &["", "created", "running", "orphaned", "done", "error", "archived"],
+    },
+    SettingSpec {
+        key: "workbench.attention_filter",
+        label: "Session attention filter",
+        description: "Attention filter the session list reopens with. Blank \
+            means any attention level.",
+        kind: SettingKind::Enum,
+        default: "",
+        group: "Workbench",
+        options: &["", "needs", "ok", "attention", "blocked"],
+    },
+    SettingSpec {
+        key: "workbench.creator_filter",
+        label: "Session creator filter",
+        description: "Creator filter the session list reopens with. Blank means \
+            everyone.",
+        kind: SettingKind::Enum,
+        default: "",
+        group: "Workbench",
+        options: &["", "mine", "ops", "mine-and-ops", "other-users"],
+    },
+    SettingSpec {
+        key: "workbench.sort",
+        label: "Session sort order",
+        description: "Sort order the session list reopens with.",
+        kind: SettingKind::Enum,
+        default: "manual",
+        group: "Workbench",
+        options: &["manual", "name", "activity", "created"],
+    },
+    SettingSpec {
         key: "watch.enabled",
         label: "Enable watches",
         description: "Master switch for the Watch engine — the periodic / \

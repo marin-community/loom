@@ -1,5 +1,6 @@
-//! Per-operator UI preferences (terminal theme/font/size) — a small,
-//! fixed-key personal override layered over the effective inherited value.
+//! Per-operator UI preferences (terminal theme/font/size and the session-list
+//! filter/sort selections) — a small, fixed-key personal override layered over
+//! the effective inherited value.
 //!
 //! Distinct from `settings.*`: those are server-wide runtime configuration
 //! with an admin-gated write (`settings.patch` is `actor = Admin`). This is
@@ -12,8 +13,9 @@ pub(super) use super::prelude;
 pub mod get {
     use super::prelude::*;
 
-    /// Get this operator's personal UI preference overrides (terminal theme, font,
-    /// font size), each layered over its effective inherited value.
+    /// Get this operator's personal UI preference overrides (terminal theme,
+    /// font, font size, and the session-list filter/sort selections), each
+    /// layered over its effective inherited value.
     #[operation(id = "preferences.get", actor = User, scope = Global, risk = Read)]
     pub struct Input {}
 

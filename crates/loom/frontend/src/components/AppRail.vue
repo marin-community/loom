@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
 import { me } from '../auth';
 import { theme, toggleTheme } from '../theme';
+import { fleetRoute } from '../lib/fleetLink';
 import {
   useMobileSessionNavigation,
   type MobileSessionSurface,
@@ -330,7 +331,7 @@ onBeforeUnmount(() => closeMore());
 
     <template v-if="sessionMode">
       <router-link
-        to="/"
+        :to="fleetRoute"
         data-mobile-nav="sessions"
         class="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-1 text-faint transition-colors hover:text-muted"
       >
@@ -388,7 +389,7 @@ onBeforeUnmount(() => closeMore());
       <router-link
         v-for="item in mobileMain"
         :key="item.to"
-        :to="item.to"
+        :to="item.to === '/' ? fleetRoute : item.to"
         :data-rail="item.data ?? item.label.toLowerCase()"
         :aria-current="active(item) ? 'page' : undefined"
         class="relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 px-0.5 py-1 transition-colors"
@@ -454,7 +455,7 @@ onBeforeUnmount(() => closeMore());
   >
     <!-- Wordmark — a warp/weft weave glyph; home link to the fleet. -->
     <router-link
-      to="/"
+      :to="fleetRoute"
       class="hidden h-12 items-center justify-center text-accent sm:flex"
       title="loom — agent sessions"
       aria-label="loom home"
@@ -476,7 +477,7 @@ onBeforeUnmount(() => closeMore());
     <router-link
       v-for="item in visibleMain"
       :key="item.to"
-      :to="item.to"
+      :to="item.to === '/' ? fleetRoute : item.to"
       :title="item.title ?? item.label"
       :data-rail="item.data ?? item.label.toLowerCase()"
       :aria-current="active(item) ? 'page' : undefined"
