@@ -308,6 +308,30 @@ test.describe('conversation view', () => {
       .toBe(true);
   });
 
+  // A half-typed message is the user's work — a refresh must not eat it. The
+  // draft lives in browser-local storage (per session), and only a successful
+  // send clears it.
+  test('a refresh keeps the half-typed draft; a send clears it for good', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await openConversation(page, weaver, { name: 'conv-draft' });
+    const input = page.getByTestId('composer-input');
+
+    await input.fill('half-typed thought');
+    // The tab pick lives in the component, not the URL, so re-open with it.
+    await page.goto(`${weaver.baseUrl}/s/${s.id}?tab=conversation`);
+    await expect(page.getByTestId('conversation')).toBeVisible();
+    await expect(input).toHaveValue('half-typed thought');
+
+    await input.fill('now it is complete');
+    await page.getByTestId('composer-send').click();
+    await expect(input).toHaveValue('');
+    await page.goto(`${weaver.baseUrl}/s/${s.id}?tab=conversation`);
+    await expect(page.getByTestId('conversation')).toBeVisible();
+    await expect(input).toHaveValue('');
+  });
+
   test('phone conversation keeps readable prose and a focus-safe composer', async ({
     page,
     weaver,
