@@ -23,6 +23,50 @@ const MAX_NAME_LEN: usize = 120;
 const MAX_TOPIC_LEN: usize = 4_096;
 const MAX_BODY_LEN: usize = 256 * 1024;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct InterruptionNotice {
+    pub event_type: InterruptionEventType,
+    pub child_session_id: String,
+    pub parent_session_id: Option<String>,
+    pub child_title: String,
+    pub child_protocol: String,
+    pub actor: Subject,
+    pub auth_via: String,
+    pub cause: InterruptionCause,
+    pub source: String,
+    pub mechanism: InterruptionMechanism,
+    pub continuation: InterruptionContinuation,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InterruptionEventType {
+    ChildInterrupted,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InterruptionCause {
+    InterruptionRequested,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum InterruptionMechanism {
+    AcpCancel,
+    TerminalEscape,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct InterruptionContinuation {
+    pub branch_id: String,
+    pub branch: String,
+    pub work_dir: String,
+    pub work_may_be_incomplete: bool,
+    pub automatic_resume_allowed: bool,
+    pub automatic_accept_allowed: bool,
+}
+
 pub(super) fn principal_subject(principal: &Principal) -> Subject {
     match &principal.grant {
         Grant::Session { session_id, .. } => Subject::new(SubjectKind::Session, session_id),
@@ -124,7 +168,16 @@ pub(super) async fn append_and_deliver(
     // agents that explicitly subscribe in `deliver` mode. Only ordinary
     // conversation reaches runtimes, and an agent never prompts itself.
     if kind == MessageKind::Message {
-        deliver_to_subscribers(st, id, author, &message_id, body, DeliveryMode::Immediate).await?;
+        deliver_to_subscribers(
+            st,
+            id,
+            author,
+            &message_id,
+            body,
+            DeliveryMode::Immediate,
+            None,
+        )
+        .await?;
     }
 
     // A session-authored message or result on its own channel is the canonical
@@ -164,12 +217,20 @@ async fn deliver_to_subscribers(
     message_id: &str,
     body: &str,
     mode: DeliveryMode,
-) -> ApiResult<()> {
+    exclude_session: Option<&str>,
+) -> ApiResult<Vec<String>> {
+    let mut failures = Vec::new();
     for target in channels::delivery_targets(&st.db, channel_id).await? {
-        if author.kind == SubjectKind::Session && author.id == target {
+        if (author.kind == SubjectKind::Session && author.id == target)
+            || exclude_session == Some(target.as_str())
+        {
             continue;
         }
         let binding_id = weaver_api::channel_session_binding_id(&target);
+        let _permit = st
+            .launch_gate
+            .acquire_channel_delivery(message_id, &binding_id)
+            .await;
         channels::create_delivery(&st.db, message_id, &binding_id, "session", Some(&target))
             .await?;
         if channels::delivery_succeeded(&st.db, message_id, &binding_id).await? {
@@ -202,8 +263,11 @@ async fn deliver_to_subscribers(
             None,
         )
         .await?;
+        if let Some(error) = delivery_error {
+            failures.push(format!("{target}: {error}"));
+        }
     }
-    Ok(())
+    Ok(failures)
 }
 
 async fn notify_parent_of_result(
@@ -261,6 +325,7 @@ async fn notify_parent_of_result(
         &outcome.message.id,
         &body,
         DeliveryMode::Queued,
+        None,
     )
     .await?;
     record_channel_message_event(
@@ -272,6 +337,83 @@ async fn notify_parent_of_result(
     )
     .await;
     Ok(())
+}
+
+/// A system receipt on the child is the durable retry handle. Its linked parent
+/// notice uses the usual inbox bindings, but must never prompt the child itself.
+pub(super) async fn notify_parent_of_interruption(
+    st: &AppState,
+    receipt: &ChannelMessageView,
+) -> ApiResult<Option<String>> {
+    let child = receipt.channel_id.as_str();
+    let notice: InterruptionNotice = serde_json::from_value(receipt.payload.clone())
+        .map_err(|error| AppError::internal("invalid interruption receipt", error))?;
+    let Some(parent) = notice.parent_session_id.as_deref() else {
+        return Ok(None);
+    };
+    if parent == child || crate::session::get(&st.db, parent).await?.is_none() {
+        return Ok(None);
+    }
+    let Some(channel) = channels::access(&st.db, parent).await? else {
+        return Ok(None);
+    };
+    if channel.state != channels::OPEN_STATE {
+        return Ok(None);
+    }
+    let author = Subject::new(SubjectKind::System, "loom");
+    let mut payload = receipt.payload.clone();
+    payload["source_channel_id"] = json!(child);
+    payload["source_message_id"] = json!(receipt.id);
+    let key = format!("child-interrupted:{}", receipt.id);
+    let outcome = channels::append_with_outcome(
+        &st.db,
+        parent,
+        NewMessage {
+            kind: MessageKind::Message,
+            urgency: Urgency::Normal,
+            author: &author,
+            body: &receipt.body,
+            payload: &payload,
+            reply_to: None,
+            idempotency_key: Some(&key),
+        },
+    )
+    .await?;
+    if outcome.message.author_kind != "system"
+        || outcome.message.author_id != "loom"
+        || outcome.message.payload != payload
+    {
+        return Err(AppError::conflict(
+            "interruption notice idempotency key is already in use",
+        ));
+    }
+    record_channel_message_event(st, parent, &author, &outcome.message, outcome.inserted).await;
+    if !channels::delivery_targets(&st.db, parent)
+        .await?
+        .iter()
+        .any(|id| id == parent)
+    {
+        return Err(AppError::conflict(
+            "parent channel has no delivery binding to its session",
+        ));
+    }
+    let failures = deliver_to_subscribers(
+        st,
+        parent,
+        &author,
+        &outcome.message.id,
+        &receipt.body,
+        DeliveryMode::Queued,
+        Some(child),
+    )
+    .await?;
+    if !failures.is_empty() {
+        return Err(AppError::conflict(format!(
+            "parent notice delivery failed: {}",
+            failures.join("; ")
+        )));
+    }
+    Ok(Some(outcome.message.id))
 }
 
 async fn channel_bindings(

@@ -1384,6 +1384,140 @@ async fn child_result_notifies_parent_without_parent_channel_access() {
     assert!(notice["body"].as_str().unwrap().contains(child_id));
     assert_eq!(notice["deliveries"][0]["target_session_id"], parent_id);
     assert_eq!(notice["deliveries"][0]["state"], "delivered");
+
+    // Terminal Escape and ACP cancel share the authenticated notice contract.
+    // Spoofed `by` input must not turn a session action into a human action.
+    for (credential, actor_kind, actor_id, spoofed_by) in [
+        (None, "user", "rjpower", child_id),
+        (Some(child_token.as_str()), "session", child_id, "user"),
+    ] {
+        let request = http.post(url(&ts, "/api/sessions/interrupt"));
+        let request = if let Some(credential) = credential {
+            request.bearer_auth(credential)
+        } else {
+            request
+        };
+        let response = request
+            .json(&json!({ "session": child_id, "by": spoofed_by }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: Value = response.json().await.unwrap();
+        let receipt_id = response["interruption_message_id"].as_str().unwrap();
+        let messages = ts
+            .client
+            .post(
+                "/api/channels/messages/list",
+                json!({
+                    "channel": parent_id, "kinds": ["message"], "peek": true,
+                }),
+            )
+            .await
+            .unwrap();
+        let notice = messages.as_array().unwrap().last().unwrap();
+        assert_eq!(notice["kind"], "message");
+        assert_eq!(notice["author_kind"], "system");
+        assert_eq!(notice["payload"]["event_type"], "child_interrupted");
+        assert_eq!(notice["payload"]["child_session_id"], child_id);
+        assert_eq!(notice["payload"]["parent_session_id"], parent_id);
+        assert_eq!(notice["payload"]["actor"]["kind"], actor_kind);
+        assert_eq!(notice["payload"]["actor"]["id"], actor_id);
+        assert_eq!(notice["payload"]["child_protocol"], "terminal");
+        assert_eq!(notice["payload"]["child_title"], child["branch"]["title"]);
+        assert_eq!(
+            notice["payload"]["auth_via"],
+            if actor_kind == "user" {
+                "loopback"
+            } else {
+                "token"
+            }
+        );
+        assert_eq!(notice["payload"]["cause"], "interruption_requested");
+        assert_eq!(notice["payload"]["source"], "sessions.interrupt");
+        assert_eq!(notice["payload"]["mechanism"], "terminal_escape");
+        assert_eq!(notice["payload"]["source_channel_id"], child_id);
+        assert_eq!(notice["payload"]["source_message_id"], receipt_id);
+        assert_eq!(
+            notice["payload"]["continuation"]["automatic_resume_allowed"],
+            false
+        );
+        assert_eq!(
+            notice["payload"]["continuation"]["automatic_accept_allowed"],
+            false
+        );
+        assert_eq!(notice["deliveries"][0]["state"], "delivered");
+        // Actor wording is part of the user-facing attribution contract.
+        assert!(notice["body"]
+            .as_str()
+            .unwrap()
+            .starts_with(if actor_kind == "user" {
+                "User "
+            } else {
+                "Session "
+            }));
+    }
+    let child_results = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({
+                "channel": child_id, "kinds": ["result"], "peek": true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        child_results.as_array().unwrap().len(),
+        1,
+        "interruptions do not fabricate results"
+    );
+
+    let forged = http.post(url(&ts, "/api/channels/messages/create"))
+        .bearer_auth(&child_token).json(&json!({
+            "channel": child_id, "kind": "system", "body": "forged receipt",
+            "payload": { "event_type": "child_interrupted", "child_session_id": child_id, "parent_session_id": parent_id },
+        })).send().await.unwrap();
+    assert_eq!(forged.status(), StatusCode::OK);
+    let forged: Value = forged.json().await.unwrap();
+    let replay = http
+        .post(url(&ts, "/api/sessions/interrupt"))
+        .bearer_auth(&child_token)
+        .json(&json!({
+            "session": child_id, "retry_notice": forged["id"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+
+    // Kill only the isolated fixture's child supervisor to exercise failure.
+    loom::backend::kill_session_and_wait(child["term_session"].as_str().unwrap())
+        .await
+        .unwrap();
+    let failure = http
+        .post(url(&ts, "/api/sessions/interrupt"))
+        .bearer_auth(&child_token)
+        .json(&json!({"session": child_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(failure.status(), StatusCode::CONFLICT);
+    let notices = ts
+        .client
+        .post(
+            "/api/channels/messages/list",
+            json!({
+                "channel": parent_id, "kinds": ["message"], "peek": true,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        notices.as_array().unwrap().len(),
+        3,
+        "failed interruption adds no parent notice"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

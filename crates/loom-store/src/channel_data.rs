@@ -94,7 +94,8 @@ impl Urgency {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SubjectKind {
     Session,
     User,
@@ -123,7 +124,7 @@ impl SubjectKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Subject {
     pub kind: SubjectKind,
     pub id: String,

@@ -2368,9 +2368,14 @@ pub struct SessionSendResult {
 }
 
 /// Result of `sessions.interrupt`.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionInterruptResult {
     pub interrupted: bool,
+    /// Durable system receipt on the child's channel. Can be supplied as
+    /// `retry_notice` to retry notification without cancelling another turn.
+    pub interruption_message_id: String,
+    /// Parent notice, or null when there is no open immediate parent channel.
+    pub parent_notice_message_id: Option<String>,
 }
 
 /// Result of `sessions.preview`: the session's terminal pane (or, for an ACP

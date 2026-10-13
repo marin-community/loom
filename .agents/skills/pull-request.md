@@ -1,20 +1,24 @@
 ---
 name: pull-request
-description: Commit cleanly, run proportional deterministic gates, decide whether the agent lint review is warranted, open or update the PR, then drive CI green and hand off to the final reviewer. Use when committing, pushing, or creating/updating a weaver pull request.
+description: Commit cleanly, run proportional gates and lint review, and handle PR/CI work within the authorized scope. Hand delegated candidates and reviews to the immediate parent. Use when committing, pushing, or creating/updating a weaver pull request.
 ---
 
 # Skill: Pull Request
 
 Clean the branch, commit, apply the lint-review policy, open or update the PR,
-then drive CI green and hand it to the coordinator/human final reviewer. Commit
+then drive CI green and hand it to the designated reviewer. Commit
 before any review run — it reads the committed branch diff and only reports.
 
-Weaver is solo: skip team ceremony, but the deterministic gates, the
-lint-review decision, and driving CI green are not optional.
+For delegated work, the immediate parent owns disposition and review repairs.
+If the task ends at a candidate commit or review, stop at that authorized scope
+and send a typed result on your own channel; do not infer permission to push or
+open a PR. Deterministic gates and the lint-review decision still apply.
 
 ## Checklist
 
-WIP checkpoint: **1, 2, 4, 5, 7**, stop. Full list before opening/updating a PR.
+WIP checkpoint: **1, 2, 4, 5, 7**, when pushing is in scope. A delegated candidate
+handoff uses steps **1–6** plus its typed result. Full list before
+opening/updating a PR.
 
 1. Self-review the diff.
 2. Gate — `./scripts/pre-commit.sh` (Rust + frontend deterministic checks). Not
@@ -151,12 +155,26 @@ isn't automatically pre-existing — confirm it fails on `main` without your
 change first. Never silently absorb a failure.
 
 Once CI is green, address any comments already present. Fix clear comments in a
-new commit and reply in-thread; if one is genuinely unclear, raise `loom status
-set --tag attention --message "<question>"`. Do not poll for future
-reviews or wait for them.
+new commit and reply in-thread. A delegated session routes unclear comments or
+agent-owned blockers to its immediate parent as a typed `parent_help` result,
+keeping status `ok`. Do not poll for future reviews or wait for them.
 
 Keep status `ok` while CI runs. Once CI is green and comments already present
-are handled, raise `loom status set --tag attention --message "ready for review"` and hand off.
+are handled, hand off the verified scope. Delegated `ready-for-review`,
+`approval`, `request-changes`, `failedchecks`, and `context` outcomes remain
+`ok`. Send `loom channels send --kind result "<outcome, commit/PR, checks, limits,
+and follow-up>"` on your own channel to wake the immediate parent; status alone
+or ending the turn does not wake it. The parent owns review follow-ups and
+repairs. Escalate through the agent hierarchy; reserve `attention`/`blocked` for
+a genuinely unresolved human decision or access requirement. Do not ask the user
+to manage agents or their repairs.
+Human review requests identify the concrete unresolved decision and reviewable
+resources; they are distinct from delegated parent review.
+
+Before ending a delegated turn, verify your open own-channel delivery binding
+and parentage, save state, and publish the typed result. If waiting on children,
+end the turn after saving state rather than busy polling. A completed child turn
+or local green does not establish integration readiness.
 Close the tracking issue when the PR is open and the work is genuinely done —
 not before.
 
@@ -164,7 +182,7 @@ not before.
 
 - `./scripts/pre-commit.sh` is the gate; make the lint-review decision after
   committing.
-- Never merge or push to `main`; open a PR.
+- Never merge or push to `main`; open a PR when it is in the authorized scope.
 - Force-push with `--force-with-lease`, e.g. after a rebase.
 - No self-attribution in commits or PR bodies.
 - Nothing to commit → say so, stop.

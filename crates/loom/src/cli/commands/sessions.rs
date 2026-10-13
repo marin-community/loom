@@ -97,6 +97,9 @@ pub enum SessionCmd {
     Interrupt {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
+        /// Retry a durable interruption receipt's parent notice without cancelling again.
+        #[arg(long)]
+        retry_notice: Option<String>,
     },
     /// Print a session's recent terminal screen.
     Preview {
@@ -332,7 +335,10 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
             message,
             no_enter,
         } => cmd_session_send(session, message.join(" "), !no_enter).await,
-        SessionCmd::Interrupt { session } => cmd_session_interrupt(session).await,
+        SessionCmd::Interrupt {
+            session,
+            retry_notice,
+        } => cmd_session_interrupt(session, retry_notice).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
         SessionCmd::Changes { session } => {
             let changes = client::default()?
@@ -805,14 +811,20 @@ pub(crate) async fn cmd_session_send(key: String, message: String, submit: bool)
 }
 
 /// `loom sessions interrupt` — interrupt the agent's current turn.
-pub(crate) async fn cmd_session_interrupt(key: String) -> Result<()> {
+pub(crate) async fn cmd_session_interrupt(key: String, retry_notice: Option<String>) -> Result<()> {
     let client = client::default()?;
+    let retrying_notice = retry_notice.is_some();
     client
         .invoke::<sessions::interrupt::Op>(&sessions::interrupt::Input {
             session: key.clone(),
+            retry_notice,
         })
         .await?;
-    println!("interrupted {key}");
+    if retrying_notice {
+        println!("retried parent notice for {key}");
+    } else {
+        println!("interrupted {key}");
+    }
     Ok(())
 }
 

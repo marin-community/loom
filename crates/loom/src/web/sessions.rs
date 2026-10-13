@@ -1374,20 +1374,123 @@ async fn op_interrupt(
     input: ops::interrupt::Input,
 ) -> ApiResult<SessionInterruptResult> {
     let st = &context.state;
-    let (session, _) = require_session(&st.db, &input.session).await?;
-    if session.protocol == "acp" {
-        let handle = require_acp_task(st, &session)?;
-        handle
-            .cancel()
-            .await
-            .map_err(|e| AppError::conflict(e.to_string()))?;
-        return Ok(SessionInterruptResult { interrupted: true });
-    }
-    require_live_terminal(&session).await?;
-    backend::send_key(&session.term_session, "Escape")
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let receipt = if let Some(id) = input.retry_notice {
+        // Only a server-authored receipt on this child can replay a notice.
+        // An arbitrary channel payload or caller-supplied `by` is not authority.
+        let valid: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM channel_messages
+             WHERE id = ? AND channel_id = ? AND kind = 'system'
+               AND author_kind = 'system' AND author_id = 'loom')",
+        )
+        .bind(&id)
+        .bind(&session.id)
+        .fetch_one(&st.db)
+        .await?;
+        if !valid {
+            return Err(AppError::bad_request(
+                "retry_notice must identify this child's system interruption receipt",
+            ));
+        }
+        let receipt = crate::channels::refresh_message(&st.db, &id).await?;
+        let notice: super::channels::InterruptionNotice =
+            serde_json::from_value(receipt.payload.clone()).map_err(|_| {
+                AppError::bad_request("retry_notice is not an interruption receipt")
+            })?;
+        if notice.child_session_id != session.id {
+            return Err(AppError::bad_request(
+                "retry_notice is not an interruption receipt",
+            ));
+        }
+        receipt
+    } else {
+        // Read provenance before touching the runtime. Once cancellation has
+        // succeeded, every error must identify the partial success explicitly.
+        let parent: Option<String> =
+            sqlx::query_scalar("SELECT parent_session_id FROM sessions WHERE id = ?")
+                .bind(&session.id)
+                .fetch_one(&st.db)
+                .await?;
+        if session.protocol == "acp" {
+            require_acp_task(st, &session)?
+                .cancel()
+                .await
+                .map_err(|e| AppError::conflict(e.to_string()))?;
+        } else {
+            require_live_terminal(&session).await?;
+            backend::send_key(&session.term_session, "Escape")
+                .await
+                .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        let actor = super::channels::principal_subject(&context.principal);
+        let body = format!(
+            "{} {} interrupted child session {} ({}) via {}. The interruption was requested; work may be incomplete. Do not automatically resume the interrupted child or accept its changes. Inspect its channel with `loom channels read --channel {}` and decide follow-up.",
+            match actor.kind {
+                crate::channels::SubjectKind::User => "User",
+                crate::channels::SubjectKind::Session => "Session",
+                _ => "Actor",
+            },
+            actor.id, session.id, branch.title, session.protocol, session.id,
+        );
+        let payload = json!(super::channels::InterruptionNotice {
+            event_type: super::channels::InterruptionEventType::ChildInterrupted,
+            child_session_id: session.id.clone(),
+            parent_session_id: parent,
+            child_title: branch.title,
+            child_protocol: session.protocol.clone(),
+            actor,
+            auth_via: context.principal.via.as_str().to_string(),
+            cause: super::channels::InterruptionCause::InterruptionRequested,
+            source: "sessions.interrupt".to_string(),
+            mechanism: if session.protocol == "acp" {
+                super::channels::InterruptionMechanism::AcpCancel
+            } else {
+                super::channels::InterruptionMechanism::TerminalEscape
+            },
+            continuation: super::channels::InterruptionContinuation {
+                branch_id: branch.id,
+                branch: branch.branch,
+                work_dir: session.work_dir,
+                work_may_be_incomplete: true,
+                automatic_resume_allowed: false,
+                automatic_accept_allowed: false,
+            },
+        });
+        let author = crate::channels::Subject::new(crate::channels::SubjectKind::System, "loom");
+        let receipt = crate::channels::append(
+            &st.db, &session.id,
+            crate::channels::NewMessage {
+                kind: crate::channels::MessageKind::System,
+                urgency: crate::channels::Urgency::Normal,
+                author: &author,
+                body: &body,
+                payload: &payload,
+                reply_to: None,
+                idempotency_key: None,
+            },
+        )
         .await
-        .map_err(|e| AppError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(SessionInterruptResult { interrupted: true })
+        .map_err(|error| AppError::internal("interruption requested, but its durable receipt could not be saved; inspect the child before retrying interruption", error)
+            .with_fields(json!({ "interrupted": true, "interruption_message_id": null })))?;
+        super::channels::record_channel_message_event(st, &session.id, &author, &receipt, true)
+            .await;
+        receipt
+    };
+    let parent_notice_message_id = super::channels::notify_parent_of_interruption(st, &receipt)
+        .await
+        .map_err(|error| AppError::new(StatusCode::BAD_GATEWAY, format!(
+            "interruption requested, but parent notification failed: {}. Retry notification with retry_notice={}",
+            error.message(), receipt.id,
+        )).with_fields(json!({
+            "interrupted": true,
+            "interruption_message_id": receipt.id,
+            "retry_notice": receipt.id,
+        })))?;
+    Ok(SessionInterruptResult {
+        interrupted: true,
+        interruption_message_id: receipt.id,
+        parent_notice_message_id,
+    })
 }
 
 async fn op_preview(
