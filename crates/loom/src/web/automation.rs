@@ -245,14 +245,31 @@ async fn prompt_channel_run(
     req: &run_operations::create::Input,
     run: crate::runs::Run,
 ) -> ApiResult<RunView> {
-    let Some(session) = crate::session::get(&st.db, &run.session_id)
+    // A suspended channel session is a wake signal: the delivery brings the
+    // runtime back, then lands on it. Anything other than a running or
+    // suspended ACP session is not ready.
+    let Some(mut session) = crate::session::get(&st.db, &run.session_id)
         .await?
-        .filter(|session| session.status == "running" && session.protocol == "acp")
+        .filter(|session| {
+            session.protocol == "acp" && matches!(session.status.as_str(), "running" | "suspended")
+        })
     else {
         let message = "automation channel session is not ready; retry this delivery";
         crate::runs::waiting(&st.db, &run.id, message).await.ok();
         return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
     };
+    if crate::session::is_suspended(&session.status) {
+        match crate::lifecycle::wake(st, &session).await {
+            Ok(refreshed) => session = refreshed,
+            Err(error) => {
+                let message = format!(
+                    "automation channel session is suspended and could not be woken: {error:#}"
+                );
+                crate::runs::waiting(&st.db, &run.id, &message).await.ok();
+                return Err(AppError::new(StatusCode::SERVICE_UNAVAILABLE, message));
+            }
+        }
+    }
     let Some(handle) = st.acp.get(&session.id) else {
         let message = "automation channel session is being adopted; retry this delivery";
         crate::runs::waiting(&st.db, &run.id, message).await.ok();

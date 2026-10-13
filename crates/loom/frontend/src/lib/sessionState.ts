@@ -219,11 +219,12 @@ const LIVE_STATUSES = new Set(['running']);
 
 // Whether the session still has a live agent pane to type into — the gate for
 // the conversation composer. `POST /sessions/{id}/send` 409s once the terminal
-// is gone (orphaned / done / error / archived), so the composer only shows while
-// the agent is running. Reuses LIVE_STATUSES: the same "the agent is here" notion
-// as the idle mark.
+// is gone (orphaned / done / error / archived), so the composer only shows
+// while the agent is running. A suspended session is included: sending to it
+// is one of its wake signals — the server restarts the runtime first, then
+// delivers the message (the request just takes those few seconds).
 export function canSend(s: SessionSummary): boolean {
-  return !s.transition && LIVE_STATUSES.has(s.status);
+  return !s.transition && (LIVE_STATUSES.has(s.status) || s.status === 'suspended');
 }
 
 export function idleTag(s: SessionSummary): Tag | null {
@@ -252,7 +253,11 @@ export function conversationState(s: SessionSummary): ConvState {
         ? 'Archiving'
         : s.transition.kind === 'handoff'
           ? 'Handing off'
-          : 'Adopting';
+          : s.transition.kind === 'suspending'
+            ? 'Suspending'
+            : s.transition.kind === 'waking'
+              ? 'Waking'
+              : 'Adopting';
     return {
       glyph: '▶',
       label: s.transition.step ? `${label} — ${s.transition.step}` : label,
@@ -260,6 +265,7 @@ export function conversationState(s: SessionSummary): ConvState {
     };
   }
   if (s.status === 'archived') return { glyph: '◦', label: 'Archived', tone: 'muted' };
+  if (s.status === 'suspended') return { glyph: '◦', label: 'Suspended', tone: 'muted' };
   if (s.status === 'orphaned') return { glyph: '●', label: 'Orphaned — detached', tone: 'attn' };
   if (s.status === 'error') return { glyph: '●', label: 'Error', tone: 'attn' };
 
@@ -311,7 +317,7 @@ export function lifecycleDot(s: SessionSummary): string {
 // Lifecycle actions — which verbs apply to a session, in one place
 // ---------------------------------------------------------------------------
 
-export type LifecycleVerb = 'adopt' | 'recover' | 'archive' | 'remove';
+export type LifecycleVerb = 'adopt' | 'recover' | 'suspend' | 'wake' | 'archive' | 'remove';
 
 export interface LifecycleAction {
   verb: LifecycleVerb;
@@ -337,6 +343,18 @@ const RECOVER: LifecycleAction = {
   busyLabel: 'Recovering…',
   hint: 'Rebuild the worktree and resume the agent',
 };
+const SUSPEND: LifecycleAction = {
+  verb: 'suspend',
+  label: 'Suspend',
+  busyLabel: 'Suspending…',
+  hint: 'Stop the runtime to free memory; wake it to continue',
+};
+const WAKE: LifecycleAction = {
+  verb: 'wake',
+  label: 'Wake',
+  busyLabel: 'Waking…',
+  hint: 'Restart the stopped runtime and resume the agent',
+};
 const ARCHIVE: LifecycleAction = {
   verb: 'archive',
   label: 'Archive',
@@ -353,24 +371,85 @@ const REMOVE: LifecycleAction = {
 
 // The one action that gets a session unstuck, when it is stuck: an orphaned
 // session (terminal gone, worktree intact) is adopted; an archived one (torn
-// down, branch kept) is recovered. Surfaced next to the status badge that
-// announces the state, so the cure sits with the diagnosis rather than behind a
-// menu. Null for every healthy session — there is nothing to fix.
+// down, branch kept) is recovered; a suspended one (runtime deliberately
+// stopped) is woken. Surfaced next to the status badge that announces the
+// state, so the cure sits with the diagnosis rather than behind a menu.
+// Null for every healthy session — there is nothing to fix.
 export function remedyAction(s: SessionSummary): LifecycleAction | null {
   if (s.transition) return null;
   if (s.status === 'orphaned') return ADOPT;
   if (s.status === 'archived') return RECOVER;
+  if (s.status === 'suspended') return WAKE;
   return null;
 }
 
+// What the standalone remedy *button* (the chip parked against the status
+// badge) surfaces: a session that is stuck, not merely parked. Orphaned and
+// archived sessions are faults with a cure to promote; a suspended one is calm
+// dormancy — its Wake stays in the ⋯/Details action menus beside Suspend,
+// and any wake signal (a sent message, a trigger) brings it back anyway.
+export function remedyButtonAction(s: SessionSummary): LifecycleAction | null {
+  const remedy = remedyAction(s);
+  return remedy?.verb === 'wake' ? null : remedy;
+}
+
 // Every lifecycle action available on a session, in menu order: its remedy (if
-// stuck), then archive (unless it already is), then the destructive remove.
+// stuck), then suspend (a running session can always park), then archive
+// (unless it already is), then the destructive remove.
 export function lifecycleActions(s: SessionSummary): LifecycleAction[] {
   if (s.transition) return [];
   const actions: LifecycleAction[] = [];
   const remedy = remedyAction(s);
   if (remedy) actions.push(remedy);
+  if (s.status === 'running') actions.push(SUSPEND);
   if (s.status !== 'archived') actions.push(ARCHIVE);
   actions.push(REMOVE);
   return actions;
+}
+
+// ---------------------------------------------------------------------------
+// Transition progress strip — the pulsing banner pinned to a conversation's
+// foot while a lifecycle transition runs. Handoff introduced it; waking and
+// suspending (the runtime coming back / being parked — often triggered by the
+// very send sitting in it) reuse the same surface. Other transitions read
+// through the header's state line instead.
+// ---------------------------------------------------------------------------
+
+export interface TransitionProgress {
+  /** The strip's `data-testid`, stable per transition kind. */
+  testid: string;
+  /** Lead line, e.g. "Handoff in progress". */
+  title: string;
+  /** Second line: the transition's live step, or the kind's default. */
+  detail: string;
+  /** Whether input is deliberately held — rendered as "· Session paused". */
+  paused: boolean;
+}
+
+export function transitionProgress(s: SessionSummary): TransitionProgress | null {
+  switch (s.transition?.kind) {
+    case 'handoff':
+      return {
+        testid: 'handoff-progress',
+        title: 'Handoff in progress',
+        detail: s.transition.step || 'Transferring session context',
+        paused: true,
+      };
+    case 'waking':
+      return {
+        testid: 'waking-progress',
+        title: 'Waking session',
+        detail: s.transition.step || 'Restarting the session runtime',
+        paused: false,
+      };
+    case 'suspending':
+      return {
+        testid: 'suspending-progress',
+        title: 'Suspending session',
+        detail: s.transition.step || 'Stopping the session runtime',
+        paused: false,
+      };
+    default:
+      return null;
+  }
 }

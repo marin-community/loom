@@ -203,7 +203,8 @@ function onKeydown(event: KeyboardEvent) {
         </span>
         <span
           v-if="
-            session.transition || ['created', 'done', 'error', 'orphaned'].includes(session.status)
+            session.transition ||
+            ['created', 'done', 'error', 'orphaned', 'suspended'].includes(session.status)
           "
           class="meta-chip shrink-0"
           :aria-label="`Lifecycle: ${session.transition?.kind ?? session.status}`"

@@ -37,6 +37,40 @@ pub mod archive {
     pub type Output = SessionArchiveResult;
 }
 
+pub mod suspend {
+    use super::prelude::*;
+
+    /// Suspend a session: stop its runtime (agent, terminal, debug shells) to
+    /// free its memory, keeping the session row, worktree, branch, and
+    /// conversation in place. The idle monitor suspends ordinary sessions
+    /// automatically per `session.idle_suspend_secs`; a session can opt out
+    /// with the `auto-suspend` tag. The inverse of `wake`.
+    #[operation(id = "sessions.suspend", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions suspend")]
+    pub struct Input {
+        #[operand(context)]
+        pub session: String,
+    }
+
+    pub type Output = SessionSuspendResult;
+}
+
+pub mod wake {
+    use super::prelude::*;
+
+    /// Wake a suspended session: restart its runtime and resume the agent in
+    /// place, without rebuilding anything. A session that is not suspended
+    /// passes through unchanged. The inverse of `suspend`.
+    #[operation(id = "sessions.wake", actor = SessionSelf, scope = Session, risk = Write,
+                grants = ["loom/sessions/write@v1"], cli = "sessions wake")]
+    pub struct Input {
+        #[operand(context)]
+        pub session: String,
+    }
+
+    pub type Output = SessionView;
+}
+
 pub mod changes {
     use super::prelude::*;
 
@@ -1408,6 +1442,8 @@ static OPERATIONS: &[&OperationSpec] = &[
     adopt::SPEC,
     archive::SPEC,
     recover::SPEC,
+    suspend::SPEC,
+    wake::SPEC,
     handoff::SPEC,
     handoff::resolve::SPEC,
     changes::SPEC,

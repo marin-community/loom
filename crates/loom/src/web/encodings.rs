@@ -180,6 +180,16 @@ async fn session_shell_terminal(
         Ok(input) => input,
         Err(error) => return error.into_response(),
     };
+    // Opening a shell is an explicit reach for the session's runtime — a debug
+    // shell is derived from the agent's supervisor, which dormancy stopped —
+    // so the attach wakes a suspended session first. (The agent-terminal
+    // attach deliberately does not: it auto-connects on page load, and merely
+    // viewing a dormant session must not revive it.)
+    if let Ok(Some((session, _))) = crate::session::resolve_key(&st.db, &input.session).await {
+        if let Err(error) = super::sessions::ensure_awake(&st, &session).await {
+            return error.into_response();
+        }
+    }
     let editor = EditorState::from_ref(&st);
     crate::terminal::session_shell_ws(ws, &editor, &input.session, input.index, &headers).await
 }

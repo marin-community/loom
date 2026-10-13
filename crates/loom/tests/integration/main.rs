@@ -37,6 +37,7 @@ mod session_layout;
 mod session_management;
 mod sessions;
 mod shell;
+mod suspend;
 mod terminal;
 mod typed_client;
 mod watches;

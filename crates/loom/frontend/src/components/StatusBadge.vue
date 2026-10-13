@@ -5,18 +5,22 @@ const props = defineProps<{ status: string }>();
 
 // Lifecycle (mechanical) status — a calm, scannable hue per state, kept softer
 // than the loud attention axis (SignalChip) so a raised signal still wins the
-// eye. `running`/`done` read healthy green, `error` the soft block red, and
-// detached/archived states recede to neutral.
+// eye. `running`/`done` read healthy green, `error` the soft block red, the
+// in-flight transitions calm cyan, and detached/dormant/archived states recede
+// to neutral.
 const palette: Record<string, string> = {
   created: 'bg-subtle text-muted',
   running: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30',
   orphaned: 'bg-subtle text-muted',
+  suspended: 'bg-subtle text-muted',
   done: 'bg-ok-soft text-ok ring-1 ring-inset ring-ok-line/30',
   error: 'bg-block-soft text-block ring-1 ring-inset ring-block-line/30',
   failed: 'bg-block-soft text-block ring-1 ring-inset ring-block-line/30',
   creating: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
   archiving: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
   adopting: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
+  suspending: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
+  waking: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
   handoff: 'bg-info-soft text-info ring-1 ring-inset ring-info-line/30',
   archived: 'bg-subtle text-faint',
 };

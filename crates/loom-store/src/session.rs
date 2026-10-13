@@ -178,12 +178,28 @@ fn select_sessions(suffix: &str) -> String {
 ///
 /// Liveness is all the orchestrator can know for sure; the agent reports the
 /// rest via `loom status`.
+///
+/// `suspended` is deliberate dormancy: the runtime was stopped (idle, to free
+/// memory) while the session, worktree, and branch stay in place. It is not
+/// terminal — a wake restarts the runtime — but it is also not a candidate for
+/// adoption or orphaning: the missing supervisor is the point.
 pub const STATUSES: &[&str] = &[
-    "created", "running", "orphaned", "done", "error", "archived",
+    "created",
+    "running",
+    "orphaned",
+    "suspended",
+    "done",
+    "error",
+    "archived",
 ];
 
 pub fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "error" | "archived")
+}
+
+/// Whether `status` is the deliberate-dormancy state a wake can reverse.
+pub fn is_suspended(status: &str) -> bool {
+    status == "suspended"
 }
 
 pub struct NewSession {
@@ -957,6 +973,7 @@ pub async fn increment_turn_count(db: &Db, id: &str) -> Result<i64> {
 /// an archive racing that snapshot cannot be overwritten back to `orphaned`.
 /// A handoff owns an intentional supervisor-free interval while replacing the
 /// provider, so the monitor must not invalidate its mutation generation either.
+/// A suspended session's missing supervisor is deliberate dormancy, not loss.
 /// Returns whether this call performed the transition.
 pub async fn mark_orphaned(db: &Db, id: &str) -> Result<bool> {
     orphan_update(db, id, None).await
@@ -971,7 +988,7 @@ async fn orphan_update(db: &Db, id: &str, driver_epoch: Option<i64>) -> Result<b
     const BASE: &str = "UPDATE sessions
          SET status = 'orphaned', mutation_revision = mutation_revision + 1
          WHERE id = ?
-           AND status NOT IN ('orphaned', 'done', 'error', 'archived', 'handoff')";
+           AND status NOT IN ('orphaned', 'done', 'error', 'archived', 'handoff', 'suspended')";
     let sql = match driver_epoch {
         Some(_) => format!("{BASE} AND acp_driver_epoch = ?"),
         None => BASE.to_string(),
@@ -1910,6 +1927,23 @@ mod tests {
         assert_eq!(
             get(&db, &session.id).await.unwrap().unwrap().status,
             "handoff"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_transition_leaves_a_suspended_session_alone() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/suspended-orphan-race").await;
+        let mut session = new_session("suspended-orphan-race", &branch, None);
+        session.status = "suspended".to_string();
+        insert(&db, &session).await.unwrap();
+
+        // A suspended session has no supervisor by design; the monitor's
+        // liveness walk must not read that as loss.
+        assert!(!mark_orphaned(&db, &session.id).await.unwrap());
+        assert_eq!(
+            get(&db, &session.id).await.unwrap().unwrap().status,
+            "suspended"
         );
     }
 
