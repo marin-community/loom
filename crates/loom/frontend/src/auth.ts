@@ -34,12 +34,15 @@ export async function loadMe(): Promise<boolean> {
   return me.authenticated;
 }
 
-/** Log out: drop the server session, then the local identity. */
+/** Log out: drop the server session, then re-read identity from the server.
+ *  Re-reading (rather than resetting to EMPTY) keeps the login screen's
+ *  sign-in methods live — an empty reset pins `methods.github` to false and
+ *  hides the GitHub button until the next refresh. */
 export async function doLogout(): Promise<void> {
   try {
     await api.logout();
   } catch {
-    /* clearing locally is enough even if the call fails */
+    /* the fallback below still refreshes identity even if the call fails */
   }
-  assign({ ...EMPTY });
+  await loadMe();
 }
