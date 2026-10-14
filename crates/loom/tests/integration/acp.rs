@@ -239,13 +239,42 @@ async fn disposable_launch_validation_rejects_unavailable_modes_and_cleans_its_r
     assert!(
         error
             .to_string()
-            .contains("launch model 'claude-unavailable' is not available"),
+            .contains("failed to select launch model 'claude-unavailable'"),
         "{error}"
     );
     assert!(
         error.to_string().contains("fake-fast, fake-deep"),
         "{error}"
     );
+    assert_eq!(backend::list_sessions().await.unwrap(), before);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disposable_launch_validation_reports_advertised_model_selection_failure() {
+    let ts = TestServer::start().await;
+    let before = backend::list_sessions().await.unwrap();
+    let cause = "provider connection closed while selecting model";
+    let mut launch = transient_launch(
+        &ts,
+        vec![("FAKE_ACP_CONFIG_ERROR".to_string(), cause.to_string())],
+    );
+    launch.initial_model = Some("fake-deep".to_string());
+
+    let error = acp::validate_launch(
+        &ts.state.db,
+        ts.state.acp.transient_sessions(),
+        launch,
+        Duration::from_secs(5),
+    )
+    .await
+    .expect_err("selecting an advertised model can still fail");
+    let message = error.to_string();
+    // Preserve the actual adapter failure instead of diagnosing model availability.
+    assert!(message.contains(cause), "{message}");
+    assert!(message.contains("session/set_config_option"), "{message}");
+    assert!(message.contains("fake-deep"), "{message}");
+    assert!(!message.contains("not available"), "{message}");
     assert_eq!(backend::list_sessions().await.unwrap(), before);
 }
 

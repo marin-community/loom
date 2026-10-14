@@ -485,6 +485,14 @@ function handleMessage(msg) {
       respond(msg.id, {});
       break;
     case "session/set_config_option":
+      if (process.env.FAKE_ACP_CONFIG_ERROR) {
+        send({
+          jsonrpc: JSONRPC,
+          id: msg.id,
+          error: { code: -32603, message: process.env.FAKE_ACP_CONFIG_ERROR },
+        });
+        break;
+      }
       if (msg.params.configId === "model") {
         if (!modelValues.includes(msg.params.value)) {
           send({
