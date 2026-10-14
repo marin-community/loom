@@ -134,6 +134,54 @@ async function queueAcpPrompt(
 }
 
 test.describe('acp conversation', () => {
+  test('session updates stay attributed and survive editing human feedback', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'separate-inbox',
+    });
+    const source = await weaver.seedSession({
+      goal: 'child work',
+      name: 'update-source',
+    });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('wait:30000|say:unfinished');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+    await queueAcpPrompt(weaver, session, 'human feedback');
+    await weaver.seedSessionUpdate(
+      session,
+      source,
+      'The child result is ready.',
+    );
+    await page.reload();
+    const update = page.getByTestId('acp-session-update');
+    await expect(update).toHaveCount(1);
+    await expect(update.locator('.acp-label')).toHaveText(
+      `Update from loom session ${source.id}`,
+    );
+    await expect(
+      update.getByRole('button', { name: 'Edit', exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByTestId('acp-pending').locator('.acp-label'),
+    ).toHaveText('You');
+    await page.getByTestId('acp-edit-queued').click();
+    await expect(input).toHaveValue('human feedback');
+    await expect(page.getByTestId('acp-pending')).toBeHidden();
+    await expect(update).toContainText('The child result is ready.');
+    await page.getByTestId('acp-composer-stop').click();
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await page.reload();
+    await expect(update).toHaveCount(1);
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await page.screenshot({
+      path: test.info().outputPath('session-update-queue.png'),
+    });
+  });
+
   test('opens the first worktree shell from the keyboard', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:Ready for shell work.',

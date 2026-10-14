@@ -220,6 +220,9 @@ export interface UserMessagePayload {
   text: string;
   by: string | null;
   steered?: boolean;
+  source_session_id?: string | null;
+  source_channel_id?: string | null;
+  source_message_id?: string | null;
 }
 export interface AgentMessagePayload {
   text: string;

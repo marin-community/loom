@@ -124,7 +124,7 @@ strongly connected components:
 ```
 [23,737 lines, 20 mods]  acp agent agent_env auth automation channels chat
                          chatlog custom_agents custom_mcp db history mcp
-                         profile repo_env review_inbox runs session
+                         profile repo_env conversation_inbox runs session
                          session_layout status
 
 [ 5,717 lines,  6 mods]  github github_app github_trigger lifecycle repo runtime
@@ -139,7 +139,7 @@ this module-level DAG:
 
 ```
 L1  db
-L2  session runs chat review_inbox custom_agents agent_env repo_env
+L2  session runs chat conversation_inbox custom_agents agent_env repo_env
 L3  channels chatlog session_layout status
 L4  acp history
 L5  mcp

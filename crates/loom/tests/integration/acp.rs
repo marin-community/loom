@@ -1588,7 +1588,7 @@ async fn child_result_waits_for_parent_acp_turn() {
     let result = http
         .post(format!("http://{}/api/channels/messages/create", ts.addr))
         .bearer_auth(&child_token)
-        .json(&json!({ "channel": child_id, "kind": "result", "body": "done" }))
+        .json(&json!({ "channel": child_id, "kind": "result", "body": "done", "idempotency_key": "result:1" }))
         .send()
         .await
         .unwrap();
@@ -1597,12 +1597,23 @@ async fn child_result_waits_for_parent_acp_turn() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        parent
-            .pending_prompt
-            .as_deref()
-            .is_some_and(|prompt| prompt.contains(child_id)),
-        "child notice should wait for the current parent turn"
+    assert!(parent.pending_prompt.as_deref().is_none_or(str::is_empty));
+    let pending = loom::conversation_inbox::pending_updates(&ts.state.db, parent_id)
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].source_session_id.as_deref(), Some(child_id));
+    let retry = http.post(format!("http://{}/api/channels/messages/create", ts.addr))
+        .bearer_auth(&child_token)
+        .json(&json!({ "channel": child_id, "kind": "result", "body": "done", "idempotency_key": "result:1" }))
+        .send().await.unwrap();
+    assert_eq!(retry.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        loom::conversation_inbox::pending_updates(&ts.state.db, parent_id)
+            .await
+            .unwrap()
+            .len(),
+        1
     );
     let chat = poll_chat(&ts, parent_id, Duration::from_secs(10), |blocks| {
         count_kind(blocks, "turn_end") >= 2
@@ -1611,6 +1622,173 @@ async fn child_result_waits_for_parent_acp_turn() {
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
         block["kind"] == "agent_message" && block["payload"]["text"] == "first turn finished"
     }));
+    let updates: Vec<_> = chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["payload"]["source_session_id"] == child_id)
+        .collect();
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0]["payload"]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("Update from loom session {child_id}")));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_updates_use_authenticated_identity_and_preserve_stop() {
+    let ts = TestServer::start().await;
+    let id = "acp-session-update";
+    start_new(&ts, id, None, None).await;
+    let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), id, &session.branch_id)
+            .await
+            .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:30000|say:unreached" }),
+        )
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let send = || {
+        http.post(format!("http://{}/api/sessions/send", ts.addr)).bearer_auth(&token)
+        .json(&json!({ "session": id, "text": "result ready", "by": "manual", "idempotency_key": "stable-update" })).send()
+    };
+    let (first, retry) = tokio::join!(send(), send());
+    assert_eq!(first.unwrap().status(), reqwest::StatusCode::OK);
+    assert_eq!(retry.unwrap().status(), reqwest::StatusCode::OK);
+    let snapshot = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(snapshot["pending_updates"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["pending_updates"][0]["source_session_id"], id);
+    assert_eq!(snapshot["pending_prompt"], Value::Null);
+    assert!(snapshot["live_turn"].is_number());
+    ts.client
+        .post("/api/sessions/interrupt", json!({ "session": id }))
+        .await
+        .unwrap();
+    let response = send().await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let snapshot = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(snapshot["live_turn"], Value::Null);
+    assert_eq!(snapshot["pending_updates"].as_array().unwrap().len(), 1);
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:resume" }),
+        )
+        .await
+        .unwrap();
+    let chat = poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 3
+    })
+    .await;
+    let updates: Vec<_> = chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["payload"]["source_session_id"] == id)
+        .collect();
+    assert_eq!(updates.len(), 1);
+}
+
+#[serial]
+#[tokio::test]
+async fn result_wait_consumes_a_notice_but_human_reads_and_peeks_do_not() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "wait-parent").await;
+    make_session(&ts, "wait-child").await;
+    sqlx::query("UPDATE sessions SET parent_session_id = 'wait-parent' WHERE id = 'wait-child'")
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let parent = session_mod::get(&ts.state.db, "wait-parent")
+        .await
+        .unwrap()
+        .unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        &parent.id,
+        &parent.branch_id,
+    )
+    .await
+    .unwrap();
+    let parent_subject =
+        loom::channels::Subject::new(loom::channels::SubjectKind::Session, &parent.id);
+    loom::channels::set_subscription(
+        &ts.state.db,
+        "wait-child",
+        &parent_subject,
+        loom::channels::SubscriptionMode::Observe,
+    )
+    .await
+    .unwrap();
+    let child = loom::channels::Subject::new(loom::channels::SubjectKind::Session, "wait-child");
+    let result = loom::channels::append(
+        &ts.state.db,
+        "wait-child",
+        loom::channels::NewMessage {
+            kind: loom::channels::MessageKind::Result,
+            urgency: loom::channels::Urgency::Normal,
+            author: &child,
+            body: "done",
+            payload: &Value::Null,
+            reply_to: None,
+            idempotency_key: Some("result:1"),
+        },
+    )
+    .await
+    .unwrap();
+    ts.client
+        .post(
+            "/api/channels/messages/list",
+            json!({ "channel": "wait-child", "peek": false }),
+        )
+        .await
+        .unwrap();
+    let http = reqwest::Client::new();
+    let peek = http
+        .post(format!("http://{}/api/channels/messages/list", ts.addr))
+        .bearer_auth(&token)
+        .json(&json!({ "channel": "wait-child", "peek": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(peek.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        loom::conversation_inbox::pending_updates(&ts.state.db, &parent.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let response = http
+        .post(format!("http://{}/api/channels/wait", ts.addr))
+        .bearer_auth(&token)
+        .json(&json!({ "channel": "wait-child", "after": 0, "kind": "result", "timeout": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["id"], result.id);
+    assert!(
+        loom::conversation_inbox::pending_updates(&ts.state.db, &parent.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Retracting unseen feedback is serialized by the ACP task: either the browser
@@ -2883,7 +3061,7 @@ async fn insert_protected_review(
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO review_conversation_inbox
+        "INSERT INTO conversation_inbox
             (delivery_key, review_id, branch_id, preferred_session_id, payload)
          VALUES (?, ?, ?, ?, ?)",
     )
@@ -2949,7 +3127,7 @@ async fn interrupting_a_review_turn_does_not_redeliver_it() {
         1
     );
     let state: String =
-        sqlx::query_scalar("SELECT state FROM review_conversation_inbox WHERE delivery_key = ?")
+        sqlx::query_scalar("SELECT state FROM conversation_inbox WHERE delivery_key = ?")
             .bind(delivery_key)
             .fetch_one(&ts.state.db)
             .await

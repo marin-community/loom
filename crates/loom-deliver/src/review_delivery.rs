@@ -10,7 +10,9 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use std::time::Duration;
 
-use crate::review_inbox::{claim_review_inbox, consume_review_inbox, release_review_inbox};
+use crate::conversation_inbox::{
+    claim_review, consume_conversation_inbox, release_conversation_inbox,
+};
 use crate::{backend, events, session, AppState};
 use weaver_core::review;
 
@@ -45,7 +47,7 @@ async fn enqueue_review_once(
     }
 
     let inserted = sqlx::query(
-        "INSERT INTO review_conversation_inbox
+        "INSERT INTO conversation_inbox
             (delivery_key, review_id, branch_id, preferred_session_id, payload)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(delivery_key) DO NOTHING",
@@ -258,8 +260,8 @@ async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Re
         }
     }
     let branches: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT branch_id FROM review_conversation_inbox
-         WHERE state IN ('queued', 'delivering')
+        "SELECT DISTINCT branch_id FROM conversation_inbox
+         WHERE review_id IS NOT NULL AND state IN ('queued', 'delivering')
          ORDER BY branch_id",
     )
     .fetch_all(&state.db)
@@ -278,7 +280,7 @@ async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Re
                 continue;
             }
             let Some(item) =
-                claim_review_inbox(&state.db, &branch_id, &target.id, None, |session, owner| {
+                claim_review(&state.db, &branch_id, &target.id, None, |session, owner| {
                     state.acp.is_claim_owner_live(session, owner)
                 })
                 .await?
@@ -288,17 +290,17 @@ async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Re
             let sent = tokio::time::timeout(transport_timeout, async {
                 backend::paste(&target.term_session, &item.payload)
                     .await
-                    .context("pasting protected review feedback")?;
+                    .context("pasting protected inbox feedback")?;
                 backend::send_enter(&target.term_session)
                     .await
-                    .context("submitting protected review feedback")
+                    .context("submitting protected inbox feedback")
             })
             .await
-            .map_err(|_| anyhow::anyhow!("protected review transport timed out"))
+            .map_err(|_| anyhow::anyhow!("protected inbox transport timed out"))
             .and_then(|result| result);
             match sent {
                 Ok(()) => {
-                    if !consume_review_inbox(
+                    if !consume_conversation_inbox(
                         &state.db,
                         &item.delivery_key,
                         &item.claim_token,
@@ -309,18 +311,22 @@ async fn drain_with_timeout(state: &AppState, transport_timeout: Duration) -> Re
                         tracing::warn!(
                             delivery_key = %item.delivery_key,
                             session = %target.id,
-                            "protected review transport completed after its inbox claim was lost"
+                            "protected inbox transport completed after its inbox claim was lost"
                         );
                     }
                 }
                 Err(error) => {
-                    let _ = release_review_inbox(&state.db, &item.delivery_key, &item.claim_token)
-                        .await;
+                    let _ = release_conversation_inbox(
+                        &state.db,
+                        &item.delivery_key,
+                        &item.claim_token,
+                    )
+                    .await;
                     tracing::warn!(
                         delivery_key = %item.delivery_key,
                         session = %target.id,
                         %error,
-                        "protected review terminal rehome failed"
+                        "protected inbox terminal rehome failed"
                     );
                 }
             }
@@ -393,7 +399,7 @@ mod tests {
             .await
             .unwrap();
             sqlx::query(
-                "INSERT INTO review_conversation_inbox
+                "INSERT INTO conversation_inbox
                     (delivery_key, review_id, branch_id, preferred_session_id, payload)
                  VALUES (?, ?, ?, ?, 'immutable')",
             )

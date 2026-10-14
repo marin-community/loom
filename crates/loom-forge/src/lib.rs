@@ -12,10 +12,10 @@ pub mod user_token;
 pub use loom_editor::Ctx;
 pub use loom_editor::{
     acp, agent, agent_env, agent_kind, auth, automation, backend, changes, channels, chat, chatlog,
-    client_context, ctx, custom_agents, custom_mcp, db, envfile, history, ide, launch, launch_gate,
-    links, logs, loom_config, mcp, paths, profile, profile_data, remote_mcp, repo_env,
-    review_inbox, runner, runs, scratch, session, session_layout, session_manager, shell,
-    slack_routes, status, terminal, EditorState,
+    client_context, conversation_inbox, ctx, custom_agents, custom_mcp, db, envfile, history, ide,
+    launch, launch_gate, links, logs, loom_config, mcp, paths, profile, profile_data, remote_mcp,
+    repo_env, runner, runs, scratch, session, session_layout, session_manager, shell, slack_routes,
+    status, terminal, EditorState,
 };
 
 /// Shared process state consumed by runtime services and the REST adapter.

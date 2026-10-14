@@ -1015,7 +1015,8 @@ pub mod scratch {
 pub mod send {
     use super::prelude::*;
 
-    /// Deliver a new prompt to a session.
+    /// Deliver a new prompt. Agent-authored ACP updates queue behind active
+    /// work and preserve a human Stop; human sends interrupt the current turn.
     #[operation(id = "sessions.send", actor = SessionSelf, scope = Session, risk = Write,
                 grants = ["loom/sessions/write@v1"], cli = "sessions send")]
     pub struct Input {
@@ -1027,6 +1028,9 @@ pub mod send {
         pub submit: Option<bool>,
         /// Who is sending (a watch name, or blank for `manual`).
         pub by: Option<String>,
+        /// Retry key for agent-authored ACP updates. Reuse only for the same text.
+        #[schemars(length(min = 1, max = 255))]
+        pub idempotency_key: Option<String>,
         #[operand(context)]
         pub session: String,
     }

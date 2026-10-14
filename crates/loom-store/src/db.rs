@@ -165,6 +165,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "user-authorization-source",
         include_str!("../migrations/0031_user_authorization_source.sql"),
     ),
+    (
+        32,
+        "conversation-inbox",
+        include_str!("../migrations/0032_conversation_inbox.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -514,9 +519,7 @@ mod tests {
         .execute(&db)
         .await
         .is_err());
-        let inbox_columns = table_columns(&db, "review_conversation_inbox")
-            .await
-            .unwrap();
+        let inbox_columns = table_columns(&db, "conversation_inbox").await.unwrap();
         for expected in [
             "delivery_key",
             "branch_id",
@@ -559,6 +562,25 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn conversation_inbox_migration_preserves_live_review_claims() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 31).await;
+        sqlx::query("INSERT INTO review_conversation_inbox (delivery_key, review_id, branch_id, preferred_session_id, payload, state, claim_token, claim_owner) VALUES ('review:1', 1, 'branch', 'session', 'feedback', 'delivering', 'claim', 'driver')")
+            .execute(&db).await.unwrap();
+        migrate_loom(&db).await.unwrap();
+        let row: (String, String, String, String) = sqlx::query_as("SELECT payload, state, claim_token, claim_owner FROM conversation_inbox WHERE delivery_key = 'review:1'").fetch_one(&db).await.unwrap();
+        assert_eq!(
+            row,
+            (
+                "feedback".into(),
+                "delivering".into(),
+                "claim".into(),
+                "driver".into()
+            )
+        );
     }
 
     #[tokio::test]
@@ -722,10 +744,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn v12_database_adds_the_review_inbox_while_upgrading_to_latest() {
+    async fn v12_database_adds_the_conversation_inbox_while_upgrading_to_latest() {
         let db = core_connect_in_memory().await.unwrap();
         migrate_through(&db, 12).await;
-        assert!(table_columns(&db, "review_conversation_inbox")
+        assert!(table_columns(&db, "conversation_inbox")
             .await
             .unwrap()
             .is_empty());
@@ -742,7 +764,7 @@ mod tests {
             versions,
             (1..=latest_migration_version()).collect::<Vec<_>>()
         );
-        assert!(!table_columns(&db, "review_conversation_inbox")
+        assert!(!table_columns(&db, "conversation_inbox")
             .await
             .unwrap()
             .is_empty());

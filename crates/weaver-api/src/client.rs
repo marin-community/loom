@@ -243,12 +243,13 @@ impl Client {
     }
 
     /// Type a message into a session's agent pane, submitting it by default
-    /// (`sessions.send`). For ACP, this steers a supported live turn and
-    /// otherwise cancels it before starting a normal turn.
+    /// (`sessions.send`). ACP session credentials enqueue protected updates;
+    /// human credentials cancel the current turn and send immediately.
     pub async fn nudge(&self, key: &str, req: &SendReq) -> Result<Value> {
         use crate::operations::sessions::send;
         let result = self
             .invoke::<send::Op>(&send::Input {
+                idempotency_key: None,
                 text: req.text.clone(),
                 submit: Some(req.submit),
                 by: req.by.clone(),

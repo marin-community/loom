@@ -80,8 +80,8 @@ pub enum SessionCmd {
         #[arg(long)]
         lifecycle_only: bool,
     },
-    /// Deliver a message to a session now. ACP sessions stop a live turn and
-    /// start the message as a new turn.
+    /// Deliver a message. Agent-authored ACP updates queue behind active work;
+    /// human sends stop the current turn.
     Send {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,
@@ -91,6 +91,9 @@ pub enum SessionCmd {
         /// Type the message but don't press Enter — stage it without submitting.
         #[arg(long)]
         no_enter: bool,
+        /// Retry key for an agent-authored update; reuse for identical text.
+        #[arg(long)]
+        idempotency_key: Option<String>,
     },
     /// Interrupt a session's current turn (sends Escape to terminal sessions).
     #[command(visible_alias = "break")]
@@ -331,7 +334,8 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
             session,
             message,
             no_enter,
-        } => cmd_session_send(session, message.join(" "), !no_enter).await,
+            idempotency_key,
+        } => cmd_session_send(session, message.join(" "), !no_enter, idempotency_key).await,
         SessionCmd::Interrupt { session } => cmd_session_interrupt(session).await,
         SessionCmd::Preview { session, lines } => cmd_session_preview(session, lines).await,
         SessionCmd::Changes { session } => {
@@ -784,13 +788,19 @@ pub(crate) fn is_terminal_status(status: &str) -> bool {
 
 /// `loom sessions send` — type a message into the agent's pane, submitting it
 /// (Enter) unless `submit` is false.
-pub(crate) async fn cmd_session_send(key: String, message: String, submit: bool) -> Result<()> {
+pub(crate) async fn cmd_session_send(
+    key: String,
+    message: String,
+    submit: bool,
+    idempotency_key: Option<String>,
+) -> Result<()> {
     if message.trim().is_empty() {
         bail!("nothing to send — provide a message");
     }
     let client = client::default()?;
     client
         .invoke::<sessions::send::Op>(&sessions::send::Input {
+            idempotency_key,
             text: message,
             submit: Some(submit),
             by: None,

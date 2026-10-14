@@ -385,6 +385,69 @@ pub async fn append_with_outcome(
     new: NewMessage<'_>,
 ) -> Result<AppendOutcome> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let (row, inserted) = append_message_tx(&mut tx, channel_id, &new).await?;
+    if inserted {
+        enqueue_message_tx(&mut tx, &row).await?;
+        if new.kind == MessageKind::Result
+            && new.author.kind == SubjectKind::Session
+            && channel_id == new.author.id
+        {
+            let parent: Option<String> = sqlx::query_scalar(
+                "SELECT c.id FROM sessions s JOIN channels c ON c.id = s.parent_session_id
+                 WHERE s.id = ? AND c.state = 'open'",
+            )
+            .bind(&new.author.id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(parent) = parent {
+                let excerpt: String = new.body.chars().take(2_000).collect();
+                let truncated = if excerpt.len() < new.body.len() {
+                    "\n[Result truncated]"
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "Result\n\n{excerpt}{truncated}\n\nSource: channel {channel_id}, result {}.\nRead the full result with `loom channels read --channel {channel_id} --after {} --limit 1 --kinds result`.",
+                    row.id, row.seq - 1,
+                );
+                let body = crate::conversation_inbox::session_update_text(&new.author.id, &body);
+                let payload = serde_json::json!({
+                    "child_session_id": new.author.id,
+                    "source_channel_id": channel_id,
+                    "source_message_id": row.id,
+                });
+                let author = Subject::new(SubjectKind::System, "loom");
+                let key = format!("child-result:{}", row.id);
+                let (notice, _) = append_message_tx(
+                    &mut tx,
+                    &parent,
+                    &NewMessage {
+                        kind: MessageKind::Message,
+                        urgency: new.urgency,
+                        author: &author,
+                        body: &body,
+                        payload: &payload,
+                        reply_to: None,
+                        idempotency_key: Some(&key),
+                    },
+                )
+                .await?;
+                enqueue_message_tx(&mut tx, &notice).await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(AppendOutcome {
+        message: message_view(db, row).await?,
+        inserted,
+    })
+}
+
+async fn append_message_tx(
+    tx: &mut SqliteConnection,
+    channel_id: &str,
+    new: &NewMessage<'_>,
+) -> Result<(MessageRow, bool)> {
     if let Some(key) = new.idempotency_key {
         if let Some(row) = sqlx::query_as::<_, MessageRow>(
             "SELECT * FROM channel_messages
@@ -396,12 +459,8 @@ pub async fn append_with_outcome(
         .await?
         {
             let read_at = now_iso();
-            advance_read_tx(&mut tx, channel_id, new.author, row.seq, &read_at).await?;
-            tx.commit().await?;
-            return Ok(AppendOutcome {
-                message: message_view(db, row).await?,
-                inserted: false,
-            });
+            advance_read_tx(tx, channel_id, new.author, row.seq, &read_at).await?;
+            return Ok((row, false));
         }
     }
     let seq: i64 = sqlx::query_scalar(
@@ -432,16 +491,78 @@ pub async fn append_with_outcome(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
-    advance_read_tx(&mut tx, channel_id, new.author, seq, &now).await?;
+    advance_read_tx(tx, channel_id, new.author, seq, &now).await?;
     let row = sqlx::query_as::<_, MessageRow>("SELECT * FROM channel_messages WHERE id = ?")
         .bind(&id)
         .fetch_one(&mut *tx)
         .await?;
-    tx.commit().await?;
-    Ok(AppendOutcome {
-        message: message_view(db, row).await?,
-        inserted: true,
-    })
+    Ok((row, true))
+}
+
+async fn enqueue_message_tx(tx: &mut SqliteConnection, row: &MessageRow) -> Result<()> {
+    if row.kind != "message" {
+        return Ok(());
+    }
+    let targets: Vec<String> = sqlx::query_scalar(
+        "SELECT sub.subject_id FROM channel_subscriptions sub JOIN sessions s ON s.id = sub.subject_id
+         WHERE sub.channel_id = ? AND sub.subject_kind = 'session' AND sub.mode = 'deliver'
+           AND NOT (? = 'session' AND sub.subject_id = ?)",
+    ).bind(&row.channel_id).bind(&row.author_kind).bind(&row.author_id).fetch_all(&mut *tx).await?;
+    let payload: Value = serde_json::from_str(&row.payload)?;
+    let source_session = if row.author_kind == "session" {
+        Some(row.author_id.as_str())
+    } else if row.author_kind == "system" {
+        payload.get("child_session_id").and_then(Value::as_str)
+    } else {
+        None
+    };
+    let source_channel = if row.author_kind == "system" {
+        payload.get("source_channel_id").and_then(Value::as_str)
+    } else {
+        None
+    }
+    .unwrap_or(&row.channel_id);
+    let source_message = if row.author_kind == "system" {
+        payload.get("source_message_id").and_then(Value::as_str)
+    } else {
+        None
+    }
+    .unwrap_or(&row.id);
+    let text = if row.author_kind == "session" {
+        crate::conversation_inbox::session_update_text(&row.author_id, &row.body)
+    } else {
+        row.body.clone()
+    };
+    for target in targets {
+        // A child result wakes its immediate parent, not every session that
+        // happens to subscribe to the parent's channel.
+        if row.author_kind == "system" && source_session.is_some() && target != row.channel_id {
+            continue;
+        }
+        let binding = weaver_api::channel_session_binding_id(&target);
+        sqlx::query("INSERT INTO channel_deliveries (message_id, binding_id, binding_kind, target_session_id, updated_at) VALUES (?, ?, 'session', ?, ?)")
+            .bind(&row.id).bind(&binding).bind(&target).bind(now_iso()).execute(&mut *tx).await?;
+        sqlx::query(
+            "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id, source_channel_id, source_message_id)
+             SELECT ?, branch_id, id, ?, ?, ?, ? FROM sessions WHERE id = ? AND protocol = 'acp'",
+        ).bind(format!("channel:{}:{target}", row.id)).bind(&text).bind(source_session)
+            .bind(source_channel).bind(source_message).bind(&target).execute(&mut *tx).await?;
+    }
+    Ok(())
+}
+
+/// Return the parent notice committed alongside this result, if one was created.
+pub async fn parent_result_notice(db: &Db, result_id: &str) -> Result<Option<ChannelMessageView>> {
+    let row = sqlx::query_as::<_, MessageRow>(
+        "SELECT * FROM channel_messages WHERE author_kind = 'system' AND idempotency_key = ?",
+    )
+    .bind(format!("child-result:{result_id}"))
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some(row) => Ok(Some(message_view(db, row).await?)),
+        None => Ok(None),
+    }
 }
 
 pub async fn set_subscription(
@@ -565,12 +686,53 @@ pub async fn finish_delivery(
 pub async fn delivery_succeeded(db: &Db, message_id: &str, binding_id: &str) -> Result<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM channel_deliveries
-         WHERE message_id = ? AND binding_id = ? AND state = 'delivered')",
+         WHERE message_id = ? AND binding_id = ? AND state IN ('delivered', 'read'))",
     )
     .bind(message_id)
     .bind(binding_id)
     .fetch_one(db)
     .await?)
+}
+
+/// Claim a terminal send before crossing the unacknowledged PTY boundary.
+/// An uncertain send requires an explicit new publication, never a blind retry.
+pub async fn claim_terminal_delivery(db: &Db, message: &str, binding: &str) -> Result<bool> {
+    Ok(sqlx::query(
+        "UPDATE channel_deliveries SET state = 'uncertain', attempts = attempts + 1,
+             last_error = 'terminal send started without a confirmed receipt', updated_at = ?
+         WHERE message_id = ? AND binding_id = ? AND state IN ('queued', 'failed')",
+    )
+    .bind(now_iso())
+    .bind(message)
+    .bind(binding)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+pub async fn finish_terminal_delivery(
+    db: &Db,
+    message: &str,
+    binding: &str,
+    error: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE channel_deliveries SET state = ?, last_error = ?, updated_at = ?
+         WHERE message_id = ? AND binding_id = ? AND state = 'uncertain'",
+    )
+    .bind(if error.is_some() {
+        "uncertain"
+    } else {
+        "delivered"
+    })
+    .bind(error)
+    .bind(now_iso())
+    .bind(message)
+    .bind(binding)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn refresh_message(db: &Db, message_id: &str) -> Result<ChannelMessageView> {
@@ -594,6 +756,12 @@ pub async fn delivery_targets(db: &Db, channel_id: &str) -> Result<Vec<String>> 
     .bind(channel_id)
     .fetch_all(db)
     .await?)
+}
+
+pub async fn message_delivery_targets(db: &Db, message: &str) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT target_session_id FROM channel_deliveries WHERE message_id = ? AND binding_kind = 'session' AND target_session_id IS NOT NULL",
+    ).bind(message).fetch_all(db).await?)
 }
 
 pub async fn archive_session_channel(db: &Db, session_id: &str) -> Result<()> {
@@ -828,6 +996,23 @@ mod tests {
         .unwrap();
         assert_eq!(posted.id, replay.id, "idempotent replay appends once");
 
+        let binding = weaver_api::channel_session_binding_id("session-1");
+        assert!(claim_terminal_delivery(&db, &posted.id, &binding)
+            .await
+            .unwrap());
+        assert!(!claim_terminal_delivery(&db, &posted.id, &binding)
+            .await
+            .unwrap());
+        finish_terminal_delivery(&db, &posted.id, &binding, Some("receipt lost"))
+            .await
+            .unwrap();
+        assert!(
+            !claim_terminal_delivery(&db, &posted.id, &binding)
+                .await
+                .unwrap(),
+            "uncertain terminal writes are not blindly replayed"
+        );
+
         create_delivery(
             &db,
             &posted.id,
@@ -847,13 +1032,14 @@ mod tests {
         .await
         .unwrap();
         let delivered = refresh_message(&db, &posted.id).await.unwrap();
-        assert_eq!(delivered.deliveries.len(), 1);
-        assert_eq!(delivered.deliveries[0].binding_kind, "slack_thread");
-        assert_eq!(delivered.deliveries[0].target_session_id, None);
-        assert_eq!(
-            delivered.deliveries[0].external_id.as_deref(),
-            Some("1786.1234")
-        );
+        assert_eq!(delivered.deliveries.len(), 2);
+        let slack = delivered
+            .deliveries
+            .iter()
+            .find(|delivery| delivery.binding_kind == "slack_thread")
+            .unwrap();
+        assert_eq!(slack.target_session_id, None);
+        assert_eq!(slack.external_id.as_deref(), Some("1786.1234"));
 
         let subscription = mark_read(&db, "session-1", &owner, None).await.unwrap();
         assert_eq!(subscription.mode, SubscriptionMode::Deliver.as_str());
@@ -884,5 +1070,96 @@ mod tests {
             get(&db, &custom.id, &owner).await.unwrap().is_some(),
             "a custom channel outlives its creator's session branch"
         );
+        let later = append(
+            &db,
+            &custom.id,
+            NewMessage {
+                kind: MessageKind::Message,
+                urgency: Urgency::Normal,
+                author: &user,
+                body: "still usable",
+                payload: &Value::Null,
+                reply_to: None,
+                idempotency_key: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            later.deliveries.is_empty(),
+            "deleted subscribers do not block publication"
+        );
+    }
+
+    #[tokio::test]
+    async fn result_publication_commits_notice_and_inbox_once_or_rolls_back_all_three() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_mod::upsert(&db, "/repo", "weaver/parent", "main")
+            .await
+            .unwrap();
+        let mut parent = new_session("parent", &branch.id);
+        parent.protocol = "acp".into();
+        session::insert(&db, &parent).await.unwrap();
+        let child_branch = branch_mod::upsert(&db, "/repo", "weaver/child", "main")
+            .await
+            .unwrap();
+        session::insert(&db, &new_session("child", &child_branch.id))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET parent_session_id = 'parent' WHERE id = 'child'")
+            .execute(&db)
+            .await
+            .unwrap();
+        let child = Subject::new(SubjectKind::Session, "child");
+        let body = "✓".repeat(2_001);
+        let send = || {
+            append_with_outcome(
+                &db,
+                "child",
+                NewMessage {
+                    kind: MessageKind::Result,
+                    urgency: Urgency::Normal,
+                    author: &child,
+                    body: &body,
+                    payload: &Value::Null,
+                    reply_to: None,
+                    idempotency_key: Some("result:1"),
+                },
+            )
+        };
+        sqlx::query("CREATE TRIGGER fail_inbox BEFORE INSERT ON conversation_inbox BEGIN SELECT RAISE(ABORT, 'injected inbox failure'); END").execute(&db).await.unwrap();
+        assert!(send().await.is_err());
+        assert!(messages(&db, "child", 0).await.unwrap().is_empty());
+        assert!(messages(&db, "parent", 0).await.unwrap().is_empty());
+        sqlx::query("DROP TRIGGER fail_inbox")
+            .execute(&db)
+            .await
+            .unwrap();
+        let (first, retry) = tokio::join!(send(), send());
+        let first = first.unwrap();
+        assert_eq!(first.message.id, retry.unwrap().message.id);
+        let notices = messages(&db, "parent", 0).await.unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].body.matches('✓').count(), 2_000);
+        let updates = crate::conversation_inbox::pending_updates(&db, "parent")
+            .await
+            .unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].source_message_id.as_deref(),
+            Some(first.message.id.as_str())
+        );
+        crate::conversation_inbox::consume_source(&db, "parent", &first.message.id)
+            .await
+            .unwrap();
+        assert!(crate::conversation_inbox::pending_updates(&db, "parent")
+            .await
+            .unwrap()
+            .is_empty());
+        send().await.unwrap();
+        assert!(crate::conversation_inbox::pending_updates(&db, "parent")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
