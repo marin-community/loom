@@ -1253,7 +1253,7 @@ fn map_launch_validation_error(
 ) -> ProvisionError {
     match error {
         crate::acp::LaunchValidationError::Validation(error) => ProvisionError::invalid(format!(
-            "profile '{profile_name}' is not available for this launch: {error}"
+            "could not validate profile '{profile_name}': {error:#}"
         )),
         relay @ crate::acp::LaunchValidationError::Relay { .. } => {
             ProvisionError::Internal(anyhow::Error::new(relay).context(format!(
@@ -1481,7 +1481,23 @@ mod tests {
         let ProvisionError::Invalid(message, _) = mapped else {
             panic!("unavailable selector must remain an invalid selection");
         };
-        assert!(message.contains("profile 'prose-cleanup' is not available for this launch"));
+        assert!(message.contains("prose-cleanup"));
+    }
+
+    #[test]
+    fn launch_validation_preserves_adapter_failure_in_client_message() {
+        let cause = "ACP session/set_config_option failed: adapter connection closed";
+        let error = crate::acp::LaunchValidationError::Validation(
+            anyhow::anyhow!(cause).context("failed to select launch model 'advertised-model'"),
+        );
+        let mapped = map_launch_validation_error("default", error);
+        let ProvisionError::Invalid(message, _) = mapped else {
+            panic!("validation failure must remain an invalid selection");
+        };
+        // The client receives a string, so the adapter cause must survive this boundary.
+        assert!(message.contains(cause), "{message}");
+        assert!(message.contains("advertised-model"), "{message}");
+        assert!(message.contains("default"), "{message}");
     }
 
     #[test]

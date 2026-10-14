@@ -177,7 +177,7 @@ pub enum LaunchValidationError {
 impl std::fmt::Display for LaunchValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Validation(error) => write!(f, "{error}"),
+            Self::Validation(error) => write!(f, "{error:#}"),
             Self::Relay { validation, .. } => {
                 f.write_str("ACP validation relay failed")?;
                 if let Some(validation) = validation {
@@ -413,18 +413,19 @@ impl AcpPromptClient {
             if details.current.as_deref() == Some(desired) {
                 continue;
             }
-            let unavailable = if details.available.is_empty() {
-                format!("launch {kind} '{desired}' is not available")
-            } else {
-                format!(
-                    "launch {kind} '{desired}' is not available (advertised {kind}s: {})",
-                    details.available.join(", ")
-                )
-            };
             options = self
                 .set_config_option(&details.id, Value::String(desired.to_string()))
                 .await
-                .with_context(|| unavailable)?;
+                .with_context(|| {
+                    if details.available.is_empty() {
+                        format!("failed to select launch {kind} '{desired}'")
+                    } else {
+                        format!(
+                            "failed to select launch {kind} '{desired}' (advertised {kind}s: {})",
+                            details.available.join(", ")
+                        )
+                    }
+                })?;
         }
 
         if let Some(mode) = launch
@@ -447,7 +448,7 @@ impl AcpPromptClient {
                 wire::set_mode_params(&self.session_id, mode),
             )
             .await
-            .with_context(|| format!("launch mode '{mode}' is not available"))?;
+            .with_context(|| format!("failed to select launch mode '{mode}'"))?;
         }
         Ok(())
     }
