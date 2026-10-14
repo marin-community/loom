@@ -736,13 +736,12 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
             .count(),
         1
     );
-    let inbox: (String, i64) = sqlx::query_as(
-        "SELECT state, COUNT(*) FROM review_conversation_inbox WHERE delivery_key = ?",
-    )
-    .bind(&submitted.delivery_key)
-    .fetch_one(&ts.state.db)
-    .await
-    .unwrap();
+    let inbox: (String, i64) =
+        sqlx::query_as("SELECT state, COUNT(*) FROM conversation_inbox WHERE delivery_key = ?")
+            .bind(&submitted.delivery_key)
+            .fetch_one(&ts.state.db)
+            .await
+            .unwrap();
     assert_eq!(inbox, ("consumed".to_string(), 1));
 
     super::acp::start_new(&ts, "acp-review-rehome", None, None).await;
@@ -807,7 +806,7 @@ async fn acp_delivery_has_one_protected_crash_boundary_and_can_rehome() {
     loom::review_delivery::drain(&ts.state).await.unwrap();
     let consumed: (String, String, String) = sqlx::query_as(
         "SELECT state, claimed_session_id, payload
-         FROM review_conversation_inbox WHERE delivery_key = ?",
+         FROM conversation_inbox WHERE delivery_key = ?",
     )
     .bind(&rehomed.delivery_key)
     .fetch_one(&ts.state.db)

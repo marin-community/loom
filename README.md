@@ -297,8 +297,14 @@ stays visible and can be pulled back into the composer with its **Edit** action
 or ArrowUp from an empty composer, or sent immediately with **Stop & send**. The
 live status names visible thinking, writing, or tool activity and reports how
 long it has been since the agent produced an observable update; quiet time is
-not guessed to mean stuck. Cross-session `loom sessions send` uses the same
-stop-and-send behavior.
+not guessed to mean stuck. Human `loom sessions send` uses the same stop-and-send
+behavior. Agent-authored ACP updates queue behind active work and respect Stop.
+They appear separately as **Update from loom session <id>**, so editing human
+feedback cannot retract a child result. Child results include a short preview
+and a link to their source. Use a stable `--idempotency-key` when retrying a
+channel publication or an agent-authored ACP send; use a new key for a revised
+result. `loom channels wait --channel <child-id> --kind result --after 0` also
+finds an already-posted first result, while `sessions wait` observes lifecycle.
 
 Whenever a session is archived — by the Archive button or automatically on merge
 — loom first captures that conversation to disk: it finds the agent's transcript

@@ -443,11 +443,32 @@ run, so a new channel operation cannot forget it.
 A child reports completion with a typed `result` in its own channel. Loom
 appends one linked, system-authored message to the immediate parent's channel
 and queues its delivery behind an active ACP turn (or sends it to the terminal
-pane). The link uses the source message id for idempotency. System authorship
+pane). Source publication, parent notice, delivery receipts, and ACP inbox
+entries commit in one transaction. The notice includes up to 2,000 characters
+of the result and an exact source reference. The link uses the source message
+id for idempotency. System authorship
 matters here:
 appending under the child's identity would subscribe it to the parent channel
 and widen its access. This handoff grants the child no access to the parent
 channel.
+
+Agent-authored input begins with `Update from loom session <id>`, derived from
+the authenticated sender. Direct ACP sends and channel messages use the
+protected `conversation_inbox`, separate from editable human `pending_prompt`
+text. Normal updates wait for the current turn and respect an explicit Stop.
+The chat snapshot exposes `pending_updates`; the journal retains source IDs.
+An agent read or wait consumes any corresponding queued notice, while a peek
+and a human read do not. Use `channels wait --after <last-seen-seq> --kind result`
+for results; lifecycle waiting does not imply a result was published.
+
+Stable publication keys deduplicate retries; distinct keys remain distinct
+even when the text matches. ACP claims fence concurrent dispatch. Once a session
+update is journaled, abandonment does not redispatch it. The unacknowledged
+relay write still has a crash window before journal persistence; this is not
+an exactly-once process-delivery guarantee. Terminal channel delivery records
+an uncertain outcome before writing to the PTY, preventing concurrent or blind
+retries. After checking the terminal, an operator can explicitly republish with
+a new key if needed. Existing concatenated prompt text is preserved on upgrade.
 
 One capability is narrower now: an automation credential reaches no raw path,
 only `actor = Internal` operations — `runs.create` alone. Nothing used its old
@@ -459,7 +480,7 @@ other tabs refresh the creator's draft when they regain focus. `ReviewDto`
 separates the subject's internal `id` from its public round-trippable `key`,
 returns a monotonic `draft_revision`, and exposes the exact server-rendered
 `message`. A 409 optimistic-revision response carries the fresh review under
-`details.review`. ACP delivery commits into `review_conversation_inbox`, a
+`details.review`. ACP delivery commits into `conversation_inbox`, a
 stable-key, branch-addressable immutable lane consumed at turn boundaries.
 That lane is distinct from `sessions.pending_prompt`, so the prompt retraction
 route can never expose submitted feedback. Delivery workers claim fenced lease

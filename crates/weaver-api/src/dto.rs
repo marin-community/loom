@@ -2909,7 +2909,20 @@ pub struct SessionChatView {
     pub effective_mode: Option<String>,
     #[serde(default)]
     pub pending_prompt: Option<String>,
+    #[serde(default)]
+    pub pending_updates: Vec<SessionUpdateView>,
     pub metadata: AcpMetadataView,
+}
+
+/// Immutable session input, separate from editable human prompts.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SessionUpdateView {
+    pub delivery_key: String,
+    pub source_session_id: Option<String>,
+    pub source_channel_id: Option<String>,
+    pub source_message_id: Option<String>,
+    pub text: String,
+    pub state: String,
 }
 
 #[cfg(test)]

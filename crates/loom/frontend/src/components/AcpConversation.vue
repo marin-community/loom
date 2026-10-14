@@ -48,7 +48,7 @@ import type {
   HandoffPayload,
   AcpUsage,
 } from '../types';
-import type { AcpMetadataView } from '../api/generated';
+import type { AcpMetadataView, SessionUpdateView } from '../api/generated';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
@@ -101,6 +101,11 @@ const lastProgressAt = ref<number | null>(null);
 // the request.
 const optimistic = ref<{ key: number; text: string }[]>([]);
 const pendingPrompt = ref<string | null>(null);
+const pendingUpdates = ref<SessionUpdateView[]>([]);
+function updateBody(text: string, sourceSession: string | null | undefined): string {
+  const prefix = sourceSession ? `Update from loom session ${sourceSession}\n` : '';
+  return prefix && text.startsWith(prefix) ? text.slice(prefix.length).trimStart() : text;
+}
 let nextOptimisticKey = 0;
 const emptyMetadata = (): AcpMetadata => ({
   commands: [],
@@ -214,6 +219,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     restoreLiveTiming(snap.live_turn, preserveObservedTiming);
     effectiveMode.value = snap.effective_mode ?? null;
     pendingPrompt.value = snap.pending_prompt?.trim() ? snap.pending_prompt : null;
+    pendingUpdates.value = snap.pending_updates;
     applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
     state.value = 'ready';
   } catch (e) {
@@ -353,6 +359,9 @@ function openStream() {
   topic.on('tool', (d) => onTool(d as SseTool));
   topic.on('turn', (d) => onTurn(d as SseTurn));
   topic.on('queue', (d) => onQueue(d as SseQueue));
+  topic.on('updates', (d) => {
+    pendingUpdates.value = (d as { pending_updates: SessionUpdateView[] }).pending_updates;
+  });
   topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
   // A bounded server broadcast can overrun a slow client. `resync` turns that
   // explicit gap into a fresh read of the durable journal instead of leaving
@@ -936,6 +945,9 @@ type Row =
       time: string;
       text: string;
       steered: boolean;
+      sourceSession: string | null;
+      sourceChannel: string | null;
+      sourceMessage: string | null;
     }
   | { type: 'agent'; key: string; time: string; text: string; streaming: boolean }
   | { type: 'thought'; key: string; text: string; streaming: boolean }
@@ -1054,8 +1066,11 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           n,
           turn: b.turn,
           time: localTime(b.created_at),
-          text,
+          text: updateBody(text, user.source_session_id),
           steered,
+          sourceSession: user.source_session_id ?? null,
+          sourceChannel: user.source_channel_id ?? null,
+          sourceMessage: user.source_message_id ?? null,
         });
         if (!steered) toc.push({ anchor, n, title: titleOf(text) });
         break;
@@ -1485,7 +1500,22 @@ function goTo(anchor: string) {
                 class="acp-speaker"
               >
                 <header class="acp-rule">
-                  <span class="acp-label text-accent">You</span>
+                  <RouterLink
+                    v-if="row.sourceSession"
+                    :to="`/s/${row.sourceSession}`"
+                    class="acp-label text-accent"
+                  >
+                    Update from loom session {{ row.sourceSession }}
+                  </RouterLink>
+                  <span v-else class="acp-label text-accent">{{
+                    row.sourceChannel ? 'Channel update' : 'You'
+                  }}</span>
+                  <RouterLink
+                    v-if="row.sourceChannel"
+                    :to="`/channels/${row.sourceChannel}#${row.sourceMessage}`"
+                    class="acp-prompt-action"
+                    >Open source</RouterLink
+                  >
                   <span v-if="row.steered" class="acp-prompt-state" data-testid="acp-steered"
                     >steered turn {{ row.turn + 1 }}</span
                   >
@@ -1683,7 +1713,37 @@ function goTo(anchor: string) {
               </div>
             </template>
 
-            <!-- The server-owned durable queue is one coalesced next-turn prompt. -->
+            <section
+              v-for="update in pendingUpdates"
+              :key="update.delivery_key"
+              class="acp-speaker"
+              data-testid="acp-session-update"
+            >
+              <header class="acp-rule">
+                <RouterLink
+                  v-if="update.source_session_id"
+                  :to="`/s/${update.source_session_id}`"
+                  class="acp-label text-accent"
+                >
+                  Update from loom session {{ update.source_session_id }}
+                </RouterLink>
+                <span v-else class="acp-label text-accent">Channel update</span>
+                <span class="acp-prompt-state">queued</span>
+                <RouterLink
+                  v-if="update.source_channel_id"
+                  :to="`/channels/${update.source_channel_id}#${update.source_message_id}`"
+                  class="acp-prompt-action"
+                  >Open source</RouterLink
+                >
+              </header>
+              <MarkdownView
+                :id="id"
+                path=""
+                :source="updateBody(update.text, update.source_session_id)"
+              />
+            </section>
+
+            <!-- Only human prompts enter the editable queue. -->
             <section v-if="pendingPrompt" class="acp-speaker" data-testid="acp-pending">
               <header class="acp-rule">
                 <span class="acp-label text-accent">You</span>

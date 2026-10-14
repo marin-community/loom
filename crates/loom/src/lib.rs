@@ -32,8 +32,9 @@ pub use loom_forge::{
 pub use loom_launch::{handoff, metadata_assist, provision};
 pub use loom_policy::{auth, automation, custom_mcp, db, profile, remote_mcp};
 pub use loom_store::{
-    agent_env, channels, chat, chatlog, github_access, history, permission_requests, profile_data,
-    repo_env, review_inbox, runs, session, session_layout, slack_routes, status,
+    agent_env, channels, chat, chatlog, conversation_inbox, github_access, history,
+    permission_requests, profile_data, repo_env, runs, session, session_layout, slack_routes,
+    status,
 };
 pub use loom_watch::{builtins, monitor, tasks, watch};
 

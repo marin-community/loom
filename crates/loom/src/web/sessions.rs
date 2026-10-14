@@ -978,45 +978,6 @@ pub(super) async fn send_session(
     Ok(Json(json!({ "sent": true, "submitted": req.submit })))
 }
 
-/// Deliver a channel notification after the current ACP turn, preserving a
-/// parent's work when a child reports a result mid-turn. Terminal sessions use
-/// their ordinary pane delivery path.
-pub(super) async fn queue_session_message(
-    st: &AppState,
-    key: &str,
-    text: &str,
-    by: &str,
-) -> ApiResult<()> {
-    let (session, branch) = require_session(&st.db, key).await?;
-    if session.protocol != "acp" {
-        let _ = send_session(
-            State(st.clone()),
-            Path(key.to_string()),
-            Json(SendReq {
-                text: text.to_string(),
-                submit: true,
-                by: Some(by.to_string()),
-            }),
-        )
-        .await?;
-        return Ok(());
-    }
-    require_acp_task(st, &session)?
-        .prompt(text.to_string(), Some(by.to_string()), Vec::new())
-        .await
-        .map_err(|error| AppError::conflict(error.to_string()))?;
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "nudge",
-        json!({ "by": by, "text": text, "send_now": false }),
-    )
-    .await
-    .ok();
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // The ACP chat journal + drive routes (protocol='acp' sessions)
 //
@@ -1311,14 +1272,66 @@ async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiR
     session_view(&st.db, &created.session, &created.branch).await
 }
 
-/// `sessions.send` — mirrors [`send_session`]; both must agree.
+/// Session credentials enqueue attributed updates; human sends remain immediate.
 async fn op_send(
     context: OperationContext,
-    input: ops::send::Input,
+    mut input: ops::send::Input,
 ) -> ApiResult<SessionSendResult> {
     let st = &context.state;
     let (session, branch) = require_session(&st.db, &input.session).await?;
     let submit = input.submit.unwrap_or(true);
+    if let crate::auth::Grant::Session {
+        session_id: source, ..
+    } = &context.principal.grant
+    {
+        if session.status == "archived" {
+            return Err(AppError::conflict("session is archived"));
+        }
+        if input
+            .idempotency_key
+            .as_ref()
+            .is_some_and(|key| key.trim().is_empty() || key.len() > 255)
+        {
+            return Err(AppError::bad_request(
+                "idempotency_key must contain 1 to 255 bytes",
+            ));
+        }
+        if input.text.trim().is_empty() {
+            return Err(AppError::bad_request("message must not be empty"));
+        }
+        if session.protocol == "acp" {
+            let key = crate::conversation_inbox::enqueue_session_update(
+                &st.db,
+                &session.id,
+                source,
+                &input.text,
+                input.idempotency_key.as_deref(),
+            )
+            .await
+            .map_err(|error| AppError::conflict(error.to_string()))?;
+            if let Some(handle) = st.acp.get(&session.id) {
+                if let Err(error) = handle.notify_updates().await {
+                    tracing::debug!(session = %session.id, %error, "session update queued; wake deferred");
+                }
+            }
+            let queued: bool = sqlx::query_scalar(
+                "SELECT state = 'queued' FROM conversation_inbox WHERE delivery_key = ?",
+            )
+            .bind(&key)
+            .fetch_one(&st.db)
+            .await?;
+            let turn: Option<i64> = sqlx::query_scalar("SELECT turn FROM chat_blocks WHERE session_id = ? AND json_extract(payload, '$.delivery_key') = ? ORDER BY turn DESC LIMIT 1")
+                .bind(&session.id).bind(&key).fetch_optional(&st.db).await?;
+            return Ok(SessionSendResult {
+                sent: true,
+                submitted: true,
+                queued: Some(queued),
+                turn,
+            });
+        }
+        input.text = format!("Update from loom session {source}\n\n{}", input.text);
+        input.by = Some(format!("session:{source}"));
+    }
     if session.protocol == "acp" {
         let handle = require_acp_task(st, &session)?;
         let by = author_or_manual(input.by.as_deref());
@@ -1795,6 +1808,7 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
         live_turn: session_mod::acp_inflight_turn(&session),
         effective_mode: effective_turn_mode(&session),
         pending_prompt,
+        pending_updates: crate::conversation_inbox::pending_updates(&st.db, &session.id).await?,
         metadata: AcpMetadataView {
             commands: metadata.commands,
             config_options: metadata.config_options,

@@ -854,12 +854,23 @@ impl AcpHandle {
 
     /// Notice immutable submitted feedback in the protected conversation inbox.
     /// Starts it immediately unless Stop has paused automatic work or another
-    /// protected review already owns the live turn. Never touches the
+    /// protected inbox already owns the live turn. Never touches the
     /// editable prompt lane.
     pub async fn notify_pending(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::NotifyPending { reply: tx })
+            .await
+            .map_err(|_| anyhow!("acp task is gone"))?;
+        rx.await
+            .map_err(|_| anyhow!("acp task dropped the reply"))?
+    }
+
+    /// Wake session updates without interrupting work or resuming a human Stop.
+    pub async fn notify_updates(&self) -> Result<PromptAck> {
+        let (tx, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::NotifyUpdates { reply: tx })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
         rx.await
@@ -994,36 +1005,36 @@ struct RegistryInner {
 
 struct RegistryEntry {
     generation: u64,
-    active_review_claim: Option<String>,
+    active_inbox_claim: Option<String>,
     handle: AcpHandle,
 }
 
-pub(crate) struct ActiveReviewClaim {
+pub(crate) struct ActiveInboxClaim {
     registry: AcpRegistry,
     session_id: String,
     generation: u64,
     owner: String,
 }
 
-impl ActiveReviewClaim {
+impl ActiveInboxClaim {
     pub(crate) fn owner(&self) -> &str {
         &self.owner
     }
 }
 
-impl Drop for ActiveReviewClaim {
+impl Drop for ActiveInboxClaim {
     fn drop(&mut self) {
         self.registry
-            .clear_review_claim(&self.session_id, self.generation, &self.owner);
+            .clear_inbox_claim(&self.session_id, self.generation, &self.owner);
     }
 }
 
-struct InflightReview {
+struct InflightInbox {
     delivery_key: String,
     claim_token: String,
     /// Present only for a claim activated by this process. A recovered turn is
     /// fenced durably by `sessions.acp_inflight` instead.
-    active_claim: Option<ActiveReviewClaim>,
+    active_claim: Option<ActiveInboxClaim>,
 }
 
 #[cfg(test)]
@@ -1075,7 +1086,7 @@ impl AcpRegistry {
             session_id.to_string(),
             RegistryEntry {
                 generation,
-                active_review_claim: None,
+                active_inbox_claim: None,
                 handle,
             },
         );
@@ -1179,24 +1190,24 @@ impl AcpRegistry {
             == Some(generation)
     }
 
-    pub(crate) fn activate_review_claim(
+    pub(crate) fn activate_inbox_claim(
         &self,
         session_id: &str,
         generation: u64,
-    ) -> Option<ActiveReviewClaim> {
+    ) -> Option<ActiveInboxClaim> {
         let mut inner = self.inner.lock().unwrap();
         let entry = inner.map.get_mut(session_id)?;
         if entry.generation != generation
             || entry.handle.cmd_tx.is_closed()
-            || entry.active_review_claim.is_some()
+            || entry.active_inbox_claim.is_some()
         {
             return None;
         }
         let mut token = [0_u8; 16];
         rand::rng().fill_bytes(&mut token);
         let token = hex::encode(token);
-        entry.active_review_claim = Some(token.clone());
-        Some(ActiveReviewClaim {
+        entry.active_inbox_claim = Some(token.clone());
+        Some(ActiveInboxClaim {
             registry: self.clone(),
             session_id: session_id.to_string(),
             generation,
@@ -1204,13 +1215,13 @@ impl AcpRegistry {
         })
     }
 
-    fn clear_review_claim(&self, session_id: &str, generation: u64, owner: &str) {
+    fn clear_inbox_claim(&self, session_id: &str, generation: u64, owner: &str) {
         let mut inner = self.inner.lock().unwrap();
         let Some(entry) = inner.map.get_mut(session_id) else {
             return;
         };
-        if entry.generation == generation && entry.active_review_claim.as_deref() == Some(owner) {
-            entry.active_review_claim = None;
+        if entry.generation == generation && entry.active_inbox_claim.as_deref() == Some(owner) {
+            entry.active_inbox_claim = None;
         }
     }
 
@@ -1222,7 +1233,7 @@ impl AcpRegistry {
             .get(session_id)
             .is_some_and(|entry| {
                 !entry.handle.cmd_tx.is_closed()
-                    && entry.active_review_claim.as_deref() == Some(owner)
+                    && entry.active_inbox_claim.as_deref() == Some(owner)
             })
     }
 
@@ -1423,6 +1434,9 @@ enum Command {
     NotifyPending {
         reply: oneshot::Sender<Result<PromptAck>>,
     },
+    NotifyUpdates {
+        reply: oneshot::Sender<Result<PromptAck>>,
+    },
     RetractPending {
         reply: oneshot::Sender<Result<String>>,
     },
@@ -1615,13 +1629,15 @@ enum TurnEndSource {
 }
 
 impl TurnEndSource {
-    fn review_claim_settlement(self) -> crate::review_inbox::ReviewClaimSettlement {
+    fn inbox_claim_settlement(self) -> crate::conversation_inbox::InboxClaimSettlement {
         match self {
             Self::MatchingPromptResponse => {
-                crate::review_inbox::ReviewClaimSettlement::MatchingPromptResponse
+                crate::conversation_inbox::InboxClaimSettlement::MatchingPromptResponse
             }
-            Self::UserCancellation => crate::review_inbox::ReviewClaimSettlement::UserCancelled,
-            Self::Synthetic => crate::review_inbox::ReviewClaimSettlement::Abandoned,
+            Self::UserCancellation => {
+                crate::conversation_inbox::InboxClaimSettlement::UserCancelled
+            }
+            Self::Synthetic => crate::conversation_inbox::InboxClaimSettlement::Abandoned,
         }
     }
 }
@@ -1679,9 +1695,9 @@ struct Task {
     /// The in-flight `session/prompt` request id + its turn, mirrored on the
     /// session row so a replayed turn-end response is recognized after a restart.
     inflight_prompt: Option<(u64, i64)>,
-    /// A protected review inbox claim stays recoverable until the matching ACP
+    /// A protected inbox claim stays recoverable until the matching ACP
     /// prompt response proves that the adapter accepted the attempted write.
-    inflight_review: Option<InflightReview>,
+    inflight_inbox: Option<InflightInbox>,
 
     current_turn: i64,
     next_seq: i64,
@@ -1715,7 +1731,7 @@ struct Task {
     /// Consume that one notice rather than journaling it under the wrong turn.
     pending_interrupt_notice_through: Option<i64>,
     /// A successful user Stop prevents every automatic source (the ordinary
-    /// queue and protected review notifier) from opening another turn. An
+    /// queue and protected inbox notifier) from opening another turn. An
     /// explicit prompt/force-send clears the latch. The newest durable
     /// `turn_end(cancelled)` restores it when this task is re-adopted.
     automatic_dispatch_paused: bool,
@@ -1774,7 +1790,7 @@ impl Task {
             stream,
             next_req_id: 0,
             inflight_prompt: None,
-            inflight_review: None,
+            inflight_inbox: None,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -1833,8 +1849,8 @@ impl Task {
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
-        let inflight_review = inflight_value.as_ref().and_then(|value| {
-            Some(InflightReview {
+        let inflight_inbox = inflight_value.as_ref().and_then(|value| {
+            Some(InflightInbox {
                 delivery_key: value.get("delivery_key")?.as_str()?.to_string(),
                 claim_token: value.get("review_claim_token")?.as_str()?.to_string(),
                 active_claim: None,
@@ -1871,7 +1887,7 @@ impl Task {
             stream,
             next_req_id: 0,
             inflight_prompt: inflight,
-            inflight_review,
+            inflight_inbox,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -2257,6 +2273,9 @@ impl Task {
             | Command::NotifyPending { reply } => {
                 let _ = reply.send(Err(setup_error()));
             }
+            Command::NotifyUpdates { reply } => {
+                let _ = reply.send(Err(setup_error()));
+            }
             Command::RetractPending { reply } => {
                 let _ = reply.send(Err(setup_error()));
             }
@@ -2281,6 +2300,8 @@ impl Task {
         // Consume interval's immediate first tick; the handshake already
         // flushed everything safe before the main loop starts.
         ack_tick.tick().await;
+        let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
+        inbox_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let stop_reason = loop {
             tokio::select! {
                 ev = self.stream.recv() => match ev {
@@ -2330,6 +2351,11 @@ impl Task {
                 _ = ack_tick.tick() => {
                     if let Err(e) = self.maybe_ack().await {
                         tracing::warn!(session = %self.session_id, error = %e, "acp ack failed");
+                    }
+                },
+                _ = inbox_tick.tick() => {
+                    if !self.turn_live && !self.automatic_dispatch_paused {
+                        self.dispatch_session_updates().await;
                     }
                 },
             }
@@ -2732,15 +2758,15 @@ impl Task {
         // Other responses need no follow-up.
     }
 
-    async fn settle_inflight_review(
+    async fn settle_inflight_inbox(
         &mut self,
-        settlement: crate::review_inbox::ReviewClaimSettlement,
+        settlement: crate::conversation_inbox::InboxClaimSettlement,
         reason: &'static str,
     ) {
-        let Some(inflight) = self.inflight_review.take() else {
+        let Some(inflight) = self.inflight_inbox.take() else {
             return;
         };
-        let settled = crate::review_inbox::settle_review_inbox_claim(
+        let settled = crate::conversation_inbox::settle_conversation_inbox_claim(
             &self.db,
             &inflight.delivery_key,
             &inflight.claim_token,
@@ -2759,7 +2785,7 @@ impl Task {
                     session = %self.session_id,
                     delivery_key = %inflight.delivery_key,
                     %reason,
-                    "protected review turn no longer owns its inbox claim at settlement"
+                    "protected inbox turn no longer owns its inbox claim at settlement"
                 );
             }
             Err(error) => {
@@ -2768,7 +2794,7 @@ impl Task {
                     delivery_key = %inflight.delivery_key,
                     %reason,
                     %error,
-                    "could not settle protected review feedback"
+                    "could not settle protected inbox feedback"
                 );
             }
         }
@@ -2782,12 +2808,11 @@ impl Task {
         source: TurnEndSource,
     ) {
         // A provider-synthesized turn end is not an adapter acknowledgement:
-        // release before going idle so the immutable prompt can retry or
-        // rehome. A user cancellation differs — Stop is authoritative, so it
-        // consumes the already-journaled prompt instead of replaying it.
-        let settlement = source.review_claim_settlement();
-        if settlement == crate::review_inbox::ReviewClaimSettlement::Abandoned {
-            self.settle_inflight_review(settlement, "synthetic turn settlement")
+        // settle before going idle. Reviews can retry or rehome; journaled
+        // session updates stay consumed. Stop consumes either kind of input.
+        let settlement = source.inbox_claim_settlement();
+        if settlement == crate::conversation_inbox::InboxClaimSettlement::Abandoned {
+            self.settle_inflight_inbox(settlement, "synthetic turn settlement")
                 .await;
         }
         self.current_turn = turn;
@@ -2820,13 +2845,13 @@ impl Task {
             self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
                 .await;
         }
-        if settlement != crate::review_inbox::ReviewClaimSettlement::Abandoned {
+        if settlement != crate::conversation_inbox::InboxClaimSettlement::Abandoned {
             let reason = match source {
                 TurnEndSource::MatchingPromptResponse => "matching ACP prompt response",
                 TurnEndSource::UserCancellation => "authoritative user cancellation",
                 TurnEndSource::Synthetic => unreachable!("abandoned settlements run above"),
             };
-            self.settle_inflight_review(settlement, reason).await;
+            self.settle_inflight_inbox(settlement, reason).await;
         }
         self.finish_turn_state(turn, &stop).await;
     }
@@ -2861,7 +2886,7 @@ impl Task {
 
     async fn claim_pending_review(
         &self,
-    ) -> Option<(crate::review_inbox::ReviewInboxItem, ActiveReviewClaim)> {
+    ) -> Option<(crate::conversation_inbox::InboxItem, ActiveInboxClaim)> {
         if self.automatic_dispatch_paused {
             return None;
         }
@@ -2870,8 +2895,8 @@ impl Task {
         }
         let active_claim = self
             .registry
-            .activate_review_claim(&self.session_id, self.generation)?;
-        let item = match crate::review_inbox::claim_review_inbox(
+            .activate_inbox_claim(&self.session_id, self.generation)?;
+        let item = match crate::conversation_inbox::claim_review(
             &self.db,
             &self.branch_id,
             &self.session_id,
@@ -2885,7 +2910,7 @@ impl Task {
                 tracing::error!(
                     session = %self.session_id,
                     %error,
-                    "could not claim protected review feedback"
+                    "could not claim protected inbox feedback"
                 );
                 return None;
             }
@@ -2893,14 +2918,14 @@ impl Task {
         item.map(|item| (item, active_claim))
     }
 
-    async fn dispatch_claimed_review(
+    async fn dispatch_claimed_inbox(
         &mut self,
-        item: crate::review_inbox::ReviewInboxItem,
-        active_claim: ActiveReviewClaim,
+        item: crate::conversation_inbox::InboxItem,
+        active_claim: ActiveInboxClaim,
     ) -> bool {
-        match self.start_review_turn(&item, active_claim).await {
+        match self.start_inbox_turn(&item, active_claim).await {
             Ok(outcome) if outcome.blocks_followup_dispatch() => {
-                if let crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+                if let crate::conversation_inbox::InboxTurnStartOutcome::TransportWrittenUnpersisted {
                     error,
                 } = outcome
                 {
@@ -2908,22 +2933,22 @@ impl Task {
                         session = %self.session_id,
                         delivery_key = %item.delivery_key,
                         %error,
-                        "holding protected review turn after post-write persistence failure"
+                        "holding protected inbox turn after post-write persistence failure"
                     );
                 }
                 true
             }
-            Ok(crate::review_inbox::ReviewTurnStartOutcome::ClaimLostBeforeWrite) => {
+            Ok(crate::conversation_inbox::InboxTurnStartOutcome::ClaimLostBeforeWrite) => {
                 tracing::warn!(
                     session = %self.session_id,
                     delivery_key = %item.delivery_key,
-                    "protected review inbox claim was lost before relay write"
+                    "protected inbox claim was lost before relay write"
                 );
                 false
             }
-            Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportNotWritten { error })
+            Ok(crate::conversation_inbox::InboxTurnStartOutcome::TransportNotWritten { error })
             | Err(error) => {
-                let released = crate::review_inbox::release_review_inbox(
+                let released = crate::conversation_inbox::release_conversation_inbox(
                     &self.db,
                     &item.delivery_key,
                     &item.claim_token,
@@ -2933,24 +2958,24 @@ impl Task {
                     session = %self.session_id,
                     delivery_key = %item.delivery_key,
                     %error,
-                    "could not start protected review feedback turn"
+                    "could not start protected inbox feedback turn"
                 );
                 if let Err(release_error) = released {
                     tracing::error!(
                         session = %self.session_id,
                         delivery_key = %item.delivery_key,
                         error = %release_error,
-                        "could not release protected review feedback after dispatch failure"
+                        "could not release protected inbox feedback after dispatch failure"
                     );
                 }
                 // The relay write did not happen, so no live turn exists and
                 // releasing the protected claim is safe.
                 false
             }
-            Ok(crate::review_inbox::ReviewTurnStartOutcome::Persisted)
-            | Ok(crate::review_inbox::ReviewTurnStartOutcome::TransportWrittenUnpersisted {
+            Ok(crate::conversation_inbox::InboxTurnStartOutcome::Persisted)
+            | Ok(crate::conversation_inbox::InboxTurnStartOutcome::TransportWrittenUnpersisted {
                 ..
-            }) => unreachable!("held review outcomes matched the dispatch gate"),
+            }) => unreachable!("held inbox outcomes matched the dispatch gate"),
         }
     }
 
@@ -2958,7 +2983,7 @@ impl Task {
         let Some((item, active_claim)) = self.claim_pending_review().await else {
             return false;
         };
-        self.dispatch_claimed_review(item, active_claim).await
+        self.dispatch_claimed_inbox(item, active_claim).await
     }
 
     async fn dispatch_pending_prompt(&mut self) {
@@ -2974,6 +2999,9 @@ impl Task {
         // Submitted review feedback is immutable and gets its own turn. It is
         // never concatenated with or exposed through the editable queue.
         if self.dispatch_review_inbox().await {
+            return;
+        }
+        if self.dispatch_session_updates().await {
             return;
         }
         // The cap gate runs before the durable queue is consumed, so a refused
@@ -3002,6 +3030,51 @@ impl Task {
                     %error,
                     "could not consume queued prompt; leaving it idle"
                 );
+            }
+        }
+    }
+
+    async fn emit_updates(&self) {
+        match crate::conversation_inbox::pending_updates(&self.db, &self.session_id).await {
+            Ok(updates) => self.emit("updates", json!({ "pending_updates": updates })),
+            Err(error) => {
+                tracing::warn!(session = %self.session_id, %error, "could not read session updates")
+            }
+        }
+    }
+
+    async fn dispatch_session_updates(&mut self) -> bool {
+        if self.turn_live
+            || self.automatic_dispatch_paused
+            || !self.registry.is_current(&self.session_id, self.generation)
+            || self.refuse_if_turn_capped().await.is_err()
+        {
+            return false;
+        }
+        let Some(active_claim) = self
+            .registry
+            .activate_inbox_claim(&self.session_id, self.generation)
+        else {
+            return false;
+        };
+        let item = crate::conversation_inbox::claim_session_update(
+            &self.db,
+            &self.branch_id,
+            &self.session_id,
+            Some(active_claim.owner()),
+            |session, owner| self.registry.is_claim_owner_live(session, owner),
+        )
+        .await;
+        match item {
+            Ok(Some(item)) => {
+                let started = self.dispatch_claimed_inbox(item, active_claim).await;
+                self.emit_updates().await;
+                started
+            }
+            Ok(None) => false,
+            Err(error) => {
+                tracing::error!(session = %self.session_id, %error, "could not claim session update");
+                false
             }
         }
     }
@@ -3073,11 +3146,11 @@ impl Task {
         .await
     }
 
-    async fn start_review_turn(
+    async fn start_inbox_turn(
         &mut self,
-        item: &crate::review_inbox::ReviewInboxItem,
-        active_claim: ActiveReviewClaim,
-    ) -> Result<crate::review_inbox::ReviewTurnStartOutcome> {
+        item: &crate::conversation_inbox::InboxItem,
+        active_claim: ActiveInboxClaim,
+    ) -> Result<crate::conversation_inbox::InboxTurnStartOutcome> {
         self.refuse_if_turn_capped().await?;
         let turn = if self.turns_dispatched > 0 {
             self.current_turn + 1
@@ -3104,12 +3177,15 @@ impl Task {
             "by": Value::Null,
             "resources": [],
             "delivery_key": item.delivery_key,
+            "source_session_id": item.source_session_id,
+            "source_channel_id": item.source_channel_id,
+            "source_message_id": item.source_message_id,
         });
-        let outcome = crate::review_inbox::start_review_inbox_turn(
+        let outcome = crate::conversation_inbox::start_conversation_inbox_turn(
             &self.db,
             item,
             &self.session_id,
-            crate::review_inbox::ReviewTurnBoundary {
+            crate::conversation_inbox::InboxTurnBoundary {
                 turn,
                 seq,
                 opening_payload: &opening_payload,
@@ -3155,7 +3231,7 @@ impl Task {
         };
         self.emit("block", serde_json::to_value(&view).unwrap_or(Value::Null));
         self.inflight_prompt = Some((id, turn));
-        self.inflight_review = Some(InflightReview {
+        self.inflight_inbox = Some(InflightInbox {
             delivery_key: item.delivery_key.clone(),
             claim_token: item.claim_token.clone(),
             active_claim: Some(active_claim),
@@ -3548,7 +3624,7 @@ impl Task {
                 // one visible review turn instead of queueing it silently. A
                 // wake for a review already in flight is a retry and must
                 // not interrupt that same review.
-                if self.inflight_review.is_some()
+                if self.inflight_inbox.is_some()
                     || self.compaction_turn
                     || self.automatic_dispatch_paused
                 {
@@ -3560,24 +3636,25 @@ impl Task {
                 }
                 let Some((item, active_claim)) = self.claim_pending_review().await else {
                     let _ = reply.send(Err(anyhow!(
-                        "there is no protected review feedback ready to send"
+                        "there is no protected inbox feedback ready to send"
                     )));
                     return;
                 };
                 if self.turn_live {
                     if let Err(error) = self.cancel_live_turn().await {
-                        if let Err(release_error) = crate::review_inbox::release_review_inbox(
-                            &self.db,
-                            &item.delivery_key,
-                            &item.claim_token,
-                        )
-                        .await
+                        if let Err(release_error) =
+                            crate::conversation_inbox::release_conversation_inbox(
+                                &self.db,
+                                &item.delivery_key,
+                                &item.claim_token,
+                            )
+                            .await
                         {
                             tracing::error!(
                                 session = %self.session_id,
                                 delivery_key = %item.delivery_key,
                                 error = %release_error,
-                                "could not release protected review after cancellation failure"
+                                "could not release protected inbox after cancellation failure"
                             );
                         }
                         let _ = reply.send(Err(error));
@@ -3587,16 +3664,24 @@ impl Task {
                     // turn boundary, not a standalone Stop request.
                     self.automatic_dispatch_paused = false;
                 }
-                if self.dispatch_claimed_review(item, active_claim).await {
+                if self.dispatch_claimed_inbox(item, active_claim).await {
                     let _ = reply.send(Ok(PromptAck {
                         queued: false,
                         turn: Some(self.current_turn),
                     }));
                 } else {
                     let _ = reply.send(Err(anyhow!(
-                        "there is no protected review feedback ready to send"
+                        "there is no protected inbox feedback ready to send"
                     )));
                 }
+            }
+            Command::NotifyUpdates { reply } => {
+                self.emit_updates().await;
+                let started = self.dispatch_session_updates().await;
+                let _ = reply.send(Ok(PromptAck {
+                    queued: !started,
+                    turn: Some(self.current_turn),
+                }));
             }
             Command::RetractPending { reply } => {
                 let result = session::take_pending_prompt(&self.db, &self.session_id)
@@ -3680,8 +3765,8 @@ impl Task {
 
     async fn on_failure(&mut self, reason: &str) {
         tracing::warn!(session = %self.session_id, reason, "acp task failed");
-        self.settle_inflight_review(
-            crate::review_inbox::ReviewClaimSettlement::Abandoned,
+        self.settle_inflight_inbox(
+            crate::conversation_inbox::InboxClaimSettlement::Abandoned,
             "ACP task failure",
         )
         .await;
@@ -3948,7 +4033,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO review_conversation_inbox
+            "INSERT INTO conversation_inbox
                 (delivery_key, review_id, branch_id, preferred_session_id, payload)
              VALUES ('review:stable', 1, ?, 'acp-review', 'immutable')",
         )
@@ -3956,7 +4041,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        crate::review_inbox::claim_review_inbox(
+        crate::conversation_inbox::claim_review(
             &db,
             &branch.id,
             "acp-review",
@@ -3970,13 +4055,13 @@ mod tests {
         let registry = super::AcpRegistry::new();
         let (generation, probe) = registry.register_claim_liveness_probe("acp-review");
         let owner_a = registry
-            .activate_review_claim("acp-review", generation)
+            .activate_inbox_claim("acp-review", generation)
             .unwrap();
         let now = chrono::DateTime::parse_from_rfc3339("2026-07-26T12:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         sqlx::query(
-            "UPDATE review_conversation_inbox
+            "UPDATE conversation_inbox
              SET claimed_at = '2026-07-26T11:00:00.000Z', claim_owner = ?
              WHERE delivery_key = 'review:stable'",
         )
@@ -3986,7 +4071,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            crate::review_inbox::claim_review_inbox_at(
+            crate::conversation_inbox::claim_review_at(
                 &db,
                 &branch.id,
                 "acp-replacement",
@@ -4001,9 +4086,9 @@ mod tests {
         );
         drop(owner_a);
         let owner_b = registry
-            .activate_review_claim("acp-review", generation)
+            .activate_inbox_claim("acp-review", generation)
             .unwrap();
-        crate::review_inbox::claim_review_inbox_at(
+        crate::conversation_inbox::claim_review_at(
             &db,
             &branch.id,
             "acp-review",
@@ -4017,7 +4102,7 @@ mod tests {
 
         let later = now + chrono::TimeDelta::minutes(2);
         assert!(
-            crate::review_inbox::claim_review_inbox_at(
+            crate::conversation_inbox::claim_review_at(
                 &db,
                 &branch.id,
                 "acp-final",
@@ -4032,7 +4117,7 @@ mod tests {
         );
         drop(probe);
         assert!(
-            crate::review_inbox::claim_review_inbox_at(
+            crate::conversation_inbox::claim_review_at(
                 &db,
                 &branch.id,
                 "acp-final",

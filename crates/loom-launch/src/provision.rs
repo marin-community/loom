@@ -1274,7 +1274,8 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
                     - Communicate: `loom channels read`; `loom channels send \"question or update\"`.\n\
                     - Save or delegate: `loom artifacts write plan plan.md`; `loom sessions launch \"implement the parser\"`.\n\
                     - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A typed child result also notifies its parent channel.\n\
-                    - Finish delegated work: `loom channels send --kind result \"<outcome or PR>\"`."
+                    - Wait for a result: `loom channels wait --channel <child-id> --kind result --after <last-seen-seq>` (0 for a new child's first result); `sessions wait` observes lifecycle.\n\
+                    - Finish delegated work: `loom channels send --kind result --idempotency-key <task-id>:result:1 \"<outcome or PR>\"`. Reuse the key on retries; increment the revision for changed results."
         .to_string();
     if let Some(id) = tracking_issue {
         note.push_str(&format!(

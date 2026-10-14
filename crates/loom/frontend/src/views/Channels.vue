@@ -9,7 +9,7 @@ import {
   ref,
   watch,
 } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import {
   createChannel,
   listChannels,
@@ -24,6 +24,7 @@ import { useCommandScope, type Command } from '../lib/commands';
 defineOptions({ name: 'Channels' });
 const props = defineProps<{ id?: string }>();
 const router = useRouter();
+const route = useRoute();
 
 const channels = ref<Channel[]>([]);
 const messages = ref<ChannelMessage[]>([]);
@@ -91,8 +92,18 @@ async function loadMessages(markRead = true) {
   loadingMessages.value = true;
   try {
     const next = await listChannelMessages(id);
+    const sourceId = route.hash.slice(1);
+    while (sourceId && !next.some((message) => message.id === sourceId) && next.length) {
+      const page = await listChannelMessages(id, next[next.length - 1].seq);
+      if (!page.length) break;
+      next.push(...page);
+    }
     if (id !== selectedId.value) return;
     messages.value = next;
+    if (route.hash) {
+      await nextTick();
+      document.getElementById(route.hash.slice(1))?.scrollIntoView({ block: 'center' });
+    }
     if (markRead && active && next.length) {
       await markChannelRead(id, next.at(-1)?.seq);
       const row = channels.value.find((channel) => channel.id === id);
@@ -250,18 +261,22 @@ function repoName(path: string): string {
 
 function deliveryLabel(message: ChannelMessage): string {
   if (!message.deliveries.length) return '';
-  const failed = message.deliveries.filter((delivery) => delivery.state === 'failed');
+  const failed = message.deliveries.filter((delivery) =>
+    ['failed', 'uncertain'].includes(delivery.state),
+  );
   if (failed.length === 1 && message.deliveries.length === 1) {
-    return `delivery failed: ${failed[0].last_error}`;
+    return `delivery ${failed[0].state}: ${failed[0].last_error}`;
   }
   if (failed.length) return `${failed.length}/${message.deliveries.length} deliveries failed`;
   if (message.deliveries.length === 1) return message.deliveries[0].state;
-  const delivered = message.deliveries.filter((delivery) => delivery.state === 'delivered').length;
+  const delivered = message.deliveries.filter((delivery) =>
+    ['delivered', 'read'].includes(delivery.state),
+  ).length;
   return `${delivered}/${message.deliveries.length} delivered`;
 }
 
 function deliveryFailed(message: ChannelMessage): boolean {
-  return message.deliveries.some((delivery) => delivery.state === 'failed');
+  return message.deliveries.some((delivery) => ['failed', 'uncertain'].includes(delivery.state));
 }
 </script>
 
@@ -408,6 +423,7 @@ function deliveryFailed(message: ChannelMessage): boolean {
         <article
           v-for="message in messages"
           :key="message.id"
+          :id="message.id"
           class="grid grid-cols-[3rem_5rem_minmax(0,1fr)] gap-2 border-b border-line px-4 py-2 text-xs"
           :class="
             message.urgency === 'blocked'

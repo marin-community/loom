@@ -140,6 +140,12 @@ export interface WeaverFixture {
    *  writes the log where the endpoint's capture fallback reads it
    *  (`<log_dir>/<branch-slug>/chat.json`). `log` is an iris `Log` shape. */
   seedConversation(session: Session, log: unknown): Promise<void>;
+  /** Seed protected input in the worker-private database for queue UI coverage. */
+  seedSessionUpdate(
+    target: Session,
+    source: Session,
+    text: string,
+  ): Promise<void>;
   /** Write an artifact via `loom artifacts write` — creates it on first call,
    *  appends an immutable revision after. Content is piped on stdin; `--repo`
    *  publishes it repo-shared instead of scoping it to the branch. A `Buffer`
@@ -593,6 +599,18 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         const slug = session.branch.branch.replace(/[^A-Za-z0-9._-]/g, '-');
         mkdirSync(join(logRoot, slug), { recursive: true });
         writeFileSync(join(logRoot, slug, 'chat.json'), JSON.stringify(log));
+      },
+
+      async seedSessionUpdate(target, source, text) {
+        runPrivateSql(
+          childEnv.WEAVER_DB!,
+          `
+          INSERT INTO conversation_inbox
+            (delivery_key, branch_id, preferred_session_id, payload, source_session_id)
+          VALUES (${quoteSqlite(`e2e:${source.id}:${target.id}`)}, ${quoteSqlite(target.branch.id)},
+            ${quoteSqlite(target.id)}, ${quoteSqlite(`Update from loom session ${source.id}\n\n${text}`)},
+            ${quoteSqlite(source.id)});`,
+        );
       },
 
       async writeArtifact(session, name, content, opts) {

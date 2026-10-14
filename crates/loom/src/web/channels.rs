@@ -119,12 +119,13 @@ pub(super) async fn append_and_deliver(
     .await?;
     let inserted = outcome.inserted;
     let message_id = outcome.message.id.clone();
+    let body = outcome.message.body.as_str();
 
     // Session channels are durable inboxes; custom channels become inboxes for
     // agents that explicitly subscribe in `deliver` mode. Only ordinary
     // conversation reaches runtimes, and an agent never prompts itself.
     if kind == MessageKind::Message {
-        deliver_to_subscribers(st, id, author, &message_id, body, DeliveryMode::Immediate).await?;
+        deliver_to_subscribers(st, author, &message_id, body).await?;
     }
 
     // A session-authored message or result on its own channel is the canonical
@@ -136,7 +137,7 @@ pub(super) async fn append_and_deliver(
     {
         deliver_to_origin_slack(st, channel, &message_id, body).await?;
         if kind == MessageKind::Result {
-            if let Err(error) = notify_parent_of_result(st, author, &outcome.message).await {
+            if let Err(error) = notify_parent_of_result(st, &outcome.message, inserted).await {
                 // The child's channel remains the canonical result even when a
                 // parent has been archived or its notification cannot be sent.
                 tracing::warn!(child = %author.id, message = %message_id, error = %error.message(),
@@ -151,55 +152,59 @@ pub(super) async fn append_and_deliver(
     ))
 }
 
-#[derive(Clone, Copy)]
-enum DeliveryMode {
-    Immediate,
-    Queued,
-}
-
 async fn deliver_to_subscribers(
     st: &AppState,
-    channel_id: &str,
     author: &Subject,
     message_id: &str,
     body: &str,
-    mode: DeliveryMode,
 ) -> ApiResult<()> {
-    for target in channels::delivery_targets(&st.db, channel_id).await? {
+    for target in channels::message_delivery_targets(&st.db, message_id).await? {
         if author.kind == SubjectKind::Session && author.id == target {
             continue;
         }
         let binding_id = weaver_api::channel_session_binding_id(&target);
-        channels::create_delivery(&st.db, message_id, &binding_id, "session", Some(&target))
-            .await?;
         if channels::delivery_succeeded(&st.db, message_id, &binding_id).await? {
             continue;
         }
-        let by = format!("channel:{}", author.id);
-        let delivery_error = match mode {
-            DeliveryMode::Immediate => super::sessions::send_session(
-                State(st.clone()),
-                Path(target.clone()),
-                Json(SendReq {
-                    text: body.to_string(),
-                    submit: true,
-                    by: Some(by),
-                }),
-            )
-            .await
-            .map(|_| ()),
-            DeliveryMode::Queued => {
-                super::sessions::queue_session_message(st, &target, body, &by).await
+        let session = crate::session::get(&st.db, &target)
+            .await?
+            .ok_or_else(|| AppError::not_found("session"))?;
+        if session.protocol == "acp" {
+            // Publication already committed the protected inbox entry. A wake
+            // is only a hint; the task also checks this queue after recovery.
+            if let Some(handle) = st.acp.get(&target) {
+                if let Err(error) = handle.notify_updates().await {
+                    tracing::debug!(session = %target, %error, "session update remains queued");
+                }
             }
+            continue;
         }
+        if !channels::claim_terminal_delivery(&st.db, message_id, &binding_id).await? {
+            continue;
+        }
+        let text = if author.kind == SubjectKind::Session {
+            format!("Update from loom session {}\n\n{body}", author.id)
+        } else {
+            body.to_string()
+        };
+        let by = format!("channel:{}", author.id);
+        let delivery_error = super::sessions::send_session(
+            State(st.clone()),
+            Path(target.clone()),
+            Json(SendReq {
+                text,
+                submit: true,
+                by: Some(by),
+            }),
+        )
+        .await
         .err()
         .map(|error| error.message().to_string());
-        channels::finish_delivery(
+        channels::finish_terminal_delivery(
             &st.db,
             message_id,
             &binding_id,
             delivery_error.as_deref(),
-            None,
         )
         .await?;
     }
@@ -208,69 +213,15 @@ async fn deliver_to_subscribers(
 
 async fn notify_parent_of_result(
     st: &AppState,
-    author: &Subject,
     result: &ChannelMessageView,
+    inserted: bool,
 ) -> ApiResult<()> {
-    let parent: Option<String> =
-        sqlx::query_scalar("SELECT parent_session_id FROM sessions WHERE id = ?")
-            .bind(&author.id)
-            .fetch_optional(&st.db)
-            .await?
-            .flatten();
-    let Some(parent) = parent else {
+    let Some(notice) = channels::parent_result_notice(&st.db, &result.id).await? else {
         return Ok(());
     };
-    let Some(parent_channel) = channels::access(&st.db, &parent).await? else {
-        return Ok(());
-    };
-    if parent_channel.state != channels::OPEN_STATE {
-        return Ok(());
-    }
-    let body = format!(
-        "Child session {} posted a result. Read it with `loom channels read --channel {} --kinds result`.",
-        author.id, result.channel_id
-    );
-    let payload = json!({
-        "child_session_id": author.id,
-        "source_channel_id": result.channel_id,
-        "source_message_id": result.id,
-    });
-    let idempotency_key = format!("child-result:{}", result.id);
-    let urgency = Urgency::parse(&result.urgency).expect("stored channel urgency is valid");
-    // Appending as the child would also subscribe it to the parent's channel.
-    // The server owns this linked notification; its payload preserves the child.
     let notice_author = Subject::new(SubjectKind::System, "loom");
-    let outcome = channels::append_with_outcome(
-        &st.db,
-        &parent,
-        NewMessage {
-            kind: MessageKind::Message,
-            urgency,
-            author: &notice_author,
-            body: &body,
-            payload: &payload,
-            reply_to: None,
-            idempotency_key: Some(&idempotency_key),
-        },
-    )
-    .await?;
-    deliver_to_subscribers(
-        st,
-        &parent,
-        &notice_author,
-        &outcome.message.id,
-        &body,
-        DeliveryMode::Queued,
-    )
-    .await?;
-    record_channel_message_event(
-        st,
-        &parent,
-        &notice_author,
-        &outcome.message,
-        outcome.inserted,
-    )
-    .await;
+    deliver_to_subscribers(st, &notice_author, &notice.id, &notice.body).await?;
+    record_channel_message_event(st, &notice.channel_id, &notice_author, &notice, inserted).await;
     Ok(())
 }
 
@@ -532,6 +483,17 @@ pub(super) async fn list_channel_messages_operation(
         if let Some(last) = messages.last() {
             let subject = principal_subject(&principal);
             channels::mark_read(&st.db, &channel_id, &subject, Some(last.seq)).await?;
+            if subject.kind == SubjectKind::Session {
+                for message in &messages {
+                    crate::conversation_inbox::consume_source(&st.db, &subject.id, &message.id)
+                        .await?;
+                }
+                if let Some(handle) = st.acp.get(&subject.id) {
+                    if let Err(error) = handle.notify_updates().await {
+                        tracing::debug!(%error, "channel read consumed pending updates; refresh deferred");
+                    }
+                }
+            }
         }
     }
     Ok(messages)
@@ -737,6 +699,14 @@ pub(super) async fn wait_for_channel_message_operation(
                 .is_none_or(|kind| message.kind == kind)
                 && (!input.urgent || matches!(message.urgency.as_str(), "attention" | "blocked"))
         }) {
+            if subject.kind == SubjectKind::Session {
+                crate::conversation_inbox::consume_source(&st.db, &subject.id, &message.id).await?;
+                if let Some(handle) = st.acp.get(&subject.id) {
+                    if let Err(error) = handle.notify_updates().await {
+                        tracing::debug!(%error, "result consumed; inbox refresh deferred");
+                    }
+                }
+            }
             return Ok(message);
         }
         if tokio::time::Instant::now() >= deadline {
