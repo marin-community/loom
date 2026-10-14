@@ -1329,7 +1329,7 @@ async fn op_send(
                 turn,
             });
         }
-        input.text = format!("Update from loom session {source}\n\n{}", input.text);
+        input.text = crate::conversation_inbox::session_update_text(source, &input.text);
         input.by = Some(format!("session:{source}"));
     }
     if session.protocol == "acp" {

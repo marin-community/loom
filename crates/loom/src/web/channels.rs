@@ -159,9 +159,6 @@ async fn deliver_to_subscribers(
     body: &str,
 ) -> ApiResult<()> {
     for target in channels::message_delivery_targets(&st.db, message_id).await? {
-        if author.kind == SubjectKind::Session && author.id == target {
-            continue;
-        }
         let binding_id = weaver_api::channel_session_binding_id(&target);
         if channels::delivery_succeeded(&st.db, message_id, &binding_id).await? {
             continue;
@@ -183,7 +180,7 @@ async fn deliver_to_subscribers(
             continue;
         }
         let text = if author.kind == SubjectKind::Session {
-            format!("Update from loom session {}\n\n{body}", author.id)
+            crate::conversation_inbox::session_update_text(&author.id, body)
         } else {
             body.to_string()
         };

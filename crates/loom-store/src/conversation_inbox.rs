@@ -10,6 +10,10 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::future::Future;
 
+pub fn session_update_text(source: &str, text: &str) -> String {
+    format!("Update from loom session {source}\n\n{text}")
+}
+
 #[derive(Debug, sqlx::FromRow)]
 pub struct InboxItem {
     pub delivery_key: String,
@@ -66,7 +70,7 @@ pub async fn enqueue_session_update(
         key.map(str::to_owned)
             .unwrap_or_else(weaver_core::branch::new_id)
     );
-    let payload = format!("Update from loom session {source}\n\n{text}");
+    let payload = session_update_text(source, text);
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let existing: Option<String> =
         sqlx::query_scalar("SELECT payload FROM conversation_inbox WHERE delivery_key = ?")

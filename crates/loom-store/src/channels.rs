@@ -407,9 +407,10 @@ pub async fn append_with_outcome(
                     ""
                 };
                 let body = format!(
-                    "Update from loom session {}\nResult\n\n{excerpt}{truncated}\n\nSource: channel {channel_id}, result {}.\nRead the full result with `loom channels read --channel {channel_id} --after {} --limit 1 --kinds result`.",
-                    new.author.id, row.id, row.seq - 1,
+                    "Result\n\n{excerpt}{truncated}\n\nSource: channel {channel_id}, result {}.\nRead the full result with `loom channels read --channel {channel_id} --after {} --limit 1 --kinds result`.",
+                    row.id, row.seq - 1,
                 );
+                let body = crate::conversation_inbox::session_update_text(&new.author.id, &body);
                 let payload = serde_json::json!({
                     "child_session_id": new.author.id,
                     "source_channel_id": channel_id,
@@ -528,7 +529,7 @@ async fn enqueue_message_tx(tx: &mut SqliteConnection, row: &MessageRow) -> Resu
     }
     .unwrap_or(&row.id);
     let text = if row.author_kind == "session" {
-        format!("Update from loom session {}\n\n{}", row.author_id, row.body)
+        crate::conversation_inbox::session_update_text(&row.author_id, &row.body)
     } else {
         row.body.clone()
     };
@@ -550,8 +551,7 @@ async fn enqueue_message_tx(tx: &mut SqliteConnection, row: &MessageRow) -> Resu
     Ok(())
 }
 
-/// The source and parent notification commit together, so callers only wake
-/// delivery after the durable publication has succeeded.
+/// Return the parent notice committed alongside this result, if one was created.
 pub async fn parent_result_notice(db: &Db, result_id: &str) -> Result<Option<ChannelMessageView>> {
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT * FROM channel_messages WHERE author_kind = 'system' AND idempotency_key = ?",
