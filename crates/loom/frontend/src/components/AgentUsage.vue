@@ -30,10 +30,10 @@ const costLabel = computed(() => {
     return `${cost.amount.toFixed(4)} ${cost.currency}`;
   }
 });
-const label = computed(
-  () =>
-    `${formatTokens(props.usage.used)} / ${formatTokens(props.usage.size)} context · ${Math.round(percent.value)}%`,
+const contextLabel = computed(
+  () => `${formatTokens(props.usage.used)} / ${formatTokens(props.usage.size)} context · `,
 );
+const percentLabel = computed(() => `${Math.round(percent.value)}%`);
 const title = computed(() => {
   const remaining = Math.max(0, props.usage.size - props.usage.used);
   const pieces = [`${formatTokens(remaining)} tokens remain in the current context window`];
@@ -49,7 +49,10 @@ const title = computed(() => {
     data-testid="agent-usage"
     :title="title"
   >
-    <span class="agent-usage-label">{{ label }}</span>
+    <span class="agent-usage-label"
+      ><span class="agent-usage-context">{{ contextLabel }}</span
+      ><span class="agent-usage-percent">{{ percentLabel }}</span></span
+    >
     <span v-if="!compact" class="agent-usage-track" aria-hidden="true">
       <span class="agent-usage-bar" :style="{ width: `${barPercent}%` }"></span>
     </span>

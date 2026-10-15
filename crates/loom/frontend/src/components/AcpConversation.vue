@@ -419,6 +419,104 @@ const selectedFiles = ref<string[]>([]);
 const attachmentInput = ref<HTMLInputElement | null>(null);
 const uploadingAttachment = ref(false);
 
+// The action bar sheds its least important pieces before it wraps: the send
+// hint, then the context totals, cost, slash-command count, and finally the
+// usage percentage and bar. Detection reads the live layout — are the two
+// groups on one row? — rather than fixed breakpoints, so the shed order holds
+// as controls are added or their labels change.
+const composerActions = ref<HTMLElement | null>(null);
+const composerLeft = ref<HTMLElement | null>(null);
+const composerRight = ref<HTMLElement | null>(null);
+const SHED_SELECTORS = [
+  '.acp-send-hint',
+  '.agent-usage-context',
+  '.agent-usage-cost',
+  '.acp-slash-hint',
+  '.agent-usage',
+] as const;
+
+let shedObserver: ResizeObserver | null = null;
+let shedFrame = 0;
+let shedSignature = '';
+
+function shedTargets(): HTMLElement[] {
+  const root = composerActions.value;
+  if (!root) return [];
+  return SHED_SELECTORS.map((selector) => root.querySelector<HTMLElement>(selector)).filter(
+    (el): el is HTMLElement => el !== null,
+  );
+}
+
+function groupsShareRow(): boolean {
+  const left = composerLeft.value?.getBoundingClientRect();
+  const right = composerRight.value?.getBoundingClientRect();
+  if (!left || !right) return true;
+  return Math.abs(left.top + left.height / 2 - (right.top + right.height / 2)) <= 2;
+}
+
+function shedSignatureNow(): string {
+  const root = composerActions.value;
+  const left = composerLeft.value;
+  const right = composerRight.value;
+  if (!root) return '';
+  return [
+    root.clientWidth,
+    root.clientHeight,
+    left?.offsetWidth ?? 0,
+    left?.offsetHeight ?? 0,
+    right?.offsetWidth ?? 0,
+    right?.offsetHeight ?? 0,
+  ].join(':');
+}
+
+function refitComposerActions() {
+  const root = composerActions.value;
+  const targets = shedTargets();
+  if (!root || !targets.length) return;
+  for (const el of targets) el.style.display = '';
+  // Below the phone breakpoint the groups stack as full-width rows, so there is
+  // nothing to shed.
+  if (getComputedStyle(root).flexDirection === 'column') return;
+  let hidden = 0;
+  while (hidden < targets.length && !groupsShareRow()) {
+    targets[hidden].style.display = 'none';
+    hidden += 1;
+  }
+}
+
+function scheduleComposerRefit() {
+  if (shedFrame) return;
+  shedFrame = requestAnimationFrame(() => {
+    shedFrame = 0;
+    const signature = shedSignatureNow();
+    if (signature === shedSignature) return;
+    refitComposerActions();
+    shedSignature = shedSignatureNow();
+  });
+}
+
+watch(
+  [composerActions, composerLeft, composerRight],
+  () => {
+    shedObserver?.disconnect();
+    shedSignature = '';
+    const elements = [composerActions.value, composerLeft.value, composerRight.value].filter(
+      (el): el is HTMLElement => el !== null,
+    );
+    if (!elements.length) return;
+    shedObserver ??= new ResizeObserver(scheduleComposerRefit);
+    for (const el of elements) shedObserver.observe(el);
+    scheduleComposerRefit();
+  },
+  { flush: 'post' },
+);
+
+onUnmounted(() => {
+  shedObserver?.disconnect();
+  shedObserver = null;
+  if (shedFrame) cancelAnimationFrame(shedFrame);
+});
+
 function resizeComposer() {
   nextTick(() => {
     const input = composerInput.value;
@@ -1916,9 +2014,9 @@ function goTo(anchor: string) {
           </button>
         </li>
       </ul>
-      <div class="acp-composer-actions">
+      <div ref="composerActions" class="acp-composer-actions">
         <!-- Agent-owned config selectors + slash discovery on the left. -->
-        <div class="acp-composer-left">
+        <div ref="composerLeft" class="acp-composer-left">
           <button
             type="button"
             class="acp-attach-button"
@@ -2028,7 +2126,7 @@ function goTo(anchor: string) {
             / {{ commands.length }} commands
           </button>
         </div>
-        <div class="acp-composer-right">
+        <div ref="composerRight" class="acp-composer-right">
           <AgentUsage v-if="model.usage" :usage="model.usage" />
           <span class="acp-send-hint">Enter to send · Shift+Enter for a new line</span>
           <button
@@ -2067,6 +2165,7 @@ function goTo(anchor: string) {
             type="submit"
             class="btn-primary px-3 py-1 text-sm"
             data-testid="acp-composer-send"
+            title="Enter to send · Shift+Enter for a new line"
             :disabled="sending || queueing || editingQueued || uploadingAttachment || !draft.trim()"
           >
             {{ sending ? 'Sending…' : 'Send' }}
@@ -2527,9 +2626,10 @@ function goTo(anchor: string) {
 }
 .acp-composer-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 0.625rem;
+  gap: 0.5rem 0.625rem;
   border-top: 1px solid var(--line);
   padding: 0.55rem 0.65rem;
 }
@@ -2604,6 +2704,7 @@ function goTo(anchor: string) {
   justify-content: flex-end;
   gap: 0.5rem;
   min-width: 0;
+  margin-left: auto;
 }
 .acp-send-hint {
   color: var(--faint);
@@ -2616,6 +2717,7 @@ function goTo(anchor: string) {
   .acp-composer-actions {
     align-items: flex-end;
     flex-direction: column;
+    flex-wrap: nowrap;
   }
   .acp-composer-left,
   .acp-composer-right {
