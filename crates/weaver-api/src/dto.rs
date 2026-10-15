@@ -209,6 +209,15 @@ pub struct SessionSummaryView {
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
+    /// When the newest `user_message` block was journaled — the last time a
+    /// human or a delivery on their behalf steered the conversation — or `null`
+    /// when the journal holds no user input. Unlike `last_activity_at` (which
+    /// the ACP task restamps on every agent frame), this does not advance while
+    /// an agent is merely busy answering, so fleet UIs can order by it without
+    /// a running session reshuffling the list. `#[serde(default)]` keeps
+    /// older-server responses parsing as `null` rather than failing.
+    #[serde(default)]
+    pub last_user_message_at: Option<String>,
     pub created_at: String,
     pub parent_id: Option<String>,
     #[serde(default)]
@@ -249,6 +258,12 @@ pub struct SessionView {
     #[serde(default)]
     pub github_issue: Option<GithubIssueRef>,
     pub last_activity_at: String,
+    /// When the newest `user_message` block was journaled — see the twin field
+    /// on [`SessionSummaryView`]; `None` for a terminal session (no journal)
+    /// or an empty one. Carried here too so the detail view feeds the same
+    /// recency helpers the fleet list does.
+    #[serde(default)]
+    pub last_user_message_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Optional metadata-agent state for the task label.
