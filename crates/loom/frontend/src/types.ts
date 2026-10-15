@@ -383,9 +383,9 @@ export interface SseTurn {
   stop_reason?: string;
 }
 
-/** `queue` — the complete durable next-turn prompt after a queue mutation. */
+/** `queue` — the complete durable input queue after a mutation. */
 export interface SseQueue {
-  pending_prompt: string | null;
+  pending_inputs: import('./api/generated').QueuedInputView[];
 }
 
 // --- Watch configuration ---------------------------------------------------

@@ -1310,7 +1310,7 @@ async fn op_send(
             .await
             .map_err(|error| AppError::conflict(error.to_string()))?;
             if let Some(handle) = st.acp.get(&session.id) {
-                if let Err(error) = handle.notify_updates().await {
+                if let Err(error) = handle.notify_queue().await {
                     tracing::debug!(session = %session.id, %error, "session update queued; wake deferred");
                 }
             }
@@ -1797,18 +1797,12 @@ async fn op_chat(context: OperationContext, input: ops::chat::Input) -> ApiResul
             None => crate::acp::AcpMetadata::default(),
         },
     };
-    let pending_prompt = session
-        .pending_prompt
-        .as_deref()
-        .filter(|pending| !pending.trim().is_empty())
-        .map(str::to_string);
     Ok(SessionChatView {
         blocks,
         older_cursor,
         live_turn: session_mod::acp_inflight_turn(&session),
         effective_mode: effective_turn_mode(&session),
-        pending_prompt,
-        pending_updates: crate::conversation_inbox::pending_updates(&st.db, &session.id).await?,
+        pending_inputs: crate::conversation_inbox::pending_inputs(&st.db, &session.id).await?,
         metadata: AcpMetadataView {
             commands: metadata.commands,
             config_options: metadata.config_options,
@@ -2271,6 +2265,9 @@ async fn op_prompt_create(
     input: ops::prompt::create::Input,
 ) -> ApiResult<ops::prompt::create::PromptResult> {
     let st = &context.state;
+    if input.delivery_key.is_some() && !input.force_queued {
+        return Err(AppError::bad_request("delivery_key requires force_queued"));
+    }
     let (session, branch) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
     let handle = require_acp_task(st, &session)?;
@@ -2281,12 +2278,22 @@ async fn op_prompt_create(
     }
     .to_string();
     let audit_text = if input.force_queued {
-        session_mod::read_pending_prompt(&st.db, &session.id).await?
+        crate::conversation_inbox::pending_inputs(&st.db, &session.id)
+            .await?
+            .into_iter()
+            .find(|queued| {
+                input
+                    .delivery_key
+                    .as_ref()
+                    .is_none_or(|key| &queued.delivery_key == key)
+            })
+            .ok_or_else(|| AppError::conflict("this input is no longer queued"))?
+            .text
     } else {
         input.text.clone()
     };
     let ack = if input.force_queued {
-        handle.force_pending(Some(by.clone())).await
+        handle.force_pending(input.delivery_key.clone()).await
     } else {
         let resources = prompt_resources(&session.work_dir, &input.files).await?;
         if input.send_now {
@@ -2310,6 +2317,7 @@ async fn op_prompt_create(
             "text": audit_text,
             "send_now": input.send_now,
             "promoted_queue": input.force_queued,
+            "delivery_key": input.delivery_key,
         }),
     )
     .await
@@ -2329,7 +2337,7 @@ async fn op_prompt_retract(
     require_acp(&session)?;
     let handle = require_acp_task(st, &session)?;
     let text = handle
-        .retract_pending()
+        .retract_pending(input.delivery_key)
         .await
         .map_err(|e| AppError::conflict(e.to_string()))?;
     Ok(ops::prompt::retract::RetractResult { text })

@@ -134,6 +134,32 @@ async function queueAcpPrompt(
 }
 
 test.describe('acp conversation', () => {
+  test('a queue event wins over an older chat snapshot', async ({ page, weaver }) => {
+    const session = await openAcp(page, weaver, { goal: 'say:ready', name: 'queue-snapshot' });
+    await expect(page.getByText('ready', { exact: true })).toBeVisible();
+    let releaseSnapshot!: () => void;
+    let snapshotRead!: () => void;
+    const release = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    const read = new Promise<void>((resolve) => { snapshotRead = resolve; });
+    await page.route('**/api/sessions/chat', async (route) => {
+      const response = await route.fetch();
+      snapshotRead();
+      await release;
+      await route.fulfill({ response });
+    }, { times: 1 });
+    await page.getByTestId('acp-composer-input').fill('wait:30000|say:unfinished');
+    await page.getByTestId('acp-composer-send').click();
+    await read;
+    try {
+      await queueAcpPrompt(weaver, session, 'say:keep this queued');
+      await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued');
+    } finally {
+      releaseSnapshot();
+    }
+    await expect(page.getByTestId('acp-composer-send')).toHaveText('Send');
+    await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued', { timeout: 2000 });
+  });
+
   test('session updates stay attributed and survive editing human feedback', async ({
     page,
     weaver,
@@ -151,23 +177,18 @@ test.describe('acp conversation', () => {
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-working')).toBeVisible();
     await queueAcpPrompt(weaver, session, 'human feedback');
-    await weaver.seedSessionUpdate(
-      session,
-      source,
-      'The child result is ready.',
-    );
+    await weaver.seedSessionUpdate(session, source, 'The child result is ready.');
     await page.reload();
     const update = page.getByTestId('acp-session-update');
     await expect(update).toHaveCount(1);
-    await expect(update.locator('.acp-label')).toHaveText(
-      `Update from loom session ${source.id}`,
-    );
-    await expect(
-      update.getByRole('button', { name: 'Edit', exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByTestId('acp-pending').locator('.acp-label'),
-    ).toHaveText('You');
+    await expect(update.locator('.acp-label')).toHaveText(`Update from loom session ${source.id}`);
+    const timeout = update.getByTestId('acp-update-timeout');
+    await expect(timeout).toHaveText(/Auto-send in \d+:\d{2}/);
+    const initialTimeout = await timeout.textContent();
+    await expect(timeout).not.toHaveText(initialTimeout!);
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Stop & send');
+    await expect(update.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('acp-pending').locator('.acp-label')).toHaveText('You');
     await page.getByTestId('acp-edit-queued').click();
     await expect(input).toHaveValue('human feedback');
     await expect(page.getByTestId('acp-pending')).toBeHidden();
@@ -177,9 +198,49 @@ test.describe('acp conversation', () => {
     await page.reload();
     await expect(update).toHaveCount(1);
     await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Auto-send paused');
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Send now');
     await page.screenshot({
       path: test.info().outputPath('session-update-queue.png'),
     });
+    await input.fill('unsent feedback');
+    await update.getByTestId('acp-force-update').click();
+    await expect(update).toHaveCount(0);
+    const delivered = page
+      .locator('.acp-speaker')
+      .filter({ hasText: 'The child result is ready.' });
+    await expect(delivered.locator('.acp-label')).toHaveText(
+      `Update from loom session ${source.id}`,
+    );
+    await expect(input).toHaveValue('unsent feedback');
+  });
+
+  test('stop and send forces a queued agent update during live work', async ({ page, weaver }) => {
+    const session = await openAcp(page, weaver, {
+      goal: 'wait:30000|say:unfinished work',
+      name: 'force-agent-update',
+    });
+    const source = await weaver.seedSession({
+      goal: 'child work',
+      name: 'force-source',
+    });
+    await weaver.seedSessionUpdate(session, source, 'The latest review is ready.');
+    await page.reload();
+    const update = page.getByTestId('acp-session-update');
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Stop & send');
+    await page.screenshot({
+      path: test.info().outputPath('force-agent-update.png'),
+    });
+    await update.getByTestId('acp-force-update').click();
+    await expect(update).toHaveCount(0);
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(page.getByText('unfinished work', { exact: true })).toHaveCount(0);
+    const delivered = page
+      .locator('.acp-speaker')
+      .filter({ hasText: 'The latest review is ready.' });
+    await expect(delivered.locator('.acp-label')).toHaveText(
+      `Update from loom session ${source.id}`,
+    );
   });
 
   test('opens the first worktree shell from the keyboard', async ({ page, weaver }) => {
@@ -496,7 +557,7 @@ test.describe('acp conversation', () => {
     await page.route('**/api/sessions/chat', (route) => {
       const operands = route.request().postDataJSON() as { session?: string };
       if (operands?.session !== s!.id) return route.fallback();
-      return route.fulfill({ json: { blocks: [], live_turn: null } });
+      return route.fulfill({ json: { blocks: [], live_turn: null, pending_inputs: [] } });
     });
     await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
     const empty = page.getByTestId('acp-empty');
@@ -541,7 +602,7 @@ test.describe('acp conversation', () => {
           older_cursor: older ? null : { turn: 8, seq: 0 },
           live_turn: null,
           effective_mode: null,
-          pending_prompt: null,
+          pending_inputs: [],
           metadata: {
             commands: [],
             config_options: [],

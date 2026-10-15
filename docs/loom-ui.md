@@ -89,7 +89,11 @@ Conversation is the durable operator/agent exchange. Mid-turn composer feedback
 stops the current turn and starts as the next turn, so it cannot sit behind work
 the model selected concurrently. Unseen queued text can still be retracted into
 the composer for editing without rewriting already-dispatched history, or
-promoted with **Stop & send**. Permission requests and runtime controls stay in
+promoted with **Stop & send**. User feedback and agent updates share one queue
+and the same **Stop & send** / **Send now** action. Entries with an automatic
+delivery deadline show its countdown; other entries wait for the next turn.
+Forcing an update preserves its sender and leaves other queued feedback intact.
+Permission requests and runtime controls stay in
 the conversation that produced them; elapsed quiet time is evidence, not an
 automatic “stuck” verdict.
 

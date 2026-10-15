@@ -47,7 +47,7 @@
 
 mod wire;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -839,13 +839,17 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Send the current durable next-turn queue now, cancelling a live turn
-    /// first when necessary. The task reads the queue itself so the browser
+    /// Send a queued input now, cancelling a live turn first when necessary.
+    /// The task reads the queue itself so the browser
     /// cannot accidentally send stale or partial text.
-    pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
+    /// A delivery key selects one input; otherwise the oldest input is sent.
+    pub async fn force_pending(&self, delivery_key: Option<String>) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::ForcePending { by, reply: tx })
+            .send(Command::ForcePending {
+                delivery_key,
+                reply: tx,
+            })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
         rx.await
@@ -854,8 +858,7 @@ impl AcpHandle {
 
     /// Notice immutable submitted feedback in the protected conversation inbox.
     /// Starts it immediately unless Stop has paused automatic work or another
-    /// protected inbox already owns the live turn. Never touches the
-    /// editable prompt lane.
+    /// submitted review already owns the live turn. Other queued inputs remain intact.
     pub async fn notify_pending(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -868,23 +871,26 @@ impl AcpHandle {
 
     /// Wake session updates, interrupting ordinary work when delivery is due.
     /// An explicit human Stop still holds automatic delivery.
-    pub async fn notify_updates(&self) -> Result<PromptAck> {
+    pub async fn notify_queue(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::NotifyUpdates { reply: tx })
+            .send(Command::NotifyQueue { reply: tx })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
         rx.await
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Atomically retract the durable next-turn queue for editing. This runs on
+    /// Atomically retract an editable queued input. This runs on
     /// the ACP task so a turn boundary cannot dispatch the same text while the
     /// browser is moving it back into the composer.
-    pub async fn retract_pending(&self) -> Result<String> {
+    pub async fn retract_pending(&self, delivery_key: Option<String>) -> Result<String> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::RetractPending { reply: tx })
+            .send(Command::RetractPending {
+                delivery_key,
+                reply: tx,
+            })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
         rx.await
@@ -1006,7 +1012,9 @@ struct RegistryInner {
 
 struct RegistryEntry {
     generation: u64,
-    active_inbox_claim: Option<String>,
+    // Claim a replacement before cancelling the current inbox turn. Both
+    // leases must stay fenced until their own guards are dropped.
+    active_inbox_claims: HashSet<String>,
     handle: AcpHandle,
 }
 
@@ -1032,6 +1040,7 @@ impl Drop for ActiveInboxClaim {
 
 struct InflightInbox {
     delivery_key: String,
+    review_id: Option<i64>,
     claim_token: String,
     /// Present only for a claim activated by this process. A recovered turn is
     /// fenced durably by `sessions.acp_inflight` instead.
@@ -1087,7 +1096,7 @@ impl AcpRegistry {
             session_id.to_string(),
             RegistryEntry {
                 generation,
-                active_inbox_claim: None,
+                active_inbox_claims: HashSet::new(),
                 handle,
             },
         );
@@ -1198,16 +1207,13 @@ impl AcpRegistry {
     ) -> Option<ActiveInboxClaim> {
         let mut inner = self.inner.lock().unwrap();
         let entry = inner.map.get_mut(session_id)?;
-        if entry.generation != generation
-            || entry.handle.cmd_tx.is_closed()
-            || entry.active_inbox_claim.is_some()
-        {
+        if entry.generation != generation || entry.handle.cmd_tx.is_closed() {
             return None;
         }
         let mut token = [0_u8; 16];
         rand::rng().fill_bytes(&mut token);
         let token = hex::encode(token);
-        entry.active_inbox_claim = Some(token.clone());
+        entry.active_inbox_claims.insert(token.clone());
         Some(ActiveInboxClaim {
             registry: self.clone(),
             session_id: session_id.to_string(),
@@ -1221,8 +1227,8 @@ impl AcpRegistry {
         let Some(entry) = inner.map.get_mut(session_id) else {
             return;
         };
-        if entry.generation == generation && entry.active_inbox_claim.as_deref() == Some(owner) {
-            entry.active_inbox_claim = None;
+        if entry.generation == generation {
+            entry.active_inbox_claims.remove(owner);
         }
     }
 
@@ -1233,8 +1239,7 @@ impl AcpRegistry {
             .map
             .get(session_id)
             .is_some_and(|entry| {
-                !entry.handle.cmd_tx.is_closed()
-                    && entry.active_inbox_claim.as_deref() == Some(owner)
+                !entry.handle.cmd_tx.is_closed() && entry.active_inbox_claims.contains(owner)
             })
     }
 
@@ -1420,6 +1425,12 @@ enum PromptDelivery {
     StopAndSend,
 }
 
+#[derive(Clone, Copy)]
+enum InputDispatch<'a> {
+    Automatic,
+    Force(&'a str),
+}
+
 enum Command {
     Prompt {
         text: String,
@@ -1429,16 +1440,17 @@ enum Command {
         reply: oneshot::Sender<Result<PromptAck>>,
     },
     ForcePending {
-        by: Option<String>,
+        delivery_key: Option<String>,
         reply: oneshot::Sender<Result<PromptAck>>,
     },
     NotifyPending {
         reply: oneshot::Sender<Result<PromptAck>>,
     },
-    NotifyUpdates {
+    NotifyQueue {
         reply: oneshot::Sender<Result<PromptAck>>,
     },
     RetractPending {
+        delivery_key: Option<String>,
         reply: oneshot::Sender<Result<String>>,
     },
     Cancel {
@@ -1851,13 +1863,27 @@ impl Task {
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
-        let inflight_inbox = inflight_value.as_ref().and_then(|value| {
+        let inbox_claim = inflight_value.as_ref().and_then(|value| {
+            Some((
+                value.get("delivery_key")?.as_str()?.to_string(),
+                value.get("review_claim_token")?.as_str()?.to_string(),
+            ))
+        });
+        let inflight_inbox = if let Some((delivery_key, claim_token)) = inbox_claim {
             Some(InflightInbox {
-                delivery_key: value.get("delivery_key")?.as_str()?.to_string(),
-                claim_token: value.get("review_claim_token")?.as_str()?.to_string(),
+                review_id: sqlx::query_scalar(
+                    "SELECT review_id FROM conversation_inbox WHERE delivery_key = ?",
+                )
+                .bind(&delivery_key)
+                .fetch_one(&state.db)
+                .await?,
+                delivery_key,
+                claim_token,
                 active_claim: None,
             })
-        });
+        } else {
+            None
+        };
         let effective_mode = inflight_value
             .as_ref()
             .and_then(|v| v.get("mode"))
@@ -1927,8 +1953,13 @@ impl Task {
         });
     }
 
-    fn emit_queue(&self, pending_prompt: Option<&str>) {
-        self.emit("queue", json!({ "pending_prompt": pending_prompt }));
+    async fn emit_queue(&self) {
+        match crate::conversation_inbox::pending_inputs(&self.db, &self.session_id).await {
+            Ok(pending) => self.emit("queue", json!({ "pending_inputs": pending })),
+            Err(error) => {
+                tracing::warn!(session = %self.session_id, %error, "could not read input queue")
+            }
+        }
     }
 
     fn emit_metadata(&self) {
@@ -2272,10 +2303,10 @@ impl Task {
             | Command::NotifyPending { reply } => {
                 let _ = reply.send(Err(setup_error()));
             }
-            Command::NotifyUpdates { reply } => {
+            Command::NotifyQueue { reply } => {
                 let _ = reply.send(Err(setup_error()));
             }
-            Command::RetractPending { reply } => {
+            Command::RetractPending { reply, .. } => {
                 let _ = reply.send(Err(setup_error()));
             }
             Command::Cancel { reply } | Command::SetMode { reply, .. } => {
@@ -2322,13 +2353,15 @@ impl Task {
                 },
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::PrepareHandoff { reply }) => {
-                        let pending = session::read_pending_prompt(&self.db, &self.session_id)
-                            .await
-                            .unwrap_or_default();
-                        if self.turn_live || !pending.trim().is_empty() {
-                            let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
-                        } else {
-                            match chat::list(&self.db, &self.session_id).await {
+                        let pending = crate::conversation_inbox::pending_inputs(&self.db, &self.session_id).await;
+                        match pending {
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                            }
+                            Ok(pending) if self.turn_live || !pending.is_empty() => {
+                                let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
+                            }
+                            Ok(_) => match chat::list(&self.db, &self.session_id).await {
                                 Ok(snapshot) => {
                                     handoff_reply = Some((reply, snapshot));
                                     break TaskStopReason::Handoff;
@@ -2336,7 +2369,7 @@ impl Task {
                                 Err(error) => {
                                     let _ = reply.send(Err(error));
                                 }
-                            }
+                            },
                         }
                     }
                     Some(c) => {
@@ -2353,7 +2386,9 @@ impl Task {
                     }
                 },
                 _ = inbox_tick.tick() => {
-                    self.dispatch_session_updates().await;
+                    if let Err(error) = self.dispatch_queued_input(InputDispatch::Automatic).await {
+                        tracing::error!(session = %self.session_id, %error, "could not deliver queued input");
+                    }
                 },
             }
         };
@@ -2882,7 +2917,7 @@ impl Task {
             return;
         }
 
-        self.dispatch_pending_prompt().await;
+        self.dispatch_pending_inputs().await;
     }
 
     async fn claim_pending_review(
@@ -2987,186 +3022,150 @@ impl Task {
         self.dispatch_claimed_inbox(item, active_claim).await
     }
 
-    async fn dispatch_pending_prompt(&mut self) {
-        // A lingering superseded task's deferred turn boundary can fire after a
-        // handoff has re-let the session; letting it drain the queue would lose
-        // the prompt against its dead relay.
-        if !self.registry.is_current(&self.session_id, self.generation) {
+    async fn dispatch_pending_inputs(&mut self) {
+        if !self.registry.is_current(&self.session_id, self.generation)
+            || self.automatic_dispatch_paused
+        {
             return;
         }
-        if self.automatic_dispatch_paused {
-            return;
-        }
-        // Submitted review feedback is immutable and gets its own turn. It is
-        // never concatenated with or exposed through the editable queue.
         if self.dispatch_review_inbox().await {
             return;
         }
-        if self.dispatch_session_updates().await {
-            return;
-        }
-        // The cap gate runs before the durable queue is consumed, so a refused
-        // dispatch keeps the prompt queued and visible instead of dropping it.
-        if self.refuse_if_turn_capped().await.is_err() {
-            return;
-        }
-        // Consuming the durable copy is a precondition for dispatch. Starting a
-        // turn after a failed clear leaves the same text eligible at every later
-        // boundary and turns one SQLite error into an unbounded replay loop.
-        match session::take_pending_prompt(&self.db, &self.session_id).await {
-            Ok(Some(pending)) => {
-                self.emit_queue(None);
-                if let Err(error) = self.start_turn(pending, None, Vec::new()).await {
-                    tracing::error!(
-                        session = %self.session_id,
-                        %error,
-                        "consumed queued prompt but could not start its turn"
-                    );
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(
-                    session = %self.session_id,
-                    %error,
-                    "could not consume queued prompt; leaving it idle"
-                );
-            }
+        if let Err(error) = self.dispatch_queued_input(InputDispatch::Automatic).await {
+            tracing::error!(session = %self.session_id, %error, "could not deliver queued input");
         }
     }
 
-    async fn emit_updates(&self) {
-        match crate::conversation_inbox::pending_updates(&self.db, &self.session_id).await {
-            Ok(updates) => self.emit("updates", json!({ "pending_updates": updates })),
-            Err(error) => {
-                tracing::warn!(session = %self.session_id, %error, "could not read session updates")
-            }
+    async fn force_queued_input(&mut self, key: Option<&str>) -> Result<PromptAck> {
+        let pending = crate::conversation_inbox::pending_inputs(&self.db, &self.session_id).await?;
+        let selected = pending
+            .iter()
+            .find(|input| key.is_none_or(|key| input.delivery_key == key))
+            .ok_or_else(|| anyhow!("this input is no longer queued"))?;
+        if self.compaction_turn {
+            return Ok(PromptAck {
+                queued: true,
+                turn: Some(self.current_turn),
+            });
         }
+        if !self
+            .dispatch_queued_input(InputDispatch::Force(&selected.delivery_key))
+            .await?
+        {
+            bail!("this input is no longer queued");
+        }
+        Ok(PromptAck {
+            queued: false,
+            turn: Some(self.current_turn),
+        })
     }
 
-    async fn dispatch_session_updates(&mut self) -> bool {
-        if self.automatic_dispatch_paused
+    async fn dispatch_queued_input(&mut self, delivery: InputDispatch<'_>) -> Result<bool> {
+        let forced_key = match delivery {
+            InputDispatch::Automatic => None,
+            InputDispatch::Force(key) => Some(key),
+        };
+        if (forced_key.is_none() && self.automatic_dispatch_paused)
             || self.compaction_turn
-            || self.inflight_inbox.is_some()
+            || (forced_key.is_none()
+                && self
+                    .inflight_inbox
+                    .as_ref()
+                    .is_some_and(|inflight| inflight.review_id.is_some()))
             || !self.registry.is_current(&self.session_id, self.generation)
         {
-            return false;
+            return Ok(false);
         }
-        let interrupt_only = self.turn_live;
-        if interrupt_only {
-            match crate::conversation_inbox::has_due_session_update(&self.db, &self.session_id)
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => return false,
-                Err(error) => {
-                    tracing::error!(session = %self.session_id, %error, "could not check update deadline");
-                    return false;
-                }
-            }
+        let interrupt = self.turn_live;
+        if interrupt
+            && forced_key.is_none()
+            && !crate::conversation_inbox::has_due_input(
+                &self.db,
+                &self.session_id,
+                self.inflight_inbox
+                    .as_ref()
+                    .map(|inflight| inflight.delivery_key.as_str()),
+            )
+            .await?
+        {
+            return Ok(false);
         }
-        if self.refuse_if_turn_capped().await.is_err() {
-            return false;
-        }
-        let Some(active_claim) = self
+        self.refuse_if_turn_capped().await?;
+        let active_claim = self
             .registry
             .activate_inbox_claim(&self.session_id, self.generation)
-        else {
-            return false;
-        };
-        let item = crate::conversation_inbox::claim_session_update(
+            .ok_or_else(|| anyhow!("session task cannot claim queued input"))?;
+        let Some(mut item) = crate::conversation_inbox::claim_input(
             &self.db,
             &self.branch_id,
             &self.session_id,
             Some(active_claim.owner()),
             |session, owner| self.registry.is_claim_owner_live(session, owner),
-            interrupt_only,
+            interrupt && forced_key.is_none(),
+            forced_key,
         )
-        .await;
-        match item {
-            Ok(Some(mut item)) => {
-                if interrupt_only {
-                    if let Err(error) =
-                        Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation))
-                            .await
-                    {
-                        if let Err(release_error) =
-                            crate::conversation_inbox::release_conversation_inbox(
-                                &self.db,
-                                &item.delivery_key,
-                                &item.claim_token,
-                            )
-                            .await
-                        {
-                            tracing::error!(session = %self.session_id, %release_error, "could not release update after cancellation failure");
-                        }
-                        tracing::error!(session = %self.session_id, %error, "could not interrupt work for session update");
-                        return false;
-                    }
-                    item.payload.push_str("\n\nYour previous turn was interrupted to deliver this update. Incorporate it and continue your task.");
-                }
-                let started = self.dispatch_claimed_inbox(item, active_claim).await;
-                self.emit_updates().await;
-                started
-            }
-            Ok(None) => false,
-            Err(error) => {
-                tracing::error!(session = %self.session_id, %error, "could not claim session update");
-                false
-            }
-        }
-    }
-
-    async fn restart_prompt(
-        &mut self,
-        text: String,
-        by: Option<String>,
-        resources: Vec<Value>,
-    ) -> Result<PromptAck> {
+        .await?
+        else {
+            return Ok(false);
+        };
         if self.turn_live {
-            if self.compaction_turn {
-                return self.queue_prompt(&text, &resources).await;
-            }
-            self.cancel_live_turn(TurnEndSource::UserCancellation)
+            if let Err(error) =
+                Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation)).await
+            {
+                crate::conversation_inbox::release_conversation_inbox(
+                    &self.db,
+                    &item.delivery_key,
+                    &item.claim_token,
+                )
                 .await?;
+                return Err(error);
+            }
         }
-        self.start_prompt(text, by, resources).await
-    }
-
-    async fn queue_prompt(&self, text: &str, resources: &[Value]) -> Result<PromptAck> {
-        let queued = queued_prompt_text(text, resources);
-        let pending = session::append_pending_prompt(&self.db, &self.session_id, &queued).await?;
-        self.emit_queue(Some(&pending));
-        Ok(PromptAck {
-            queued: true,
-            turn: Some(self.current_turn),
-        })
-    }
-
-    async fn start_pending_prompt(&mut self, by: Option<String>) -> Result<PromptAck> {
-        if !self.registry.is_current(&self.session_id, self.generation) {
-            bail!("session task was superseded");
+        if interrupt && item.author.is_none() {
+            item.payload.push_str("\n\nYour previous turn was interrupted to deliver this update. Incorporate it and continue your task.");
         }
-        // Gate before consuming the durable copy so a capped session keeps it.
-        self.refuse_if_turn_capped().await?;
-        let pending = session::take_pending_prompt(&self.db, &self.session_id)
-            .await?
-            .ok_or_else(|| anyhow!("there is no queued feedback to send"))?;
-        self.emit_queue(None);
-        self.start_prompt(pending, by, Vec::new()).await
+        let started = self.dispatch_claimed_inbox(item, active_claim).await;
+        self.emit_queue().await;
+        if !started {
+            bail!("could not start queued input");
+        }
+        Ok(true)
     }
 
-    async fn start_prompt(
+    async fn send_queued_prompt(
         &mut self,
         text: String,
         by: Option<String>,
         resources: Vec<Value>,
+        delivery: PromptDelivery,
     ) -> Result<PromptAck> {
-        self.start_turn(text, by, resources).await?;
-        Ok(PromptAck {
-            queued: false,
-            turn: Some(self.current_turn),
+        let text = if delivery == PromptDelivery::Queue {
+            queued_prompt_text(&text, &resources)
+        } else {
+            text
+        };
+        let key = crate::conversation_inbox::enqueue_prompt(
+            &self.db,
+            &self.session_id,
+            &text,
+            by.as_deref(),
+            &resources,
+            delivery == PromptDelivery::Queue,
+        )
+        .await?;
+        self.emit_queue().await;
+        if self.turn_live && delivery == PromptDelivery::Queue {
+            return Ok(PromptAck {
+                queued: true,
+                turn: Some(self.current_turn),
+            });
+        }
+        self.force_queued_input(if delivery == PromptDelivery::StopAndSend {
+            Some(&key)
+        } else {
+            None
         })
+        .await
     }
 
     async fn start_turn(
@@ -3190,6 +3189,8 @@ impl Task {
         item: &crate::conversation_inbox::InboxItem,
         active_claim: ActiveInboxClaim,
     ) -> Result<crate::conversation_inbox::InboxTurnStartOutcome> {
+        let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
+        let compaction = item.author.is_some() && is_compaction_prompt(&item.payload);
         self.refuse_if_turn_capped().await?;
         let turn = if self.turns_dispatched > 0 {
             self.current_turn + 1
@@ -3209,12 +3210,13 @@ impl Task {
             "mode": effective_mode,
             "delivery_key": item.delivery_key,
             "review_claim_token": item.claim_token,
+            "compaction": compaction,
         })
         .to_string();
         let opening_payload = json!({
             "text": item.payload,
-            "by": Value::Null,
-            "resources": [],
+            "by": item.author,
+            "resources": resources,
             "delivery_key": item.delivery_key,
             "source_session_id": item.source_session_id,
             "source_channel_id": item.source_channel_id,
@@ -3233,7 +3235,7 @@ impl Task {
             self.stream.write(&wire::request_line(
                 id,
                 method::SESSION_PROMPT,
-                wire::prompt_params(&self.acp_session_id, &item.payload, &[]),
+                wire::prompt_params(&self.acp_session_id, &item.payload, &resources),
             )),
         )
         .await;
@@ -3245,7 +3247,7 @@ impl Task {
         self.next_seq = seq + 1;
         self.turns_dispatched += 1;
         self.turn_live = true;
-        self.compaction_turn = false;
+        self.compaction_turn = compaction;
         self.effective_mode = effective_mode;
         if self
             .pending_interrupt_notice_through
@@ -3272,6 +3274,7 @@ impl Task {
         self.inflight_prompt = Some((id, turn));
         self.inflight_inbox = Some(InflightInbox {
             delivery_key: item.delivery_key.clone(),
+            review_id: item.review_id,
             claim_token: item.claim_token.clone(),
             active_claim: Some(active_claim),
         });
@@ -3597,74 +3600,27 @@ impl Task {
                 resources,
                 reply,
             } => {
-                match delivery {
-                    PromptDelivery::Queue => {
-                        let ack = if self.turn_live {
-                            // A failed queue write must surface — a 202 that
-                            // silently dropped the prompt would be worse than an
-                            // error.
-                            self.queue_prompt(&text, &resources).await
-                        } else {
-                            match session::read_pending_prompt(&self.db, &self.session_id).await {
-                                Ok(pending) if !pending.trim().is_empty() => {
-                                    // A stopped turn can leave earlier feedback
-                                    // waiting. Append the new input and send the
-                                    // whole backlog in arrival order.
-                                    match self.queue_prompt(&text, &resources).await {
-                                        Ok(_) => self.start_pending_prompt(by).await,
-                                        Err(error) => Err(error),
-                                    }
-                                }
-                                Ok(_) => self.start_prompt(text, by, resources).await,
-                                Err(error) => Err(error),
-                            }
-                        };
-                        self.resume_automatic_dispatch_on(&ack);
-                        let _ = reply.send(ack);
-                    }
-                    PromptDelivery::StopAndSend => {
-                        let ack = self.restart_prompt(text, by, resources).await;
-                        self.resume_automatic_dispatch_on(&ack);
-                        let _ = reply.send(ack);
-                    }
-                }
+                let result = self.send_queued_prompt(text, by, resources, delivery).await;
+                self.resume_automatic_dispatch_on(&result);
+                let _ = reply.send(result);
             }
-            Command::ForcePending { by, reply } => {
-                let queued = match session::read_pending_prompt(&self.db, &self.session_id).await {
-                    Ok(queued) => queued,
-                    Err(error) => {
-                        let _ = reply.send(Err(error));
-                        return;
-                    }
-                };
-                if queued.trim().is_empty() {
-                    let _ = reply.send(Err(anyhow!("there is no queued feedback to send")));
-                } else if self.turn_live && self.compaction_turn {
-                    let _ = reply.send(Ok(PromptAck {
-                        queued: true,
-                        turn: Some(self.current_turn),
-                    }));
-                } else if !self.turn_live {
-                    let result = self.start_pending_prompt(by).await;
-                    self.resume_automatic_dispatch_on(&result);
-                    let _ = reply.send(result);
-                } else {
-                    let result = match self.cancel_live_turn(TurnEndSource::UserCancellation).await
-                    {
-                        Ok(()) => self.start_pending_prompt(by).await,
-                        Err(error) => Err(error),
-                    };
-                    self.resume_automatic_dispatch_on(&result);
-                    let _ = reply.send(result);
-                }
+            Command::ForcePending {
+                delivery_key,
+                reply,
+            } => {
+                let result = self.force_queued_input(delivery_key.as_deref()).await;
+                self.resume_automatic_dispatch_on(&result);
+                let _ = reply.send(result);
             }
+
             Command::NotifyPending { reply } => {
-                // Submitted review feedback lives in the protected inbox, not
-                // the editable pending prompt: replace ordinary live work with
-                // one visible review turn instead of queueing it silently. A
+                // Submitted reviews keep their immediate delivery policy. A
                 // wake for a review already in flight is a retry and must
                 // not interrupt that same review.
-                if self.inflight_inbox.is_some()
+                if self
+                    .inflight_inbox
+                    .as_ref()
+                    .is_some_and(|inflight| inflight.review_id.is_some())
                     || self.compaction_turn
                     || self.automatic_dispatch_paused
                 {
@@ -3716,25 +3672,33 @@ impl Task {
                     )));
                 }
             }
-            Command::NotifyUpdates { reply } => {
-                self.emit_updates().await;
-                let started = self.dispatch_session_updates().await;
-                let _ = reply.send(Ok(PromptAck {
-                    queued: !started,
-                    turn: Some(self.current_turn),
-                }));
-            }
-            Command::RetractPending { reply } => {
-                let result = session::take_pending_prompt(&self.db, &self.session_id)
+            Command::NotifyQueue { reply } => {
+                self.emit_queue().await;
+                let result = self
+                    .dispatch_queued_input(InputDispatch::Automatic)
                     .await
-                    .and_then(|pending| {
-                        pending.ok_or_else(|| anyhow!("there is no queued feedback to edit"))
+                    .map(|started| PromptAck {
+                        queued: !started,
+                        turn: Some(self.current_turn),
                     });
+                let _ = reply.send(result);
+            }
+            Command::RetractPending {
+                delivery_key,
+                reply,
+            } => {
+                let result = crate::conversation_inbox::retract_input(
+                    &self.db,
+                    &self.session_id,
+                    delivery_key.as_deref(),
+                )
+                .await;
                 if result.is_ok() {
-                    self.emit_queue(None);
+                    self.emit_queue().await;
                 }
                 let _ = reply.send(result);
             }
+
             Command::Cancel { reply } => {
                 let _ = reply.send(self.cancel_live_turn(TurnEndSource::UserCancellation).await);
             }
@@ -4042,6 +4006,23 @@ mod tests {
         assert!(is_compaction_prompt("  /compact preserve the test context"));
         assert!(!is_compaction_prompt("/compaction"));
         assert!(!is_compaction_prompt("explain /compact"));
+    }
+
+    #[tokio::test]
+    async fn replacement_claim_keeps_both_owners_live_until_their_own_settlement() {
+        let registry = super::AcpRegistry::new();
+        let (generation, _probe) = registry.register_claim_liveness_probe("queued");
+        let current = registry.activate_inbox_claim("queued", generation).unwrap();
+        let replacement = registry.activate_inbox_claim("queued", generation).unwrap();
+        let current_owner = current.owner().to_string();
+        assert!(registry.is_claim_owner_live("queued", &current_owner));
+        assert!(registry.is_claim_owner_live("queued", replacement.owner()));
+        drop(current);
+        assert!(!registry.is_claim_owner_live("queued", &current_owner));
+        assert!(registry.is_claim_owner_live("queued", replacement.owner()));
+        let replacement_owner = replacement.owner().to_string();
+        drop(replacement);
+        assert!(!registry.is_claim_owner_live("queued", &replacement_owner));
     }
 
     #[tokio::test]

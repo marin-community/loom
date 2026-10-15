@@ -1,7 +1,7 @@
 //! Orchestrator-owned session rows. One *active* session per branch — terminal
 //! sessions stay in history.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, Row, SqliteConnection};
 
@@ -82,12 +82,6 @@ pub struct Session {
     /// The session's current ACP mode id (gating posture), or `None` until the
     /// agent reports one.
     pub current_mode: Option<String>,
-    /// The durable prompt queue: paragraph-appended while a turn is in flight,
-    /// dispatched as one prompt at the next turn boundary. Canonically `''` when
-    /// empty — the column is `NOT NULL DEFAULT ''`; `Option` only because a
-    /// legacy row may hold NULL (treat `None` and `Some("")` identically). See
-    /// [`take_pending_prompt`].
-    pub pending_prompt: Option<String>,
     /// How this session came to exist: `"user"` (hand-launched), `"agent"`
     /// (delegated by another session), `"github"` / `"slack"` (chat triggers),
     /// `"watch"` (engine infrastructure). Stamped once at create, never
@@ -155,7 +149,7 @@ const SESSION_COLUMNS: &str = "\
     lifecycle_transition_owner_pid, github_repo, \
     last_activity_at, created_at, parent_branch_id, managed_by, created_by, park, sort_order, \
     protocol, acp_session_id, acp_ack_seq, acp_driver_epoch, acp_inflight, current_mode, \
-    pending_prompt, origin, \
+    origin, \
     class, turn_count, tracking_issue_id, profile, launch_mode, profile_revision, \
     profile_lifetime, policy_strict, policy_env_clear, policy_ambient_allowlist, \
     policy_idle_archive_secs, policy_turn_budget, policy_prelude, policy_restricted, \
@@ -1372,78 +1366,6 @@ pub async fn prepare_handoff(
     Ok(changed)
 }
 
-/// Append `text` to the durable prompt queue as a new paragraph. Returns the
-/// full queued text after the append.
-pub async fn append_pending_prompt(db: &Db, id: &str, text: &str) -> Result<String> {
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT pending_prompt FROM sessions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(db)
-            .await?
-            .flatten();
-    let combined = match existing.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(prev) => format!("{prev}\n\n{text}"),
-        None => text.to_string(),
-    };
-    sqlx::query("UPDATE sessions SET pending_prompt = ? WHERE id = ?")
-        .bind(&combined)
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(combined)
-}
-
-/// Read the durable prompt queue (empty string when nothing is queued).
-/// [`take_pending_prompt`] consumes it before the text is dispatched.
-pub async fn read_pending_prompt(db: &Db, id: &str) -> Result<String> {
-    let existing: Option<String> =
-        sqlx::query_scalar("SELECT pending_prompt FROM sessions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(db)
-            .await?
-            .flatten();
-    Ok(existing.unwrap_or_default())
-}
-
-/// Atomically remove and return the durable prompt queue. A caller may dispatch
-/// only a returned value: if the update fails, the transaction rolls back and
-/// the prompt stays visibly queued instead of becoming eligible for replay at
-/// every later turn boundary.
-pub async fn take_pending_prompt(db: &Db, id: &str) -> Result<Option<String>> {
-    // Take the writer lock before reading: a deferred transaction can read while
-    // another writer holds WAL's reserved lock, then fail the read -> write
-    // upgrade with SQLITE_BUSY instead of honoring busy_timeout — hit when
-    // stop-and-send lands right after its cancellation write.
-    let mut tx = weaver_core::db::begin_immediate(db).await?;
-    let pending: Option<String> =
-        sqlx::query_scalar::<_, Option<String>>("SELECT pending_prompt FROM sessions WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .flatten()
-            .filter(|text| !text.trim().is_empty());
-    let Some(pending) = pending else {
-        tx.commit().await?;
-        return Ok(None);
-    };
-
-    let result = sqlx::query(
-        // Clear to '' rather than NULL: the column is `NOT NULL DEFAULT ''`,
-        // and a NULL here fails the next consume and wedges the queue.
-        "UPDATE sessions SET pending_prompt = ''
-         WHERE id = ? AND pending_prompt = ?",
-    )
-    .bind(id)
-    .bind(&pending)
-    .execute(&mut *tx)
-    .await?;
-    if result.rows_affected() != 1 {
-        bail!("queued prompt changed while it was being consumed");
-    }
-    tx.commit().await?;
-    Ok(Some(pending))
-}
-
 pub async fn delete(db: &Db, id: &str) -> Result<Option<i64>> {
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let had_placement: bool = sqlx::query_scalar(
@@ -2049,9 +1971,16 @@ mod tests {
         set_current_mode(&db, "handoff", "acceptEdits")
             .await
             .unwrap();
-        append_pending_prompt(&db, "handoff", "queued")
-            .await
-            .unwrap();
+        crate::conversation_inbox::enqueue_prompt(
+            &db,
+            "handoff",
+            "queued",
+            Some("manual"),
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
 
         let policy = SessionHandoffPolicy {
             agent_kind: "codex".to_string(),
@@ -2091,7 +2020,13 @@ mod tests {
         assert_eq!(session.acp_ack_seq, 0);
         assert!(session.acp_inflight.is_none());
         assert!(session.current_mode.is_none());
-        assert_eq!(session.pending_prompt.as_deref(), Some("queued"));
+        assert_eq!(
+            crate::conversation_inbox::pending_inputs(&db, "handoff")
+                .await
+                .unwrap()[0]
+                .text,
+            "queued"
+        );
         assert_eq!(session.mutation_revision, 3);
     }
 
@@ -2138,72 +2073,5 @@ mod tests {
         assert_eq!(session.agent_kind, "claude");
         assert_eq!(session.profile, crate::agent_kind::DEFAULT_PROFILE);
         assert_eq!(session.mutation_revision, 3);
-    }
-
-    /// Regression guard: `pending_prompt` is `NOT NULL DEFAULT ''`, so a
-    /// clearing write must store `''`, never NULL, or the constraint fails and
-    /// the queue can never drain.
-    #[tokio::test]
-    async fn draining_the_queue_clears_to_empty_not_null() {
-        let db = crate::db::connect_in_memory().await.unwrap();
-        // The column must actually carry the constraint, or this guards nothing.
-        let notnull: i64 = sqlx::query_scalar(
-            "SELECT \"notnull\" FROM pragma_table_info('sessions') WHERE name = 'pending_prompt'",
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-        assert_eq!(notnull, 1, "pending_prompt must be NOT NULL");
-
-        let branch = branch_id(&db, "weaver/drain").await;
-        insert(&db, &new_session("drain", &branch, None))
-            .await
-            .unwrap();
-        append_pending_prompt(&db, "drain", "queued text")
-            .await
-            .unwrap();
-
-        let taken = take_pending_prompt(&db, "drain").await.unwrap();
-        assert_eq!(taken.as_deref(), Some("queued text"));
-        let row = get(&db, "drain").await.unwrap().unwrap();
-        assert_eq!(
-            row.pending_prompt.as_deref(),
-            Some(""),
-            "cleared to '', not NULL"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn take_pending_prompt_waits_for_a_concurrent_writer() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = crate::db::connect(&dir.path().join("weaver.db"))
-            .await
-            .unwrap();
-        let branch = branch_id(&db, "weaver/busy-queue").await;
-        insert(&db, &new_session("busy-queue", &branch, None))
-            .await
-            .unwrap();
-        append_pending_prompt(&db, "busy-queue", "send after stop")
-            .await
-            .unwrap();
-
-        let writer = weaver_core::db::begin_immediate(&db).await.unwrap();
-        let contender_db = db.clone();
-        let take =
-            tokio::spawn(async move { take_pending_prompt(&contender_db, "busy-queue").await });
-
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert!(
-            !take.is_finished(),
-            "queue consumption should wait for the writer instead of returning SQLITE_BUSY"
-        );
-        writer.commit().await.unwrap();
-
-        let taken = tokio::time::timeout(std::time::Duration::from_secs(1), take)
-            .await
-            .expect("queue consumption resumes once the writer commits")
-            .unwrap()
-            .unwrap();
-        assert_eq!(taken.as_deref(), Some("send after stop"));
     }
 }
