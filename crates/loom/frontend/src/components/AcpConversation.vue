@@ -563,12 +563,12 @@ async function queuePrompt() {
   }
 }
 
-async function forceQueued() {
+async function forceQueued(deliveryKey?: string) {
   if (sending.value || queueing.value || editingQueued.value) return;
   sending.value = true;
   sendError.value = '';
   try {
-    await forceQueuedSession(id.value);
+    await forceQueuedSession(id.value, deliveryKey);
     await load({ preserve: true });
     autoFollow();
   } catch (e) {
@@ -1350,6 +1350,13 @@ function durationLabel(seconds: number): string {
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
 }
+function updateTimeoutLabel(update: SessionUpdateView): string {
+  const deadline = timeOf(update.interrupt_at ?? undefined);
+  if (deadline == null) return 'Next turn';
+  if (!turnLive.value) return 'Auto-send paused';
+  const seconds = Math.max(0, Math.ceil((deadline - clock.value) / 1000));
+  return seconds > 0 ? `Auto-send in ${durationLabel(seconds)}` : 'Auto-send pending';
+}
 function secondsSince(timestamp: number | null): number {
   return timestamp == null ? 0 : Math.max(0, Math.floor((clock.value - timestamp) / 1000));
 }
@@ -1729,12 +1736,29 @@ function goTo(anchor: string) {
                 </RouterLink>
                 <span v-else class="acp-label text-accent">Channel update</span>
                 <span class="acp-prompt-state">queued</span>
+                <span class="acp-update-timeout" data-testid="acp-update-timeout">
+                  {{ updateTimeoutLabel(update) }}
+                </span>
                 <RouterLink
                   v-if="update.source_channel_id"
                   :to="`/channels/${update.source_channel_id}#${update.source_message_id}`"
                   class="acp-prompt-action"
                   >Open source</RouterLink
                 >
+                <button
+                  type="button"
+                  class="acp-prompt-action"
+                  data-testid="acp-force-update"
+                  :disabled="sending || queueing || editingQueued"
+                  :title="
+                    turnLive
+                      ? 'Stop the running turn and send this queued update as the next turn'
+                      : 'Start a new turn with this queued update'
+                  "
+                  @click="forceQueued(update.delivery_key)"
+                >
+                  {{ turnLive ? 'Stop & send' : 'Send now' }}
+                </button>
               </header>
               <MarkdownView
                 :id="id"
@@ -1771,7 +1795,7 @@ function goTo(anchor: string) {
                         ? 'Stop the running turn and send all queued feedback as the next turn'
                         : 'Start a new turn with all queued feedback'
                     "
-                    @click="forceQueued"
+                    @click="forceQueued()"
                   >
                     {{ turnLive ? 'Stop & send' : 'Send now' }}
                   </button>
@@ -2186,6 +2210,15 @@ function goTo(anchor: string) {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
   color: var(--attn);
+}
+.acp-update-timeout {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.125rem 0.375rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 .acp-prompt-actions {
   display: inline-flex;

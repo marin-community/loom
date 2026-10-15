@@ -606,10 +606,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
           childEnv.WEAVER_DB!,
           `
           INSERT INTO conversation_inbox
-            (delivery_key, branch_id, preferred_session_id, payload, source_session_id)
+            (delivery_key, branch_id, preferred_session_id, payload, source_session_id, interrupt_at)
           VALUES (${quoteSqlite(`e2e:${source.id}:${target.id}`)}, ${quoteSqlite(target.branch.id)},
             ${quoteSqlite(target.id)}, ${quoteSqlite(`Update from loom session ${source.id}\n\n${text}`)},
-            ${quoteSqlite(source.id)});`,
+            ${quoteSqlite(source.id)}, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '+60 seconds'));`,
         );
       },
 

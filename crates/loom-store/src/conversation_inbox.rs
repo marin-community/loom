@@ -32,6 +32,7 @@ pub fn session_update_text(source: &str, text: &str) -> String {
 #[derive(Debug, sqlx::FromRow)]
 pub struct InboxItem {
     pub delivery_key: String,
+    pub review_id: Option<i64>,
     pub payload: String,
     pub claim_token: String,
     pub source_session_id: Option<String>,
@@ -46,7 +47,7 @@ pub async fn pending_updates(
     use sqlx::Row;
     let rows = sqlx::query(
         "SELECT delivery_key, source_session_id, source_channel_id, source_message_id,
-                payload, state FROM conversation_inbox
+                payload, state, interrupt_at FROM conversation_inbox
          WHERE preferred_session_id = ? AND review_id IS NULL AND state = 'queued'
          ORDER BY created_at, rowid",
     )
@@ -62,15 +63,19 @@ pub async fn pending_updates(
                 source_message_id: row.try_get("source_message_id")?,
                 text: row.try_get("payload")?,
                 state: row.try_get("state")?,
+                interrupt_at: row.try_get("interrupt_at")?,
             })
         })
         .collect()
 }
 
 #[derive(Clone, Copy)]
-enum InboxLane {
+enum InboxLane<'a> {
     Review,
-    Session { interrupt_only: bool },
+    Session {
+        interrupt_only: bool,
+        delivery_key: Option<&'a str>,
+    },
 }
 
 pub async fn enqueue_session_update(
@@ -147,6 +152,7 @@ pub async fn claim_session_update(
     claim_owner: Option<&str>,
     owner_is_live: impl Fn(&str, &str) -> bool,
     interrupt_only: bool,
+    delivery_key: Option<&str>,
 ) -> Result<Option<InboxItem>> {
     claim_at(
         db,
@@ -155,19 +161,29 @@ pub async fn claim_session_update(
         claim_owner,
         owner_is_live,
         chrono::Utc::now(),
-        InboxLane::Session { interrupt_only },
+        InboxLane::Session {
+            interrupt_only,
+            delivery_key,
+        },
     )
     .await
 }
 
-pub async fn has_due_session_update(db: &crate::db::Db, session: &str) -> Result<bool> {
+pub async fn has_due_session_update(
+    db: &crate::db::Db,
+    session: &str,
+    exclude_key: Option<&str>,
+) -> Result<bool> {
     Ok(sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM conversation_inbox
          WHERE preferred_session_id = ? AND review_id IS NULL
-           AND state IN ('queued', 'delivering') AND interrupt_at <= ?)",
+           AND state IN ('queued', 'delivering') AND interrupt_at <= ?
+           AND (? IS NULL OR delivery_key != ?))",
     )
     .bind(session)
     .bind(crate::db::now_iso())
+    .bind(exclude_key)
+    .bind(exclude_key)
     .fetch_one(db)
     .await?)
 }
@@ -255,13 +271,17 @@ async fn claim_at(
     claim_owner: Option<&str>,
     owner_is_live: impl Fn(&str, &str) -> bool,
     now: chrono::DateTime<chrono::Utc>,
-    lane: InboxLane,
+    lane: InboxLane<'_>,
 ) -> Result<Option<InboxItem>> {
     let stale = now
         .checked_sub_signed(chrono::TimeDelta::minutes(1))
         .map(|instant| instant.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string())
         .unwrap_or_else(crate::db::now_iso);
     let now = now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let delivery_key = match lane {
+        InboxLane::Session { delivery_key, .. } => delivery_key,
+        InboxLane::Review => None,
+    };
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let candidates: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT inbox.delivery_key, inbox.state,
@@ -271,6 +291,7 @@ async fn claim_at(
            AND CASE WHEN ? THEN inbox.review_id IS NOT NULL
                     ELSE inbox.review_id IS NULL AND inbox.preferred_session_id = ? END
            AND (NOT ? OR inbox.interrupt_at <= ?)
+           AND (? IS NULL OR inbox.delivery_key = ?)
            AND (
              inbox.state = 'queued'
              OR (
@@ -292,10 +313,13 @@ async fn claim_at(
     .bind(matches!(
         lane,
         InboxLane::Session {
-            interrupt_only: true
+            interrupt_only: true,
+            ..
         }
     ))
     .bind(&now)
+    .bind(delivery_key)
+    .bind(delivery_key)
     .bind(stale)
     .fetch_all(&mut *tx)
     .await?;
@@ -323,7 +347,7 @@ async fn claim_at(
                      claim_owner = ?,
                      claimed_at = ?
                  WHERE delivery_key = ?
-                 RETURNING delivery_key, payload, claim_token,
+                 RETURNING delivery_key, review_id, payload, claim_token,
                            source_session_id, source_channel_id, source_message_id",
             )
             .bind(session_id)
@@ -636,6 +660,7 @@ mod tests {
                 now,
                 InboxLane::Session {
                     interrupt_only: true,
+                    delivery_key: None,
                 },
             )
             .await
@@ -681,8 +706,10 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE delivery_key = ?")
             .bind(&due).execute(&db).await.unwrap();
-        assert!(has_due_session_update(&db, "acp-review").await.unwrap());
-        let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, true)
+        assert!(has_due_session_update(&db, "acp-review", None)
+            .await
+            .unwrap());
+        let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, true, None)
             .await
             .unwrap()
             .unwrap();
@@ -690,12 +717,15 @@ mod tests {
         consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
             .await
             .unwrap();
-        assert!(!has_due_session_update(&db, "acp-review").await.unwrap());
+        assert!(!has_due_session_update(&db, "acp-review", None)
+            .await
+            .unwrap());
         for expected in [debug, future] {
-            let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, false)
-                .await
-                .unwrap()
-                .unwrap();
+            let item =
+                claim_session_update(&db, &branch, "acp-review", None, |_, _| false, false, None)
+                    .await
+                    .unwrap()
+                    .unwrap();
             assert_eq!(item.delivery_key, expected);
             consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
                 .await
@@ -751,7 +781,8 @@ mod tests {
             "other-session",
             Some("other"),
             |_, _| false,
-            false
+            false,
+            None,
         )
         .await
         .unwrap()
@@ -763,6 +794,7 @@ mod tests {
             Some("driver"),
             |_, _| false,
             false,
+            None,
         )
         .await
         .unwrap()
@@ -800,7 +832,8 @@ mod tests {
             "acp-review",
             Some("replacement"),
             |_, _| { false },
-            false
+            false,
+            None,
         )
         .await
         .unwrap()

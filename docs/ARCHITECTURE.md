@@ -456,10 +456,11 @@ Agent-authored input begins with `Update from loom session <id>`, derived from
 the authenticated sender. Direct ACP sends and channel messages use the
 protected `conversation_inbox`, separate from editable human `pending_prompt`
 text. Normal updates wait for a turn boundary for up to 60 seconds, then cancel
-ordinary work and open an update turn. Channel urgency `attention`/`blocked`
-interrupts immediately; `debug` never interrupts due to age. Status and other
+ordinary work (including turns opened by earlier session updates) and open an
+update turn. Channel urgency `attention`/`blocked` interrupts immediately;
+`debug` never interrupts due to age. Status and other
 bookkeeping kinds do not prompt agents. Direct agent sends use normal urgency.
-Explicit Stop, compaction, protected inbox turns, session generation, and turn
+Explicit Stop, compaction, submitted UI review turns, session generation, and turn
 caps hold automatic delivery. Human-prompted work is ordinary work for this
 policy. Submitted UI reviews retain their immediate delivery path.
 
@@ -471,7 +472,12 @@ restarts retain deadlines, so an overdue update can interrupt on the first tick
 after adoption. Policy cancellations journal `cancelled_by: update_policy` so a
 failed replacement turn does not become a human Stop on recovery. Terminal
 delivery still pastes and submits immediately without ACP deadline semantics.
-The chat snapshot exposes `pending_updates`; the journal retains source IDs.
+The chat snapshot exposes `pending_updates` with their deadlines; the journal
+retains source IDs.
+Operators can force a selected update with `sessions.prompt.create` using
+`force_queued` and its `delivery_key`, the same operation that promotes queued
+human feedback. This preserves source provenance and other queued messages,
+resumes after Stop, and waits for compaction to finish.
 An agent read or wait consumes any corresponding queued notice, while a peek
 and a human read do not. Use `channels wait --after <last-seen-seq> --kind result`
 for results; lifecycle waiting does not imply a result was published.

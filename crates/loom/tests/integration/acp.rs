@@ -1727,6 +1727,78 @@ async fn child_results_interrupt_ordinary_work_when_delivery_is_due() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_updates_interrupt_turns_started_by_earlier_updates() {
+    for (urgency, recover) in [("normal", false), ("attention", false), ("normal", true)] {
+        let ts = TestServer::start().await;
+        let id = "successive-updates";
+        start_new(&ts, id, None, None).await;
+        ts.client
+            .post(
+                "/api/channels/messages/create",
+                json!({ "channel": id, "body": "wait:30000|say:first-update-finished" }),
+            )
+            .await
+            .unwrap();
+        poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+            count_kind(blocks, "user_message") == 1
+        })
+        .await;
+        if recover {
+            assert!(ts.state.acp.stop(id));
+            acp::attach(&ts.state.acp_ctx(), id).await.unwrap();
+        }
+        sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ? AND state = 'delivering'")
+            .bind(id).execute(&ts.state.db).await.unwrap();
+        ts.client
+            .post(
+                "/api/channels/messages/create",
+                json!({ "channel": id, "body": "say:latest-update-seen", "urgency": urgency }),
+            )
+            .await
+            .unwrap();
+        if urgency == "normal" {
+            let snapshot = ts
+                .client
+                .post("/api/sessions/chat", json!({ "session": id }))
+                .await
+                .unwrap();
+            assert_eq!(snapshot["live_turn"], 0);
+            assert_eq!(snapshot["pending_updates"].as_array().unwrap().len(), 1);
+            sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ? AND state = 'queued'")
+                .bind(id).execute(&ts.state.db).await.unwrap();
+        }
+        let chat = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+            count_kind(blocks, "turn_end") >= 2
+        })
+        .await;
+        let blocks = chat["blocks"].as_array().unwrap();
+        assert!(blocks.iter().any(|block| block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["cancelled_by"] == "update_policy"));
+        assert_eq!(
+            blocks
+                .iter()
+                .filter(|block| block["kind"] == "agent_message"
+                    && block["payload"]["text"] == "latest-update-seen")
+                .count(),
+            1
+        );
+        assert!(!blocks.iter().any(|block| block["kind"] == "agent_message"
+            && block["payload"]["text"] == "first-update-finished"));
+        assert!(chat["pending_updates"].as_array().unwrap().is_empty());
+        let states: Vec<String> = sqlx::query_scalar(
+            "SELECT state FROM conversation_inbox WHERE preferred_session_id = ? ORDER BY created_at, rowid",
+        )
+        .bind(id)
+        .fetch_all(&ts.state.db)
+        .await
+        .unwrap();
+        assert_eq!(states, vec!["consumed", "consumed"]);
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn debug_update_waits_for_a_natural_boundary() {
     let ts = TestServer::start().await;
     let id = "debug-update";
@@ -2290,6 +2362,149 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:second"
     }));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_queued_update_preserves_other_feedback_and_rejects_stale_keys() {
+    for initial in ["prompt", "update", "stopped"] {
+        let ts = TestServer::start().await;
+        let id = "force-selected-update";
+        start_new(&ts, id, None, None).await;
+        let (route, input) = if initial == "update" {
+            (
+                "/api/channels/messages/create",
+                json!({ "channel": id, "body": "wait:30000|say:unfinished" }),
+            )
+        } else {
+            (
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "wait:30000|say:unfinished" }),
+            )
+        };
+        ts.client.post(route, input).await.unwrap();
+        if initial == "stopped" {
+            ts.client
+                .post("/api/sessions/interrupt", json!({ "session": id }))
+                .await
+                .unwrap();
+        }
+        // Queue human feedback directly when stopped so only the selected
+        // update resumes the session, matching feedback left by an earlier Stop.
+        session_mod::append_pending_prompt(&ts.state.db, id, "human feedback")
+            .await
+            .unwrap();
+        ts.client
+            .post(
+                "/api/channels/messages/create",
+                json!({ "channel": id, "body": "older update", "urgency": "debug" }),
+            )
+            .await
+            .unwrap();
+        let selected = ts.client
+            .post("/api/channels/messages/create", json!({ "channel": id, "body": "wait:30000|say:selected update", "urgency": "debug" }))
+            .await
+            .unwrap();
+        let key = format!("channel:{}:{id}", selected["id"].as_str().unwrap());
+        let sent = ts
+            .client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "", "force_queued": true, "delivery_key": key }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(sent["queued"], false);
+        assert_eq!(sent["turn"], 1);
+        let snapshot = ts
+            .client
+            .post("/api/sessions/chat", json!({ "session": id }))
+            .await
+            .unwrap();
+        assert_eq!(snapshot["live_turn"], 1);
+        assert_eq!(snapshot["pending_prompt"], "human feedback");
+        assert_eq!(snapshot["pending_updates"].as_array().unwrap().len(), 1);
+        let opening = snapshot["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|block| block["turn"] == 1 && block["kind"] == "user_message")
+            .unwrap();
+        assert_eq!(opening["payload"]["delivery_key"], key);
+        assert_eq!(opening["payload"]["source_channel_id"], id);
+        assert_eq!(opening["payload"]["source_message_id"], selected["id"]);
+        let retry = reqwest::Client::new()
+            .post(format!("http://{}/api/sessions/prompt/create", ts.addr))
+            .json(&json!({ "session": id, "text": "", "force_queued": true, "delivery_key": key }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status(), reqwest::StatusCode::CONFLICT);
+        let snapshot = ts
+            .client
+            .post("/api/sessions/chat", json!({ "session": id }))
+            .await
+            .unwrap();
+        assert_eq!(snapshot["live_turn"], 1);
+        ts.client
+            .post("/api/sessions/interrupt", json!({ "session": id }))
+            .await
+            .unwrap();
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn force_queued_update_waits_for_compaction() {
+    let ts = TestServer::start().await;
+    let id = "force-update-compaction";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![("FAKE_ACP_COMPACT_DELAY".to_string(), "1500".to_string())],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "/compact keep task" }),
+        )
+        .await
+        .unwrap();
+    let update = ts
+        .client
+        .post(
+            "/api/channels/messages/create",
+            json!({ "channel": id, "body": "say:after compaction" }),
+        )
+        .await
+        .unwrap();
+    let key = format!("channel:{}:{id}", update["id"].as_str().unwrap());
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "", "force_queued": true, "delivery_key": key }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], true);
+    assert_eq!(sent["turn"], 0);
+    let chat = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks
+        .iter()
+        .filter(|block| block["kind"] == "turn_end")
+        .all(|block| block["payload"]["stop_reason"] == "end_turn"));
+    assert!(blocks
+        .iter()
+        .any(|block| block["kind"] == "agent_message"
+            && block["payload"]["text"] == "after compaction"));
 }
 
 /// Sending the durable queue now cancels the current turn and starts one normal

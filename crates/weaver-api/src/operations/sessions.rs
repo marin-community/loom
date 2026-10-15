@@ -785,7 +785,7 @@ pub mod preview {
 }
 
 pub mod prompt {
-    //! Deliver or withdraw a queued user message to an ACP session's next turn.
+    //! Deliver queued input or withdraw a queued user message from an ACP session.
     pub(super) use super::prelude;
     pub mod create {
         use super::prelude::*;
@@ -795,6 +795,8 @@ pub mod prompt {
         /// cancels an ordinary live turn and starts the message as a normal prompt.
         /// A live compaction always finishes before queued feedback starts. Every
         /// send records a `nudge` event on the branch.
+        /// With `force_queued`, promote the stored human prompt or the session
+        /// update selected by `delivery_key`, preserving its source identity.
         ///
         /// Provenance is derived from the credential: `manual` for a human operator,
         /// `agent` otherwise.
@@ -814,6 +816,9 @@ pub mod prompt {
             /// copy.
             #[operand(default = false)]
             pub force_queued: bool,
+            /// Force this queued session update instead of the human prompt queue.
+            /// Requires `force_queued`; the server retains the update's provenance.
+            pub delivery_key: Option<String>,
             /// Worktree-relative files to attach as ACP resource links.
             #[serde(default)]
             pub files: Vec<String>,

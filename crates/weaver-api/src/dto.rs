@@ -2923,6 +2923,8 @@ pub struct SessionUpdateView {
     pub source_message_id: Option<String>,
     pub text: String,
     pub state: String,
+    /// Automatic interruption deadline; null for updates that wait for a turn boundary.
+    pub interrupt_at: Option<String>,
 }
 
 #[cfg(test)]

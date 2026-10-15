@@ -730,10 +730,11 @@ export const queueSession = (id: string, text: string, files: string[] = []) =>
   });
 
 /** Send all durable next-turn feedback now, stopping a live turn first. */
-export const forceQueuedSession = (id: string) =>
+export const forceQueuedSession = (id: string, deliveryKey?: string) =>
   invokeOperation('sessions.prompt.create', {
     text: '',
     force_queued: true,
+    delivery_key: deliveryKey,
     files: [],
     session: id,
   });

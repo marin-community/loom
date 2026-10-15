@@ -151,23 +151,18 @@ test.describe('acp conversation', () => {
     await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-working')).toBeVisible();
     await queueAcpPrompt(weaver, session, 'human feedback');
-    await weaver.seedSessionUpdate(
-      session,
-      source,
-      'The child result is ready.',
-    );
+    await weaver.seedSessionUpdate(session, source, 'The child result is ready.');
     await page.reload();
     const update = page.getByTestId('acp-session-update');
     await expect(update).toHaveCount(1);
-    await expect(update.locator('.acp-label')).toHaveText(
-      `Update from loom session ${source.id}`,
-    );
-    await expect(
-      update.getByRole('button', { name: 'Edit', exact: true }),
-    ).toHaveCount(0);
-    await expect(
-      page.getByTestId('acp-pending').locator('.acp-label'),
-    ).toHaveText('You');
+    await expect(update.locator('.acp-label')).toHaveText(`Update from loom session ${source.id}`);
+    const timeout = update.getByTestId('acp-update-timeout');
+    await expect(timeout).toHaveText(/Auto-send in \d+:\d{2}/);
+    const initialTimeout = await timeout.textContent();
+    await expect(timeout).not.toHaveText(initialTimeout!);
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Stop & send');
+    await expect(update.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('acp-pending').locator('.acp-label')).toHaveText('You');
     await page.getByTestId('acp-edit-queued').click();
     await expect(input).toHaveValue('human feedback');
     await expect(page.getByTestId('acp-pending')).toBeHidden();
@@ -177,9 +172,49 @@ test.describe('acp conversation', () => {
     await page.reload();
     await expect(update).toHaveCount(1);
     await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Auto-send paused');
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Send now');
     await page.screenshot({
       path: test.info().outputPath('session-update-queue.png'),
     });
+    await input.fill('unsent feedback');
+    await update.getByTestId('acp-force-update').click();
+    await expect(update).toHaveCount(0);
+    const delivered = page
+      .locator('.acp-speaker')
+      .filter({ hasText: 'The child result is ready.' });
+    await expect(delivered.locator('.acp-label')).toHaveText(
+      `Update from loom session ${source.id}`,
+    );
+    await expect(input).toHaveValue('unsent feedback');
+  });
+
+  test('stop and send forces a queued agent update during live work', async ({ page, weaver }) => {
+    const session = await openAcp(page, weaver, {
+      goal: 'wait:30000|say:unfinished work',
+      name: 'force-agent-update',
+    });
+    const source = await weaver.seedSession({
+      goal: 'child work',
+      name: 'force-source',
+    });
+    await weaver.seedSessionUpdate(session, source, 'The latest review is ready.');
+    await page.reload();
+    const update = page.getByTestId('acp-session-update');
+    await expect(update.getByTestId('acp-force-update')).toHaveText('Stop & send');
+    await page.screenshot({
+      path: test.info().outputPath('force-agent-update.png'),
+    });
+    await update.getByTestId('acp-force-update').click();
+    await expect(update).toHaveCount(0);
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(page.getByText('unfinished work', { exact: true })).toHaveCount(0);
+    const delivered = page
+      .locator('.acp-speaker')
+      .filter({ hasText: 'The latest review is ready.' });
+    await expect(delivered.locator('.acp-label')).toHaveText(
+      `Update from loom session ${source.id}`,
+    );
   });
 
   test('opens the first worktree shell from the keyboard', async ({ page, weaver }) => {

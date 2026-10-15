@@ -2271,6 +2271,9 @@ async fn op_prompt_create(
     input: ops::prompt::create::Input,
 ) -> ApiResult<ops::prompt::create::PromptResult> {
     let st = &context.state;
+    if input.delivery_key.is_some() && !input.force_queued {
+        return Err(AppError::bad_request("delivery_key requires force_queued"));
+    }
     let (session, branch) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
     let handle = require_acp_task(st, &session)?;
@@ -2281,12 +2284,23 @@ async fn op_prompt_create(
     }
     .to_string();
     let audit_text = if input.force_queued {
-        session_mod::read_pending_prompt(&st.db, &session.id).await?
+        if let Some(key) = &input.delivery_key {
+            crate::conversation_inbox::pending_updates(&st.db, &session.id)
+                .await?
+                .into_iter()
+                .find(|update| &update.delivery_key == key)
+                .ok_or_else(|| AppError::conflict("this session update is no longer queued"))?
+                .text
+        } else {
+            session_mod::read_pending_prompt(&st.db, &session.id).await?
+        }
     } else {
         input.text.clone()
     };
     let ack = if input.force_queued {
-        handle.force_pending(Some(by.clone())).await
+        handle
+            .force_pending(Some(by.clone()), input.delivery_key.clone())
+            .await
     } else {
         let resources = prompt_resources(&session.work_dir, &input.files).await?;
         if input.send_now {
@@ -2310,6 +2324,7 @@ async fn op_prompt_create(
             "text": audit_text,
             "send_now": input.send_now,
             "promoted_queue": input.force_queued,
+            "delivery_key": input.delivery_key,
         }),
     )
     .await

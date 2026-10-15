@@ -842,10 +842,19 @@ impl AcpHandle {
     /// Send the current durable next-turn queue now, cancelling a live turn
     /// first when necessary. The task reads the queue itself so the browser
     /// cannot accidentally send stale or partial text.
-    pub async fn force_pending(&self, by: Option<String>) -> Result<PromptAck> {
+    /// A delivery key selects an immutable session update instead of human text.
+    pub async fn force_pending(
+        &self,
+        by: Option<String>,
+        delivery_key: Option<String>,
+    ) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
-            .send(Command::ForcePending { by, reply: tx })
+            .send(Command::ForcePending {
+                by,
+                delivery_key,
+                reply: tx,
+            })
             .await
             .map_err(|_| anyhow!("acp task is gone"))?;
         rx.await
@@ -1032,6 +1041,7 @@ impl Drop for ActiveInboxClaim {
 
 struct InflightInbox {
     delivery_key: String,
+    review_id: Option<i64>,
     claim_token: String,
     /// Present only for a claim activated by this process. A recovered turn is
     /// fenced durably by `sessions.acp_inflight` instead.
@@ -1430,6 +1440,7 @@ enum Command {
     },
     ForcePending {
         by: Option<String>,
+        delivery_key: Option<String>,
         reply: oneshot::Sender<Result<PromptAck>>,
     },
     NotifyPending {
@@ -1851,13 +1862,27 @@ impl Task {
         let inflight = inflight_value
             .as_ref()
             .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
-        let inflight_inbox = inflight_value.as_ref().and_then(|value| {
+        let inbox_claim = inflight_value.as_ref().and_then(|value| {
+            Some((
+                value.get("delivery_key")?.as_str()?.to_string(),
+                value.get("review_claim_token")?.as_str()?.to_string(),
+            ))
+        });
+        let inflight_inbox = if let Some((delivery_key, claim_token)) = inbox_claim {
             Some(InflightInbox {
-                delivery_key: value.get("delivery_key")?.as_str()?.to_string(),
-                claim_token: value.get("review_claim_token")?.as_str()?.to_string(),
+                review_id: sqlx::query_scalar(
+                    "SELECT review_id FROM conversation_inbox WHERE delivery_key = ?",
+                )
+                .bind(&delivery_key)
+                .fetch_one(&state.db)
+                .await?,
+                delivery_key,
+                claim_token,
                 active_claim: None,
             })
-        });
+        } else {
+            None
+        };
         let effective_mode = inflight_value
             .as_ref()
             .and_then(|v| v.get("mode"))
@@ -2353,7 +2378,7 @@ impl Task {
                     }
                 },
                 _ = inbox_tick.tick() => {
-                    self.dispatch_session_updates().await;
+                    self.dispatch_session_updates(None).await;
                 },
             }
         };
@@ -3002,7 +3027,7 @@ impl Task {
         if self.dispatch_review_inbox().await {
             return;
         }
-        if self.dispatch_session_updates().await {
+        if self.dispatch_session_updates(None).await {
             return;
         }
         // The cap gate runs before the durable queue is consumed, so a refused
@@ -3044,18 +3069,49 @@ impl Task {
         }
     }
 
-    async fn dispatch_session_updates(&mut self) -> bool {
-        if self.automatic_dispatch_paused
+    async fn force_session_update(&mut self, key: &str) -> Result<PromptAck> {
+        let pending =
+            crate::conversation_inbox::pending_updates(&self.db, &self.session_id).await?;
+        if !pending.iter().any(|update| update.delivery_key == key) {
+            bail!("this session update is no longer queued");
+        }
+        if self.compaction_turn {
+            return Ok(PromptAck {
+                queued: true,
+                turn: Some(self.current_turn),
+            });
+        }
+        if !self.dispatch_session_updates(Some(key)).await {
+            bail!("could not start the queued session update");
+        }
+        Ok(PromptAck {
+            queued: false,
+            turn: Some(self.current_turn),
+        })
+    }
+
+    async fn dispatch_session_updates(&mut self, forced_key: Option<&str>) -> bool {
+        if (forced_key.is_none() && self.automatic_dispatch_paused)
             || self.compaction_turn
-            || self.inflight_inbox.is_some()
+            || (forced_key.is_none()
+                && self
+                    .inflight_inbox
+                    .as_ref()
+                    .is_some_and(|inflight| inflight.review_id.is_some()))
             || !self.registry.is_current(&self.session_id, self.generation)
         {
             return false;
         }
         let interrupt_only = self.turn_live;
-        if interrupt_only {
-            match crate::conversation_inbox::has_due_session_update(&self.db, &self.session_id)
-                .await
+        if interrupt_only && forced_key.is_none() {
+            match crate::conversation_inbox::has_due_session_update(
+                &self.db,
+                &self.session_id,
+                self.inflight_inbox
+                    .as_ref()
+                    .map(|inflight| inflight.delivery_key.as_str()),
+            )
+            .await
             {
                 Ok(true) => {}
                 Ok(false) => return false,
@@ -3067,6 +3123,16 @@ impl Task {
         }
         if self.refuse_if_turn_capped().await.is_err() {
             return false;
+        }
+        // The old inbox turn owns the registry's claim slot. Settle it before
+        // claiming its replacement; journaled session updates remain consumed.
+        if self.inflight_inbox.is_some() {
+            if let Err(error) =
+                Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation)).await
+            {
+                tracing::error!(session = %self.session_id, %error, "could not interrupt inbox turn for session update");
+                return false;
+            }
         }
         let Some(active_claim) = self
             .registry
@@ -3080,12 +3146,13 @@ impl Task {
             &self.session_id,
             Some(active_claim.owner()),
             |session, owner| self.registry.is_claim_owner_live(session, owner),
-            interrupt_only,
+            interrupt_only && forced_key.is_none(),
+            forced_key,
         )
         .await;
         match item {
             Ok(Some(mut item)) => {
-                if interrupt_only {
+                if interrupt_only && self.turn_live {
                     if let Err(error) =
                         Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation))
                             .await
@@ -3103,6 +3170,8 @@ impl Task {
                         tracing::error!(session = %self.session_id, %error, "could not interrupt work for session update");
                         return false;
                     }
+                }
+                if interrupt_only {
                     item.payload.push_str("\n\nYour previous turn was interrupted to deliver this update. Incorporate it and continue your task.");
                 }
                 let started = self.dispatch_claimed_inbox(item, active_claim).await;
@@ -3272,6 +3341,7 @@ impl Task {
         self.inflight_prompt = Some((id, turn));
         self.inflight_inbox = Some(InflightInbox {
             delivery_key: item.delivery_key.clone(),
+            review_id: item.review_id,
             claim_token: item.claim_token.clone(),
             active_claim: Some(active_claim),
         });
@@ -3629,7 +3699,17 @@ impl Task {
                     }
                 }
             }
-            Command::ForcePending { by, reply } => {
+            Command::ForcePending {
+                by,
+                delivery_key,
+                reply,
+            } => {
+                if let Some(key) = delivery_key {
+                    let result = self.force_session_update(&key).await;
+                    self.resume_automatic_dispatch_on(&result);
+                    let _ = reply.send(result);
+                    return;
+                }
                 let queued = match session::read_pending_prompt(&self.db, &self.session_id).await {
                     Ok(queued) => queued,
                     Err(error) => {
@@ -3718,7 +3798,7 @@ impl Task {
             }
             Command::NotifyUpdates { reply } => {
                 self.emit_updates().await;
-                let started = self.dispatch_session_updates().await;
+                let started = self.dispatch_session_updates(None).await;
                 let _ = reply.send(Ok(PromptAck {
                     queued: !started,
                     turn: Some(self.current_turn),
