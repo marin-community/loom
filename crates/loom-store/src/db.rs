@@ -170,6 +170,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "conversation-inbox",
         include_str!("../migrations/0032_conversation_inbox.sql"),
     ),
+    (
+        33,
+        "update-interrupt-deadline",
+        include_str!("../migrations/0033_update_interrupt_deadline.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -562,6 +567,29 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_deadline_migration_gives_backlog_grace_without_reordering() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 32).await;
+        sqlx::query("INSERT INTO conversation_inbox (delivery_key, review_id, branch_id, preferred_session_id, payload, created_at) VALUES ('old-update', NULL, 'branch', 'session', 'done', '2000-01-01T00:00:00.000Z'), ('review', 1, 'branch', 'session', 'review', '2000-01-01T00:00:00.000Z')")
+            .execute(&db).await.unwrap();
+        let before = chrono::Utc::now();
+        migrate_loom(&db).await.unwrap();
+        let (created, deadline): (String, String) = sqlx::query_as("SELECT created_at, interrupt_at FROM conversation_inbox WHERE delivery_key = 'old-update'")
+            .fetch_one(&db).await.unwrap();
+        assert_eq!(created, "2000-01-01T00:00:00.000Z");
+        let deadline = chrono::DateTime::parse_from_rfc3339(&deadline).unwrap();
+        assert!(deadline > before + chrono::TimeDelta::seconds(59));
+        assert!(deadline <= chrono::Utc::now() + chrono::TimeDelta::seconds(60));
+        let review_deadline: Option<String> = sqlx::query_scalar(
+            "SELECT interrupt_at FROM conversation_inbox WHERE delivery_key = 'review'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert!(review_deadline.is_none());
     }
 
     #[tokio::test]

@@ -1637,6 +1637,309 @@ async fn child_result_waits_for_parent_acp_turn() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_results_interrupt_ordinary_work_when_delivery_is_due() {
+    for urgency in ["normal", "attention", "blocked"] {
+        let ts = TestServer::start().await;
+        let parent = format!("due-parent-{urgency}");
+        let child = format!("due-child-{urgency}");
+        start_new(&ts, &parent, None, None).await;
+        make_session(&ts, &child).await;
+        sqlx::query("UPDATE sessions SET parent_session_id = ? WHERE id = ?")
+            .bind(&parent)
+            .bind(&child)
+            .execute(&ts.state.db)
+            .await
+            .unwrap();
+        let child_session = session_mod::get(&ts.state.db, &child)
+            .await
+            .unwrap()
+            .unwrap();
+        let token = loom::auth::create_session_token(
+            &ts.state.db,
+            Some("rjpower"),
+            &child,
+            &child_session.branch_id,
+        )
+        .await
+        .unwrap();
+        ts.client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": parent, "text": "wait:30000|say:stale-work" }),
+            )
+            .await
+            .unwrap();
+        let mut events = ts.state.acp.get(&parent).unwrap().subscribe();
+        let http = reqwest::Client::new();
+        let send = || {
+            http.post(format!("http://{}/api/channels/messages/create", ts.addr))
+            .bearer_auth(&token).json(&json!({ "channel": child, "kind": "result", "urgency": urgency, "body": "review complete", "idempotency_key": "review:1" })).send()
+        };
+        let response = send().await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let result: Value = response.json().await.unwrap();
+        if urgency == "normal" {
+            let queued = ts
+                .client
+                .post("/api/sessions/chat", json!({ "session": parent }))
+                .await
+                .unwrap();
+            assert_eq!(queued["live_turn"], 0);
+            assert_eq!(queued["pending_updates"].as_array().unwrap().len(), 1);
+            // Advance the durable deadline; the periodic tick must deliver
+            // without relying on another publication or explicit wake.
+            sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
+                .bind(&parent).execute(&ts.state.db).await.unwrap();
+        }
+        let chat = poll_chat(&ts, &parent, Duration::from_secs(5), |blocks| {
+            count_kind(blocks, "turn_end") >= 2
+        })
+        .await;
+        let blocks = chat["blocks"].as_array().unwrap();
+        assert!(blocks.iter().any(|block| block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+            && block["payload"]["cancelled_by"] == "update_policy"));
+        assert!(
+            !loom::chat::latest_turn_was_user_stopped(&ts.state.db, &parent)
+                .await
+                .unwrap()
+        );
+        let updates: Vec<_> = blocks
+            .iter()
+            .filter(|block| block["payload"]["source_session_id"] == child)
+            .collect();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0]["payload"]["source_message_id"], result["id"]);
+        assert_eq!(send().await.unwrap().status(), reqwest::StatusCode::OK);
+        let updates = drain_events(&mut events, Duration::from_secs(5), |event| {
+            event.event == "updates"
+                && event.data["pending_updates"]
+                    .as_array()
+                    .is_some_and(Vec::is_empty)
+        })
+        .await;
+        assert!(updates
+            .iter()
+            .any(|event| event.event == "updates" && event.data["pending_updates"] == json!([])));
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_update_waits_for_a_natural_boundary() {
+    let ts = TestServer::start().await;
+    let id = "debug-update";
+    start_new(&ts, id, None, None).await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:2000|say:work-completed" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/channels/messages/create",
+            json!({ "channel": id, "body": "debug detail", "urgency": "debug" }),
+        )
+        .await
+        .unwrap();
+    let deadlines: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT interrupt_at FROM conversation_inbox WHERE preferred_session_id = ?",
+    )
+    .bind(id)
+    .fetch_all(&ts.state.db)
+    .await
+    .unwrap();
+    assert_eq!(deadlines, vec![None]);
+    let chat = poll_chat(&ts, id, Duration::from_secs(8), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
+        block["kind"] == "agent_message" && block["payload"]["text"] == "work-completed"
+    }));
+    assert!(chat["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["kind"] == "turn_end")
+        .all(|block| block["payload"]["stop_reason"] == "end_turn"));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn urgent_updates_wait_for_compaction_and_protected_turns() {
+    for compacting in [true, false] {
+        let ts = TestServer::start().await;
+        let id = "fenced-update";
+        start_new_with_env(
+            &ts,
+            id,
+            None,
+            None,
+            vec![("FAKE_ACP_COMPACT_DELAY".to_string(), "2000".to_string())],
+        )
+        .await;
+        if compacting {
+            ts.client
+                .post(
+                    "/api/sessions/prompt/create",
+                    json!({ "session": id, "text": "/compact keep task" }),
+                )
+                .await
+                .unwrap();
+        } else {
+            insert_protected_review(&ts, id, "review:protected", "wait:2000|say:review-finished")
+                .await;
+            ts.state
+                .acp
+                .get(id)
+                .unwrap()
+                .notify_pending()
+                .await
+                .unwrap();
+        }
+        ts.client
+            .post(
+                "/api/channels/messages/create",
+                json!({ "channel": id, "body": "urgent result", "urgency": "attention" }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            ts.state
+                .acp
+                .get(id)
+                .unwrap()
+                .notify_updates()
+                .await
+                .unwrap()
+                .queued
+        );
+        let chat = poll_chat(&ts, id, Duration::from_secs(8), |blocks| {
+            count_kind(blocks, "turn_end") >= 2
+        })
+        .await;
+        assert!(chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["kind"] == "turn_end")
+            .all(|block| block["payload"]["stop_reason"] == "end_turn"));
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn due_update_preserves_active_work_when_turn_budget_is_exhausted() {
+    let ts = TestServer::start().await;
+    let id = "capped-policy-update";
+    start_new(&ts, id, None, None).await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:30000|say:keep-working" }),
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET class = 'automation', policy_turn_budget = 1, turn_count = 1 WHERE id = ?")
+        .bind(id).execute(&ts.state.db).await.unwrap();
+    ts.client
+        .post(
+            "/api/channels/messages/create",
+            json!({ "channel": id, "body": "due update", "urgency": "blocked" }),
+        )
+        .await
+        .unwrap();
+    let snapshot = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(snapshot["live_turn"], 0);
+    assert_eq!(snapshot["pending_updates"].as_array().unwrap().len(), 1);
+    assert!(!snapshot["blocks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|block| block["kind"] == "turn_end"));
+    ts.client
+        .post("/api/sessions/interrupt", json!({ "session": id }))
+        .await
+        .unwrap();
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_update_dispatch_after_policy_cancellation_retries_after_adoption() {
+    let ts = TestServer::start().await;
+    let id = "retry-policy-update";
+    start_new(&ts, id, None, None).await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:30000|say:stale-work" }),
+        )
+        .await
+        .unwrap();
+    // A budget change between cancellation and replacement refuses that new
+    // turn. Recovery must still distinguish this interruption from human Stop.
+    sqlx::query(
+        "CREATE TRIGGER cap_after_policy_cancel AFTER INSERT ON chat_blocks
+        WHEN NEW.session_id = 'retry-policy-update' AND NEW.kind = 'turn_end'
+         AND json_extract(NEW.payload, '$.cancelled_by') = 'update_policy'
+        BEGIN UPDATE sessions SET class = 'automation', policy_turn_budget = 1, turn_count = 1
+        WHERE id = NEW.session_id; END",
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    ts.client
+        .post(
+            "/api/channels/messages/create",
+            json!({ "channel": id, "body": "recover update", "urgency": "attention" }),
+        )
+        .await
+        .unwrap();
+    let stopped = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(stopped["live_turn"], Value::Null);
+    assert_eq!(stopped["pending_updates"].as_array().unwrap().len(), 1);
+    assert!(!loom::chat::latest_turn_was_user_stopped(&ts.state.db, id)
+        .await
+        .unwrap());
+    assert!(ts.state.acp.stop(id));
+    sqlx::query("UPDATE sessions SET class = 'interactive' WHERE id = ?")
+        .bind(id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    acp::attach(&ts.state.acp_ctx(), id).await.unwrap();
+    let chat = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    assert_eq!(
+        chat["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| {
+                block["kind"] == "user_message" && block["payload"]["text"] == "recover update"
+            })
+            .count(),
+        1
+    );
+    assert!(chat["pending_updates"].as_array().unwrap().is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_updates_use_authenticated_identity_and_preserve_stop() {
     let ts = TestServer::start().await;
     let id = "acp-session-update";
@@ -1674,6 +1977,8 @@ async fn session_updates_use_authenticated_identity_and_preserve_stop() {
         .post("/api/sessions/interrupt", json!({ "session": id }))
         .await
         .unwrap();
+    sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
+        .bind(id).execute(&ts.state.db).await.unwrap();
     let response = send().await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let snapshot = ts

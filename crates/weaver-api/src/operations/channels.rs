@@ -147,9 +147,10 @@ pub mod messages {
             #[operand(default = String::from("message"))]
             #[schemars(extend("enum" = ["message", "status", "result"]))]
             pub kind: String,
-            /// `normal`, `attention`, or `blocked`.
+            /// ACP delivery: `debug` waits for idle; `normal` interrupts after
+            /// 60 seconds; `attention` and `blocked` interrupt immediately.
             #[operand(default = String::from("normal"))]
-            #[schemars(extend("enum" = ["normal", "attention", "blocked"]))]
+            #[schemars(extend("enum" = ["debug", "normal", "attention", "blocked"]))]
             pub urgency: String,
             /// Arbitrary structured payload alongside the body.
             #[operand(json, default = serde_json::json!({}))]

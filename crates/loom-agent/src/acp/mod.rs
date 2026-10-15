@@ -866,7 +866,8 @@ impl AcpHandle {
             .map_err(|_| anyhow!("acp task dropped the reply"))?
     }
 
-    /// Wake session updates without interrupting work or resuming a human Stop.
+    /// Wake session updates, interrupting ordinary work when delivery is due.
+    /// An explicit human Stop still holds automatic delivery.
     pub async fn notify_updates(&self) -> Result<PromptAck> {
         let (tx, rx) = oneshot::channel();
         self.cmd_tx
@@ -1625,6 +1626,7 @@ struct PendingPerm {
 enum TurnEndSource {
     MatchingPromptResponse,
     UserCancellation,
+    UpdatePolicyCancellation,
     Synthetic,
 }
 
@@ -1634,7 +1636,7 @@ impl TurnEndSource {
             Self::MatchingPromptResponse => {
                 crate::conversation_inbox::InboxClaimSettlement::MatchingPromptResponse
             }
-            Self::UserCancellation => {
+            Self::UserCancellation | Self::UpdatePolicyCancellation => {
                 crate::conversation_inbox::InboxClaimSettlement::UserCancelled
             }
             Self::Synthetic => crate::conversation_inbox::InboxClaimSettlement::Abandoned,
@@ -1863,10 +1865,7 @@ impl Task {
             .map(str::to_string);
         let current_turn = live_turn.unwrap_or(max_turn);
         let automatic_dispatch_paused = live_turn.is_none()
-            && chat::latest_stop_reason(&state.db, &session.id)
-                .await?
-                .as_deref()
-                == Some("cancelled");
+            && chat::latest_turn_was_user_stopped(&state.db, &session.id).await?;
         // The journal always holds at least this turn's `user_message`, so
         // `max_seq + 1` continues the turn without colliding.
         let next_seq = max_seq + 1;
@@ -2354,9 +2353,7 @@ impl Task {
                     }
                 },
                 _ = inbox_tick.tick() => {
-                    if !self.turn_live && !self.automatic_dispatch_paused {
-                        self.dispatch_session_updates().await;
-                    }
+                    self.dispatch_session_updates().await;
                 },
             }
         };
@@ -2842,13 +2839,17 @@ impl Task {
             .await
             .unwrap_or(false)
         {
-            self.journal_block(kind::TURN_END, json!({ "stop_reason": stop }))
-                .await;
+            let mut payload = json!({ "stop_reason": stop });
+            if source == TurnEndSource::UpdatePolicyCancellation {
+                payload["cancelled_by"] = json!("update_policy");
+            }
+            self.journal_block(kind::TURN_END, payload).await;
         }
         if settlement != crate::conversation_inbox::InboxClaimSettlement::Abandoned {
             let reason = match source {
                 TurnEndSource::MatchingPromptResponse => "matching ACP prompt response",
                 TurnEndSource::UserCancellation => "authoritative user cancellation",
+                TurnEndSource::UpdatePolicyCancellation => "session update interruption",
                 TurnEndSource::Synthetic => unreachable!("abandoned settlements run above"),
             };
             self.settle_inflight_inbox(settlement, reason).await;
@@ -3044,11 +3045,27 @@ impl Task {
     }
 
     async fn dispatch_session_updates(&mut self) -> bool {
-        if self.turn_live
-            || self.automatic_dispatch_paused
+        if self.automatic_dispatch_paused
+            || self.compaction_turn
+            || self.inflight_inbox.is_some()
             || !self.registry.is_current(&self.session_id, self.generation)
-            || self.refuse_if_turn_capped().await.is_err()
         {
+            return false;
+        }
+        let interrupt_only = self.turn_live;
+        if interrupt_only {
+            match crate::conversation_inbox::has_due_session_update(&self.db, &self.session_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return false,
+                Err(error) => {
+                    tracing::error!(session = %self.session_id, %error, "could not check update deadline");
+                    return false;
+                }
+            }
+        }
+        if self.refuse_if_turn_capped().await.is_err() {
             return false;
         }
         let Some(active_claim) = self
@@ -3063,10 +3080,31 @@ impl Task {
             &self.session_id,
             Some(active_claim.owner()),
             |session, owner| self.registry.is_claim_owner_live(session, owner),
+            interrupt_only,
         )
         .await;
         match item {
-            Ok(Some(item)) => {
+            Ok(Some(mut item)) => {
+                if interrupt_only {
+                    if let Err(error) =
+                        Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation))
+                            .await
+                    {
+                        if let Err(release_error) =
+                            crate::conversation_inbox::release_conversation_inbox(
+                                &self.db,
+                                &item.delivery_key,
+                                &item.claim_token,
+                            )
+                            .await
+                        {
+                            tracing::error!(session = %self.session_id, %release_error, "could not release update after cancellation failure");
+                        }
+                        tracing::error!(session = %self.session_id, %error, "could not interrupt work for session update");
+                        return false;
+                    }
+                    item.payload.push_str("\n\nYour previous turn was interrupted to deliver this update. Incorporate it and continue your task.");
+                }
                 let started = self.dispatch_claimed_inbox(item, active_claim).await;
                 self.emit_updates().await;
                 started
@@ -3089,7 +3127,8 @@ impl Task {
             if self.compaction_turn {
                 return self.queue_prompt(&text, &resources).await;
             }
-            self.cancel_live_turn().await?;
+            self.cancel_live_turn(TurnEndSource::UserCancellation)
+                .await?;
         }
         self.start_prompt(text, by, resources).await
     }
@@ -3503,7 +3542,7 @@ impl Task {
 
     // -- commands -----------------------------------------------------------
 
-    async fn cancel_live_turn(&mut self) -> Result<()> {
+    async fn cancel_live_turn(&mut self, source: TurnEndSource) -> Result<()> {
         let result = self
             .stream
             .write(&wire::notification_line(
@@ -3512,7 +3551,7 @@ impl Task {
             ))
             .await;
         if result.is_ok() && self.turn_live {
-            self.automatic_dispatch_paused = true;
+            self.automatic_dispatch_paused = source != TurnEndSource::UpdatePolicyCancellation;
             // The adapter's interrupt notice belongs to the cancelled turn
             // even if it arrives after an immediate restart. Bound
             // suppression to that turn and its successor so later prose is
@@ -3525,7 +3564,7 @@ impl Task {
                 self.current_turn,
                 Some(json!({ "stopReason": "cancelled" })),
                 None,
-                TurnEndSource::UserCancellation,
+                source,
             )
             .await;
         }
@@ -3610,7 +3649,8 @@ impl Task {
                     self.resume_automatic_dispatch_on(&result);
                     let _ = reply.send(result);
                 } else {
-                    let result = match self.cancel_live_turn().await {
+                    let result = match self.cancel_live_turn(TurnEndSource::UserCancellation).await
+                    {
                         Ok(()) => self.start_pending_prompt(by).await,
                         Err(error) => Err(error),
                     };
@@ -3641,7 +3681,8 @@ impl Task {
                     return;
                 };
                 if self.turn_live {
-                    if let Err(error) = self.cancel_live_turn().await {
+                    if let Err(error) = self.cancel_live_turn(TurnEndSource::UserCancellation).await
+                    {
                         if let Err(release_error) =
                             crate::conversation_inbox::release_conversation_inbox(
                                 &self.db,
@@ -3695,7 +3736,7 @@ impl Task {
                 let _ = reply.send(result);
             }
             Command::Cancel { reply } => {
-                let _ = reply.send(self.cancel_live_turn().await);
+                let _ = reply.send(self.cancel_live_turn(TurnEndSource::UserCancellation).await);
             }
             Command::AnswerPermission {
                 request_id,

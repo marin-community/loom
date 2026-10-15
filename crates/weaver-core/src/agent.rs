@@ -57,7 +57,7 @@ You are working in a detached Loom session. Your opening task is the goal.
 - Save a deliverable: `loom artifacts write plan plan.md`. Delegate: `loom sessions launch "implement the parser"`.
 - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A child's typed result also notifies its parent channel.
 - Wait for a result: `loom channels wait --channel <child-id> --kind result --after <last-seen-seq>` (use 0 for a new child's first result). `sessions wait` waits for lifecycle changes, not results.
-- Finish delegated work: `loom channels send --kind result --idempotency-key <task-id>:result:1 "<outcome or PR>"`. Reuse the key on retries; increment the revision for a changed result. Agent updates queue behind active work and carry their sender's session ID.
+- Finish delegated work: `loom channels send --kind result --idempotency-key <task-id>:result:1 "<outcome or PR>"`. Reuse the key on retries; increment the revision for a changed result. ACP updates interrupt ordinary work after 60s; `--urgency attention` or `blocked` interrupts immediately, `debug` waits for idle. Updates preserve human Stop and carry their sender's session ID.
 
 Repository-specific engineering and landing rules live in `AGENTS.md`.
 "#;

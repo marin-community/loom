@@ -1252,7 +1252,7 @@ mod tests {
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:e928a720610385e4820bc5b5414b52e5a7a059c383bfd7ecc7c3fda88517da06",
+                "sha256:1b4861c1299557e09ae666883f0fe58a9f26f50503c4ab6ed7c5ff87c9889aa5",
             ),
             (
                 "loom/artifacts/read@v1",

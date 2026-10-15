@@ -4,7 +4,7 @@
 //! session row. Messages are append-only and read state lives on per-subject
 //! subscriptions; runtime delivery is a separate receipt.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use sqlx::{FromRow, Row, SqliteConnection};
 use weaver_api::{ChannelDeliveryView, ChannelMessageView, ChannelSubscriptionView, ChannelView};
@@ -543,10 +543,14 @@ async fn enqueue_message_tx(tx: &mut SqliteConnection, row: &MessageRow) -> Resu
         sqlx::query("INSERT INTO channel_deliveries (message_id, binding_id, binding_kind, target_session_id, updated_at) VALUES (?, ?, 'session', ?, ?)")
             .bind(&row.id).bind(&binding).bind(&target).bind(now_iso()).execute(&mut *tx).await?;
         sqlx::query(
-            "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id, source_channel_id, source_message_id)
-             SELECT ?, branch_id, id, ?, ?, ?, ? FROM sessions WHERE id = ? AND protocol = 'acp'",
+            "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id, source_channel_id, source_message_id, interrupt_at)
+             SELECT ?, branch_id, id, ?, ?, ?, ?, ? FROM sessions WHERE id = ? AND protocol = 'acp'",
         ).bind(format!("channel:{}:{target}", row.id)).bind(&text).bind(source_session)
-            .bind(source_channel).bind(source_message).bind(&target).execute(&mut *tx).await?;
+            .bind(source_channel).bind(source_message)
+            .bind(crate::conversation_inbox::update_interrupt_at(
+                Urgency::parse(&row.urgency).context("invalid stored channel urgency")?,
+            ))
+            .bind(&target).execute(&mut *tx).await?;
     }
     Ok(())
 }
