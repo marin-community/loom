@@ -2354,10 +2354,14 @@ impl Task {
                 cmd = cmd_rx.recv() => match cmd {
                     Some(Command::PrepareHandoff { reply }) => {
                         let pending = crate::conversation_inbox::pending_inputs(&self.db, &self.session_id).await;
-                        if self.turn_live || pending.as_ref().is_err() || pending.as_ref().is_ok_and(|pending| !pending.is_empty()) {
-                            let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
-                        } else {
-                            match chat::list(&self.db, &self.session_id).await {
+                        match pending {
+                            Err(error) => {
+                                let _ = reply.send(Err(error));
+                            }
+                            Ok(pending) if self.turn_live || !pending.is_empty() => {
+                                let _ = reply.send(Err(anyhow!("cannot hand off while a turn or queued prompt is active")));
+                            }
+                            Ok(_) => match chat::list(&self.db, &self.session_id).await {
                                 Ok(snapshot) => {
                                     handoff_reply = Some((reply, snapshot));
                                     break TaskStopReason::Handoff;
@@ -2365,7 +2369,7 @@ impl Task {
                                 Err(error) => {
                                     let _ = reply.send(Err(error));
                                 }
-                            }
+                            },
                         }
                     }
                     Some(c) => {
