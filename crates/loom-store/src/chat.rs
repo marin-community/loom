@@ -698,9 +698,7 @@ pub async fn has_turn_end(db: &Db, session_id: &str, turn: i64) -> Result<bool> 
     Ok(n > 0)
 }
 
-/// The stop reason on the newest completed turn, used when re-adopting an ACP
-/// runtime so a user-owned Stop boundary survives the loom process that
-/// recorded it.
+/// Policy-owned interruptions retain the provider stop reason `cancelled`.
 pub async fn latest_stop_reason(db: &Db, session_id: &str) -> Result<Option<String>> {
     Ok(sqlx::query_scalar(
         "SELECT json_extract(payload, '$.stop_reason')
@@ -713,6 +711,21 @@ pub async fn latest_stop_reason(db: &Db, session_id: &str) -> Result<Option<Stri
     .bind(kind::TURN_END)
     .fetch_optional(db)
     .await?)
+}
+
+/// Cancellation records without attribution retain human Stop semantics.
+pub async fn latest_turn_was_user_stopped(db: &Db, session_id: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT json_extract(payload, '$.stop_reason') = 'cancelled'
+             AND COALESCE(json_extract(payload, '$.cancelled_by'), 'user') != 'update_policy'
+         FROM chat_blocks WHERE session_id = ? AND kind = ?
+         ORDER BY turn DESC, seq DESC LIMIT 1",
+    )
+    .bind(session_id)
+    .bind(kind::TURN_END)
+    .fetch_optional(db)
+    .await?
+    .unwrap_or(false))
 }
 
 /// Close a turn abandoned by a vanished ACP task. The opening user block is

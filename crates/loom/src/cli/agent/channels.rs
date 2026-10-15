@@ -28,6 +28,7 @@ pub enum ChannelCmd {
         channel: Option<String>,
         #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_MESSAGE_KIND)]
         kind: String,
+        /// debug waits for idle; normal interrupts after 60s; attention/blocked immediately.
         #[arg(long, default_value = weaver_api::CHANNEL_DEFAULT_URGENCY)]
         urgency: String,
         /// Retry-safe key scoped to the channel.

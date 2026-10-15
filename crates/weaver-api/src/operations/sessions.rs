@@ -1015,8 +1015,8 @@ pub mod scratch {
 pub mod send {
     use super::prelude::*;
 
-    /// Deliver a new prompt. Agent-authored ACP updates queue behind active
-    /// work and preserve a human Stop; human sends interrupt the current turn.
+    /// Deliver a new prompt. Agent-authored ACP updates interrupt ordinary work
+    /// after 60 seconds and preserve a human Stop; human sends interrupt immediately.
     #[operation(id = "sessions.send", actor = SessionSelf, scope = Session, risk = Write,
                 grants = ["loom/sessions/write@v1"], cli = "sessions send")]
     pub struct Input {

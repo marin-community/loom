@@ -455,7 +455,22 @@ channel.
 Agent-authored input begins with `Update from loom session <id>`, derived from
 the authenticated sender. Direct ACP sends and channel messages use the
 protected `conversation_inbox`, separate from editable human `pending_prompt`
-text. Normal updates wait for the current turn and respect an explicit Stop.
+text. Normal updates wait for a turn boundary for up to 60 seconds, then cancel
+ordinary work and open an update turn. Channel urgency `attention`/`blocked`
+interrupts immediately; `debug` never interrupts due to age. Status and other
+bookkeeping kinds do not prompt agents. Direct agent sends use normal urgency.
+Explicit Stop, compaction, protected inbox turns, session generation, and turn
+caps hold automatic delivery. Human-prompted work is ordinary work for this
+policy. Submitted UI reviews retain their immediate delivery path.
+
+Session updates store an immutable `interrupt_at` deadline (null for debug).
+The one-second ACP inbox tick also checks deadlines during active work; wakes
+are hints and retries never reset the clock. Migration gives the existing
+backlog a fresh 60-second grace while preserving publication timestamps. Later
+restarts retain deadlines, so an overdue update can interrupt on the first tick
+after adoption. Policy cancellations journal `cancelled_by: update_policy` so a
+failed replacement turn does not become a human Stop on recovery. Terminal
+delivery still pastes and submits immediately without ACP deadline semantics.
 The chat snapshot exposes `pending_updates`; the journal retains source IDs.
 An agent read or wait consumes any corresponding queued notice, while a peek
 and a human read do not. Use `channels wait --after <last-seen-seq> --kind result`

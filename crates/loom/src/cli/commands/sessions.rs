@@ -80,8 +80,8 @@ pub enum SessionCmd {
         #[arg(long)]
         lifecycle_only: bool,
     },
-    /// Deliver a message. Agent-authored ACP updates queue behind active work;
-    /// human sends stop the current turn.
+    /// Deliver a message. Agent-authored ACP updates interrupt after 60 seconds;
+    /// human sends stop the current turn immediately. Both respect compaction.
     Send {
         /// Session key: id, branch id, branch name, or `repo:branch`.
         session: String,

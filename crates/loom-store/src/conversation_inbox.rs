@@ -10,6 +10,21 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::future::Future;
 
+use crate::channel_data::Urgency;
+
+pub fn update_interrupt_at(urgency: Urgency) -> Option<String> {
+    let delay = match urgency {
+        Urgency::Debug => return None,
+        Urgency::Normal => chrono::TimeDelta::seconds(60),
+        Urgency::Attention | Urgency::Blocked => chrono::TimeDelta::zero(),
+    };
+    Some(
+        (chrono::Utc::now() + delay)
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string(),
+    )
+}
+
 pub fn session_update_text(source: &str, text: &str) -> String {
     format!("Update from loom session {source}\n\n{text}")
 }
@@ -55,7 +70,7 @@ pub async fn pending_updates(
 #[derive(Clone, Copy)]
 enum InboxLane {
     Review,
-    Session,
+    Session { interrupt_only: bool },
 }
 
 pub async fn enqueue_session_update(
@@ -84,10 +99,11 @@ pub async fn enqueue_session_update(
         anyhow::bail!("idempotency key already belongs to a different session update");
     }
     let inserted = sqlx::query(
-        "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id)
-         SELECT ?, branch_id, id, ?, ? FROM sessions WHERE id = ? AND status != 'archived'
+        "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id, interrupt_at)
+         SELECT ?, branch_id, id, ?, ?, ? FROM sessions WHERE id = ? AND status != 'archived'
          ON CONFLICT(delivery_key) DO NOTHING",
-    ).bind(&key).bind(payload).bind(source).bind(session).execute(&mut *tx).await?;
+    ).bind(&key).bind(payload).bind(source).bind(update_interrupt_at(Urgency::Normal))
+        .bind(session).execute(&mut *tx).await?;
     if existing.is_none() && inserted.rows_affected() == 0 {
         anyhow::bail!("session is missing or archived");
     }
@@ -130,6 +146,7 @@ pub async fn claim_session_update(
     session_id: &str,
     claim_owner: Option<&str>,
     owner_is_live: impl Fn(&str, &str) -> bool,
+    interrupt_only: bool,
 ) -> Result<Option<InboxItem>> {
     claim_at(
         db,
@@ -138,9 +155,21 @@ pub async fn claim_session_update(
         claim_owner,
         owner_is_live,
         chrono::Utc::now(),
-        InboxLane::Session,
+        InboxLane::Session { interrupt_only },
     )
     .await
+}
+
+pub async fn has_due_session_update(db: &crate::db::Db, session: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM conversation_inbox
+         WHERE preferred_session_id = ? AND review_id IS NULL
+           AND state IN ('queued', 'delivering') AND interrupt_at <= ?)",
+    )
+    .bind(session)
+    .bind(crate::db::now_iso())
+    .fetch_one(db)
+    .await?)
 }
 
 pub struct InboxTurnBoundary<'a> {
@@ -241,6 +270,7 @@ async fn claim_at(
          WHERE inbox.branch_id = ?
            AND CASE WHEN ? THEN inbox.review_id IS NOT NULL
                     ELSE inbox.review_id IS NULL AND inbox.preferred_session_id = ? END
+           AND (NOT ? OR inbox.interrupt_at <= ?)
            AND (
              inbox.state = 'queued'
              OR (
@@ -259,6 +289,13 @@ async fn claim_at(
     .bind(branch_id)
     .bind(matches!(lane, InboxLane::Review))
     .bind(session_id)
+    .bind(matches!(
+        lane,
+        InboxLane::Session {
+            interrupt_only: true
+        }
+    ))
+    .bind(&now)
     .bind(stale)
     .fetch_all(&mut *tx)
     .await?;
@@ -563,6 +600,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_update_deadlines_survive_retries_and_release() {
+        let (db, _) = claimed_inbox().await;
+        let key = enqueue_session_update(&db, "acp-review", "child", "done", Some("deadline"))
+            .await
+            .unwrap();
+        let branch: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let deadline: String = sqlx::query_scalar(
+            "SELECT interrupt_at FROM conversation_inbox WHERE delivery_key = ?",
+        )
+        .bind(&key)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        let due = chrono::DateTime::parse_from_rfc3339(&deadline)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        enqueue_session_update(&db, "acp-review", "child", "done", Some("deadline"))
+            .await
+            .unwrap();
+        for (now, expected) in [
+            (due - chrono::TimeDelta::milliseconds(1), false),
+            (due, true),
+        ] {
+            let item = claim_at(
+                &db,
+                &branch,
+                "acp-review",
+                Some("owner"),
+                |_, _| false,
+                now,
+                InboxLane::Session {
+                    interrupt_only: true,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(item.is_some(), expected);
+            if let Some(item) = item {
+                release_conversation_inbox(&db, &item.delivery_key, &item.claim_token)
+                    .await
+                    .unwrap();
+            }
+        }
+        let retained: String = sqlx::query_scalar(
+            "SELECT interrupt_at FROM conversation_inbox WHERE delivery_key = ?",
+        )
+        .bind(key)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(retained, deadline);
+    }
+
+    #[tokio::test]
+    async fn due_claim_skips_debug_and_future_updates_but_idle_claim_is_fifo() {
+        let (db, _) = claimed_inbox().await;
+        let branch: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let debug = enqueue_session_update(&db, "acp-review", "child", "debug", Some("debug"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE conversation_inbox SET interrupt_at = NULL WHERE delivery_key = ?")
+            .bind(&debug)
+            .execute(&db)
+            .await
+            .unwrap();
+        let future = enqueue_session_update(&db, "acp-review", "child", "future", Some("future"))
+            .await
+            .unwrap();
+        let due = enqueue_session_update(&db, "acp-review", "child", "due", Some("due"))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE delivery_key = ?")
+            .bind(&due).execute(&db).await.unwrap();
+        assert!(has_due_session_update(&db, "acp-review").await.unwrap());
+        let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.delivery_key, due);
+        consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
+            .await
+            .unwrap();
+        assert!(!has_due_session_update(&db, "acp-review").await.unwrap());
+        for expected in [debug, future] {
+            let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, false)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(item.delivery_key, expected);
+            consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn concurrent_updates_keep_one_identity_and_reject_changed_retries() {
         let (db, _) = claimed_inbox().await;
         let send = || enqueue_session_update(&db, "acp-review", "child", "done", Some("result:1"));
@@ -604,16 +745,28 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert!(
-            claim_session_update(&db, &branch, "other-session", Some("other"), |_, _| false)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        let item = claim_session_update(&db, &branch, "acp-review", Some("driver"), |_, _| false)
-            .await
-            .unwrap()
-            .unwrap();
+        assert!(claim_session_update(
+            &db,
+            &branch,
+            "other-session",
+            Some("other"),
+            |_, _| false,
+            false
+        )
+        .await
+        .unwrap()
+        .is_none());
+        let item = claim_session_update(
+            &db,
+            &branch,
+            "acp-review",
+            Some("driver"),
+            |_, _| false,
+            false,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let payload = json!({ "text": item.payload, "delivery_key": item.delivery_key });
         let inflight =
             json!({ "delivery_key": item.delivery_key, "review_claim_token": item.claim_token })
@@ -641,14 +794,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            claim_session_update(&db, &branch, "acp-review", Some("replacement"), |_, _| {
-                false
-            })
-            .await
-            .unwrap()
-            .is_none()
-        );
+        assert!(claim_session_update(
+            &db,
+            &branch,
+            "acp-review",
+            Some("replacement"),
+            |_, _| { false },
+            false
+        )
+        .await
+        .unwrap()
+        .is_none());
     }
 
     #[tokio::test]

@@ -298,7 +298,11 @@ or ArrowUp from an empty composer, or sent immediately with **Stop & send**. The
 live status names visible thinking, writing, or tool activity and reports how
 long it has been since the agent produced an observable update; quiet time is
 not guessed to mean stuck. Human `loom sessions send` uses the same stop-and-send
-behavior. Agent-authored ACP updates queue behind active work and respect Stop.
+behavior. Agent-authored ACP updates wait up to 60 seconds behind ordinary active
+work, then interrupt to deliver the update. Channel `--urgency attention` or
+`blocked` interrupts immediately; `--urgency debug` waits for a natural turn
+boundary without a timeout. Updates respect explicit Stop, compaction, and an
+active protected update/review turn. This includes work opened by a human prompt.
 They appear separately as **Update from loom session <id>**, so editing human
 feedback cannot retract a child result. Child results include a short preview
 and a link to their source. Use a stable `--idempotency-key` when retrying a

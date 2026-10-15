@@ -62,6 +62,7 @@ impl SubscriptionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Urgency {
+    Debug,
     Normal,
     Attention,
     Blocked,
@@ -70,6 +71,7 @@ pub enum Urgency {
 impl Urgency {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Debug => "debug",
             Self::Normal => weaver_api::CHANNEL_DEFAULT_URGENCY,
             Self::Attention => "attention",
             Self::Blocked => "blocked",
@@ -78,6 +80,7 @@ impl Urgency {
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "debug" => Some(Self::Debug),
             "normal" => Some(Self::Normal),
             "attention" => Some(Self::Attention),
             "blocked" => Some(Self::Blocked),
