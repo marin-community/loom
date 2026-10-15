@@ -537,7 +537,6 @@ mod tests {
             acp_driver_epoch: 0,
             acp_inflight: None,
             current_mode: None,
-            pending_prompt: None,
             origin: "user".to_string(),
             class: "interactive".to_string(),
             turn_count: 0,

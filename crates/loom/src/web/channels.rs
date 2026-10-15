@@ -170,7 +170,7 @@ async fn deliver_to_subscribers(
             // Publication already committed the protected inbox entry. A wake
             // is only a hint; the task also checks this queue after recovery.
             if let Some(handle) = st.acp.get(&target) {
-                if let Err(error) = handle.notify_updates().await {
+                if let Err(error) = handle.notify_queue().await {
                     tracing::debug!(session = %target, %error, "session update remains queued");
                 }
             }
@@ -486,7 +486,7 @@ pub(super) async fn list_channel_messages_operation(
                         .await?;
                 }
                 if let Some(handle) = st.acp.get(&subject.id) {
-                    if let Err(error) = handle.notify_updates().await {
+                    if let Err(error) = handle.notify_queue().await {
                         tracing::debug!(%error, "channel read consumed pending updates; refresh deferred");
                     }
                 }
@@ -699,7 +699,7 @@ pub(super) async fn wait_for_channel_message_operation(
             if subject.kind == SubjectKind::Session {
                 crate::conversation_inbox::consume_source(&st.db, &subject.id, &message.id).await?;
                 if let Some(handle) = st.acp.get(&subject.id) {
-                    if let Err(error) = handle.notify_updates().await {
+                    if let Err(error) = handle.notify_queue().await {
                         tracing::debug!(%error, "result consumed; inbox refresh deferred");
                     }
                 }

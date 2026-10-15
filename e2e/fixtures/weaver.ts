@@ -57,7 +57,6 @@ export interface Session {
   resolved_launch: {
     provenance: { mode: string };
   } | null;
-  pending_prompt: string;
   github_repo: string | null;
   github_issue: { repo: string; number: number } | null;
   last_activity_at: string;

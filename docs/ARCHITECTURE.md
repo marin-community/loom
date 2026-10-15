@@ -454,8 +454,9 @@ channel.
 
 Agent-authored input begins with `Update from loom session <id>`, derived from
 the authenticated sender. Direct ACP sends and channel messages use the
-protected `conversation_inbox`, separate from editable human `pending_prompt`
-text. Normal updates wait for a turn boundary for up to 60 seconds, then cancel
+shared `conversation_inbox`, alongside queued user feedback. Each input carries
+its provenance, editability, attachments, and optional interruption deadline.
+Normal agent updates wait for a turn boundary for up to 60 seconds, then cancel
 ordinary work (including turns opened by earlier session updates) and open an
 update turn. Channel urgency `attention`/`blocked` interrupts immediately;
 `debug` never interrupts due to age. Status and other
@@ -472,12 +473,14 @@ restarts retain deadlines, so an overdue update can interrupt on the first tick
 after adoption. Policy cancellations journal `cancelled_by: update_policy` so a
 failed replacement turn does not become a human Stop on recovery. Terminal
 delivery still pastes and submits immediately without ACP deadline semantics.
-The chat snapshot exposes `pending_updates` with their deadlines; the journal
-retains source IDs.
-Operators can force a selected update with `sessions.prompt.create` using
-`force_queued` and its `delivery_key`, the same operation that promotes queued
-human feedback. This preserves source provenance and other queued messages,
-resumes after Stop, and waits for compaction to finish.
+The chat snapshot and `queue` stream event expose one `pending_inputs` list.
+User feedback and agent updates use the same claim, dispatch, force, and
+settlement path. Operators can force a selected input with
+`sessions.prompt.create` using `force_queued` and its `delivery_key`; omitting
+the key sends the oldest queued input. This preserves source provenance and
+other queued messages, resumes after Stop, and waits for compaction to finish.
+Only editable user feedback can be retracted. Adjacent user messages coalesce
+into one draft without crossing an intervening agent message.
 An agent read or wait consumes any corresponding queued notice, while a peek
 and a human read do not. Use `channels wait --after <last-seen-seq> --kind result`
 for results; lifecycle waiting does not imply a result was published.
@@ -503,14 +506,14 @@ returns a monotonic `draft_revision`, and exposes the exact server-rendered
 `message`. A 409 optimistic-revision response carries the fresh review under
 `details.review`. ACP delivery commits into `conversation_inbox`, a
 stable-key, branch-addressable immutable lane consumed at turn boundaries.
-That lane is distinct from `sessions.pending_prompt`, so the prompt retraction
-route can never expose submitted feedback. Delivery workers claim fenced lease
+The shared queue marks submitted reviews as non-editable, so prompt retraction
+can never expose submitted feedback. Delivery workers claim fenced lease
 tokens, leave offline targets at zero attempts, and may rehome queued feedback
 to the branch's next usable conversation.
 
 `SessionView` (the `sessions.*` operations) returns session-specific fields
 top-level (`id`, `status`, `work_dir`, `term_session`, `agent_kind`, `model`,
-`effort`, `pending_prompt`, `github_repo`, `github_issue` (the `repo` + `number`
+`effort`, `github_repo`, `github_issue` (the `repo` + `number`
 linked on the session's tracking issue), `last_activity_at`,
 `created_at`, `updated_at`, `parent_id`, `protocol` (`terminal` or `acp`),
 `acp_session_id`, `current_mode`, `usage` (`{used, size}` context window, from

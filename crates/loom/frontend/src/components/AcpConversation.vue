@@ -48,7 +48,7 @@ import type {
   HandoffPayload,
   AcpUsage,
 } from '../types';
-import type { AcpMetadataView, SessionUpdateView } from '../api/generated';
+import type { AcpMetadataView, QueuedInputView } from '../api/generated';
 import { canSend } from '../lib/sessionState';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
@@ -70,7 +70,7 @@ import ToolContentPreview from './ToolContentPreview.vue';
 // snapshot, then applies the `sessions.chat.stream` SSE tail in place — `block` upserts
 // by (turn, seq), `delta` streams into a shadow message/thought, `tool` tracks
 // live tool state (feeding the status line), `turn` drives the live-turn state,
-// and `queue` carries the complete durable next-turn prompt.
+// and `queue` carries all durable next-turn inputs.
 // The composer posts to `/prompt`; Stop posts `/interrupt`; permission cards
 // answer via `/permissions/{id}`; the mode chip drives `/mode`.
 const props = withDefaults(
@@ -100,8 +100,11 @@ const lastProgressAt = ref<number | null>(null);
 // comes from the durable queue snapshot/SSE, never from the click that initiated
 // the request.
 const optimistic = ref<{ key: number; text: string }[]>([]);
-const pendingPrompt = ref<string | null>(null);
-const pendingUpdates = ref<SessionUpdateView[]>([]);
+const pendingInputs = ref<QueuedInputView[]>([]);
+let queueRevision = 0;
+const editableInput = computed(() =>
+  [...pendingInputs.value].reverse().find((input) => input.editable),
+);
 function updateBody(text: string, sourceSession: string | null | undefined): string {
   const prefix = sourceSession ? `Update from loom session ${sourceSession}\n` : '';
   return prefix && text.startsWith(prefix) ? text.slice(prefix.length).trimStart() : text;
@@ -205,8 +208,10 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     liveTools.clear();
     olderCursor.value = null;
     olderError.value = '';
+    pendingInputs.value = [];
   }
   const journalRevision = journal.beginSnapshot();
+  const queueAt = queueRevision;
   try {
     const snap = await getSessionChat(id.value);
     if (seq !== loadSeq) return;
@@ -218,8 +223,8 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     turnLive.value = snap.live_turn != null;
     restoreLiveTiming(snap.live_turn, preserveObservedTiming);
     effectiveMode.value = snap.effective_mode ?? null;
-    pendingPrompt.value = snap.pending_prompt?.trim() ? snap.pending_prompt : null;
-    pendingUpdates.value = snap.pending_updates;
+    // A queue event received during this request is newer than its snapshot.
+    if (queueAt === queueRevision) applyQueue(snap.pending_inputs);
     applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
     state.value = 'ready';
   } catch (e) {
@@ -325,8 +330,15 @@ function onTurn(ev: SseTurn) {
   }
 }
 
+function applyQueue(inputs: QueuedInputView[]) {
+  pendingInputs.value = inputs;
+  const durableTexts = new Set(inputs.filter((input) => input.editable).map((input) => input.text));
+  optimistic.value = optimistic.value.filter((input) => !durableTexts.has(input.text));
+}
+
 function onQueue(ev: SseQueue) {
-  pendingPrompt.value = ev.pending_prompt?.trim() ? ev.pending_prompt : null;
+  queueRevision++;
+  applyQueue(ev.pending_inputs);
   autoFollow();
 }
 
@@ -359,9 +371,6 @@ function openStream() {
   topic.on('tool', (d) => onTool(d as SseTool));
   topic.on('turn', (d) => onTurn(d as SseTurn));
   topic.on('queue', (d) => onQueue(d as SseQueue));
-  topic.on('updates', (d) => {
-    pendingUpdates.value = (d as { pending_updates: SessionUpdateView[] }).pending_updates;
-  });
   topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
   // A bounded server broadcast can overrun a slow client. `resync` turns that
   // explicit gap into a fresh read of the durable journal instead of leaving
@@ -578,17 +587,17 @@ async function forceQueued(deliveryKey?: string) {
   }
 }
 
-async function editQueued() {
-  if (!pendingPrompt.value || sending.value || queueing.value || editingQueued.value) return;
+async function editQueued(deliveryKey = editableInput.value?.delivery_key) {
+  if (!deliveryKey || sending.value || queueing.value || editingQueued.value) return;
   editingQueued.value = true;
   sendError.value = '';
   let moved = false;
   try {
-    const { text } = await retractQueuedSession(id.value);
+    const { text } = await retractQueuedSession(id.value, deliveryKey);
     // A click can race with typing in another tab or in the composer itself.
     // Preserve both pieces of human-authored text instead of overwriting either.
     draft.value = draft.value.trim() ? `${text}\n\n${draft.value}` : text;
-    pendingPrompt.value = null;
+    pendingInputs.value = pendingInputs.value.filter((input) => input.delivery_key !== deliveryKey);
     await load({ preserve: true });
     moved = true;
   } catch (e) {
@@ -724,7 +733,7 @@ function onComposerKeydown(e: KeyboardEvent) {
   }
   // Chat-history convention, scoped to the only message that is still
   // editable: ArrowUp in an empty composer retracts unseen queued feedback.
-  if (e.key === 'ArrowUp' && draft.value === '' && pendingPrompt.value) {
+  if (e.key === 'ArrowUp' && draft.value === '' && editableInput.value) {
     e.preventDefault();
     editQueued();
     return;
@@ -1203,7 +1212,7 @@ const isEmpty = computed(
     state.value === 'ready' &&
     !model.value.rows.length &&
     !optimistic.value.length &&
-    !pendingPrompt.value &&
+    !pendingInputs.value.length &&
     !turnLive.value,
 );
 
@@ -1350,8 +1359,8 @@ function durationLabel(seconds: number): string {
   const s = seconds % 60;
   return `${m}:${String(s).padStart(2, '0')}`;
 }
-function updateTimeoutLabel(update: SessionUpdateView): string {
-  const deadline = timeOf(update.interrupt_at ?? undefined);
+function inputTimeoutLabel(input: QueuedInputView): string {
+  const deadline = timeOf(input.interrupt_at ?? undefined);
   if (deadline == null) return 'Next turn';
   if (!turnLive.value) return 'Auto-send paused';
   const seconds = Math.max(0, Math.ceil((deadline - clock.value) / 1000));
@@ -1721,87 +1730,70 @@ function goTo(anchor: string) {
             </template>
 
             <section
-              v-for="update in pendingUpdates"
-              :key="update.delivery_key"
+              v-for="input in pendingInputs"
+              :key="input.delivery_key"
               class="acp-speaker"
-              data-testid="acp-session-update"
+              :data-testid="input.editable ? 'acp-pending' : 'acp-session-update'"
             >
               <header class="acp-rule">
                 <RouterLink
-                  v-if="update.source_session_id"
-                  :to="`/s/${update.source_session_id}`"
+                  v-if="input.source_session_id"
+                  :to="`/s/${input.source_session_id}`"
                   class="acp-label text-accent"
                 >
-                  Update from loom session {{ update.source_session_id }}
+                  Update from loom session {{ input.source_session_id }}
                 </RouterLink>
-                <span v-else class="acp-label text-accent">Channel update</span>
-                <span class="acp-prompt-state">queued</span>
+                <span v-else class="acp-label text-accent">{{
+                  input.editable ? 'You' : 'Channel update'
+                }}</span>
+                <span
+                  class="acp-prompt-state"
+                  :data-testid="input.editable ? 'acp-queued' : undefined"
+                >
+                  {{ input.editable ? 'queued · agent hasn’t seen this yet' : 'queued' }}
+                </span>
                 <span class="acp-update-timeout" data-testid="acp-update-timeout">
-                  {{ updateTimeoutLabel(update) }}
+                  {{ inputTimeoutLabel(input) }}
                 </span>
                 <RouterLink
-                  v-if="update.source_channel_id"
-                  :to="`/channels/${update.source_channel_id}#${update.source_message_id}`"
+                  v-if="input.source_channel_id"
+                  :to="`/channels/${input.source_channel_id}#${input.source_message_id}`"
                   class="acp-prompt-action"
                   >Open source</RouterLink
                 >
-                <button
-                  type="button"
-                  class="acp-prompt-action"
-                  data-testid="acp-force-update"
-                  :disabled="sending || queueing || editingQueued"
-                  :title="
-                    turnLive
-                      ? 'Stop the running turn and send this queued update as the next turn'
-                      : 'Start a new turn with this queued update'
-                  "
-                  @click="forceQueued(update.delivery_key)"
-                >
-                  {{ turnLive ? 'Stop & send' : 'Send now' }}
-                </button>
-              </header>
-              <MarkdownView
-                :id="id"
-                path=""
-                :source="updateBody(update.text, update.source_session_id)"
-              />
-            </section>
-
-            <!-- Only human prompts enter the editable queue. -->
-            <section v-if="pendingPrompt" class="acp-speaker" data-testid="acp-pending">
-              <header class="acp-rule">
-                <span class="acp-label text-accent">You</span>
-                <span class="acp-prompt-state" data-testid="acp-queued"
-                  >queued · agent hasn’t seen this yet</span
-                >
                 <span class="acp-prompt-actions">
                   <button
+                    v-if="input.editable"
                     type="button"
                     class="acp-prompt-action"
                     data-testid="acp-edit-queued"
                     :disabled="sending || queueing || editingQueued"
                     title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
-                    @click="editQueued"
+                    @click="editQueued(input.delivery_key)"
                   >
                     {{ editingQueued ? 'Moving…' : 'Edit' }}
                   </button>
                   <button
                     type="button"
                     class="acp-prompt-action"
-                    data-testid="acp-force-queued"
+                    :data-testid="input.editable ? 'acp-force-queued' : 'acp-force-update'"
                     :disabled="sending || queueing || editingQueued"
                     :title="
                       turnLive
-                        ? 'Stop the running turn and send all queued feedback as the next turn'
-                        : 'Start a new turn with all queued feedback'
+                        ? 'Stop the running turn and send this queued input as the next turn'
+                        : 'Start a new turn with this queued input'
                     "
-                    @click="forceQueued()"
+                    @click="forceQueued(input.delivery_key)"
                   >
                     {{ turnLive ? 'Stop & send' : 'Send now' }}
                   </button>
                 </span>
               </header>
-              <MarkdownView :id="id" path="" :source="pendingPrompt" />
+              <MarkdownView
+                :id="id"
+                path=""
+                :source="updateBody(input.text, input.source_session_id)"
+              />
             </section>
 
             <!-- A local send remains unclassified only until the server answers. -->

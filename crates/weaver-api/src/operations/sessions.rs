@@ -795,8 +795,8 @@ pub mod prompt {
         /// cancels an ordinary live turn and starts the message as a normal prompt.
         /// A live compaction always finishes before queued feedback starts. Every
         /// send records a `nudge` event on the branch.
-        /// With `force_queued`, promote the stored human prompt or the session
-        /// update selected by `delivery_key`, preserving its source identity.
+        /// With `force_queued`, deliver the input selected by `delivery_key`,
+        /// or the oldest queued input, preserving its source identity.
         ///
         /// Provenance is derived from the credential: `manual` for a human operator,
         /// `agent` otherwise.
@@ -811,13 +811,13 @@ pub mod prompt {
             /// boundary instead.
             #[operand(default = false)]
             pub send_now: bool,
-            /// Promote the server's durable next-turn queue instead of sending
+            /// Promote an input from the server's durable queue instead of sending
             /// `text`. Keeps the action race-free when a client is showing queued
             /// copy.
             #[operand(default = false)]
             pub force_queued: bool,
-            /// Force this queued session update instead of the human prompt queue.
-            /// Requires `force_queued`; the server retains the update's provenance.
+            /// Select a queued input to force. Requires `force_queued`.
+            /// Omitting it forces the oldest queued input.
             pub delivery_key: Option<String>,
             /// Worktree-relative files to attach as ACP resource links.
             #[serde(default)]
@@ -841,12 +841,14 @@ pub mod prompt {
     pub mod retract {
         use super::prelude::*;
 
-        /// Pull unseen next-turn feedback back out of the durable queue for editing.
+        /// Pull editable unseen feedback out of the durable input queue for editing.
         /// The ACP task owns the consume so this action is serialized with automatic
         /// dispatch at a turn boundary.
         #[operation(id = "sessions.prompt.retract", actor = SessionSelf, scope = Session,
                     risk = Write, grants = ["loom/sessions/write@v1"])]
         pub struct Input {
+            /// The queued input to edit; defaults to the latest editable input.
+            pub delivery_key: Option<String>,
             #[operand(context)]
             pub session: String,
         }

@@ -3,7 +3,7 @@
 //! Submission itself only commits durable state. This worker moves the
 //! structured feedback across the conversation boundary. ACP delivery writes a
 //! protected immutable inbox lane with a stable-key receipt in one transaction;
-//! editable `sessions.pending_prompt` text never contains submitted feedback.
+//! Submitted feedback is never editable, even though it shares the input inbox.
 //! Terminal delivery is necessarily at-least-once at the external PTY edge.
 
 use anyhow::{Context, Result};

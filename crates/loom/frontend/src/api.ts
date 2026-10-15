@@ -729,7 +729,7 @@ export const queueSession = (id: string, text: string, files: string[] = []) =>
     session: id,
   });
 
-/** Send all durable next-turn feedback now, stopping a live turn first. */
+/** Send a queued input now, stopping a live turn first. Omit the key for the oldest input. */
 export const forceQueuedSession = (id: string, deliveryKey?: string) =>
   invokeOperation('sessions.prompt.create', {
     text: '',
@@ -742,8 +742,8 @@ export const forceQueuedSession = (id: string, deliveryKey?: string) =>
 /** Atomically pull unseen next-turn feedback out of the server queue so it can
  * be edited in the composer. A 409 means the current ACP state has no queue
  * available to retract. */
-export const retractQueuedSession = (id: string) =>
-  invokeOperation('sessions.prompt.retract', { session: id });
+export const retractQueuedSession = (id: string, deliveryKey?: string) =>
+  invokeOperation('sessions.prompt.retract', { session: id, delivery_key: deliveryKey });
 
 /** Worktree-backed completion for `@file` mentions in the ACP composer. */
 export const listSessionFiles = (id: string, query: string) =>

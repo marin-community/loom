@@ -134,6 +134,32 @@ async function queueAcpPrompt(
 }
 
 test.describe('acp conversation', () => {
+  test('a queue event wins over an older chat snapshot', async ({ page, weaver }) => {
+    const session = await openAcp(page, weaver, { goal: 'say:ready', name: 'queue-snapshot' });
+    await expect(page.getByText('ready', { exact: true })).toBeVisible();
+    let releaseSnapshot!: () => void;
+    let snapshotRead!: () => void;
+    const release = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
+    const read = new Promise<void>((resolve) => { snapshotRead = resolve; });
+    await page.route('**/api/sessions/chat', async (route) => {
+      const response = await route.fetch();
+      snapshotRead();
+      await release;
+      await route.fulfill({ response });
+    }, { times: 1 });
+    await page.getByTestId('acp-composer-input').fill('wait:30000|say:unfinished');
+    await page.getByTestId('acp-composer-send').click();
+    await read;
+    try {
+      await queueAcpPrompt(weaver, session, 'say:keep this queued');
+      await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued');
+    } finally {
+      releaseSnapshot();
+    }
+    await expect(page.getByTestId('acp-composer-send')).toHaveText('Send');
+    await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued', { timeout: 2000 });
+  });
+
   test('session updates stay attributed and survive editing human feedback', async ({
     page,
     weaver,
@@ -531,7 +557,7 @@ test.describe('acp conversation', () => {
     await page.route('**/api/sessions/chat', (route) => {
       const operands = route.request().postDataJSON() as { session?: string };
       if (operands?.session !== s!.id) return route.fallback();
-      return route.fulfill({ json: { blocks: [], live_turn: null } });
+      return route.fulfill({ json: { blocks: [], live_turn: null, pending_inputs: [] } });
     });
     await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
     const empty = page.getByTestId('acp-empty');
@@ -576,7 +602,7 @@ test.describe('acp conversation', () => {
           older_cursor: older ? null : { turn: 8, seq: 0 },
           live_turn: null,
           effective_mode: null,
-          pending_prompt: null,
+          pending_inputs: [],
           metadata: {
             commands: [],
             config_options: [],

@@ -1145,7 +1145,7 @@ mod tests {
         let notices = messages(&db, "parent", 0).await.unwrap();
         assert_eq!(notices.len(), 1);
         assert_eq!(notices[0].body.matches('✓').count(), 2_000);
-        let updates = crate::conversation_inbox::pending_updates(&db, "parent")
+        let updates = crate::conversation_inbox::pending_inputs(&db, "parent")
             .await
             .unwrap();
         assert_eq!(updates.len(), 1);
@@ -1156,12 +1156,12 @@ mod tests {
         crate::conversation_inbox::consume_source(&db, "parent", &first.message.id)
             .await
             .unwrap();
-        assert!(crate::conversation_inbox::pending_updates(&db, "parent")
+        assert!(crate::conversation_inbox::pending_inputs(&db, "parent")
             .await
             .unwrap()
             .is_empty());
         send().await.unwrap();
-        assert!(crate::conversation_inbox::pending_updates(&db, "parent")
+        assert!(crate::conversation_inbox::pending_inputs(&db, "parent")
             .await
             .unwrap()
             .is_empty());

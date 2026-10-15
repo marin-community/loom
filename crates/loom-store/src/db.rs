@@ -175,6 +175,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "update-interrupt-deadline",
         include_str!("../migrations/0033_update_interrupt_deadline.sql"),
     ),
+    (
+        34,
+        "unified-input-queue",
+        include_str!("../migrations/0034_unified_input_queue.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -421,6 +426,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unified_queue_migrates_pending_prompts_without_changing_agent_deadlines() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 33).await;
+        insert_branch(&db, "queue-branch").await;
+        sqlx::query("INSERT INTO sessions (id, branch_id, work_dir, term_session, status, protocol, pending_prompt) VALUES ('queued', 'queue-branch', '/w', 'term', 'running', 'acp', 'first paragraph' || char(10) || char(10) || 'second paragraph')")
+            .execute(&db).await.unwrap();
+        sqlx::query("INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload, source_session_id, interrupt_at) VALUES ('agent:queued', 'queue-branch', 'queued', 'review ready', 'child', '2026-10-15T21:19:31.529Z')")
+            .execute(&db).await.unwrap();
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        LOOM_STREAM.apply_pending(&db).await.unwrap();
+        let pending = crate::conversation_inbox::pending_inputs(&db, "queued")
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 2);
+        let human = pending.iter().find(|input| input.editable).unwrap();
+        assert_eq!(human.text, "first paragraph\n\nsecond paragraph");
+        assert!(human.interrupt_at.is_none());
+        let agent = pending.iter().find(|input| !input.editable).unwrap();
+        assert_eq!(
+            agent.interrupt_at.as_deref(),
+            Some("2026-10-15T21:19:31.529Z")
+        );
+        assert_eq!(agent.source_session_id.as_deref(), Some("child"));
+        assert!(!table_columns(&db, "sessions")
+            .await
+            .unwrap()
+            .iter()
+            .any(|column| column == "pending_prompt"));
+    }
+
+    #[tokio::test]
     async fn fresh_schema_records_baseline_and_has_final_shape() {
         let db = connect_in_memory().await.unwrap();
         migrate_loom(&db).await.unwrap();
@@ -473,7 +509,6 @@ mod tests {
             "term_session",
             "parent_branch_id",
             "protocol",
-            "pending_prompt",
             "origin",
             "class",
             "turn_count",

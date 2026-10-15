@@ -2908,21 +2908,20 @@ pub struct SessionChatView {
     #[serde(default)]
     pub effective_mode: Option<String>,
     #[serde(default)]
-    pub pending_prompt: Option<String>,
-    #[serde(default)]
-    pub pending_updates: Vec<SessionUpdateView>,
+    pub pending_inputs: Vec<QueuedInputView>,
     pub metadata: AcpMetadataView,
 }
 
-/// Immutable session input, separate from editable human prompts.
+/// Queued conversation input, with provenance and editing policy.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SessionUpdateView {
+pub struct QueuedInputView {
     pub delivery_key: String,
     pub source_session_id: Option<String>,
     pub source_channel_id: Option<String>,
     pub source_message_id: Option<String>,
     pub text: String,
     pub state: String,
+    pub editable: bool,
     /// Automatic interruption deadline; null for updates that wait for a turn boundary.
     pub interrupt_at: Option<String>,
 }

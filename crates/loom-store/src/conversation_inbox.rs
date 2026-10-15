@@ -1,6 +1,6 @@
-//! Protected conversation input shared by reviews and session updates.
+//! Durable conversation input shared by user feedback, session updates, and reviews.
 //!
-//! An immutable update becomes an inbox item that a session's ACP task claims,
+//! Each input becomes an inbox item that a session's ACP task claims,
 //! opens a turn against, and then settles. The claim is a durable lease: the row
 //! carries the token, so a task that dies mid-turn releases its claim on restart
 //! rather than wedging the lane. Session updates stay addressed to their exact
@@ -34,20 +34,22 @@ pub struct InboxItem {
     pub delivery_key: String,
     pub review_id: Option<i64>,
     pub payload: String,
+    pub author: Option<String>,
+    pub resources: String,
     pub claim_token: String,
     pub source_session_id: Option<String>,
     pub source_channel_id: Option<String>,
     pub source_message_id: Option<String>,
 }
 
-pub async fn pending_updates(
+pub async fn pending_inputs(
     db: &crate::db::Db,
     session: &str,
-) -> Result<Vec<weaver_api::SessionUpdateView>> {
+) -> Result<Vec<weaver_api::QueuedInputView>> {
     use sqlx::Row;
     let rows = sqlx::query(
         "SELECT delivery_key, source_session_id, source_channel_id, source_message_id,
-                payload, state, interrupt_at FROM conversation_inbox
+                payload, state, interrupt_at, editable FROM conversation_inbox
          WHERE preferred_session_id = ? AND review_id IS NULL AND state = 'queued'
          ORDER BY created_at, rowid",
     )
@@ -56,7 +58,7 @@ pub async fn pending_updates(
     .await?;
     rows.into_iter()
         .map(|row| {
-            Ok(weaver_api::SessionUpdateView {
+            Ok(weaver_api::QueuedInputView {
                 delivery_key: row.try_get("delivery_key")?,
                 source_session_id: row.try_get("source_session_id")?,
                 source_channel_id: row.try_get("source_channel_id")?,
@@ -64,9 +66,89 @@ pub async fn pending_updates(
                 text: row.try_get("payload")?,
                 state: row.try_get("state")?,
                 interrupt_at: row.try_get("interrupt_at")?,
+                editable: row.try_get("editable")?,
             })
         })
         .collect()
+}
+
+/// Explicitly queued adjacent user inputs can remain one editable draft. Other senders keep their
+/// place in the queue, and claiming or editing a draft fences further appends.
+pub async fn enqueue_prompt(
+    db: &crate::db::Db,
+    session: &str,
+    text: &str,
+    by: Option<&str>,
+    resources: &[Value],
+    append_to_draft: bool,
+) -> Result<String> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let last: Option<(String, String, Option<String>, String, bool)> = sqlx::query_as(
+        "SELECT delivery_key, payload, author, resources, editable FROM conversation_inbox
+         WHERE preferred_session_id = ? AND review_id IS NULL AND state = 'queued'
+         ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(session)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((key, previous, author, saved_resources, true)) = last {
+        if append_to_draft && author.as_deref() == by {
+            let mut combined_resources: Vec<Value> = serde_json::from_str(&saved_resources)?;
+            combined_resources.extend_from_slice(resources);
+            sqlx::query(
+                "UPDATE conversation_inbox SET payload = ?, resources = ? WHERE delivery_key = ?",
+            )
+            .bind(format!("{}\n\n{text}", previous.trim()))
+            .bind(serde_json::to_string(&combined_resources)?)
+            .bind(&key)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            return Ok(key);
+        }
+    }
+    let key = format!("prompt:{session}:{}", weaver_core::branch::new_id());
+    let inserted = sqlx::query(
+        "INSERT INTO conversation_inbox
+            (delivery_key, branch_id, preferred_session_id, payload, editable, author, resources)
+         SELECT ?, branch_id, id, ?, 1, ?, ? FROM sessions WHERE id = ? AND status != 'archived'",
+    )
+    .bind(&key)
+    .bind(text)
+    .bind(by)
+    .bind(serde_json::to_string(resources)?)
+    .bind(session)
+    .execute(&mut *tx)
+    .await?;
+    if inserted.rows_affected() != 1 {
+        anyhow::bail!("session is missing or archived");
+    }
+    tx.commit().await?;
+    Ok(key)
+}
+
+pub async fn retract_input(
+    db: &crate::db::Db,
+    session: &str,
+    delivery_key: Option<&str>,
+) -> Result<String> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let text: Option<String> = sqlx::query_scalar(
+        "DELETE FROM conversation_inbox WHERE delivery_key = (
+             SELECT delivery_key FROM conversation_inbox
+             WHERE preferred_session_id = ? AND state = 'queued' AND editable = 1
+               AND review_id IS NULL AND (? IS NULL OR delivery_key = ?)
+             ORDER BY created_at DESC, rowid DESC LIMIT 1
+         ) RETURNING payload",
+    )
+    .bind(session)
+    .bind(delivery_key)
+    .bind(delivery_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let text = text.ok_or_else(|| anyhow::anyhow!("there is no editable queued input"))?;
+    tx.commit().await?;
+    Ok(text)
 }
 
 #[derive(Clone, Copy)]
@@ -145,7 +227,7 @@ pub async fn consume_source(db: &crate::db::Db, session: &str, message: &str) ->
     Ok(())
 }
 
-pub async fn claim_session_update(
+pub async fn claim_input(
     db: &crate::db::Db,
     branch_id: &str,
     session_id: &str,
@@ -169,7 +251,7 @@ pub async fn claim_session_update(
     .await
 }
 
-pub async fn has_due_session_update(
+pub async fn has_due_input(
     db: &crate::db::Db,
     session: &str,
     exclude_key: Option<&str>,
@@ -347,7 +429,7 @@ async fn claim_at(
                      claim_owner = ?,
                      claimed_at = ?
                  WHERE delivery_key = ?
-                 RETURNING delivery_key, review_id, payload, claim_token,
+                 RETURNING delivery_key, review_id, payload, author, resources, claim_token,
                            source_session_id, source_channel_id, source_message_id",
             )
             .bind(session_id)
@@ -706,10 +788,8 @@ mod tests {
             .unwrap();
         sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE delivery_key = ?")
             .bind(&due).execute(&db).await.unwrap();
-        assert!(has_due_session_update(&db, "acp-review", None)
-            .await
-            .unwrap());
-        let item = claim_session_update(&db, &branch, "acp-review", None, |_, _| false, true, None)
+        assert!(has_due_input(&db, "acp-review", None).await.unwrap());
+        let item = claim_input(&db, &branch, "acp-review", None, |_, _| false, true, None)
             .await
             .unwrap()
             .unwrap();
@@ -717,20 +797,123 @@ mod tests {
         consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
             .await
             .unwrap();
-        assert!(!has_due_session_update(&db, "acp-review", None)
-            .await
-            .unwrap());
+        assert!(!has_due_input(&db, "acp-review", None).await.unwrap());
         for expected in [debug, future] {
-            let item =
-                claim_session_update(&db, &branch, "acp-review", None, |_, _| false, false, None)
-                    .await
-                    .unwrap()
-                    .unwrap();
+            let item = claim_input(&db, &branch, "acp-review", None, |_, _| false, false, None)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(item.delivery_key, expected);
             consume_conversation_inbox(&db, &item.delivery_key, &item.claim_token, "acp-review")
                 .await
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn user_and_agent_inputs_share_ordering_claims_and_edit_protection() {
+        let (db, review) = claimed_inbox().await;
+        let first = enqueue_prompt(
+            &db,
+            "acp-review",
+            "first",
+            Some("manual"),
+            &[json!({"name": "code.rs"})],
+            true,
+        )
+        .await
+        .unwrap();
+        let appended = enqueue_prompt(&db, "acp-review", "second", Some("manual"), &[], true)
+            .await
+            .unwrap();
+        assert_eq!(first, appended);
+        let agent = enqueue_session_update(&db, "acp-review", "child", "review ready", None)
+            .await
+            .unwrap();
+        let last = enqueue_prompt(&db, "acp-review", "third", Some("manual"), &[], true)
+            .await
+            .unwrap();
+        let pending = pending_inputs(&db, "acp-review").await.unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .map(|input| input.delivery_key.as_str())
+                .collect::<Vec<_>>(),
+            vec![first.as_str(), agent.as_str(), last.as_str()]
+        );
+        assert_eq!(pending[0].text, "first\n\nsecond");
+        assert!(retract_input(&db, "acp-review", Some(&agent))
+            .await
+            .is_err());
+        assert!(retract_input(&db, "acp-review", Some(&review.delivery_key))
+            .await
+            .is_err());
+        assert_eq!(
+            retract_input(&db, "acp-review", None).await.unwrap(),
+            "third"
+        );
+        let branch: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let claimed = claim_input(&db, &branch, "acp-review", None, |_, _| false, false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.delivery_key, first);
+        assert_eq!(claimed.author.as_deref(), Some("manual"));
+        assert_eq!(
+            serde_json::from_str::<Vec<Value>>(&claimed.resources).unwrap(),
+            vec![json!({"name": "code.rs"})]
+        );
+        assert!(retract_input(&db, "acp-review", Some(&first))
+            .await
+            .is_err());
+        consume_conversation_inbox(&db, &first, &claimed.claim_token, "acp-review")
+            .await
+            .unwrap();
+        let claimed = claim_input(&db, &branch, "acp-review", None, |_, _| false, false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.delivery_key, agent);
+        assert_eq!(claimed.source_session_id.as_deref(), Some("child"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn editing_queued_input_waits_for_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::connect(&dir.path().join("weaver.db"))
+            .await
+            .unwrap();
+        let branch = weaver_core::branch::upsert(&db, "/repo", "weaver/busy-queue", "main")
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, branch_id, work_dir, term_session, status) VALUES ('busy-queue', ?, '/repo', 'relay', 'running')").bind(&branch.id).execute(&db).await.unwrap();
+        enqueue_prompt(
+            &db,
+            "busy-queue",
+            "send after stop",
+            Some("manual"),
+            &[],
+            true,
+        )
+        .await
+        .unwrap();
+        let writer = weaver_core::db::begin_immediate(&db).await.unwrap();
+        let contender = db.clone();
+        let editing =
+            tokio::spawn(async move { retract_input(&contender, "busy-queue", None).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!editing.is_finished());
+        writer.commit().await.unwrap();
+        let text = tokio::time::timeout(std::time::Duration::from_secs(1), editing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(text, "send after stop");
     }
 
     #[tokio::test]
@@ -747,18 +930,15 @@ mod tests {
         enqueue_session_update(&db, "acp-review", "child", "done", Some("result:2"))
             .await
             .unwrap();
-        let pending = pending_updates(&db, "acp-review").await.unwrap();
+        let pending = pending_inputs(&db, "acp-review").await.unwrap();
         assert_eq!(
             pending.len(),
             2,
             "distinct publications may have identical text"
         );
         assert_eq!(pending[0].source_session_id.as_deref(), Some("child"));
-        assert!(crate::session::take_pending_prompt(&db, "acp-review")
-            .await
-            .unwrap()
-            .is_none());
-        assert_eq!(pending_updates(&db, "acp-review").await.unwrap().len(), 2);
+        assert!(retract_input(&db, "acp-review", None).await.is_err());
+        assert_eq!(pending_inputs(&db, "acp-review").await.unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -775,7 +955,7 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert!(claim_session_update(
+        assert!(claim_input(
             &db,
             &branch,
             "other-session",
@@ -787,7 +967,7 @@ mod tests {
         .await
         .unwrap()
         .is_none());
-        let item = claim_session_update(
+        let item = claim_input(
             &db,
             &branch,
             "acp-review",
@@ -826,7 +1006,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(claim_session_update(
+        assert!(claim_input(
             &db,
             &branch,
             "acp-review",
@@ -843,11 +1023,14 @@ mod tests {
     #[tokio::test]
     async fn post_write_persistence_failure_holds_every_followup_until_prompt_response() {
         let (db, item) = claimed_inbox().await;
-        sqlx::query(
-            "UPDATE sessions SET pending_prompt = 'ordinary queued prompt'
-             WHERE id = 'acp-review'",
+        enqueue_prompt(
+            &db,
+            "acp-review",
+            "ordinary queued prompt",
+            Some("manual"),
+            &[],
+            true,
         )
-        .execute(&db)
         .await
         .unwrap();
         sqlx::query(
@@ -903,18 +1086,14 @@ mod tests {
         let ordinary_started = if outcome.blocks_followup_dispatch() {
             None
         } else {
-            crate::session::take_pending_prompt(&db, "acp-review")
-                .await
-                .unwrap()
+            Some(retract_input(&db, "acp-review", None).await.unwrap())
         };
         assert!(
             ordinary_started.is_none(),
             "the dispatch caller must not drain an ordinary prompt after the relay write"
         );
         assert_eq!(
-            crate::session::read_pending_prompt(&db, "acp-review")
-                .await
-                .unwrap(),
+            pending_inputs(&db, "acp-review").await.unwrap()[0].text,
             "ordinary queued prompt"
         );
         let branch_id: String =
@@ -951,11 +1130,8 @@ mod tests {
         .await
         .unwrap());
         assert_eq!(
-            crate::session::take_pending_prompt(&db, "acp-review")
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("ordinary queued prompt"),
+            retract_input(&db, "acp-review", None).await.unwrap(),
+            "ordinary queued prompt",
             "the ordinary queue becomes eligible only after the matching response"
         );
     }
