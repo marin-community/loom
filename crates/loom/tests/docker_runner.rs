@@ -11,6 +11,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::Value;
 use serial_test::serial;
 
 #[path = "support/tapestry.rs"]
@@ -89,15 +90,55 @@ fn docker_runner_child() {
     configure(&root, &session);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
+        let db = loom::db::connect_in_memory().await.unwrap();
+        let launch = loom::agent::build_acp_launch(
+            &db,
+            &loom::agent::AcpLaunchSpec {
+                session_id: "session-id",
+                branch_id: "branch-id",
+                runtime: "codex",
+                work_dir: Path::new("/home/app/work"),
+                server_addr: "0.0.0.0:7878",
+                model: "",
+                effort: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: true,
+                mode: "auto",
+                prelude: "none",
+                restricted: false,
+                allowed_tools: r#"["mcp__loom__channel_get"]"#,
+                mcp_access: r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
+                custom: None,
+            },
+            loom::agent::AcpOpen::Fresh,
+        )
+        .await
+        .unwrap();
+        let mcp_api = launch.mcp_servers[0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == "WEAVER_API")
+            .unwrap()["value"]
+            .as_str()
+            .unwrap();
+        let config: Value = serde_json::from_str(
+            &launch.env.iter().find(|(name, _)| name == "CODEX_CONFIG").unwrap().1,
+        )
+        .unwrap();
+        assert_eq!(config["features"]["network_proxy"]["domains"]["loom-test-api"], "allow");
         let env = [
             ("LOOM_SESSION_ID", "session-id"),
             ("LOOM_TOKEN", "session-token"),
             ("OWNER_ENV", "owner-value"),
+            ("MCP_API", mcp_api),
         ];
         let options = tapestry::LaunchOptions {
             name: &session,
             cwd: Path::new("/home/app/work"),
-            script: "python3 -c 'import os, urllib.request; print(urllib.request.urlopen(os.environ[\"WEAVER_API\"], timeout=5).status)'; printf 'runner-ready owner-host=%s\\n' \"$(cat /etc/hostname)\"; sleep 60",
+            script: "python3 -c 'import os, urllib.request; print(\"callbacks\", *[urllib.request.urlopen(os.environ[key], timeout=5).status for key in (\"WEAVER_API\", \"MCP_API\")])'; printf 'runner-ready owner-host=%s\\n' \"$(cat /etc/hostname)\"; sleep 60",
             env: &env,
             env_clear: false,
             cols: 80,
@@ -197,7 +238,7 @@ fn docker_runner_supervisor_outlives_its_launcher() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
         assert!(tapestry::Client::is_alive(&session).await);
-        let owner_screen = wait_for_screen(&session, &["runner-ready", "200"]).await;
+        let owner_screen = wait_for_screen(&session, &["runner-ready", "callbacks 200 200"]).await;
 
         let host_session = format!("{session}-host-shell");
         let host_screen = wait_for_screen(&host_session, &["host-shell-ready"]).await;
