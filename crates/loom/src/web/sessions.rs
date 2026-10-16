@@ -1984,6 +1984,9 @@ pub(super) async fn raw_session_bytes(
             (header::CONTENT_TYPE, content_type_for(&input.path)),
             (header::CONTENT_DISPOSITION, "inline"),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            // MIME detection also recognizes scripts; session files must not be
+            // executable resources on another site's page.
+            (header::HeaderName::from_static("cross-origin-resource-policy"), "same-origin"),
             // Raw HTML/SVG must not acquire Loom's origin when opened directly.
             (header::CONTENT_SECURITY_POLICY, "sandbox allow-scripts; default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'"),
         ],

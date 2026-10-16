@@ -116,6 +116,7 @@ async fn session_file_previews_and_raw_bytes_stay_inside_the_worktree() {
         .unwrap();
     assert_eq!(raw.status(), 200);
     assert_eq!(raw.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(raw.headers()["cross-origin-resource-policy"], "same-origin");
     assert!(raw.headers()["content-security-policy"]
         .to_str()
         .unwrap()
