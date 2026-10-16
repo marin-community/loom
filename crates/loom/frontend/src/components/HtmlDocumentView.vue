@@ -13,7 +13,7 @@ import { ref, watch } from 'vue';
 // it was written to. (Combining allow-scripts with allow-same-origin would let
 // it script its way out of the sandbox, so we never do.)
 const props = defineProps<{
-  /** Raw HTML source of the artifact (the selected revision's content). */
+  /** Raw HTML source to preview. */
   content: string;
 }>();
 
