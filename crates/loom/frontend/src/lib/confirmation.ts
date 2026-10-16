@@ -1,11 +1,19 @@
 import { reactive } from 'vue';
 
+export interface ConfirmationOption {
+  label: string;
+}
+
 export interface ConfirmationOptions {
   title: string;
   description: string;
   confirmLabel: string;
-  action: () => Promise<void>;
+  action: (context: { optionChecked: boolean }) => Promise<void>;
   danger?: boolean;
+  /** An inline checkbox under the description, for optional add-ons like
+   * archiving child sessions alongside the confirmed one. Unchecked by
+   * default; the checked state reaches `action` as `optionChecked`. */
+  option?: ConfirmationOption;
 }
 
 export const confirmation = reactive({
@@ -16,15 +24,19 @@ export const confirmation = reactive({
   danger: false,
   busy: false,
   error: '',
+  optionLabel: '',
+  optionChecked: false,
 });
 
-let action: (() => Promise<void>) | null = null;
+let action: ((context: { optionChecked: boolean }) => Promise<void>) | null = null;
 let settle: ((confirmed: boolean) => void) | null = null;
 
 function close(confirmed: boolean) {
   confirmation.open = false;
   confirmation.busy = false;
   confirmation.error = '';
+  confirmation.optionLabel = '';
+  confirmation.optionChecked = false;
   action = null;
   settle?.(confirmed);
   settle = null;
@@ -38,6 +50,8 @@ export function confirmAction(options: ConfirmationOptions): Promise<boolean> {
   confirmation.danger = options.danger ?? false;
   confirmation.busy = false;
   confirmation.error = '';
+  confirmation.optionLabel = options.option?.label ?? '';
+  confirmation.optionChecked = false;
   confirmation.open = true;
   action = options.action;
   return new Promise((resolve) => {
@@ -54,7 +68,7 @@ export async function acceptConfirmation() {
   confirmation.busy = true;
   confirmation.error = '';
   try {
-    await action();
+    await action({ optionChecked: confirmation.optionChecked });
     close(true);
   } catch (cause) {
     confirmation.error = (cause as Error).message;

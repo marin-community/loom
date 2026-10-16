@@ -57,13 +57,22 @@ test.describe('session lifecycle actions', () => {
     await confirm.click();
     await expect(page.getByTestId('token-row')).toHaveCount(0);
 
+    // The session page must publish its mobile navigation before the More
+    // sheet offers its session actions; under load the clicks can beat the
+    // publication, so wait for the session-contextual nav (its back link
+    // carries data-mobile-nav) before opening it.
+    const openMobileSessionDetails = async () => {
+      await expect(page.locator('[data-mobile-nav="sessions"]')).toBeVisible();
+      await page.getByRole('button', { name: 'More' }).click();
+      await page.getByRole('button', { name: 'Details & actions' }).click();
+    };
+
     const archived = await weaver.seedSession({
       goal: 'Archive this work without losing its history',
       name: 'archive-task',
     });
     await page.goto(`${weaver.baseUrl}/s/${archived.id}`);
-    await page.getByRole('button', { name: 'More' }).click();
-    await page.getByRole('button', { name: 'Details & actions' }).click();
+    await openMobileSessionDetails();
     await page.getByTestId('action-archive').scrollIntoViewIfNeeded();
     await page.getByTestId('action-archive').click();
     await expect(dialog).toContainText('branch, conversation, placement, and Loom history');
@@ -84,8 +93,7 @@ test.describe('session lifecycle actions', () => {
       name: 'remove-task',
     });
     await page.goto(`${weaver.baseUrl}/s/${removed.id}`);
-    await page.getByRole('button', { name: 'More' }).click();
-    await page.getByRole('button', { name: 'Details & actions' }).click();
+    await openMobileSessionDetails();
     const scroller = page.getByTestId('details-scroll');
     await expect(scroller).toHaveCSS('overflow-y', 'auto');
     const remove = page.getByTestId('action-remove');
@@ -97,8 +105,7 @@ test.describe('session lifecycle actions', () => {
     expect((await weaver.getSession(removed.id)).id).toBe(removed.id);
     await page.goForward();
     if (!(await remove.isVisible())) {
-      await page.getByRole('button', { name: 'More' }).click();
-      await page.getByRole('button', { name: 'Details & actions' }).click();
+      await openMobileSessionDetails();
     }
     await remove.scrollIntoViewIfNeeded();
     await remove.click();
@@ -132,5 +139,69 @@ test.describe('session lifecycle actions', () => {
     await expect
       .poll(async () => (await weaver.getSession(s.id)).branch.tags)
       .not.toContainEqual(expect.objectContaining({ key: 'auto-archive' }));
+  });
+
+  test('archiving a parent can take its children along', async ({ page, weaver }) => {
+    const parent = await weaver.seedSession({ goal: 'Delegate the work', name: 'parent-task' });
+    const child = await weaver.seedSession({
+      goal: 'Do the delegated work',
+      name: 'child-task',
+      parent: parent.branch.id,
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${parent.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('action-archive').click();
+    const dialog = page.getByTestId('confirm-dialog');
+    await expect(dialog).toContainText('Archive this session?');
+    await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
+      'Also archive 1 child session',
+    );
+    await dialog.getByTestId('confirm-dialog-option').getByRole('checkbox').check();
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
+    await expect.poll(async () => (await weaver.getSession(child.id)).status).toBe('archived');
+  });
+
+  test('archiving a parent leaves the subtree alone unless asked', async ({ page, weaver }) => {
+    const parent = await weaver.seedSession({ goal: 'Delegate only myself', name: 'solo-parent' });
+    const child = await weaver.seedSession({
+      goal: 'Survive the parent archive',
+      name: 'surviving-child',
+      parent: parent.branch.id,
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${parent.id}`);
+    await page.getByRole('button', { name: /Details/ }).click();
+    await page.getByTestId('action-archive').click();
+    const dialog = page.getByTestId('confirm-dialog');
+    await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
+      'Also archive 1 child session',
+    );
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
+    expect((await weaver.getSession(child.id)).status).not.toBe('archived');
+  });
+
+  test('bulk archive from the selection toolbar can include children', async ({ page, weaver }) => {
+    const parent = await weaver.seedSession({ goal: 'Fleet parent', name: 'fleet-parent' });
+    const child = await weaver.seedSession({
+      goal: 'Fleet child',
+      name: 'fleet-child',
+      parent: parent.branch.id,
+    });
+
+    await page.goto(weaver.baseUrl);
+    await page.locator(`[data-session-id="${parent.id}"]`).getByRole('checkbox').check();
+    await page.getByTestId('selection-toolbar').getByRole('button', { name: 'Archive' }).click();
+    const dialog = page.getByTestId('confirm-dialog');
+    await expect(dialog).toContainText('Archive 1 selected session?');
+    await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
+      'Also archive 1 child session',
+    );
+    await dialog.getByTestId('confirm-dialog-option').getByRole('checkbox').check();
+    await page.getByTestId('confirm-dialog-confirm').click();
+    await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
+    await expect.poll(async () => (await weaver.getSession(child.id)).status).toBe('archived');
   });
 });
