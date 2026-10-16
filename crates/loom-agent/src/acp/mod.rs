@@ -45,6 +45,7 @@
 //! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 
+mod images;
 mod wire;
 
 use std::collections::{HashMap, HashSet};
@@ -1570,7 +1571,7 @@ impl LiveTool {
                         "mime_type": mime_type,
                         "uri": uri,
                     })),
-                    wire::ContentBlock::Other => {}
+                    wire::ContentBlock::ResourceLink { .. } | wire::ContentBlock::Other => {}
                 },
                 ToolCallContent::Diff {
                     path,
@@ -1700,6 +1701,7 @@ struct Task {
     driver_epoch: i64,
     session_id: String,
     branch_id: String,
+    work_dir: PathBuf,
     relay_name: String,
     acp_session_id: String,
     events_tx: broadcast::Sender<SseEvent>,
@@ -1798,6 +1800,7 @@ impl Task {
             driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
+            work_dir: PathBuf::from(&session.work_dir),
             relay_name,
             acp_session_id: String::new(),
             events_tx,
@@ -1906,6 +1909,7 @@ impl Task {
             driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
+            work_dir: PathBuf::from(&session.work_dir),
             relay_name,
             acp_session_id,
             events_tx,
@@ -2707,12 +2711,16 @@ impl Task {
             .remove(&tc.tool_call_id)
             .unwrap_or_else(|| LiveTool::new(&tc.tool_call_id, seq));
         tool.merge(&tc);
+        let should_journal = tool.is_terminal()
+            && !chat::tool_call_exists(&self.db, &self.session_id, &tool.id)
+                .await
+                .unwrap_or(false);
+        if should_journal && !self.suppress_journal {
+            images::capture_linked_images(&mut tool.content, &self.work_dir).await;
+        }
         self.emit("tool", tool.sse(self.current_turn));
         if tool.is_terminal() {
-            if !chat::tool_call_exists(&self.db, &self.session_id, &tool.id)
-                .await
-                .unwrap_or(false)
-            {
+            if should_journal {
                 let payload = tool.block_payload();
                 self.journal_block(kind::TOOL_CALL, payload).await;
             }

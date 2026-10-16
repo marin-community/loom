@@ -2,6 +2,7 @@ import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/weaver';
 import type { Session, WeaverFixture } from '../fixtures/weaver';
 import { join } from 'path';
+import { unlinkSync, writeFileSync } from 'fs';
 
 // The Conversation surface for an ACP session (`protocol='acp'`): a live,
 // journal-backed transcript rendered as typeset dialogue — serif prose for the
@@ -16,6 +17,7 @@ import { join } from 'path';
 //   think:TEXT           an agent_thought_chunk
 //   tool:KIND[:TITLE]    a tool_call (in_progress → completed); `edit` carries a diff
 //   image[:TITLE]        a read tool that carries an ACP image content block
+//   image-file:PATH      a read tool that links to a local image
 //   plan                 a plan update
 //   usage:USED:SIZE      a usage_update
 //   wait:MS              sleep (keeps the turn live — for queue/interrupt tests)
@@ -321,31 +323,79 @@ test.describe('acp conversation', () => {
     await expect(expand).toBeFocused();
   });
 
-  test('previews ACP image tool results and opens the full-size image', async ({
+  test('keeps image evidence visible in a collapsed tool run and opens it from the keyboard', async ({
     page,
     weaver,
   }) => {
     await openAcp(page, weaver, {
-      goal: 'image:Read /tmp/screenshot.png|say:image inspected',
+      goal: 'tool:execute:Capture screenshots|image:View Image /tmp/before.png|image:View Image /tmp/after.png|say:images inspected',
     });
-    await expect(page.getByText('image inspected', { exact: true })).toBeVisible();
+    await expect(page.getByText('images inspected', { exact: true })).toBeVisible();
 
-    const head = page
-      .getByTestId('acp-activity-head')
-      .filter({ hasText: 'Read /tmp/screenshot.png' });
-    await head.click();
-    const preview = page.getByTestId('tool-image-preview');
+    const activity = page.getByTestId('acp-activity');
+    await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
+    await expect(activity.getByTestId('tool-image-preview')).toHaveCount(2);
+    const preview = activity.getByTestId('tool-image-preview').first();
     await expect(preview.locator('img')).toHaveAttribute('src', /^data:image\/png;base64,/);
-    await preview.click();
+    await preview.focus();
+    await page.keyboard.press('Enter');
 
     const viewer = page.getByTestId('tool-detail-dialog');
-    await expect(viewer).toContainText('Read /tmp/screenshot.png');
+    await expect(viewer).toContainText('View Image /tmp/before.png');
     await expect(page.getByTestId('tool-detail-image')).toHaveAttribute(
       'src',
       /^data:image\/png;base64,/,
     );
-    await page.getByTestId('tool-detail-close').click();
+    await page.keyboard.press('Escape');
     await expect(viewer).toBeHidden();
+    await expect(preview).toBeFocused();
+
+    await activity.getByTestId('acp-activity-head').click();
+    await expect(activity.getByTestId('acp-activity-item')).toHaveCount(3);
+    await expect(activity.getByTestId('tool-image-preview')).toHaveCount(2);
+
+    await page.reload();
+    await expect(page.getByTestId('tool-image-preview')).toHaveCount(2);
+    await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
+  });
+
+  test('opens a solo image on a phone without expanding a tool row', async ({ page, weaver }) => {
+    const path = join(weaver.repoPath, 'screenshot.png');
+    const png = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1440;
+      canvas.height = 1000;
+      const context = canvas.getContext('2d')!;
+      context.fillStyle = '#345b7d';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+    writeFileSync(path, Buffer.from(png, 'base64'));
+    await openAcp(page, weaver, { goal: `image-file:${path}|say:inspected` });
+    await expect(page.getByText('inspected', { exact: true })).toBeVisible();
+    unlinkSync(path);
+    await page.reload();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId('acp-activity-head')).toBeDisabled();
+    const preview = page.getByTestId('tool-image-preview');
+    await expect(preview.locator('img')).toHaveJSProperty('naturalWidth', 1440);
+    await preview.click();
+    const image = page.getByTestId('tool-detail-image');
+    await expect(image).toBeVisible();
+    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
+    await page.keyboard.press('Shift+Tab');
+    const size = page.getByTestId('tool-detail-size');
+    await expect(size).toBeFocused();
+    await page.keyboard.press('Enter');
+    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBe(1440);
+    await page.keyboard.press('Tab');
+    await expect(page.getByTestId('tool-detail-close')).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(size).toBeFocused();
+    await page.keyboard.press('Enter');
+    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.getByTestId('tool-detail-close').click();
     await expect(preview).toBeFocused();
   });
 

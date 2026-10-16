@@ -1378,11 +1378,21 @@ function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
 // Whether a call carries anything worth expanding.
 function hasDetail(t: ToolCallPayload): boolean {
   return (t.content ?? []).some(
-    (content) =>
-      content.type === 'diff' ||
-      content.type === 'image' ||
-      (content.type === 'text' && !!content.text),
+    (content) => content.type === 'diff' || (content.type === 'text' && !!content.text),
   );
+}
+// Images remain discoverable even when the surrounding tool run is folded.
+function activityImages(row: Extract<Row, { type: 'activity' }>) {
+  return row.items.flatMap(({ tool }) =>
+    tool.content.flatMap((content, index) =>
+      content.type === 'image'
+        ? [{ key: `${tool.tool_call_id}-${index}`, content, title: tool.title || tool.tool_kind }]
+        : [],
+    ),
+  );
+}
+function toolDetails(t: ToolCallPayload) {
+  return t.content.filter((content) => content.type !== 'image');
 }
 // Execute titles are the command line itself. Keep long commands compact in the
 // activity list, but always let the operator disclose the complete command even
@@ -1701,6 +1711,15 @@ function goTo(anchor: string) {
                     >{{ row.failures }} failed</span
                   >
                 </button>
+                <div class="acp-activity-images" data-testid="acp-activity-images">
+                  <ToolContentPreview
+                    v-for="image in activityImages(row)"
+                    :key="image.key"
+                    :content="image.content"
+                    :title="image.title"
+                    thumbnail
+                  />
+                </div>
                 <div
                   v-if="
                     isSoloToolActivity(row) &&
@@ -1711,7 +1730,7 @@ function goTo(anchor: string) {
                   data-testid="acp-detail"
                 >
                   <ToolContentPreview
-                    v-for="(content, index) in row.items[0].tool.content"
+                    v-for="(content, index) in toolDetails(row.items[0].tool)"
                     :key="index"
                     :content="content"
                     :title="row.items[0].tool.title || row.items[0].tool.tool_kind"
@@ -1773,7 +1792,7 @@ function goTo(anchor: string) {
                         data-testid="acp-detail"
                       >
                         <ToolContentPreview
-                          v-for="(content, index) in entry.item.tool.content"
+                          v-for="(content, index) in toolDetails(entry.item.tool)"
                           :key="index"
                           :content="content"
                           :title="entry.item.tool.title || entry.item.tool.tool_kind"
@@ -2367,11 +2386,11 @@ function goTo(anchor: string) {
   max-width: 100%;
   font-family: var(--font-mono);
   font-size: 0.75rem;
-  color: var(--faint);
+  color: var(--muted);
   cursor: pointer;
 }
 .acp-fold-head:hover {
-  color: var(--muted);
+  color: var(--fg);
 }
 .acp-fold-head:disabled {
   cursor: default;
@@ -2415,6 +2434,14 @@ function goTo(anchor: string) {
   align-items: center;
   gap: 0.45rem;
   min-width: 0;
+}
+.acp-activity-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.acp-activity-images:not(:empty) {
+  margin: 0.4rem 0 0.4rem 1.15rem;
 }
 .acp-activity-failbadge {
   flex: none;

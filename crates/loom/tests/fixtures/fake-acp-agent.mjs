@@ -16,6 +16,7 @@
 //                        an `edit` kind carries a diff, others a text content block
 //   toolwait:MS[:title]  an in-progress execute tool that waits until MS or cancellation
 //   image[:title]        a read tool whose result is an ACP image content block
+//   image-file:PATH      a completed read with a resource_link, as Codex emits
 //   toolfail[:title]     a tool_call that ends with status `failed`
 //   plan                 a plan update with two entries
 //   usage:USED:SIZE      a usage_update
@@ -267,6 +268,17 @@ async function runToken(tok) {
     });
     await sleep(10);
     notify({ sessionUpdate: "tool_call_update", toolCallId, status: "failed" });
+  } else if (tok.startsWith("image-file:")) {
+    const path = tok.slice("image-file:".length);
+    notify({
+      sessionUpdate: "tool_call",
+      toolCallId: "call-image-file-" + Math.floor(Math.random() * 100000),
+      title: `View Image ${path}`,
+      kind: "read",
+      status: "completed",
+      content: [{ type: "content", content: { type: "resource_link", uri: path, name: path } }],
+      locations: [{ path }],
+    });
   } else if (tok === "image" || tok.startsWith("image:")) {
     const title = tok.includes(":") ? tok.slice(tok.indexOf(":") + 1) : "Read screenshot.png";
     const toolCallId = "call-image-" + Math.floor(Math.random() * 100000);
