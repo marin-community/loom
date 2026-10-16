@@ -1273,6 +1273,7 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
                     - Report progress: `loom status set --tag ok --message \"tests running\"` (use `attention` or `blocked` when a person must act).\n\
                     - Communicate: `loom channels read`; `loom channels send \"question or update\"`.\n\
                     - Save or delegate: `loom artifacts write plan plan.md`; `loom sessions launch \"implement the parser\"`.\n\
+                    - Link a worktree file: `loom sessions url --path reports/index.md` (uses the public Loom URL).\n\
                     - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A typed child result also notifies its parent channel.\n\
                     - Wait for a result: `loom channels wait --channel <child-id> --kind result --after <last-seen-seq>` (0 for a new child's first result); `sessions wait` observes lifecycle.\n\
                     - Finish delegated work: `loom channels send --kind result --idempotency-key <task-id>:result:1 \"<outcome or PR>\"`. Reuse the key on retries; increment the revision for changed results."

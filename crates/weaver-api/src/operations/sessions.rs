@@ -265,6 +265,23 @@ pub mod events {
     }
 }
 
+pub mod file {
+    use super::prelude::*;
+
+    /// Preview a file in the session's worktree, including untracked files.
+    #[operation(id = "sessions.file", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], cli = "sessions file")]
+    pub struct Input {
+        /// Path relative to the session's worktree.
+        #[operand(positional)]
+        pub path: String,
+        #[operand(context)]
+        pub session: String,
+    }
+
+    pub type Output = SessionFileView;
+}
+
 pub mod files {
     use super::prelude::*;
 
@@ -1388,6 +1405,8 @@ pub mod url {
     #[operation(id = "sessions.url", actor = SessionSelf, scope = Session, risk = Read,
                 grants = ["loom/sessions/read@v1"], cli = "sessions url")]
     pub struct Input {
+        /// Open a worktree-relative file in the viewer instead of the dashboard.
+        pub path: Option<String>,
         #[operand(context)]
         pub session: String,
     }
@@ -1396,6 +1415,7 @@ pub mod url {
 }
 
 static OPERATIONS: &[&OperationSpec] = &[
+    file::SPEC,
     context::SPEC,
     summary::get::SPEC,
     summary::list::SPEC,

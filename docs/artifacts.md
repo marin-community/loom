@@ -128,3 +128,21 @@ compatibility history; new feedback uses staged reviews.
 The REST routes and storage ownership are catalogued in
 [Architecture](ARCHITECTURE.md#rest-api). The agent workflow and reference
 conventions live in [the smartdoc skill](../.agents/skills/smartdoc.md).
+
+## Worktree file links
+
+To share a file without copying it into the artifact store, run
+`loom sessions url --path reports/index.md`. The command prints a public Loom
+link of the form `/s/<session-id>/files/reports/index.md`, with path segments
+URL-encoded. Paths are relative to the session's worktree and may name untracked
+or ignored files. To link a file in another session, use
+`loom sessions url <session> --path <path>`.
+
+The file viewer shares Markdown, sandboxed HTML, and image previews with the
+artifact viewer, and also displays plain text. Markdown images and
+links resolve relative to the file. HTML previews accept self-contained pages,
+as HTML artifacts do. Text previews are limited to 2 MiB; binary and larger text
+files offer a download. File links show current worktree contents on load or
+Reload, with no artifact revisions or comments. They require the same session
+access as other Loom pages, reject paths outside the worktree (including
+symlinks), and stop working if the file or worktree is removed.

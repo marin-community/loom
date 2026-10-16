@@ -156,6 +156,12 @@ export const listSessionSummaries = (
 
 export const getSession = (id: string) => invokeOperation('sessions.get', { session: id });
 
+export const getSessionFile = (id: string, path: string) =>
+  invokeOperation('sessions.file', { session: id, path });
+
+export const sessionFileRawUrl = (id: string, path: string) =>
+  `${operationPath('sessions.raw')}?${new URLSearchParams({ session: id, path })}`;
+
 export const getSessionGithubAccess = (id: string) =>
   invokeOperation('sessions.github.access.list', { session: id });
 /** The write half is the two operations `permissions.github.grant` (mode

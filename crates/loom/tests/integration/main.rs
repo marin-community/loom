@@ -33,6 +33,7 @@ mod repo_config;
 mod repos;
 mod reviews;
 mod scratch;
+mod session_files;
 mod session_layout;
 mod session_management;
 mod sessions;

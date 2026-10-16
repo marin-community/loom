@@ -123,6 +123,7 @@ function withSection(section?: string | null): string {
 }
 const docTitle = computed(() => {
   const id = route.params.id;
+  if (typeof route.params.path === 'string') return withSection(route.params.path);
   if (typeof id === 'string' && route.path.startsWith(`/s/${id}`)) {
     return withSection(sessionById(id)?.branch.title || sessionById(id)?.branch.name);
   }
@@ -164,6 +165,7 @@ const CACHED_VIEWS = [
 // cap is really there to bound the detail terminals.
 const KEEP_ALIVE_MAX = 4;
 function cacheKey(route: { path: string; params: Record<string, string | string[]> }): string {
+  if (typeof route.params.path === 'string') return `file:${route.params.id}`;
   // Every `/s/:id…` path (the work tabs and the Artifacts deep-links) is the
   // same SessionDetail instance, so they share one cache key — switching to
   // artifacts and back is a tab flip on the warm page, never a remount.

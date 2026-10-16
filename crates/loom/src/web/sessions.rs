@@ -822,16 +822,14 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
 // handles file browsing and editing; this endpoint only reads, never writes.
 // ---------------------------------------------------------------------------
 
-/// Validate a client-supplied repo-relative path: reject absolute paths and any
-/// `.`/`..`/prefix component, so it cannot escape the worktree. Returns the
-/// normalized (`/`-separated) relative path.
+/// Validate a worktree-relative path. Backslashes are refused rather than
+/// normalized after validation, which could introduce a traversal segment.
 fn rel_path(raw: &str) -> ApiResult<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
+    if raw.is_empty() {
         return Err(AppError::bad_request("path is required"));
     }
-    let p = std::path::Path::new(trimmed);
-    if p.is_absolute() {
+    let p = std::path::Path::new(raw);
+    if p.is_absolute() || raw.contains('\\') {
         return Err(AppError::bad_request(
             "path must be relative to the worktree",
         ));
@@ -841,7 +839,25 @@ fn rel_path(raw: &str) -> ApiResult<String> {
             "path must not contain '.' or '..' segments",
         ));
     }
-    Ok(trimmed.replace('\\', "/"))
+    Ok(raw.to_owned())
+}
+
+async fn worktree_file(work_dir: &str, path: &str) -> ApiResult<PathBuf> {
+    let relative = rel_path(path)?;
+    let root = tokio::fs::canonicalize(work_dir).await?;
+    let file = tokio::fs::canonicalize(root.join(relative))
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => AppError::not_found("file"),
+            _ => error.into(),
+        })?;
+    if !file.starts_with(root) {
+        return Err(AppError::bad_request("file is outside the worktree"));
+    }
+    if !tokio::fs::metadata(&file).await?.is_file() {
+        return Err(AppError::bad_request("path is not a regular file"));
+    }
+    Ok(file)
 }
 
 /// Best-effort content type from the file extension, for the raw-bytes endpoint.
@@ -863,6 +879,8 @@ fn content_type_for(path: &str) -> &'static str {
         "bmp" => "image/bmp",
         "ico" => "image/x-icon",
         "pdf" => "application/pdf",
+        "md" | "markdown" => "text/markdown; charset=utf-8",
+        "html" | "htm" => "text/html; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -1152,6 +1170,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<ops::chat::Op, _, _>(op_chat),
         register::<ops::conversation::Op, _, _>(op_conversation),
         register::<ops::files::Op, _, _>(op_files),
+        register::<ops::file::Op, _, _>(op_file),
         register::<ops::mode::Op, _, _>(op_mode),
         register::<ops::url::Op, _, _>(op_url),
         register::<ops::ide_info::Op, _, _>(op_ide_info),
@@ -1879,6 +1898,52 @@ async fn op_files(
     Ok(SessionFilesView { files })
 }
 
+async fn op_file(
+    context: OperationContext,
+    input: ops::file::Input,
+) -> ApiResult<weaver_api::SessionFileView> {
+    use tokio::io::AsyncReadExt;
+    use weaver_api::FilePreviewKind;
+
+    const MAX_PREVIEW_BYTES: u64 = 2 * 1024 * 1024;
+    let (session, _) = require_session(&context.state.db, &input.session).await?;
+    let file = worktree_file(&session.work_dir, &input.path).await?;
+    let mime = content_type_for(&input.path);
+    let mut kind = match mime {
+        "text/markdown; charset=utf-8" => FilePreviewKind::Markdown,
+        "text/html; charset=utf-8" => FilePreviewKind::Html,
+        "application/pdf" => FilePreviewKind::Download,
+        _ if mime.starts_with("image/") => FilePreviewKind::Image,
+        _ => FilePreviewKind::Text,
+    };
+    let mut content = None;
+    if matches!(
+        kind,
+        FilePreviewKind::Markdown | FilePreviewKind::Html | FilePreviewKind::Text
+    ) {
+        // Bound the read itself: a file may grow after a metadata check.
+        let mut bytes = Vec::new();
+        tokio::fs::File::open(file)
+            .await?
+            .take(MAX_PREVIEW_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() as u64 > MAX_PREVIEW_BYTES || bytes.contains(&0) {
+            kind = FilePreviewKind::Download;
+        } else {
+            match String::from_utf8(bytes) {
+                Ok(text) => content = Some(text),
+                Err(_) => kind = FilePreviewKind::Download,
+            }
+        }
+    }
+    Ok(weaver_api::SessionFileView {
+        path: input.path,
+        kind,
+        content,
+    })
+}
+
 async fn op_mode(
     context: OperationContext,
     input: ops::mode::Input,
@@ -1923,9 +1988,8 @@ pub(super) async fn raw_session_bytes(
     input: &ops::raw::Input,
 ) -> ApiResult<Response> {
     let (session, _) = require_session(&st.db, &input.session).await?;
-    let work_dir = PathBuf::from(&session.work_dir);
-    let rel = rel_path(&input.path)?;
-    let bytes = match tokio::fs::read(work_dir.join(&rel)).await {
+    let file = worktree_file(&session.work_dir, &input.path).await?;
+    let bytes = match tokio::fs::read(file).await {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Err(AppError::not_found("file"));
@@ -1934,8 +1998,11 @@ pub(super) async fn raw_session_bytes(
     };
     Ok((
         [
-            (header::CONTENT_TYPE, content_type_for(&rel)),
+            (header::CONTENT_TYPE, content_type_for(&input.path)),
             (header::CONTENT_DISPOSITION, "inline"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            // Raw HTML/SVG must not acquire Loom's origin when opened directly.
+            (header::CONTENT_SECURITY_POLICY, "sandbox allow-scripts; default-src 'none'; img-src data: http: https:; style-src 'unsafe-inline'; script-src 'unsafe-inline'"),
         ],
         bytes,
     )
@@ -1946,9 +2013,18 @@ async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
     let base = super::auth::public_base(st, &header::HeaderMap::new()).await;
-    Ok(SessionUrlView {
-        url: crate::links::session_url(&base, &session.id),
-    })
+    let mut url = crate::links::session_url(&base, &session.id);
+    if let Some(path) = input.path {
+        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+        rel_path(&path)?;
+        let encoded = path
+            .split('/')
+            .map(|part| utf8_percent_encode(part, NON_ALPHANUMERIC).to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        url.push_str(&format!("/files/{encoded}"));
+    }
+    Ok(SessionUrlView { url })
 }
 
 async fn op_ide_info(
