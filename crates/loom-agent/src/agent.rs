@@ -931,7 +931,7 @@ async fn start_terminal(
     // The session environment loom injects (WEAVER_API/WEAVER_BRANCH, session
     // credentials, and operator vars) — the same set the ACP relay launch
     // delivers (see [`session_env`] / [`build_acp_launch`]).
-    let mut env_owned = session_env(ctx.server_addr, ctx.branch_id, ctx.extra_env);
+    let mut env_owned = session_env(ctx.server_addr, ctx.branch_id, ctx.extra_env).await?;
     let github_adapter_dir = if let Some(session_id) = ctx
         .extra_env
         .iter()
@@ -993,19 +993,22 @@ pub fn read_local_token() -> Option<String> {
 /// the terminal (PTY) and ACP (relay) backends. `extra_env` carries the freshly
 /// minted session-bound `LOOM_TOKEN` and `LOOM_SESSION_ID`; the machine-local
 /// admin token is never injected into an agent.
-pub fn session_env(
+pub async fn session_env(
     server_addr: &str,
     branch_id: &str,
     extra_env: &[(String, String)],
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>> {
     let mut env: Vec<(String, String)> = vec![
-        ("WEAVER_API".to_string(), format!("http://{server_addr}")),
+        (
+            "WEAVER_API".to_string(),
+            crate::runner::api_url(server_addr).await?,
+        ),
         ("WEAVER_BRANCH".to_string(), branch_id.to_string()),
     ];
     for (k, v) in extra_env {
         env.push((k.clone(), v.clone()));
     }
-    env
+    Ok(env)
 }
 
 /// The `loom` binary path — a sibling of the running executable, falling back
@@ -1179,7 +1182,7 @@ pub async fn build_acp_launch(
         None
     };
 
-    let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env);
+    let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env).await?;
     push_env_default(&mut env, "LOOM_SESSION_ID", spec.session_id);
     if let Some(directory) = install_github_cli_adapter(spec.session_id, spec.extra_env).await? {
         prepend_path(&mut env, &directory);
@@ -1350,7 +1353,7 @@ async fn codex_acp_cmd(db: &Db) -> String {
 /// its deterministic one-shot decisions, so the default reviewer is `user`
 /// unless `CODEX_CONFIG` already names one. Weaver commands still need to
 /// reach Loom from inside that sandbox, so `agent` mode also enables Codex's
-/// network proxy, scoped to Loom's known local hostnames.
+/// network proxy, scoped to loopback and the runner's control-plane host.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
@@ -1399,15 +1402,27 @@ fn configure_codex_acp(
             .as_object_mut()
             .ok_or_else(|| anyhow!("CODEX_CONFIG.features.network_proxy must be a JSON object"))?;
         proxy.insert("enabled".to_string(), json!(true));
+        // The Docker control-plane alias resolves to a private address. Domain
+        // allow rules alone do not bypass Codex's separate private-network gate.
+        proxy.insert("allow_local_binding".to_string(), json!(true));
+        let api_host = env
+            .iter()
+            .rev()
+            .find_map(|(name, value)| (name == "WEAVER_API").then_some(value))
+            .map(|value| reqwest::Url::parse(value))
+            .transpose()
+            .context("invalid session WEAVER_API URL")?
+            .and_then(|url| url.host_str().map(str::to_string));
         let domains = proxy
             .entry("domains".to_string())
             .or_insert_with(|| json!({}));
         let domains = domains.as_object_mut().ok_or_else(|| {
             anyhow!("CODEX_CONFIG.features.network_proxy.domains must be a JSON object")
         })?;
-        // Local launches use loopback. ContainerRunner overrides WEAVER_API to
-        // the `loom` Docker-network alias when it delivers the launch spec.
-        for host in ["127.0.0.1", "localhost", "loom"] {
+        for host in ["127.0.0.1", "localhost"]
+            .into_iter()
+            .chain(api_host.as_deref())
+        {
             domains.insert(host.to_string(), json!("allow"));
         }
     }
@@ -2865,10 +2880,17 @@ mod tests {
 
     #[test]
     fn codex_acp_agent_mode_routes_approvals_to_loom() {
-        let mut env = vec![(
-            "CODEX_CONFIG".to_string(),
-            r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#.to_string(),
-        )];
+        let mut env = vec![
+            (
+                "CODEX_CONFIG".to_string(),
+                r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#
+                    .to_string(),
+            ),
+            (
+                "WEAVER_API".to_string(),
+                "http://control-plane:4321".to_string(),
+            ),
+        ];
 
         configure_codex_acp(&mut env, "ignored", "high", "agent").unwrap();
 
@@ -2884,12 +2906,19 @@ mod tests {
         assert_eq!(config["features"]["shell_snapshot"], true);
         assert_eq!(config["features"]["apps"], false);
         assert_eq!(config["features"]["network_proxy"]["enabled"], true);
-        for host in ["127.0.0.1", "localhost", "loom"] {
+        assert_eq!(
+            config["features"]["network_proxy"]["allow_local_binding"],
+            true
+        );
+        for host in ["127.0.0.1", "localhost", "control-plane"] {
             assert_eq!(
                 config["features"]["network_proxy"]["domains"][host],
                 "allow"
             );
         }
+        assert!(config["features"]["network_proxy"]["domains"]
+            .get("*")
+            .is_none());
     }
 
     #[test]

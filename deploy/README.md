@@ -174,6 +174,12 @@ journals before serving requests. Session containers join the `loom_default`
 network so their scoped `WEAVER_API` callbacks resolve the replacement control
 service by its stable Compose name.
 
+The runner resolves that callback URL before constructing ACP's MCP descriptors,
+so both the agent CLI and its built-in MCP server use the same address. Codex's
+command proxy allows that host and local/private connections; its domain rules
+still gate other destinations. A hostname allow rule by itself does not permit a
+Docker-private address.
+
 The first update that enables `ContainerRunner` is a one-time cutover: supervisors
 created by an older Loom still live inside the control container and stop when
 it is replaced. Inventory those sessions before the cutover and adopt any

@@ -40,6 +40,9 @@ static RUNNER: OnceCell<Arc<dyn Runner>> = OnceCell::const_new();
 /// transport protocol.
 #[async_trait]
 pub trait Runner: Send + Sync {
+    /// The control-plane URL reachable from this runner's agent processes.
+    fn api_url(&self, server_addr: &str) -> String;
+
     /// Verify that the placement backend is ready to accept launches.
     async fn validate(&self) -> Result<()>;
 
@@ -55,6 +58,10 @@ pub struct ProcessRunner;
 
 #[async_trait]
 impl Runner for ProcessRunner {
+    fn api_url(&self, server_addr: &str) -> String {
+        format!("http://{server_addr}")
+    }
+
     async fn validate(&self) -> Result<()> {
         Ok(())
     }
@@ -236,6 +243,10 @@ impl ContainerRunner {
 
 #[async_trait]
 impl Runner for ContainerRunner {
+    fn api_url(&self, _server_addr: &str) -> String {
+        self.config.api_url.clone()
+    }
+
     async fn validate(&self) -> Result<()> {
         for volume in [&self.config.home_volume, &self.config.uv_volume] {
             self.docker
@@ -435,6 +446,11 @@ pub async fn validate() -> Result<()> {
     configured_runner().await?.validate().await
 }
 
+/// Resolve callbacks before they are embedded in agent and MCP configuration.
+pub async fn api_url(server_addr: &str) -> Result<String> {
+    Ok(configured_runner().await?.api_url(server_addr))
+}
+
 /// Start a supervisor using the configured placement backend.
 pub async fn spawn(opts: &tapestry::LaunchOptions<'_>, memory_max_gb: u64) -> Result<()> {
     configured_runner().await?.start(opts, memory_max_gb).await
@@ -527,6 +543,17 @@ mod tests {
             docker: Docker::connect_with_socket_defaults().unwrap(),
             config: container_config_fixture(),
         }
+    }
+
+    #[test]
+    fn callback_url_matches_supervisor_placement() {
+        assert_eq!(
+            ProcessRunner.api_url("127.0.0.1:4321"),
+            "http://127.0.0.1:4321"
+        );
+        let mut runner = container_runner();
+        runner.config.api_url = "http://control-plane:4321".to_string();
+        assert_eq!(runner.api_url("0.0.0.0:7878"), "http://control-plane:4321");
     }
 
     fn launch_options<'a>(
