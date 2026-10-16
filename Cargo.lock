@@ -1572,6 +1572,7 @@ dependencies = [
  "loom-policy",
  "loom-store",
  "loom-watch",
+ "mime_guess",
  "percent-encoding",
  "reqwest",
  "ring",

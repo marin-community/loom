@@ -860,29 +860,11 @@ async fn worktree_file(work_dir: &str, path: &str) -> ApiResult<PathBuf> {
     Ok(file)
 }
 
-/// Best-effort content type from the file extension, for the raw-bytes endpoint.
-/// Only the formats the viewer renders inline get a real type; everything else
-/// downloads as an opaque blob.
+/// Use the same MIME database for preview selection and raw responses.
 fn content_type_for(path: &str) -> &'static str {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "avif" => "image/avif",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        "pdf" => "application/pdf",
-        "md" | "markdown" => "text/markdown; charset=utf-8",
-        "html" | "htm" => "text/html; charset=utf-8",
-        _ => "application/octet-stream",
-    }
+    mime_guess::from_path(path)
+        .first_raw()
+        .unwrap_or("application/octet-stream")
 }
 
 fn history_error(error: crate::history::PageError) -> AppError {
@@ -1909,15 +1891,11 @@ async fn op_file(
     let (session, _) = require_session(&context.state.db, &input.session).await?;
     let file = worktree_file(&session.work_dir, &input.path).await?;
     let mime = content_type_for(&input.path);
-    let extension = std::path::Path::new(&input.path)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    let mut kind = match extension.as_str() {
-        "md" | "markdown" => FilePreviewKind::Markdown,
-        "html" | "htm" => FilePreviewKind::Html,
-        "pdf" => FilePreviewKind::Download,
+    let mut kind = match mime {
+        "text/markdown" | "text/x-markdown" => FilePreviewKind::Markdown,
+        "text/html" => FilePreviewKind::Html,
+        // PDF previews need a renderer that works inside the document sandbox.
+        "application/pdf" => FilePreviewKind::Download,
         _ if mime.starts_with("image/") => FilePreviewKind::Image,
         _ => FilePreviewKind::Text,
     };

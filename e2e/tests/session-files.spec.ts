@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test, expect } from '../fixtures/weaver';
 
@@ -17,6 +17,7 @@ test('file links render reports, resolve siblings, and preserve artifact navigat
     'base64',
   );
   await writeFile(join(directory, 'plot #1.png'), png);
+  await writeFile(join(directory, 'plot.apng'), png);
   await writeFile(
     join(directory, 'index.md'),
     '# Dataset review\n\n![Plot](plot%20%231.png)\n\n[Details](details%20%231.md)\n',
@@ -58,6 +59,17 @@ test('file links render reports, resolve siblings, and preserve artifact navigat
   );
   await page.goto(`${root}/files/reports/plot%20%231.png`);
   await expect(page.getByTestId('session-file').getByRole('img')).toBeVisible();
+  await page.goto(`${root}/files/reports/plot.apng`);
+  const standalone = page.getByTestId('document-image');
+  await expect
+    .poll(() => standalone.evaluate((el: HTMLImageElement) => el.naturalWidth))
+    .toBe(1);
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    page.getByRole('link', { name: 'Download', exact: true }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe('plot.apng');
+  expect((await readFile(await download.path())).equals(png)).toBe(true);
   await page.goto(`${root}/files/missing.md`);
   await expect(page.getByRole('alert')).toContainText('file');
 });

@@ -137,6 +137,9 @@ link of the form `/s/<session-id>/files/reports/index.md`, with path segments
 URL-encoded. Paths are relative to the session's worktree and may name untracked
 or ignored files. To link a file in another session, use
 `loom sessions url <session> --path <path>`.
+The same command shares images directly: `loom sessions url --path plots/loss.png`.
+Preview selection and downloads use a shared MIME database rather than a list
+of image extensions in Loom.
 
 The file viewer shares Markdown, sandboxed HTML, and image previews with the
 artifact viewer, and also displays plain text. Markdown images and

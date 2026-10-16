@@ -26,6 +26,9 @@ async fn session_file_previews_and_raw_bytes_stay_inside_the_worktree() {
         ("reports/index.md", b"# Report\n", "markdown"),
         ("report.html", b"<h1>Report</h1>", "html"),
         ("script.rs", b"fn main() {}", "text"),
+        ("results.json", b"{\"rows\": 42}", "text"),
+        ("plot.APNG", b"image data", "image"),
+        ("photo.jfif", b"image data", "image"),
         ("binary.dat", b"\0\xff", "download"),
         (
             "image.svg",
@@ -119,4 +122,13 @@ async fn session_file_previews_and_raw_bytes_stay_inside_the_worktree() {
         .split(';')
         .any(|directive| directive.trim() == "sandbox allow-scripts"));
     assert_eq!(raw.text().await.unwrap(), "<h1>Report</h1>");
+    let image = http
+        .get(format!("{}/api/sessions/raw", ts.client.base()))
+        .query(&[("session", id), ("path", "plot.APNG")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(image.status(), 200);
+    assert_eq!(image.headers()["content-type"], "image/apng");
+    assert_eq!(image.bytes().await.unwrap().as_ref(), b"image data");
 }
