@@ -17,13 +17,17 @@ export function toolCommand(tool: ToolCallPayload): string | null {
   return tool.title || null;
 }
 
-function firstLine(text: string): string {
+export function firstLine(text: string): string {
   return (
     text
       .split('\n')
       .map((line) => line.trim())
       .find(Boolean) ?? ''
   );
+}
+
+export function imageFilename(uri: string | null | undefined, title: string): string {
+  return (uri || title).split('/').pop() || title;
 }
 
 export function toolLabel(tool: ToolCallPayload): string {
@@ -46,7 +50,7 @@ export function toolLabel(tool: ToolCallPayload): string {
   if (tool.name === 'view_image' || tool.content.some((content) => content.type === 'image')) {
     const image = tool.content.find((content) => content.type === 'image');
     const path = image?.type === 'image' ? image.uri : null;
-    const name = (path || tool.locations[0]?.path || tool.title).split('/').pop();
+    const name = imageFilename(path || tool.locations[0]?.path, tool.title);
     return name ? `View ${name}` : 'View image';
   }
   return (

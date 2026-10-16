@@ -2,12 +2,13 @@
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
 import type { ToolContent } from '../types';
 import { changedDiffLines } from '../lib/toolDiff';
+import { imageFilename } from '../lib/toolPresentation';
 
 const props = defineProps<{
   content: ToolContent;
   title: string;
   thumbnail?: boolean;
-  textLabel?: string;
+  textLabel?: 'command' | 'output';
 }>();
 
 function diffLines(content: Extract<ToolContent, { type: 'diff' }>) {
@@ -26,7 +27,7 @@ const detailLabel = computed(() => {
 });
 const imageName = computed(() => {
   if (props.content.type !== 'image') return '';
-  return (props.content.uri || props.title).split('/').pop() || props.title;
+  return imageFilename(props.content.uri, props.title);
 });
 
 const expanded = ref(false);

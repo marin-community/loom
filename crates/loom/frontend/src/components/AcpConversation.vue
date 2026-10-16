@@ -56,7 +56,13 @@ import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import { localTime } from '../lib/time';
-import { toolCommand, toolFailure, toolLabel } from '../lib/toolPresentation';
+import {
+  firstLine,
+  imageFilename,
+  toolCommand,
+  toolFailure,
+  toolLabel,
+} from '../lib/toolPresentation';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import ToolContentPreview from './ToolContentPreview.vue';
@@ -889,10 +895,8 @@ const settingsSummary = computed(() =>
 const settingsFullAccess = computed(
   () =>
     configOptions.value.some(
-      (option) =>
-        isModeOption(option) &&
-        ['agent-full-access', 'bypassPermissions'].includes(String(option.currentValue)),
-    ) || currentMode.value === 'bypassPermissions',
+      (option) => isModeOption(option) && isFullAccess(option.currentValue),
+    ) || isFullAccess(currentMode.value),
 );
 function configRank(option: AcpConfigOption): number {
   if (isModeOption(option)) return 0;
@@ -907,9 +911,7 @@ function configName(option: AcpConfigOption): string {
 }
 function configTone(option: AcpConfigOption): string {
   if (!isModeOption(option)) return '';
-  return option.currentValue === 'agent-full-access' || option.currentValue === 'bypassPermissions'
-    ? 'acp-config-danger'
-    : 'acp-config-permission';
+  return isFullAccess(option.currentValue) ? 'acp-config-danger' : 'acp-config-permission';
 }
 function configChoices(option: AcpConfigOption): AcpConfigChoice[] {
   const choices = option.options ?? [];
@@ -974,6 +976,9 @@ async function pickConfig(option: AcpConfigOption, event: Event) {
 
 function isModeOption(option: AcpConfigOption): boolean {
   return option.category === 'mode' || option.id === 'mode';
+}
+function isFullAccess(value: unknown): boolean {
+  return value === 'agent-full-access' || value === 'bypassPermissions';
 }
 
 // ── Permission answering ─────────────────────────────────────────────────────
@@ -1063,14 +1068,6 @@ interface TocItem {
   title: string;
 }
 
-function firstLine(s: string): string {
-  return (
-    s
-      .split('\n')
-      .map((l) => l.trim())
-      .find(Boolean) ?? ''
-  );
-}
 function titleOf(text: string): string {
   const f = firstLine(text) || '(no text)';
   return f.replace(/^[#>\-*`\s]+/, '').trim() || f;
@@ -1094,6 +1091,7 @@ const latestPlan = computed<PlanEntry[]>(() => {
   return entries;
 });
 const contextOpen = ref(false);
+const CONTEXT_OVERLAY_QUERY = '(max-width: 1023px)';
 const contextButton = ref<HTMLButtonElement | null>(null);
 const contextRail = ref<HTMLElement | null>(null);
 
@@ -1323,7 +1321,7 @@ const contextImages = computed(() =>
       activityKey: row.key,
       toolId: image.toolId,
       kind: 'image' as const,
-      label: (image.content.uri || image.title).split('/').pop() || image.title,
+      label: imageFilename(image.content.uri, image.title),
     })),
   ),
 );
@@ -1574,12 +1572,15 @@ watch(
   () => model.value.rows.length,
   () => nextTick(updateActive),
 );
-function goTo(anchor: string) {
+async function goTo(anchor: string) {
   activeAnchor.value = anchor;
-  convScroll.value
-    ?.querySelector(`[data-anchor="${CSS.escape(anchor)}"]`)
-    ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  if (window.matchMedia('(max-width: 1023px)').matches) contextOpen.value = false;
+  if (window.matchMedia(CONTEXT_OVERLAY_QUERY).matches) contextOpen.value = false;
+  await nextTick();
+  const element = convScroll.value?.querySelector<HTMLElement>(
+    `[data-anchor="${CSS.escape(anchor)}"]`,
+  );
+  element?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  element?.focus({ preventScroll: true });
 }
 
 async function goToActivity(target: {
@@ -1593,7 +1594,7 @@ async function goToActivity(target: {
     next.set(`tool-${target.toolId}`, true);
     folds.value = next;
   }
-  if (window.matchMedia('(max-width: 1023px)').matches) contextOpen.value = false;
+  if (window.matchMedia(CONTEXT_OVERLAY_QUERY).matches) contextOpen.value = false;
   await nextTick();
   const group = convScroll.value?.querySelector<HTMLElement>(
     `[data-activity-anchor="${CSS.escape(target.activityKey)}"]`,
@@ -1601,7 +1602,9 @@ async function goToActivity(target: {
   const selector = `${target.kind === 'failure' ? 'li' : ''}[data-tool-id="${CSS.escape(target.toolId)}"]`;
   const element = group?.querySelector<HTMLElement>(selector) || group;
   element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  element?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
+  (element?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? element)?.focus({
+    preventScroll: true,
+  });
 }
 </script>
 
@@ -1702,6 +1705,7 @@ async function goToActivity(target: {
                 v-else-if="row.type === 'user'"
                 :id="row.anchor"
                 :data-anchor="row.anchor"
+                tabindex="-1"
                 class="acp-speaker"
               >
                 <header class="acp-rule">
@@ -1758,6 +1762,7 @@ async function goToActivity(target: {
                 class="acp-activity"
                 :class="{ 'acp-activity-error': isSoloToolActivity(row) && row.failures > 0 }"
                 :data-activity-anchor="row.key"
+                tabindex="-1"
                 data-testid="acp-activity"
               >
                 <button
@@ -1809,6 +1814,7 @@ async function goToActivity(target: {
                     v-for="image in activityImages(row)"
                     :key="image.key"
                     :data-tool-id="image.toolId"
+                    tabindex="-1"
                   >
                     <ToolContentPreview :content="image.content" :title="image.title" thumbnail />
                   </div>
@@ -1852,6 +1858,7 @@ async function goToActivity(target: {
                         entry.type === 'tool' ? entry.item.tool.tool_call_id : undefined
                       "
                       :class="{ 'acp-activity-error': entry.type === 'tool' && entry.item.failed }"
+                      tabindex="-1"
                     >
                       <template v-if="entry.type === 'thought'">
                         <p class="acp-activity-thought" data-testid="acp-activity-thought">
@@ -2072,7 +2079,7 @@ async function goToActivity(target: {
           </div>
         </div>
 
-        <!-- Right rail: user-turn jump list + the current plan. -->
+        <!-- Optional context: turns, images, failures, and the current plan. -->
         <nav
           v-if="contextOpen && hasContext"
           id="acp-context-rail"

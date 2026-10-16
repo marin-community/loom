@@ -680,6 +680,19 @@ test.describe('acp conversation', () => {
       goal: 'tool:read:Read source|image:View image /tmp/screenshot.png|toolfail:cargo test|say:Checking the failure.',
     });
     await expect(page.getByText('Checking the failure.', { exact: true })).toBeVisible();
+    await page.route('**/api/sessions/chat', async (route) => {
+      const response = await route.fetch();
+      const chat = await response.json();
+      for (const block of chat.blocks) {
+        // A failed read can have no detail button; the jump must still move focus.
+        if (block.kind === 'tool_call' && block.payload.status === 'failed') {
+          block.payload.tool_kind = 'read';
+          block.payload.content = [];
+        }
+      }
+      await route.fulfill({ response, json: chat });
+    });
+    await page.reload();
     await page.setViewportSize({ width: 390, height: 844 });
     const activity = page.getByTestId('acp-activity');
     await activity.getByTestId('acp-activity-head').click();
@@ -690,10 +703,15 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-rail')).toHaveCount(0);
     await expect(activity.getByTestId('acp-activity-item')).toHaveCount(3);
     await expect(page.getByTestId('acp-tool-failure')).toBeVisible();
+    await expect(activity.getByTestId('acp-activity-item').last()).toBeFocused();
     await context.click();
     await page.getByTestId('acp-context-images').getByRole('button').click();
     await expect(page.getByTestId('acp-rail')).toHaveCount(0);
     await expect(page.getByTestId('tool-image-preview')).toBeFocused();
+    await context.click();
+    await page.getByTestId('acp-turns').getByRole('button').click();
+    await expect(page.getByTestId('acp-rail')).toHaveCount(0);
+    await expect(page.locator('[data-anchor="acp-turn-0"]')).toBeFocused();
   });
 
   test('an empty conversation shows a styled empty state, not a blank canvas', async ({
