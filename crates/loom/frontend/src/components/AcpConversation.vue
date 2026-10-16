@@ -50,6 +50,7 @@ import type {
 } from '../types';
 import type { AcpMetadataView, QueuedInputView } from '../api/generated';
 import { canSend } from '../lib/sessionState';
+import { draftStorage, restoreDraft, saveDraft } from '../lib/composerDraft';
 import { openTopic, type TopicHandle } from '../lib/eventStream';
 import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
@@ -426,7 +427,9 @@ watch(
 );
 
 // ── Composer ─────────────────────────────────────────────────────────────────
-const draft = ref('');
+// The draft seeds from browser-local storage so a refresh never eats a
+// half-typed message; every later mutation re-saves it there.
+const draft = ref(restoreDraft(id.value, draftStorage()));
 const composerInput = ref<HTMLTextAreaElement | null>(null);
 const sending = ref(false);
 const queueing = ref(false);
@@ -543,7 +546,10 @@ function resizeComposer() {
     input.style.height = `${Math.min(input.scrollHeight, 256)}px`;
   });
 }
-watch(draft, resizeComposer);
+// Immediate so a draft restored from storage sizes the textarea at mount,
+// not only after the first keystroke.
+watch(draft, resizeComposer, { immediate: true });
+watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
 watch(id, () => {
   draft.value = '';
   selectedFiles.value = [];

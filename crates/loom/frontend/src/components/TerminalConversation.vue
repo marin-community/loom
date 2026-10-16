@@ -13,6 +13,7 @@ import {
 import { getSession, invokeOperation, sendMessage } from '../api';
 import type { IrisLog, IrisBlock, Session } from '../types';
 import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
+import { draftStorage, restoreDraft, saveDraft } from '../lib/composerDraft';
 import { useFollowFoot } from '../lib/followFoot';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { localTime } from '../lib/time';
@@ -193,7 +194,10 @@ watch(
 // read-only log with no composer. After a send the auto-refresh (driven by the
 // agent's own working/idle hooks) brings the new turn in; we also nudge a
 // refresh so it shows promptly.
-const draft = ref('');
+// The draft seeds from browser-local storage so a refresh never eats a
+// half-typed message; every later mutation re-saves it there.
+const draft = ref(restoreDraft(id.value, draftStorage()));
+watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
 const sending = ref(false);
 const sendError = ref('');
 const composerVisible = computed(
