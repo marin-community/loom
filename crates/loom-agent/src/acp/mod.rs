@@ -21,7 +21,8 @@
 //!   and journaling it would duplicate the transcript.
 //! - `agent_message`  `{ text }` — a whole consolidated agent message.
 //! - `thought`        `{ text, ms }` — a whole consolidated reasoning passage.
-//! - `tool_call`      `{ tool_call_id, title, tool_kind, status, content, locations }`
+//! - `tool_call`      `{ tool_call_id, title, name, input, tool_kind, status,
+//!   content, locations }`
 //!   — written once at terminal status; live state rides `tool` SSE.
 //! - `plan`           `{ entries: [{content, status}] }`.
 //! - `permission_request` `{ request_id, tool_call_id, title, options, outcome }`
@@ -45,6 +46,7 @@
 //! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 
+mod images;
 mod wire;
 
 use std::collections::{HashMap, HashSet};
@@ -1506,6 +1508,8 @@ struct LiveTool {
     id: String,
     first_seq: u64,
     title: Option<String>,
+    name: Option<String>,
+    input: Option<Value>,
     kind: Option<String>,
     status: Option<String>,
     content: Vec<ToolCallContent>,
@@ -1518,6 +1522,8 @@ impl LiveTool {
             id: id.to_string(),
             first_seq,
             title: None,
+            name: None,
+            input: None,
             kind: None,
             status: None,
             content: Vec::new(),
@@ -1528,6 +1534,12 @@ impl LiveTool {
     fn merge(&mut self, tc: &ToolCall) {
         if tc.title.is_some() {
             self.title = tc.title.clone();
+        }
+        if tc.name.is_some() {
+            self.name = tc.name.clone();
+        }
+        if tc.raw_input.is_some() {
+            self.input = tc.raw_input.clone();
         }
         if tc.kind.is_some() {
             self.kind = tc.kind.clone();
@@ -1570,7 +1582,7 @@ impl LiveTool {
                         "mime_type": mime_type,
                         "uri": uri,
                     })),
-                    wire::ContentBlock::Other => {}
+                    wire::ContentBlock::ResourceLink { .. } | wire::ContentBlock::Other => {}
                 },
                 ToolCallContent::Diff {
                     path,
@@ -1607,6 +1619,8 @@ impl LiveTool {
         json!({
             "tool_call_id": self.id.clone(),
             "title": self.title.clone().unwrap_or_default(),
+            "name": self.name.clone(),
+            "input": self.input.clone(),
             "tool_kind": self.kind.clone().unwrap_or_else(|| "other".to_string()),
             "status": self.terminal_status().to_string(),
             "content": self.content_json(),
@@ -1619,6 +1633,8 @@ impl LiveTool {
             "turn": turn,
             "tool_call_id": self.id.clone(),
             "title": self.title.clone().unwrap_or_default(),
+            "name": self.name.clone(),
+            "input": self.input.clone(),
             "tool_kind": self.kind.clone().unwrap_or_else(|| "other".to_string()),
             "status": self.status.clone().unwrap_or_else(|| "pending".to_string()),
             "content": self.content_json(),
@@ -1700,6 +1716,7 @@ struct Task {
     driver_epoch: i64,
     session_id: String,
     branch_id: String,
+    work_dir: PathBuf,
     relay_name: String,
     acp_session_id: String,
     events_tx: broadcast::Sender<SseEvent>,
@@ -1798,6 +1815,7 @@ impl Task {
             driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
+            work_dir: PathBuf::from(&session.work_dir),
             relay_name,
             acp_session_id: String::new(),
             events_tx,
@@ -1906,6 +1924,7 @@ impl Task {
             driver_epoch: session.acp_driver_epoch,
             session_id: session.id.clone(),
             branch_id: session.branch_id.clone(),
+            work_dir: PathBuf::from(&session.work_dir),
             relay_name,
             acp_session_id,
             events_tx,
@@ -2707,12 +2726,16 @@ impl Task {
             .remove(&tc.tool_call_id)
             .unwrap_or_else(|| LiveTool::new(&tc.tool_call_id, seq));
         tool.merge(&tc);
+        let should_journal = tool.is_terminal()
+            && !chat::tool_call_exists(&self.db, &self.session_id, &tool.id)
+                .await
+                .unwrap_or(false);
+        if should_journal && !self.suppress_journal {
+            images::capture_linked_images(&mut tool.content, &self.work_dir).await;
+        }
         self.emit("tool", tool.sse(self.current_turn));
         if tool.is_terminal() {
-            if !chat::tool_call_exists(&self.db, &self.session_id, &tool.id)
-                .await
-                .unwrap_or(false)
-            {
+            if should_journal {
                 let payload = tool.block_payload();
                 self.journal_block(kind::TOOL_CALL, payload).await;
             }
@@ -4187,6 +4210,25 @@ mod tests {
                 "uri": "file:///tmp/screenshot.png",
             })]
         );
+    }
+
+    #[test]
+    fn live_tool_keeps_structured_input_through_completion() {
+        let command = "cat <<'EOF'\nline one\nline two\nEOF";
+        let mut tool = LiveTool::new("command", 1);
+        tool.merge(&serde_json::from_value(json!({
+            "toolCallId": "command", "kind": "execute", "name": "exec_command",
+            "title": "Write the example", "rawInput": { "command": command }, "status": "in_progress"
+        })).unwrap());
+        tool.merge(
+            &serde_json::from_value(json!({ "toolCallId": "command", "status": "completed" }))
+                .unwrap(),
+        );
+        for payload in [tool.block_payload(), tool.sse(2)] {
+            assert_eq!(payload["name"], "exec_command");
+            assert_eq!(payload["input"]["command"], command);
+            assert_eq!(payload["title"], "Write the example");
+        }
     }
 
     #[test]

@@ -335,7 +335,12 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                 vec![Block::thinking(text("text"))],
             )),
             kind::TOOL_CALL => {
-                let name = match p.get("title").and_then(Value::as_str) {
+                let name = match p
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .or_else(|| p.get("title").and_then(Value::as_str))
+                {
                     Some(t) if !t.is_empty() => t.to_string(),
                     _ => p
                         .get("tool_kind")
@@ -343,11 +348,17 @@ pub async fn journal_to_log(db: &Db, session: &Session) -> Option<Log> {
                         .unwrap_or("tool")
                         .to_string(),
                 };
-                let input = json!({
-                    "tool_kind": p.get("tool_kind").cloned().unwrap_or(Value::Null),
-                    "content": p.get("content").cloned().unwrap_or(Value::Null),
-                    "locations": p.get("locations").cloned().unwrap_or(Value::Null),
-                });
+                let input = p
+                    .get("input")
+                    .filter(|input| !input.is_null())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "tool_kind": p.get("tool_kind").cloned().unwrap_or(Value::Null),
+                            "content": p.get("content").cloned().unwrap_or(Value::Null),
+                            "locations": p.get("locations").cloned().unwrap_or(Value::Null),
+                        })
+                    });
                 let is_error = p.get("status").and_then(Value::as_str) == Some("failed");
                 let output = tool_content_text(p.get("content"));
                 messages.push(Message::new(

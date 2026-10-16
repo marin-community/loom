@@ -97,6 +97,33 @@ Permission requests and runtime controls stay in
 the conversation that produced them; elapsed quiet time is evidence, not an
 automatic “stuck” verdict.
 
+An ACP activity run shows a short action and image count. Its disclosure retains
+the ordered reasoning and tool calls, with concise action labels and the exact
+command in a separate, expandable detail. A failed action shows its error before
+the command and full output. Progress within one turn keeps its order without
+repeating the Agent heading. Essential metadata and controls use readable muted
+text; red marks the failed action, without changing the session's attention state.
+
+The composer starts at two lines and grows with the draft. **Settings** groups
+agent-owned model, effort, permissions, and other runtime controls. The current
+model, full-access permissions, and pending permission changes remain visible
+on the toolbar where space permits. Drafts, attachments, queueing, and interruption
+controls remain available while settings change. The optional **Context** rail
+links to images and failed actions in the turn being read, alongside turns and
+the plan. On phones, following one of these links closes the rail and focuses
+the selected action or thumbnail.
+
+ACP tool images stay visible as small, labelled thumbnails beneath their activity
+run, including when the tools are collapsed. Clicking, tapping, or activating a
+thumbnail from the keyboard opens a viewer that initially fits the image to the
+available width. **Actual size** restores the original resolution for inspection;
+closing the viewer returns focus to the thumbnail. These previews use image
+content preserved in the journal, so they survive a reload without depending on
+the original local file.
+For local image resource links, Loom captures supported raster images up to
+10 MiB from the session worktree or the system temporary directory at tool
+completion. If capture fails, the tool detail explains why a preview is unavailable.
+
 An in-place model handoff pauses conversation input and shows the server-owned
 handoff stage until the incoming provider is ready. The same transition appears
 in the session header and fleet, so leaving the open Details popover does not

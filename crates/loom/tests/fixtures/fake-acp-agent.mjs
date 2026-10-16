@@ -16,6 +16,7 @@
 //                        an `edit` kind carries a diff, others a text content block
 //   toolwait:MS[:title]  an in-progress execute tool that waits until MS or cancellation
 //   image[:title]        a read tool whose result is an ACP image content block
+//   image-file:PATH      a completed read with a resource_link, as Codex emits
 //   toolfail[:title]     a tool_call that ends with status `failed`
 //   plan                 a plan update with two entries
 //   usage:USED:SIZE      a usage_update
@@ -262,11 +263,24 @@ async function runToken(tok) {
       toolCallId,
       title,
       kind: "execute",
+      name: "exec_command",
+      rawInput: { command: title },
       status: "in_progress",
       content: [{ type: "content", content: { type: "text", text: "exit 1: boom" } }],
     });
     await sleep(10);
     notify({ sessionUpdate: "tool_call_update", toolCallId, status: "failed" });
+  } else if (tok.startsWith("image-file:")) {
+    const path = tok.slice("image-file:".length);
+    notify({
+      sessionUpdate: "tool_call",
+      toolCallId: "call-image-file-" + Math.floor(Math.random() * 100000),
+      title: `View Image ${path}`,
+      kind: "read",
+      status: "completed",
+      content: [{ type: "content", content: { type: "resource_link", uri: path, name: path } }],
+      locations: [{ path }],
+    });
   } else if (tok === "image" || tok.startsWith("image:")) {
     const title = tok.includes(":") ? tok.slice(tok.indexOf(":") + 1) : "Read screenshot.png";
     const toolCallId = "call-image-" + Math.floor(Math.random() * 100000);
@@ -315,6 +329,8 @@ async function runToken(tok) {
       toolCallId,
       title: title || "Tool " + kind,
       kind,
+      name: kind === "execute" ? "exec_command" : kind,
+      rawInput: kind === "execute" ? { command: title || "Tool " + kind } : null,
       status: "in_progress",
       content,
       locations: [{ path: "/w/file.rs", line: 1 }],

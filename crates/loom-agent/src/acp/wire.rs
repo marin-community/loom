@@ -228,7 +228,7 @@ pub struct ThreadStatus {
 ///
 /// Agent prose consumes only [`ContentBlock::Text`], while tool calls also
 /// preserve images for the durable chat journal and Conversation preview.
-/// Other protocol content (audio/resources and future variants) degrades to
+/// Other protocol content (audio and future variants) degrades to
 /// [`ContentBlock::Other`] until loom has a truthful renderer for it.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -243,6 +243,11 @@ pub enum ContentBlock {
         #[serde(default)]
         uri: Option<String>,
     },
+    ResourceLink {
+        uri: String,
+        #[serde(default, rename = "mimeType")]
+        mime_type: Option<String>,
+    },
     #[serde(other)]
     Other,
 }
@@ -252,7 +257,9 @@ impl ContentBlock {
     pub fn text(&self) -> Option<&str> {
         match self {
             ContentBlock::Text { text } => Some(text),
-            ContentBlock::Image { .. } | ContentBlock::Other => None,
+            ContentBlock::Image { .. }
+            | ContentBlock::ResourceLink { .. }
+            | ContentBlock::Other => None,
         }
     }
 }
@@ -265,6 +272,10 @@ pub struct ToolCall {
     pub tool_call_id: String,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub raw_input: Option<Value>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]

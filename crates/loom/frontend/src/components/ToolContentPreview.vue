@@ -2,10 +2,13 @@
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
 import type { ToolContent } from '../types';
 import { changedDiffLines } from '../lib/toolDiff';
+import { imageFilename } from '../lib/toolPresentation';
 
 const props = defineProps<{
   content: ToolContent;
   title: string;
+  thumbnail?: boolean;
+  textLabel?: 'command' | 'output';
 }>();
 
 function diffLines(content: Extract<ToolContent, { type: 'diff' }>) {
@@ -20,10 +23,16 @@ const imageSrc = computed(() => {
 const detailLabel = computed(() => {
   if (props.content.type === 'diff') return props.content.path;
   if (props.content.type === 'image') return props.content.uri ?? props.content.mime_type;
-  return 'Command output';
+  return props.textLabel === 'command' ? 'Command' : 'Command output';
+});
+const imageName = computed(() => {
+  if (props.content.type !== 'image') return '';
+  return imageFilename(props.content.uri, props.title);
 });
 
 const expanded = ref(false);
+const actualSize = ref(false);
+const sizeButton = ref<HTMLButtonElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const titleId = `${useId()}-title`;
 let returnFocus: HTMLElement | null = null;
@@ -31,6 +40,7 @@ let previousBodyOverflow = '';
 
 function openViewer() {
   returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  actualSize.value = false;
   expanded.value = true;
 }
 
@@ -45,7 +55,12 @@ function onDocumentKeydown(event: KeyboardEvent) {
     closeViewer();
   } else if (event.key === 'Tab') {
     event.preventDefault();
-    closeButton.value?.focus();
+    const buttons = [sizeButton.value, closeButton.value].filter(
+      (button): button is HTMLButtonElement => button !== null,
+    );
+    const current = buttons.findIndex((button) => button === document.activeElement);
+    const next = (current + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
   }
 }
 
@@ -72,17 +87,24 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="tool-preview">
+  <div class="tool-preview" :class="{ 'tool-preview-thumbnail': thumbnail }">
     <button
       v-if="content.type === 'image' && imageSrc"
       type="button"
       class="tool-image-preview"
       data-testid="tool-image-preview"
       :aria-label="`Open full-size preview of ${title}`"
+      :title="detailLabel"
       @click="openViewer"
     >
       <img :src="imageSrc" :alt="title" />
-      <span class="tool-preview-action">View full size <span aria-hidden="true">↗</span></span>
+      <span v-if="thumbnail" class="tool-image-caption">
+        <span>{{ imageName }}</span
+        ><span aria-hidden="true">↗</span>
+      </span>
+      <span v-else class="tool-preview-action">
+        View full size <span aria-hidden="true">↗</span>
+      </span>
     </button>
 
     <div v-else-if="content.type === 'diff'" class="tool-code-preview">
@@ -111,7 +133,7 @@ onBeforeUnmount(() => {
         data-testid="tool-content-expand"
         @click="openViewer"
       >
-        Expand output <span aria-hidden="true">↗</span>
+        Expand {{ textLabel || 'output' }} <span aria-hidden="true">↗</span>
       </button>
     </div>
 
@@ -140,6 +162,16 @@ onBeforeUnmount(() => {
             <p :title="detailLabel">{{ detailLabel }}</p>
           </div>
           <button
+            v-if="content.type === 'image' && imageSrc"
+            ref="sizeButton"
+            type="button"
+            class="btn-secondary tool-viewer-size"
+            data-testid="tool-detail-size"
+            @click="actualSize = !actualSize"
+          >
+            {{ actualSize ? 'Fit to width' : 'Actual size' }}
+          </button>
+          <button
             ref="closeButton"
             type="button"
             class="btn-secondary tool-viewer-close"
@@ -155,6 +187,7 @@ onBeforeUnmount(() => {
             :src="imageSrc"
             :alt="title"
             class="tool-viewer-image"
+            :class="{ 'tool-viewer-image-actual': actualSize }"
             data-testid="tool-detail-image"
           />
           <pre v-else-if="content.type === 'diff'" class="tool-viewer-code acp-diff"><code
@@ -196,7 +229,7 @@ onBeforeUnmount(() => {
 }
 .tool-image-preview:hover,
 .tool-image-preview:focus-visible {
-  border-color: var(--muted);
+  border-color: var(--accent);
 }
 .tool-image-preview img {
   display: block;
@@ -204,6 +237,38 @@ onBeforeUnmount(() => {
   max-height: 18rem;
   max-width: 100%;
   object-fit: contain;
+}
+.tool-preview-thumbnail {
+  width: 9rem;
+  max-width: 100%;
+  flex: none;
+}
+.tool-preview-thumbnail .tool-image-preview {
+  flex-direction: column;
+  min-height: 0;
+  max-height: none;
+}
+.tool-preview-thumbnail img {
+  height: 5.5rem;
+}
+.tool-image-caption {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.35rem;
+  border-top: 1px solid var(--line);
+  padding: 0.25rem 0.4rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1rem;
+}
+.tool-image-caption span:first-child {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tool-preview-action {
   display: flex;
@@ -309,6 +374,7 @@ button.tool-preview-action:focus-visible,
 }
 .tool-viewer-heading {
   min-width: 0;
+  margin-right: auto;
 }
 .tool-viewer-heading h2,
 .tool-viewer-heading p {
@@ -329,8 +395,8 @@ button.tool-preview-action:focus-visible,
   font-family: var(--font-mono);
   font-size: 0.6875rem;
 }
+.tool-viewer-size,
 .tool-viewer-close {
-  margin-left: auto;
   flex: none;
   padding: 0.3rem 0.65rem;
   font-size: 0.75rem;
@@ -343,10 +409,12 @@ button.tool-preview-action:focus-visible,
 }
 .tool-viewer-image {
   display: block;
-  min-width: 100%;
-  max-width: none;
+  max-width: 100%;
   height: auto;
   margin: auto;
+}
+.tool-viewer-image-actual {
+  max-width: none;
 }
 .tool-viewer-code {
   min-width: 100%;
@@ -356,6 +424,11 @@ button.tool-preview-action:focus-visible,
 }
 
 @media (max-width: 640px) {
+  .tool-viewer-size,
+  .tool-viewer-close {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
   .tool-viewer-backdrop {
     padding: 0;
   }

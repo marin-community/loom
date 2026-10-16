@@ -5211,7 +5211,7 @@ async fn conversation_is_live_and_archive_captures_it() {
     .await
     .unwrap();
 
-    let created = rest_create(&ts, "fakeacp", "say:archived").await;
+    let created = rest_create(&ts, "fakeacp", "tool:execute:printf archived|say:archived").await;
     let id = created["id"].as_str().unwrap().to_string();
     poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
         blocks.iter().any(|b| b["kind"] == "turn_end")
@@ -5263,6 +5263,18 @@ async fn conversation_is_live_and_archive_captures_it() {
         chat_json.contains("say:archived"),
         "the goal survived the capture"
     );
+    let captured: Value = serde_json::from_str(&chat_json).unwrap();
+    for conversation in [&log, &captured] {
+        let command = conversation["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["blocks"].as_array().unwrap())
+            .find(|block| block["kind"] == "tool_use")
+            .unwrap();
+        assert_eq!(command["name"], "exec_command");
+        assert_eq!(command["input"]["command"], "printf archived");
+    }
 }
 
 /// Archived ACP sessions must recover through the relay/adapter path. A terminal
