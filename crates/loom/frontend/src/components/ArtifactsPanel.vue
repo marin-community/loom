@@ -92,12 +92,13 @@ const kind = computed(() => view.value?.meta.kind ?? 'markdown');
 const isMarkdown = computed(() => kind.value === 'markdown');
 const isHtml = computed(() => kind.value === 'html');
 const isImage = computed(() => kind.value === 'image');
-function isRenderableKind(value: string): boolean {
+function isRenderableKind(value: string): value is 'markdown' | 'html' | 'image' {
   return value === 'markdown' || value === 'html' || value === 'image';
 }
 // Markdown, HTML, and images have a rendered Preview ⇄ Source toggle; every
 // other kind is shown as read-only source only.
 const isRenderable = computed(() => isRenderableKind(kind.value));
+const previewKind = computed(() => (isRenderableKind(kind.value) ? kind.value : 'text'));
 // The pseudo-path drives the markdown image base. The artifact name carries no
 // extension, so stamp one on from the kind.
 const pseudoPath = computed(() => {
@@ -699,16 +700,11 @@ onUnmounted(() => {
             autocapitalize="off"
           ></textarea>
 
-          <pre
-            v-else-if="view && viewMode === 'source'"
-            class="h-full w-full overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[13px] leading-5 text-fg"
-          ><code>{{ view.content }}</code></pre>
-
           <DocumentPreview
-            v-if="view && viewMode === 'preview' && !editing"
+            v-if="view && !editing"
             :id="props.id"
             :path="pseudoPath"
-            :kind="kind"
+            :kind="viewMode === 'source' ? 'text' : previewKind"
             :content="view.content"
             :raw-url="artifactImageUrl"
             :title="view.meta.title || view.meta.name"

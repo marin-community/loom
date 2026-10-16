@@ -78,7 +78,7 @@ test('HTML file scripts stay sandboxed in preview and fullscreen', async ({
     </script>`,
   );
   await page.goto(`${weaver.baseUrl}/s/${session.id}/files/report.html`);
-  const inner = page.frameLocator('[data-testid="artifact-html"]');
+  const inner = page.frameLocator('[data-testid="document-html"]');
   await expect(inner.getByRole('heading')).toHaveText('Live report');
   await expect(inner.locator('html')).toHaveAttribute('data-isolated', 'yes');
   await page.getByRole('button', { name: 'Fullscreen', exact: false }).click();

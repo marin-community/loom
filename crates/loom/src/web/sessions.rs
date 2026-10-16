@@ -1909,10 +1909,15 @@ async fn op_file(
     let (session, _) = require_session(&context.state.db, &input.session).await?;
     let file = worktree_file(&session.work_dir, &input.path).await?;
     let mime = content_type_for(&input.path);
-    let mut kind = match mime {
-        "text/markdown; charset=utf-8" => FilePreviewKind::Markdown,
-        "text/html; charset=utf-8" => FilePreviewKind::Html,
-        "application/pdf" => FilePreviewKind::Download,
+    let extension = std::path::Path::new(&input.path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mut kind = match extension.as_str() {
+        "md" | "markdown" => FilePreviewKind::Markdown,
+        "html" | "htm" => FilePreviewKind::Html,
+        "pdf" => FilePreviewKind::Download,
         _ if mime.starts_with("image/") => FilePreviewKind::Image,
         _ => FilePreviewKind::Text,
     };

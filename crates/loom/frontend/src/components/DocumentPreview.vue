@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import MarkdownView from './MarkdownView.vue';
 import HtmlDocumentView from './HtmlDocumentView.vue';
+import type { FilePreviewKind } from '../api/generated';
 
 defineProps<{
   id: string;
   path: string;
-  kind: string;
+  kind: FilePreviewKind;
   content: string;
   rawUrl?: string;
   title?: string;
@@ -26,7 +27,7 @@ defineProps<{
         :src="rawUrl"
         :alt="title || path"
         class="max-h-full max-w-full object-contain"
-        data-testid="artifact-image"
+        data-testid="document-image"
       />
     </div>
     <p v-else-if="kind === 'download'" class="p-6 text-sm text-muted">

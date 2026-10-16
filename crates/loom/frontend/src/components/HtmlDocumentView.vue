@@ -44,7 +44,7 @@ watch(
       sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals"
       class="h-full w-full border-0 bg-white"
       title="HTML document"
-      data-testid="artifact-html"
+      data-testid="document-html"
     ></iframe>
     <button
       class="absolute right-2 top-2 rounded border border-line bg-surface/90 px-2 py-0.5 text-xs text-muted shadow-sm hover:bg-subtle hover:text-fg"
