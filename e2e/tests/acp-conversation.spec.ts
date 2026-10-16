@@ -137,18 +137,29 @@ async function queueAcpPrompt(
 
 test.describe('acp conversation', () => {
   test('a queue event wins over an older chat snapshot', async ({ page, weaver }) => {
-    const session = await openAcp(page, weaver, { goal: 'say:ready', name: 'queue-snapshot' });
+    const session = await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'queue-snapshot',
+    });
     await expect(page.getByText('ready', { exact: true })).toBeVisible();
     let releaseSnapshot!: () => void;
     let snapshotRead!: () => void;
-    const release = new Promise<void>((resolve) => { releaseSnapshot = resolve; });
-    const read = new Promise<void>((resolve) => { snapshotRead = resolve; });
-    await page.route('**/api/sessions/chat', async (route) => {
-      const response = await route.fetch();
-      snapshotRead();
-      await release;
-      await route.fulfill({ response });
-    }, { times: 1 });
+    const release = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const read = new Promise<void>((resolve) => {
+      snapshotRead = resolve;
+    });
+    await page.route(
+      '**/api/sessions/chat',
+      async (route) => {
+        const response = await route.fetch();
+        snapshotRead();
+        await release;
+        await route.fulfill({ response });
+      },
+      { times: 1 },
+    );
     await page.getByTestId('acp-composer-input').fill('wait:30000|say:unfinished');
     await page.getByTestId('acp-composer-send').click();
     await read;
@@ -159,7 +170,9 @@ test.describe('acp conversation', () => {
       releaseSnapshot();
     }
     await expect(page.getByTestId('acp-composer-send')).toHaveText('Send');
-    await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued', { timeout: 2000 });
+    await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued', {
+      timeout: 2000,
+    });
   });
 
   test('session updates stay attributed and survive editing human feedback', async ({
@@ -341,7 +354,8 @@ test.describe('acp conversation', () => {
     await page.keyboard.press('Enter');
 
     const viewer = page.getByTestId('tool-detail-dialog');
-    await expect(viewer).toContainText('View Image /tmp/before.png');
+    await expect(viewer).toContainText('View screenshot.png');
+    await expect(viewer).toContainText('file:///tmp/screenshot.png');
     await expect(page.getByTestId('tool-detail-image')).toHaveAttribute(
       'src',
       /^data:image\/png;base64,/,
@@ -382,7 +396,9 @@ test.describe('acp conversation', () => {
     await preview.click();
     const image = page.getByTestId('tool-detail-image');
     await expect(image).toBeVisible();
-    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
+    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(
+      390,
+    );
     await page.keyboard.press('Shift+Tab');
     const size = page.getByTestId('tool-detail-size');
     await expect(size).toBeFocused();
@@ -393,8 +409,12 @@ test.describe('acp conversation', () => {
     await page.keyboard.press('Tab');
     await expect(size).toBeFocused();
     await page.keyboard.press('Enter');
-    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(390);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    expect(await image.evaluate((img) => img.getBoundingClientRect().width)).toBeLessThanOrEqual(
+      390,
+    );
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
     await page.getByTestId('tool-detail-close').click();
     await expect(preview).toBeFocused();
   });
@@ -522,13 +542,13 @@ test.describe('acp conversation', () => {
     // One group line for the whole run, closed by default.
     const head = page.getByTestId('acp-activity-head');
     await expect(head).toHaveCount(1);
-    await expect(head).toContainText('2 steps');
-    await expect(head).toContainText('1 read');
-    await expect(head).toContainText('1 search');
+    await expect(head).toContainText('2 actions');
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(0);
 
     await head.click();
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
+    await expect(page.locator('.acp-activity-breakdown')).toContainText('1 file read');
+    await expect(page.locator('.acp-activity-breakdown')).toContainText('1 search');
   });
 
   test('gloms interleaved thinking and commands into one activity run', async ({
@@ -544,8 +564,7 @@ test.describe('acp conversation', () => {
     // Thought/tool alternation is one investigation, not four collapsed rows.
     const head = page.getByTestId('acp-activity-head');
     await expect(head).toHaveCount(1);
-    await expect(head).toContainText('2 thinking');
-    await expect(head).toContainText('2 steps');
+    await expect(head).toContainText('2 actions');
     await expect(page.getByTestId('acp-activity-thought')).toHaveCount(0);
 
     await head.click();
@@ -553,26 +572,29 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-activity-item')).toHaveCount(2);
   });
 
-  test('expands a truncated command line in an activity run', async ({ page, weaver }) => {
+  test('keeps long commands out of headings while retaining their full detail without output', async ({
+    page,
+    weaver,
+  }) => {
     const command =
       'kubectl --kubeconfig /home/operator/.kube/cluster --context production -n services exec deployment/api -- printenv';
-    await openAcp(page, weaver, { goal: `tool:execute:${command}|say:done` });
+    await openAcp(page, weaver, { goal: `toolwait:10:${command}|say:done` });
     await expect(page.getByText('done', { exact: true })).toBeVisible();
 
     const item = page.getByTestId('acp-activity-head');
     const title = item.getByTestId('acp-activity-title');
     await expect(title).toHaveClass(/truncate/);
     await expect(item).toHaveAttribute('aria-expanded', 'false');
-    await expect.poll(() => title.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true);
-    const collapsedHeight = await title.evaluate((el) => el.clientHeight);
+    await expect(title).not.toHaveText(command);
+    await expect(page.getByTestId('tool-text-preview')).toHaveCount(0);
 
     await item.click();
-    await expect(title).not.toHaveClass(/truncate/);
-    await expect(title).toHaveText(command);
     await expect(item).toHaveAttribute('aria-expanded', 'true');
-    await expect
-      .poll(() => title.evaluate((el) => el.clientHeight))
-      .toBeGreaterThan(collapsedHeight);
+    await expect(page.getByTestId('tool-text-preview')).toHaveText(command);
+    await page.getByRole('button', { name: 'Expand command' }).click();
+    await expect(page.getByTestId('tool-detail-dialog')).toContainText(command);
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('button', { name: 'Expand command' })).toBeFocused();
   });
 
   test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
@@ -589,6 +611,89 @@ test.describe('acp conversation', () => {
       page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' }),
     ).toContainText('failed');
     await expect(page.getByTestId('acp-detail')).toContainText('exit 1: boom');
+    const cause = page.getByTestId('acp-tool-failure');
+    await expect(cause).toBeVisible();
+    const causeBox = await cause.boundingBox();
+    const commandBox = await page.getByTestId('tool-text-preview').first().boundingBox();
+    expect(causeBox!.y).toBeLessThan(commandBox!.y);
+  });
+
+  test('progress keeps its order without repeating the agent heading inside a turn', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:Inspecting the source.|tool:read:Read source|say:Preparing the change.|tool:edit:Update source|say:Change is ready.',
+    });
+    const conversation = page.getByTestId('acp-conversation');
+    await expect(conversation.getByText('Change is ready.', { exact: true })).toBeVisible();
+    await expect(conversation.getByLabel('Agent update')).toHaveCount(3);
+    await expect(conversation.locator('.acp-label', { hasText: /^Agent$/ })).toHaveCount(1);
+    await page.getByTestId('acp-composer-input').fill('say:Second turn reply.');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(conversation.getByText('Second turn reply.', { exact: true })).toBeVisible();
+    await expect(conversation.locator('.acp-label', { hasText: /^Agent$/ })).toHaveCount(2);
+  });
+
+  test('the phone composer stays compact, grows with a draft, and keeps settings keyboard accessible', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, { goal: 'say:ready' });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const composer = page.getByTestId('acp-composer');
+    const input = page.getByTestId('acp-composer-input');
+    const compactHeight = await composer.evaluate(
+      (element) => element.getBoundingClientRect().height,
+    );
+    expect(compactHeight).toBeLessThan(180);
+    await input.fill(Array.from({ length: 10 }, (_, i) => `Draft line ${i}`).join('\n'));
+    await expect
+      .poll(() => composer.evaluate((element) => element.getBoundingClientRect().height))
+      .toBeGreaterThan(compactHeight + 80);
+    const draft = await input.inputValue();
+    const settings = page.getByTestId('acp-settings-toggle');
+    await settings.focus();
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('combobox', { name: 'Permissions' })).toBeFocused();
+    await expect(input).toHaveValue(draft);
+    const panel = await page.getByTestId('acp-settings-panel').boundingBox();
+    expect(panel!.x).toBeGreaterThanOrEqual(0);
+    expect(panel!.x + panel!.width).toBeLessThanOrEqual(390);
+    expect(panel!.y).toBeGreaterThanOrEqual(0);
+    await page.keyboard.press('Escape');
+    await expect(settings).toBeFocused();
+    await input.fill('');
+    await expect
+      .poll(() => composer.evaluate((element) => element.getBoundingClientRect().height))
+      .toBeLessThan(180);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  });
+
+  test('context links reveal image evidence and the failed action in the selected turn', async ({
+    page,
+    weaver,
+  }) => {
+    await openAcp(page, weaver, {
+      goal: 'tool:read:Read source|image:View image /tmp/screenshot.png|toolfail:cargo test|say:Checking the failure.',
+    });
+    await expect(page.getByText('Checking the failure.', { exact: true })).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const activity = page.getByTestId('acp-activity');
+    await activity.getByTestId('acp-activity-head').click();
+    await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
+    const context = page.getByTestId('acp-context-toggle');
+    await context.click();
+    await page.getByTestId('acp-context-failures').getByRole('button').click();
+    await expect(page.getByTestId('acp-rail')).toHaveCount(0);
+    await expect(activity.getByTestId('acp-activity-item')).toHaveCount(3);
+    await expect(page.getByTestId('acp-tool-failure')).toBeVisible();
+    await context.click();
+    await page.getByTestId('acp-context-images').getByRole('button').click();
+    await expect(page.getByTestId('acp-rail')).toHaveCount(0);
+    await expect(page.getByTestId('tool-image-preview')).toBeFocused();
   });
 
   test('an empty conversation shows a styled empty state, not a blank canvas', async ({
@@ -607,7 +712,9 @@ test.describe('acp conversation', () => {
     await page.route('**/api/sessions/chat', (route) => {
       const operands = route.request().postDataJSON() as { session?: string };
       if (operands?.session !== s!.id) return route.fallback();
-      return route.fulfill({ json: { blocks: [], live_turn: null, pending_inputs: [] } });
+      return route.fulfill({
+        json: { blocks: [], live_turn: null, pending_inputs: [] },
+      });
     });
     await page.goto(`${weaver.baseUrl}/s/${s!.id}`);
     const empty = page.getByTestId('acp-empty');
@@ -908,9 +1015,7 @@ test.describe('acp conversation', () => {
 
     await input.fill('say:queued feedback');
     await page.getByTestId('acp-composer-queue').click();
-    await expect(page.getByTestId('acp-queued')).toHaveText(
-      'queued · agent hasn’t seen this yet',
-    );
+    await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
     await expect(page.getByTestId('acp-pending')).toContainText('say:queued feedback');
     await expect(input).toHaveValue('');
     // Unlike Send, Queue leaves the running turn alone.
@@ -1038,35 +1143,57 @@ test.describe('acp conversation', () => {
     ).toBeVisible();
   });
 
-  test('permission, model, and effort pills change the live agent config', async ({
+  test('settings change the live agent config without clearing the draft', async ({
     page,
     weaver,
   }) => {
     await openAcp(page, weaver, { goal: 'say:ready' });
+    const input = page.getByTestId('acp-composer-input');
+    await input.fill('keep this unsent draft');
+    const settings = page.getByTestId('acp-settings-toggle');
+    await settings.click();
 
     const permissions = page.getByTestId('acp-config-mode');
     await expect(permissions).toContainText('Permissions');
-    await expect(permissions).toContainText('Default');
-    await permissions.getByRole('button').first().click();
-    await page.getByTestId('acp-config-menu').getByText('Accept edits', { exact: true }).click();
-    await expect(permissions).toContainText('Accept edits');
+    await expect(permissions.getByRole('combobox')).toHaveValue('default');
+    await permissions.getByRole('combobox').selectOption('acceptEdits');
 
     const model = page.getByTestId('acp-config-model');
-    await expect(model).toContainText('Fake fast');
-    await model.getByRole('button').first().click();
-    await page.getByTestId('acp-config-menu').getByText('Fake deep', { exact: true }).click();
-    await expect(model).toContainText('Fake deep');
+    await expect(model.getByRole('combobox')).toHaveValue('fake-fast');
+    await model.getByRole('combobox').selectOption('fake-deep');
+    await expect(settings).toContainText('Fake deep');
 
     const effort = page.getByTestId('acp-config-thought_level');
-    await expect(effort).toContainText('Medium');
-    await effort.getByRole('button').first().click();
-    await page.getByTestId('acp-config-menu').getByText('High', { exact: true }).click();
-    await expect(effort).toContainText('High');
+    await expect(effort.getByRole('combobox')).toHaveValue('medium');
+    await effort.getByRole('combobox').selectOption('high');
 
     const fast = page.getByTestId('acp-config-fast-mode');
     await expect(fast).toContainText('Off');
-    await fast.getByRole('button').click();
+    await fast.getByRole('checkbox').check();
     await expect(fast).toContainText('On');
+    await page.keyboard.press('Escape');
+    await expect(settings).toBeFocused();
+    await expect(input).toHaveValue('keep this unsent draft');
+    await page.reload();
+    await settings.click();
+    await expect(permissions.getByRole('combobox')).toHaveValue('acceptEdits');
+    await expect(model.getByRole('combobox')).toHaveValue('fake-deep');
+    await expect(effort.getByRole('combobox')).toHaveValue('high');
+    await expect(fast.getByRole('checkbox')).toBeChecked();
+    await expect(input).toHaveValue('keep this unsent draft');
+
+    await page.route('**/api/sessions/config/set', (route) =>
+      route.fulfill({
+        status: 400,
+        json: { error: 'The agent rejected this model.' },
+      }),
+    );
+    await model.getByRole('combobox').focus();
+    await model.getByRole('combobox').selectOption('fake-fast');
+    await expect(page.getByText('The agent rejected this model.', { exact: true })).toBeVisible();
+    await expect(model.getByRole('combobox')).toHaveValue('fake-deep');
+    await expect(model.getByRole('combobox')).toBeFocused();
+    await expect(input).toHaveValue('keep this unsent draft');
   });
 
   test('a live permission change is labelled for the next turn', async ({ page, weaver }) => {
@@ -1079,19 +1206,17 @@ test.describe('acp conversation', () => {
     });
 
     const permissions = page.getByTestId('acp-config-mode');
-    await permissions.getByRole('button').first().click();
-    await page
-      .getByTestId('acp-config-menu')
-      .getByText('Bypass permissions', { exact: true })
-      .click();
-    await expect(permissions).toContainText('Bypass permissions');
+    await page.getByTestId('acp-settings-toggle').click();
+    await permissions.getByRole('combobox').selectOption('bypassPermissions');
+    await expect(permissions.getByRole('combobox')).toHaveValue('bypassPermissions');
     await expect(permissions).toContainText('next turn');
+    await page.keyboard.press('Escape');
 
     await page.getByTestId('acp-composer-stop').click();
     await expect(page.getByTestId('acp-working')).toBeHidden({
       timeout: 5_000,
     });
-    await expect(permissions).not.toContainText('next turn');
+    await expect(page.getByTestId('acp-settings-toggle')).not.toContainText('next turn');
   });
 
   test('a permission card answers and collapses to a receipt', async ({ page, weaver }) => {

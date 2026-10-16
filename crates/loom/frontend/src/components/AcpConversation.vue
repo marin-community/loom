@@ -56,6 +56,7 @@ import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import { localTime } from '../lib/time';
+import { toolCommand, toolFailure, toolLabel } from '../lib/toolPresentation';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import ToolContentPreview from './ToolContentPreview.vue';
@@ -439,104 +440,36 @@ const composerVisible = computed(() => canSend(props.session));
 const selectedFiles = ref<string[]>([]);
 const attachmentInput = ref<HTMLInputElement | null>(null);
 const uploadingAttachment = ref(false);
+const settingsOpen = ref(false);
+const settingsRoot = ref<HTMLElement | null>(null);
+const settingsPanel = ref<HTMLElement | null>(null);
+const settingsButton = ref<HTMLButtonElement | null>(null);
 
-// The action bar sheds its least important pieces before it wraps: the send
-// hint, then the context totals, cost, slash-command count, and finally the
-// usage percentage and bar. Detection reads the live layout — are the two
-// groups on one row? — rather than fixed breakpoints, so the shed order holds
-// as controls are added or their labels change.
-const composerActions = ref<HTMLElement | null>(null);
-const composerLeft = ref<HTMLElement | null>(null);
-const composerRight = ref<HTMLElement | null>(null);
-const SHED_SELECTORS = [
-  '.acp-send-hint',
-  '.agent-usage-context',
-  '.agent-usage-cost',
-  '.acp-slash-hint',
-  '.agent-usage',
-] as const;
-
-let shedObserver: ResizeObserver | null = null;
-let shedFrame = 0;
-let shedSignature = '';
-
-function shedTargets(): HTMLElement[] {
-  const root = composerActions.value;
-  if (!root) return [];
-  return SHED_SELECTORS.map((selector) => root.querySelector<HTMLElement>(selector)).filter(
-    (el): el is HTMLElement => el !== null,
-  );
-}
-
-function groupsShareRow(): boolean {
-  const left = composerLeft.value?.getBoundingClientRect();
-  const right = composerRight.value?.getBoundingClientRect();
-  if (!left || !right) return true;
-  return Math.abs(left.top + left.height / 2 - (right.top + right.height / 2)) <= 2;
-}
-
-function shedSignatureNow(): string {
-  const root = composerActions.value;
-  const left = composerLeft.value;
-  const right = composerRight.value;
-  if (!root) return '';
-  return [
-    root.clientWidth,
-    root.clientHeight,
-    left?.offsetWidth ?? 0,
-    left?.offsetHeight ?? 0,
-    right?.offsetWidth ?? 0,
-    right?.offsetHeight ?? 0,
-  ].join(':');
-}
-
-function refitComposerActions() {
-  const root = composerActions.value;
-  const targets = shedTargets();
-  if (!root || !targets.length) return;
-  for (const el of targets) el.style.display = '';
-  // Below the phone breakpoint the groups stack as full-width rows, so there is
-  // nothing to shed.
-  if (getComputedStyle(root).flexDirection === 'column') return;
-  let hidden = 0;
-  while (hidden < targets.length && !groupsShareRow()) {
-    targets[hidden].style.display = 'none';
-    hidden += 1;
+async function toggleSettings(event: MouseEvent) {
+  if (settingsOpen.value) {
+    closeSettings();
+    return;
   }
+  settingsOpen.value = true;
+  if (event.detail !== 0) return;
+  await nextTick();
+  const first =
+    settingsPanel.value?.querySelector<HTMLElement>(
+      'select:not(:disabled), input:not(:disabled)',
+    ) ?? settingsPanel.value?.querySelector<HTMLElement>('button:not(:disabled)');
+  first?.focus();
 }
 
-function scheduleComposerRefit() {
-  if (shedFrame) return;
-  shedFrame = requestAnimationFrame(() => {
-    shedFrame = 0;
-    const signature = shedSignatureNow();
-    if (signature === shedSignature) return;
-    refitComposerActions();
-    shedSignature = shedSignatureNow();
-  });
+function closeSettings(restoreFocus = true) {
+  settingsOpen.value = false;
+  if (restoreFocus) void nextTick(() => settingsButton.value?.focus());
 }
 
-watch(
-  [composerActions, composerLeft, composerRight],
-  () => {
-    shedObserver?.disconnect();
-    shedSignature = '';
-    const elements = [composerActions.value, composerLeft.value, composerRight.value].filter(
-      (el): el is HTMLElement => el !== null,
-    );
-    if (!elements.length) return;
-    shedObserver ??= new ResizeObserver(scheduleComposerRefit);
-    for (const el of elements) shedObserver.observe(el);
-    scheduleComposerRefit();
-  },
-  { flush: 'post' },
-);
-
-onUnmounted(() => {
-  shedObserver?.disconnect();
-  shedObserver = null;
-  if (shedFrame) cancelAnimationFrame(shedFrame);
-});
+function onSettingsFocusout(event: FocusEvent) {
+  if (event.relatedTarget instanceof Node && !settingsRoot.value?.contains(event.relatedTarget))
+    closeSettings(false);
+}
+onDeactivated(() => closeSettings(false));
 
 function resizeComposer() {
   nextTick(() => {
@@ -548,12 +481,13 @@ function resizeComposer() {
 }
 // Immediate so a draft restored from storage sizes the textarea at mount,
 // not only after the first keystroke.
-watch(draft, resizeComposer, { immediate: true });
+watch([draft, composerInput], resizeComposer, { immediate: true });
 watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
 watch(id, () => {
   draft.value = '';
   selectedFiles.value = [];
   sendError.value = '';
+  settingsOpen.value = false;
 });
 
 function removeSelectedFile(path: string) {
@@ -799,6 +733,7 @@ function chooseCommand(command: AcpCommand) {
   nextTick(() => composerInput.value?.focus());
 }
 function showCommands() {
+  settingsOpen.value = false;
   draft.value = '/';
   nextTick(() => composerInput.value?.focus());
 }
@@ -901,9 +836,7 @@ const modeLabel = (m: string | null) => {
 };
 const modeInteractive = computed(() => canSend(props.session) && modeOptions.value.length > 1);
 const legacyModeVisible = computed(() => !metadata.value.config_options.some(isModeOption));
-const modeOpen = ref(false);
 async function pickMode(m: string) {
-  modeOpen.value = false;
   if (m === currentMode.value) return;
   try {
     await setSessionMode(id.value, m);
@@ -912,19 +845,26 @@ async function pickMode(m: string) {
     sendError.value = (e as Error).message ?? 'Failed to change agent permissions';
   }
 }
-function onDocClick(e: MouseEvent) {
-  if (modeOpen.value && !(e.target as HTMLElement).closest('[data-testid="acp-mode-chip"]')) {
-    modeOpen.value = false;
-  }
-  if (configOpen.value && !(e.target as HTMLElement).closest('[data-acp-config]')) {
-    configOpen.value = '';
-  }
+function onDocClick(event: MouseEvent) {
+  if (settingsOpen.value && !settingsRoot.value?.contains(event.target as Node))
+    closeSettings(false);
 }
-onMounted(() => document.addEventListener('click', onDocClick));
-onUnmounted(() => document.removeEventListener('click', onDocClick));
+function onDocKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape' || !settingsOpen.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeSettings();
+}
+onMounted(() => {
+  document.addEventListener('click', onDocClick);
+  document.addEventListener('keydown', onDocKeydown);
+});
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick);
+  document.removeEventListener('keydown', onDocKeydown);
+});
 
 // ── Agent-owned model / reasoning / config controls -------------------------
-const configOpen = ref('');
 const configBusy = ref('');
 const configOptions = computed(() =>
   metadata.value.config_options
@@ -934,6 +874,25 @@ const configOptions = computed(() =>
         (option.type === 'boolean' && typeof option.currentValue === 'boolean'),
     )
     .sort((a, b) => configRank(a) - configRank(b)),
+);
+const settingsModel = computed(() => {
+  const option = configOptions.value.find(
+    (option) => option.category === 'model' || option.id === 'model',
+  );
+  return option ? configValueLabel(option) : '';
+});
+const settingsSummary = computed(() =>
+  configOptions.value
+    .map((option) => `${configName(option)}: ${configValueLabel(option)}`)
+    .join(' · '),
+);
+const settingsFullAccess = computed(
+  () =>
+    configOptions.value.some(
+      (option) =>
+        isModeOption(option) &&
+        ['agent-full-access', 'bypassPermissions'].includes(String(option.currentValue)),
+    ) || currentMode.value === 'bypassPermissions',
 );
 function configRank(option: AcpConfigOption): number {
   if (isModeOption(option)) return 0;
@@ -975,15 +934,17 @@ function configAppliesNextTurn(option: AcpConfigOption): boolean {
   return isModeOption(option) && selectionAppliesNextTurn(option.currentValue);
 }
 const permissionModeAppliesNextTurn = computed(() => selectionAppliesNextTurn(currentMode.value));
-async function pickConfig(option: AcpConfigOption, value: string | boolean) {
-  configOpen.value = '';
+async function pickConfig(option: AcpConfigOption, event: Event) {
+  const control = event.target as HTMLSelectElement | HTMLInputElement;
+  const value = control instanceof HTMLInputElement ? control.checked : control.value;
   if (value === option.currentValue || configBusy.value) return;
+  const hadFocus = document.activeElement === control;
   configBusy.value = option.id;
   try {
     const response = await setSessionConfigOption(id.value, option.id, value);
     // Clear the write lock before publishing the acknowledged value. Vue can
     // paint that value before this async function's `finally` runs; keeping the
-    // lock through that paint makes an immediate click on the next pill vanish.
+    // lock through that paint makes an immediate change to the next control vanish.
     configBusy.value = '';
     // The response is the full state acknowledged by the agent. This matters
     // when changing one value also changes another control's choices (a model
@@ -994,8 +955,20 @@ async function pickConfig(option: AcpConfigOption, value: string | boolean) {
     if (typeof mode === 'string') currentMode.value = mode;
   } catch (e) {
     sendError.value = (e as Error).message ?? 'Failed to change agent configuration';
+    if (control instanceof HTMLSelectElement) control.value = String(option.currentValue);
+    if (control instanceof HTMLInputElement) control.checked = Boolean(option.currentValue);
   } finally {
     configBusy.value = '';
+    await nextTick();
+    // Disabling a native control while saving can move focus to the body.
+    // Restore it unless the operator has already moved elsewhere.
+    if (
+      settingsOpen.value &&
+      hadFocus &&
+      control.isConnected &&
+      document.activeElement === document.body
+    )
+      control.focus();
   }
 }
 
@@ -1062,7 +1035,14 @@ type Row =
       sourceChannel: string | null;
       sourceMessage: string | null;
     }
-  | { type: 'agent'; key: string; time: string; text: string; streaming: boolean }
+  | {
+      type: 'agent';
+      key: string;
+      time: string;
+      text: string;
+      streaming: boolean;
+      continued: boolean;
+    }
   | { type: 'thought'; key: string; text: string; streaming: boolean }
   | {
       type: 'activity';
@@ -1071,6 +1051,7 @@ type Row =
       items: ActivityItem[];
       thoughts: ThoughtItem[];
       failures: number;
+      turn: number;
     }
   | { type: 'permission'; key: string; perm: PermissionPayload }
   | { type: 'mode'; key: string; mode: string }
@@ -1149,6 +1130,8 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
 
   let activity: ActivityEntry[] = [];
   let activityKey = '';
+  let activityTurn = 0;
+  let agentSpoke = false;
   const flushActivity = () => {
     if (!activity.length) return;
     rows.push({
@@ -1158,6 +1141,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
       items: activity.flatMap((entry) => (entry.type === 'tool' ? [entry.item] : [])),
       thoughts: activity.flatMap((entry) => (entry.type === 'thought' ? [entry.thought] : [])),
       failures: activity.filter((entry) => entry.type === 'tool' && entry.item.failed).length,
+      turn: activityTurn,
     });
     activity = [];
   };
@@ -1167,6 +1151,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
     switch (b.kind) {
       case 'user_message': {
         flushActivity();
+        agentSpoke = false;
         const user = b.payload as unknown as UserMessagePayload;
         const steered = user.steered === true;
         const n = b.turn + 1;
@@ -1206,11 +1191,16 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           time: localTime(b.created_at),
           text,
           streaming: false,
+          continued: agentSpoke,
         });
+        agentSpoke = true;
         break;
       }
       case 'thought':
-        if (!activity.length) activityKey = `act-${k}`;
+        if (!activity.length) {
+          activityKey = `act-${k}`;
+          activityTurn = b.turn;
+        }
         activity.push({
           type: 'thought',
           thought: { key: k, text: (b.payload as unknown as ThoughtPayload).text ?? '' },
@@ -1218,7 +1208,10 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       case 'tool_call': {
         const tool = b.payload as unknown as ToolCallPayload;
-        if (!activity.length) activityKey = `act-${k}`;
+        if (!activity.length) {
+          activityKey = `act-${k}`;
+          activityTurn = b.turn;
+        }
         activity.push({ type: 'tool', item: { tool, failed: tool.status === 'failed' } });
         break;
       }
@@ -1236,6 +1229,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       case 'handoff':
         flushActivity();
+        agentSpoke = false;
         currentUsage = null;
         rows.push({
           type: 'handoff',
@@ -1245,6 +1239,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       case 'turn_end': {
         flushActivity();
+        agentSpoke = false;
         const stop = (b.payload as unknown as TurnEndPayload).stop_reason ?? 'end_turn';
         rows.push({
           type: 'turnRule',
@@ -1300,6 +1295,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           time: '',
           text: msg.text,
           streaming: true,
+          continued: agentSpoke,
         });
       }
     }
@@ -1308,6 +1304,42 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
   return { rows, toc, usage: currentUsage };
 });
 const hasContext = computed(() => model.value.toc.length > 0 || latestPlan.value.length > 0);
+const contextTurn = computed(
+  () =>
+    (model.value.toc.find((turn) => turn.anchor === activeAnchor.value)?.n ??
+      model.value.toc.at(-1)?.n ??
+      1) - 1,
+);
+const contextActivities = computed(() =>
+  model.value.rows.filter(
+    (row): row is Extract<Row, { type: 'activity' }> =>
+      row.type === 'activity' && row.turn === contextTurn.value,
+  ),
+);
+const contextImages = computed(() =>
+  contextActivities.value.flatMap((row) =>
+    activityImages(row).map((image) => ({
+      key: image.key,
+      activityKey: row.key,
+      toolId: image.toolId,
+      kind: 'image' as const,
+      label: (image.content.uri || image.title).split('/').pop() || image.title,
+    })),
+  ),
+);
+const contextFailures = computed(() =>
+  contextActivities.value.flatMap((row) =>
+    row.items
+      .filter((item) => item.failed)
+      .map(({ tool }) => ({
+        key: tool.tool_call_id,
+        activityKey: row.key,
+        toolId: tool.tool_call_id,
+        kind: 'failure' as const,
+        label: toolLabel(tool),
+      })),
+  ),
+);
 
 // The empty conversation, styled on purpose — a fresh session has no journal
 // yet, and a bare canvas reads as breakage.
@@ -1330,7 +1362,7 @@ const statusLabel = computed(() => {
   for (const t of liveTools.values()) {
     if (t.turn === lt) tool = t;
   }
-  if (tool) return tool.title || tool.tool_kind;
+  if (tool) return toolLabel(tool);
   if (shadows.get(`${lt}:agent_message`)?.text) return 'Writing';
   if (shadows.get(`${lt}:thought`)?.text) return 'Thinking';
   return 'Working';
@@ -1353,27 +1385,40 @@ function toolGlyph(kind: string): string {
     )[kind] ?? '•'
   );
 }
-// The kind census on a collapsed group: `7 read · 2 search`, commonest first.
-function activityBreakdown(items: ActivityItem[]): string {
+// Keep the detailed census inside the disclosure rather than in the conversation.
+function activityBreakdown(row: Extract<Row, { type: 'activity' }>): string {
   const counts = new Map<string, number>();
-  for (const it of items) {
+  for (const it of row.items) {
     const kind = it.tool.tool_kind || 'other';
     counts.set(kind, (counts.get(kind) ?? 0) + 1);
   }
-  return [...counts.entries()]
+  const parts = [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .map(([kind, c]) => `${c} ${kind}`)
-    .join(' · ');
+    .map(([kind, c]) => {
+      const noun =
+        (
+          {
+            read: 'file read',
+            edit: 'file edit',
+            execute: 'command',
+            search: 'search',
+            think: 'review',
+          } as Record<string, string>
+        )[kind] || 'action';
+      return `${c} ${noun}${c === 1 ? '' : noun === 'search' ? 'es' : 's'}`;
+    });
+  if (row.thoughts.length)
+    parts.push(`${row.thoughts.length} reasoning ${row.thoughts.length === 1 ? 'note' : 'notes'}`);
+  return parts.join(' · ');
 }
 function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
   const parts: string[] = [];
-  if (row.thoughts.length) parts.push(`${row.thoughts.length} thinking`);
   if (row.items.length) {
-    const steps = `${row.items.length} ${row.items.length === 1 ? 'step' : 'steps'}`;
-    const breakdown = activityBreakdown(row.items);
-    parts.push(breakdown ? `${steps} — ${breakdown}` : steps);
+    parts.push(`${row.items.length} ${row.items.length === 1 ? 'action' : 'actions'}`);
   }
-  return parts.join(' · ');
+  const images = activityImages(row).length;
+  if (images) parts.push(`${images} ${images === 1 ? 'image' : 'images'}`);
+  return parts.join(' · ') || 'Reasoning';
 }
 // Whether a call carries anything worth expanding.
 function hasDetail(t: ToolCallPayload): boolean {
@@ -1386,7 +1431,14 @@ function activityImages(row: Extract<Row, { type: 'activity' }>) {
   return row.items.flatMap(({ tool }) =>
     tool.content.flatMap((content, index) =>
       content.type === 'image'
-        ? [{ key: `${tool.tool_call_id}-${index}`, content, title: tool.title || tool.tool_kind }]
+        ? [
+            {
+              key: `${tool.tool_call_id}-${index}`,
+              content,
+              title: toolLabel(tool),
+              toolId: tool.tool_call_id,
+            },
+          ]
         : [],
     ),
   );
@@ -1398,7 +1450,7 @@ function toolDetails(t: ToolCallPayload) {
 // activity list, but always let the operator disclose the complete command even
 // when the call produced no output to use as a detail panel.
 function canExpandTool(t: ToolCallPayload): boolean {
-  return t.tool_kind === 'execute' || hasDetail(t);
+  return !!toolCommand(t) || hasDetail(t);
 }
 function planGlyph(status: string): string {
   return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '○';
@@ -1408,7 +1460,7 @@ function planTone(status: string): string {
     ? 'text-ok'
     : status === 'in_progress'
       ? 'text-agent'
-      : 'text-faint';
+      : 'text-muted';
 }
 function isAllow(kind: string): boolean {
   return kind.startsWith('allow');
@@ -1527,6 +1579,29 @@ function goTo(anchor: string) {
   convScroll.value
     ?.querySelector(`[data-anchor="${CSS.escape(anchor)}"]`)
     ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (window.matchMedia('(max-width: 1023px)').matches) contextOpen.value = false;
+}
+
+async function goToActivity(target: {
+  activityKey: string;
+  toolId: string;
+  kind: 'image' | 'failure';
+}) {
+  if (target.kind === 'failure') {
+    const next = new Map(folds.value);
+    next.set(target.activityKey, true);
+    next.set(`tool-${target.toolId}`, true);
+    folds.value = next;
+  }
+  if (window.matchMedia('(max-width: 1023px)').matches) contextOpen.value = false;
+  await nextTick();
+  const group = convScroll.value?.querySelector<HTMLElement>(
+    `[data-activity-anchor="${CSS.escape(target.activityKey)}"]`,
+  );
+  const selector = `${target.kind === 'failure' ? 'li' : ''}[data-tool-id="${CSS.escape(target.toolId)}"]`;
+  const element = group?.querySelector<HTMLElement>(selector) || group;
+  element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  element?.querySelector<HTMLButtonElement>('button')?.focus({ preventScroll: true });
 }
 </script>
 
@@ -1655,8 +1730,13 @@ function goTo(anchor: string) {
               </section>
 
               <!-- AGENT — the model's prose. -->
-              <section v-else-if="row.type === 'agent'" class="acp-speaker">
-                <header class="acp-rule">
+              <section
+                v-else-if="row.type === 'agent'"
+                class="acp-speaker"
+                :class="{ 'acp-speaker-continued': row.continued }"
+                aria-label="Agent update"
+              >
+                <header v-if="!row.continued" class="acp-rule">
                   <span class="acp-label">Agent</span>
                   <span v-if="row.time" class="acp-time">{{ row.time }}</span>
                 </header>
@@ -1676,6 +1756,8 @@ function goTo(anchor: string) {
               <div
                 v-else-if="row.type === 'activity'"
                 class="acp-activity"
+                :class="{ 'acp-activity-error': isSoloToolActivity(row) && row.failures > 0 }"
+                :data-activity-anchor="row.key"
                 data-testid="acp-activity"
               >
                 <button
@@ -1683,7 +1765,11 @@ function goTo(anchor: string) {
                   class="acp-fold-head"
                   data-testid="acp-activity-head"
                   :disabled="isSoloToolActivity(row) && !canExpandTool(row.items[0].tool)"
-                  :aria-expanded="isSoloExpandableActivity(row) ? activityRowOpen(row) : undefined"
+                  :aria-expanded="
+                    !isSoloToolActivity(row) || isSoloExpandableActivity(row)
+                      ? activityRowOpen(row)
+                      : undefined
+                  "
                   @click="toggleActivityRow(row)"
                 >
                   <span
@@ -1693,14 +1779,14 @@ function goTo(anchor: string) {
                     >▸</span
                   >
                   <span v-if="isSoloToolActivity(row)" class="acp-activity-solo">
-                    <span class="acp-tool-glyph">{{ toolGlyph(row.items[0].tool.tool_kind) }}</span>
+                    <span class="acp-tool-glyph" aria-hidden="true">{{
+                      toolGlyph(row.items[0].tool.tool_kind)
+                    }}</span>
                     <span
-                      :class="{
-                        truncate: !activityRowOpen(row),
-                        'acp-activity-title-open': activityRowOpen(row),
-                      }"
+                      class="acp-activity-title truncate"
+                      :title="row.items[0].tool.title"
                       data-testid="acp-activity-title"
-                      >{{ row.items[0].tool.title || row.items[0].tool.tool_kind }}</span
+                      >{{ toolLabel(row.items[0].tool) }}</span
                     >
                   </span>
                   <span v-else>{{ activitySummary(row) }}</span>
@@ -1711,96 +1797,131 @@ function goTo(anchor: string) {
                     >{{ row.failures }} failed</span
                   >
                 </button>
+                <p
+                  v-if="isSoloToolActivity(row) && row.items[0].failed"
+                  class="acp-tool-error"
+                  data-testid="acp-tool-failure"
+                >
+                  {{ toolFailure(row.items[0].tool) }}
+                </p>
                 <div class="acp-activity-images" data-testid="acp-activity-images">
-                  <ToolContentPreview
+                  <div
                     v-for="image in activityImages(row)"
                     :key="image.key"
-                    :content="image.content"
-                    :title="image.title"
-                    thumbnail
-                  />
+                    :data-tool-id="image.toolId"
+                  >
+                    <ToolContentPreview :content="image.content" :title="image.title" thumbnail />
+                  </div>
                 </div>
                 <div
                   v-if="
                     isSoloToolActivity(row) &&
-                    hasDetail(row.items[0].tool) &&
+                    canExpandTool(row.items[0].tool) &&
                     activityItemOpen(row.items[0])
                   "
                   class="acp-detail acp-detail-solo"
                   data-testid="acp-detail"
                 >
+                  <div v-if="toolCommand(row.items[0].tool)" class="acp-command-detail">
+                    <h3>Command</h3>
+                    <ToolContentPreview
+                      :content="{ type: 'text', text: toolCommand(row.items[0].tool)! }"
+                      :title="toolLabel(row.items[0].tool)"
+                      text-label="command"
+                    />
+                  </div>
                   <ToolContentPreview
                     v-for="(content, index) in toolDetails(row.items[0].tool)"
                     :key="index"
                     :content="content"
-                    :title="row.items[0].tool.title || row.items[0].tool.tool_kind"
+                    :title="toolLabel(row.items[0].tool)"
                   />
                 </div>
-                <ul
-                  v-else-if="!isSoloToolActivity(row) && foldOpen(row.key, row.failures > 0)"
-                  class="acp-activity-list"
-                >
-                  <li
-                    v-for="entry in row.entries"
-                    :key="
-                      entry.type === 'thought' ? entry.thought.key : entry.item.tool.tool_call_id
-                    "
-                    :data-testid="entry.type === 'tool' ? 'acp-activity-item' : undefined"
-                  >
-                    <template v-if="entry.type === 'thought'">
-                      <p class="acp-activity-thought" data-testid="acp-activity-thought">
-                        {{ entry.thought.text }}
-                      </p>
-                    </template>
-                    <template v-else>
-                      <button
-                        type="button"
-                        class="acp-activity-line"
-                        :disabled="!canExpandTool(entry.item.tool)"
-                        :aria-expanded="
-                          canExpandTool(entry.item.tool) ? activityItemOpen(entry.item) : undefined
-                        "
-                        @click="toggleActivityItem(entry.item)"
-                      >
-                        <span class="acp-tool-glyph">{{
-                          toolGlyph(entry.item.tool.tool_kind)
-                        }}</span>
-                        <span
-                          class="acp-activity-title"
-                          :class="{
-                            truncate: !activityItemOpen(entry.item),
-                            open: activityItemOpen(entry.item),
-                          }"
-                          data-testid="acp-activity-title"
-                          >{{ entry.item.tool.title || entry.item.tool.tool_kind }}</span
+                <div v-else-if="!isSoloToolActivity(row) && foldOpen(row.key, row.failures > 0)">
+                  <p class="acp-activity-breakdown">
+                    {{ activityBreakdown(row) }}
+                  </p>
+                  <ul class="acp-activity-list">
+                    <li
+                      v-for="entry in row.entries"
+                      :key="
+                        entry.type === 'thought' ? entry.thought.key : entry.item.tool.tool_call_id
+                      "
+                      :data-testid="entry.type === 'tool' ? 'acp-activity-item' : undefined"
+                      :data-tool-id="
+                        entry.type === 'tool' ? entry.item.tool.tool_call_id : undefined
+                      "
+                      :class="{ 'acp-activity-error': entry.type === 'tool' && entry.item.failed }"
+                    >
+                      <template v-if="entry.type === 'thought'">
+                        <p class="acp-activity-thought" data-testid="acp-activity-thought">
+                          {{ entry.thought.text }}
+                        </p>
+                      </template>
+                      <template v-else>
+                        <button
+                          type="button"
+                          class="acp-activity-line"
+                          :disabled="!canExpandTool(entry.item.tool)"
+                          :aria-expanded="
+                            canExpandTool(entry.item.tool)
+                              ? activityItemOpen(entry.item)
+                              : undefined
+                          "
+                          @click="toggleActivityItem(entry.item)"
                         >
-                        <span v-if="entry.item.failed" class="acp-activity-status text-block"
-                          >failed</span
+                          <span class="acp-tool-glyph" aria-hidden="true">{{
+                            toolGlyph(entry.item.tool.tool_kind)
+                          }}</span>
+                          <span
+                            class="acp-activity-title truncate"
+                            :title="entry.item.tool.title"
+                            data-testid="acp-activity-title"
+                            >{{ toolLabel(entry.item.tool) }}</span
+                          >
+                          <span v-if="entry.item.failed" class="acp-activity-status text-block"
+                            >failed</span
+                          >
+                          <span
+                            v-else-if="canExpandTool(entry.item.tool)"
+                            class="chev sm"
+                            :class="{
+                              open: activityItemOpen(entry.item),
+                            }"
+                            >▸</span
+                          >
+                        </button>
+                        <p
+                          v-if="entry.item.failed"
+                          class="acp-tool-error"
+                          data-testid="acp-tool-failure"
                         >
-                        <span
-                          v-else-if="canExpandTool(entry.item.tool)"
-                          class="chev sm"
-                          :class="{
-                            open: activityItemOpen(entry.item),
-                          }"
-                          >▸</span
+                          {{ toolFailure(entry.item.tool) }}
+                        </p>
+                        <div
+                          v-if="canExpandTool(entry.item.tool) && activityItemOpen(entry.item)"
+                          class="acp-detail"
+                          data-testid="acp-detail"
                         >
-                      </button>
-                      <div
-                        v-if="hasDetail(entry.item.tool) && activityItemOpen(entry.item)"
-                        class="acp-detail"
-                        data-testid="acp-detail"
-                      >
-                        <ToolContentPreview
-                          v-for="(content, index) in toolDetails(entry.item.tool)"
-                          :key="index"
-                          :content="content"
-                          :title="entry.item.tool.title || entry.item.tool.tool_kind"
-                        />
-                      </div>
-                    </template>
-                  </li>
-                </ul>
+                          <div v-if="toolCommand(entry.item.tool)" class="acp-command-detail">
+                            <h3>Command</h3>
+                            <ToolContentPreview
+                              :content="{ type: 'text', text: toolCommand(entry.item.tool)! }"
+                              :title="toolLabel(entry.item.tool)"
+                              text-label="command"
+                            />
+                          </div>
+                          <ToolContentPreview
+                            v-for="(content, index) in toolDetails(entry.item.tool)"
+                            :key="index"
+                            :content="content"
+                            :title="toolLabel(entry.item.tool)"
+                          />
+                        </div>
+                      </template>
+                    </li>
+                  </ul>
+                </div>
               </div>
 
               <!-- Permission — the one interactive block. -->
@@ -1979,6 +2100,31 @@ function goTo(anchor: string) {
             </ul>
           </template>
 
+          <template v-if="contextImages.length">
+            <p class="acp-rail-head">Images · turn {{ contextTurn + 1 }}</p>
+            <ul class="mb-4 space-y-0.5" data-testid="acp-context-images">
+              <li v-for="image in contextImages" :key="image.key">
+                <button
+                  type="button"
+                  class="acp-toc-item"
+                  :title="image.label"
+                  @click="goToActivity(image)"
+                >
+                  <span class="truncate">{{ image.label }}</span>
+                </button>
+              </li>
+            </ul>
+          </template>
+          <template v-if="contextFailures.length">
+            <p class="acp-rail-head">Failed actions · turn {{ contextTurn + 1 }}</p>
+            <ul class="mb-4 space-y-0.5" data-testid="acp-context-failures">
+              <li v-for="failure in contextFailures" :key="failure.key">
+                <button type="button" class="acp-toc-item" @click="goToActivity(failure)">
+                  <span class="text-block">{{ failure.label }}</span>
+                </button>
+              </li>
+            </ul>
+          </template>
           <template v-if="latestPlan.length">
             <p class="acp-rail-head">Plan</p>
             <ul class="space-y-1" data-testid="acp-plan">
@@ -1986,9 +2132,7 @@ function goTo(anchor: string) {
                 <span class="acp-plan-glyph" :class="planTone(e.status)">{{
                   planGlyph(e.status)
                 }}</span>
-                <span :class="e.status === 'pending' ? 'text-faint' : 'text-muted'">{{
-                  e.content
-                }}</span>
+                <span class="text-muted">{{ e.content }}</span>
               </li>
             </ul>
           </template>
@@ -2035,7 +2179,7 @@ function goTo(anchor: string) {
       <textarea
         ref="composerInput"
         v-model="draft"
-        rows="4"
+        rows="2"
         :disabled="sending || queueing || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
         autocomplete="off"
@@ -2115,15 +2259,16 @@ function goTo(anchor: string) {
           </button>
         </li>
       </ul>
-      <div ref="composerActions" class="acp-composer-actions">
-        <!-- Agent-owned config selectors + slash discovery on the left. -->
-        <div ref="composerLeft" class="acp-composer-left">
+      <div class="acp-composer-actions">
+        <!-- Attachments and agent settings stay beside the send controls. -->
+        <div class="acp-composer-left">
           <button
             type="button"
             class="acp-attach-button"
             data-testid="acp-composer-attach"
             :disabled="uploadingAttachment"
             :title="uploadingAttachment ? 'Attaching…' : 'Attach files'"
+            :aria-label="uploadingAttachment ? 'Attaching files' : 'Attach files'"
             @click="attachmentInput?.click()"
           >
             <svg
@@ -2151,83 +2296,112 @@ function goTo(anchor: string) {
             data-testid="acp-composer-file-input"
             @change="onAttachmentPick"
           />
-          <div
-            v-for="option in configOptions"
-            :key="option.id"
-            class="acp-mode-wrap"
-            data-acp-config
-            :data-testid="`acp-config-${option.id}`"
-          >
+          <div ref="settingsRoot" class="acp-settings-wrap" @focusout="onSettingsFocusout">
             <button
+              ref="settingsButton"
               type="button"
-              class="acp-mode-chip"
-              :class="configTone(option)"
-              :disabled="configBusy === option.id"
-              :title="option.description ?? option.name"
-              :aria-pressed="option.type === 'boolean' ? Boolean(option.currentValue) : undefined"
-              @click.stop="
-                option.type === 'boolean'
-                  ? pickConfig(option, !option.currentValue)
-                  : (configOpen = configOpen === option.id ? '' : option.id)
-              "
+              class="acp-settings-button"
+              data-testid="acp-settings-toggle"
+              :aria-expanded="settingsOpen"
+              :aria-controls="'acp-settings-' + id"
+              aria-label="Agent settings"
+              :title="settingsSummary"
+              @click="toggleSettings"
             >
-              <span class="acp-config-name">{{ configName(option) }}</span>
-              {{ configValueLabel(option)
-              }}<span v-if="configAppliesNextTurn(option)" class="acp-config-timing">next turn</span
-              ><span v-if="option.type === 'select'" class="acp-mode-caret">▾</span>
+              Settings
+              <span v-if="settingsModel" class="acp-settings-current">{{ settingsModel }}</span>
+              <span v-if="settingsFullAccess" class="text-block">Full access</span>
+              <span v-if="permissionModeAppliesNextTurn" class="text-attn">next turn</span>
+              <span aria-hidden="true">▾</span>
             </button>
-            <ul v-if="configOpen === option.id" class="acp-mode-menu" data-testid="acp-config-menu">
-              <li v-for="choice in configChoices(option)" :key="choice.value">
-                <button
-                  type="button"
-                  class="acp-mode-item"
-                  :data-active="choice.value === option.currentValue"
-                  :title="choice.description ?? undefined"
-                  @click="pickConfig(option, choice.value)"
-                >
-                  {{ choice.name }}
-                </button>
-              </li>
-            </ul>
-          </div>
-          <div v-if="legacyModeVisible" class="acp-mode-wrap" data-testid="acp-mode-chip">
-            <button
-              type="button"
-              class="acp-mode-chip"
-              :class="{ 'acp-mode-static': !modeInteractive }"
-              :disabled="!modeInteractive"
-              @click.stop="modeOpen = !modeOpen"
+            <section
+              v-if="settingsOpen"
+              :id="'acp-settings-' + id"
+              ref="settingsPanel"
+              class="acp-settings-panel"
+              data-testid="acp-settings-panel"
+              role="dialog"
+              aria-label="Agent settings"
             >
-              <span class="acp-config-name">Permissions</span>
-              {{ modeLabel(currentMode)
-              }}<span v-if="permissionModeAppliesNextTurn" class="acp-config-timing">next turn</span
-              ><span v-if="modeInteractive" class="acp-mode-caret">▾</span>
-            </button>
-            <ul v-if="modeOpen" class="acp-mode-menu" data-testid="acp-mode-menu">
-              <li v-for="m in modeOptions" :key="m">
-                <button
-                  type="button"
-                  class="acp-mode-item"
-                  :data-active="m === currentMode"
-                  @click="pickMode(m)"
-                >
-                  {{ modeLabel(m) }}
+              <header class="acp-settings-heading">
+                <span>Agent settings</span>
+                <button type="button" aria-label="Close agent settings" @click="closeSettings()">
+                  ×
                 </button>
-              </li>
-            </ul>
+              </header>
+              <label
+                v-for="option in configOptions"
+                :key="option.id"
+                class="acp-setting-row"
+                :class="configTone(option)"
+                :data-testid="'acp-config-' + option.id"
+              >
+                <span>
+                  {{ configName(option) }}
+                  <small v-if="configAppliesNextTurn(option)" class="text-attn">next turn</small>
+                </span>
+                <select
+                  v-if="option.type === 'select'"
+                  :value="option.currentValue"
+                  :aria-label="configName(option)"
+                  :disabled="configBusy !== ''"
+                  :title="option.description ?? option.name"
+                  @change="pickConfig(option, $event)"
+                >
+                  <option
+                    v-for="choice in configChoices(option)"
+                    :key="choice.value"
+                    :value="choice.value"
+                  >
+                    {{ choice.name }}
+                  </option>
+                </select>
+                <span v-else class="acp-setting-toggle">
+                  {{ option.currentValue ? 'On' : 'Off' }}
+                  <input
+                    type="checkbox"
+                    :checked="Boolean(option.currentValue)"
+                    :aria-label="configName(option)"
+                    :disabled="configBusy !== ''"
+                    @change="pickConfig(option, $event)"
+                  />
+                </span>
+              </label>
+              <label v-if="legacyModeVisible" class="acp-setting-row" data-testid="acp-mode-chip">
+                <span
+                  >Permissions
+                  <small v-if="permissionModeAppliesNextTurn" class="text-attn"
+                    >next turn</small
+                  ></span
+                >
+                <select
+                  :value="currentMode ?? ''"
+                  :disabled="!modeInteractive"
+                  aria-label="Permissions"
+                  @change="pickMode(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-if="!currentMode" value="" disabled>Unknown</option>
+                  <option v-for="mode in modeOptions" :key="mode" :value="mode">
+                    {{ modeLabel(mode) }}
+                  </option>
+                </select>
+              </label>
+              <footer class="acp-settings-footer">
+                <AgentUsage v-if="model.usage" :usage="model.usage" />
+                <button
+                  v-if="commands.length"
+                  type="button"
+                  class="acp-slash-hint"
+                  data-testid="acp-command-hint"
+                  @click="showCommands"
+                >
+                  Browse {{ commands.length }} commands
+                </button>
+              </footer>
+            </section>
           </div>
-          <button
-            v-if="commands.length"
-            type="button"
-            class="acp-slash-hint"
-            data-testid="acp-command-hint"
-            title="Show commands"
-            @click="showCommands"
-          >
-            / {{ commands.length }} commands
-          </button>
         </div>
-        <div ref="composerRight" class="acp-composer-right">
+        <div class="acp-composer-right">
           <AgentUsage v-if="model.usage" :usage="model.usage" />
           <span class="acp-send-hint">Enter to send · Shift+Enter for a new line</span>
           <button
@@ -2292,10 +2466,13 @@ function goTo(anchor: string) {
   padding: 0.125rem 0;
 }
 
-/* Speaker block: a hairline rule + micro-caps label + mono time, serif beneath. */
+/* Only the first agent update in an exchange needs a speaker rule. */
 .acp-speaker {
   scroll-margin-top: 0.5rem;
   margin-top: 1rem;
+}
+.acp-speaker-continued {
+  margin-top: 0.45rem;
 }
 .acp-speaker:first-child {
   margin-top: 0.25rem;
@@ -2319,7 +2496,7 @@ function goTo(anchor: string) {
 .acp-time {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 .acp-prompt-state {
@@ -2369,7 +2546,7 @@ function goTo(anchor: string) {
   margin-top: 0.35rem;
   font-family: var(--font-sans);
   font-size: 0.75rem;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* Fold heads — one quiet mono voice for thinking + activity. */
@@ -2405,7 +2582,7 @@ function goTo(anchor: string) {
 }
 .chev.sm {
   margin-left: auto;
-  color: var(--faint);
+  color: var(--muted);
 }
 .acp-thought-body {
   margin: 0.3rem 0 0 1.15rem;
@@ -2413,7 +2590,7 @@ function goTo(anchor: string) {
   font-style: italic;
   font-size: 0.8125rem;
   line-height: 1.45;
-  color: var(--faint);
+  color: var(--muted);
   white-space: pre-wrap;
 }
 
@@ -2442,6 +2619,32 @@ function goTo(anchor: string) {
 }
 .acp-activity-images:not(:empty) {
   margin: 0.4rem 0 0.4rem 1.15rem;
+}
+.acp-activity-breakdown {
+  margin: 0.3rem 0 0.2rem 1.15rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+}
+.acp-activity-error {
+  border-left: 2px solid var(--block-line);
+  padding-left: 0.5rem;
+}
+.acp-tool-error {
+  margin: 0.25rem 0 0.4rem 1.15rem;
+  color: var(--block);
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.acp-command-detail h3 {
+  margin: 0;
+  padding: 0.25rem 0.5rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.6875rem;
+  font-weight: 600;
 }
 .acp-activity-failbadge {
   flex: none;
@@ -2483,12 +2686,6 @@ function goTo(anchor: string) {
 .acp-activity-line:not(:disabled):hover {
   background: color-mix(in srgb, var(--subtle) 55%, transparent);
   color: var(--fg);
-}
-.acp-activity-title.open,
-.acp-activity-title-open {
-  min-width: 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 .acp-activity-status {
   margin-left: auto;
@@ -2558,7 +2755,7 @@ function goTo(anchor: string) {
   text-align: center;
   font-family: var(--font-mono);
   font-size: 0.6875rem;
-  color: var(--faint);
+  color: var(--muted);
 }
 
 /* Turn rule. */
@@ -2573,7 +2770,7 @@ function goTo(anchor: string) {
   padding-top: 0.55rem;
   font-family: var(--font-mono);
   font-size: 0.6875rem;
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 .acp-turn-rule.loud {
@@ -2659,7 +2856,7 @@ function goTo(anchor: string) {
 .acp-status-meta {
   font-family: var(--font-mono);
   font-size: 0.6875rem;
-  color: var(--faint);
+  color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
@@ -2690,7 +2887,7 @@ function goTo(anchor: string) {
 .acp-input {
   display: block;
   width: 100%;
-  min-height: 7.25rem;
+  min-height: 4.5rem;
   max-height: 16rem;
   resize: none;
   border: 0;
@@ -2701,6 +2898,10 @@ function goTo(anchor: string) {
   font-size: 1rem;
   line-height: 1.55;
   outline: none;
+}
+.acp-input::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 .acp-input:focus {
   box-shadow: none;
@@ -2736,7 +2937,7 @@ function goTo(anchor: string) {
   flex: none;
   place-items: center;
   border-radius: 999px;
-  color: var(--faint);
+  color: var(--muted);
 }
 .acp-attachment-pill button:hover {
   background: var(--subtle-hover);
@@ -2764,7 +2965,7 @@ function goTo(anchor: string) {
   gap: 0.3rem;
   border-radius: 0.25rem;
   padding: 0.2rem 0.35rem;
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.6875rem;
 }
@@ -2813,7 +3014,7 @@ function goTo(anchor: string) {
   color: var(--accent);
 }
 .acp-command-item kbd {
-  color: var(--faint);
+  color: var(--muted);
 }
 .acp-composer-right {
   display: flex;
@@ -2825,109 +3026,155 @@ function goTo(anchor: string) {
   margin-left: auto;
 }
 .acp-send-hint {
-  color: var(--faint);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.625rem;
   white-space: nowrap;
 }
 
+/* Settings are secondary to composing and sending a message. */
+.acp-settings-wrap {
+  position: relative;
+  min-width: 0;
+}
+.acp-settings-button {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 0.25rem;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.acp-settings-button:hover {
+  color: var(--fg);
+  background: var(--subtle);
+}
+.acp-settings-current {
+  max-width: 9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.acp-settings-panel {
+  position: absolute;
+  bottom: calc(100% + 0.6rem);
+  left: 0;
+  z-index: 30;
+  width: min(25rem, calc(100vw - 3rem));
+  max-height: min(26rem, 55dvh);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 20%);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 0.8125rem;
+}
+.acp-settings-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+.acp-settings-heading button {
+  min-width: 2rem;
+  min-height: 2rem;
+  font-size: 1.25rem;
+  cursor: pointer;
+}
+.acp-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2.75rem;
+  border-top: 1px solid var(--line);
+}
+.acp-setting-row > span:first-child {
+  flex: 1;
+}
+.acp-setting-row small {
+  display: block;
+}
+.acp-setting-row select {
+  max-width: 65%;
+  min-height: 2rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.2rem;
+  background: var(--input);
+  color: var(--fg);
+}
+.acp-setting-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--muted);
+}
+.acp-setting-toggle input {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
+}
+.acp-config-danger select {
+  border-color: var(--block-line);
+}
+.acp-config-permission select {
+  border-color: color-mix(in srgb, var(--attn) 40%, var(--line));
+}
+.acp-settings-footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  border-top: 1px solid var(--line);
+  padding-top: 0.5rem;
+}
+.acp-slash-hint {
+  color: var(--accent);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
 @media (max-width: 900px) {
-  .acp-composer-actions {
-    align-items: flex-end;
-    flex-direction: column;
-    flex-wrap: nowrap;
-  }
-  .acp-composer-left,
-  .acp-composer-right {
-    width: 100%;
-  }
-  .acp-composer-right {
-    justify-content: flex-end;
-  }
-  .acp-send-hint {
+  .acp-send-hint,
+  .acp-composer-right :deep(.agent-usage) {
     display: none;
   }
 }
-
-/* Mode chip + dropdown. */
-.acp-mode-wrap {
-  position: relative;
-}
-.acp-mode-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  border: 1px solid var(--line);
-  border-radius: 0.25rem;
-  background: var(--subtle);
-  padding: 0.2rem 0.5rem;
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  color: var(--muted);
-  cursor: pointer;
-}
-.acp-mode-chip:hover:not(:disabled) {
-  color: var(--fg);
-  background: var(--subtle-hover);
-}
-.acp-mode-static {
-  cursor: default;
-}
-.acp-mode-caret {
-  color: var(--faint);
-}
-.acp-config-name {
-  color: var(--faint);
-}
-.acp-config-timing {
-  color: var(--attn);
-  font-size: 0.625rem;
-}
-.acp-config-permission {
-  border-color: color-mix(in srgb, var(--attn) 40%, var(--line));
-}
-.acp-config-danger {
-  border-color: color-mix(in srgb, var(--block) 55%, var(--line));
-  color: var(--block);
-}
-.acp-mode-menu {
-  position: absolute;
-  bottom: calc(100% + 0.3rem);
-  left: 0;
-  z-index: 20;
-  min-width: 9rem;
-  border: 1px solid var(--line);
-  border-radius: 0.375rem;
-  background: var(--surface);
-  box-shadow: 0 6px 20px rgb(0 0 0 / 0.18);
-  padding: 0.2rem;
-}
-.acp-mode-item {
-  display: block;
-  width: 100%;
-  border-radius: 0.2rem;
-  padding: 0.3rem 0.5rem;
-  text-align: left;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--muted);
-  cursor: pointer;
-}
-.acp-mode-item:hover {
-  background: var(--subtle);
-  color: var(--fg);
-}
-.acp-mode-item[data-active='true'] {
-  color: var(--accent);
-}
-.acp-slash-hint {
-  font-family: var(--font-mono);
-  font-size: 0.6875rem;
-  color: var(--faint);
-  cursor: pointer;
-}
-.acp-slash-hint:hover {
-  color: var(--fg);
+@media (max-width: 639px) {
+  .acp-composer-actions {
+    padding: 0.35rem 0.45rem;
+    gap: 0.35rem;
+  }
+  .acp-composer-actions button {
+    min-height: 2.75rem;
+  }
+  .acp-settings-current {
+    display: none;
+  }
+  .acp-settings-panel {
+    left: -2.5rem;
+  }
+  .acp-settings-heading button,
+  .acp-setting-row select {
+    min-height: 2.75rem;
+  }
+  .acp-attach-button > span {
+    display: none;
+  }
+  .acp-attach-button {
+    min-width: 2.75rem;
+    justify-content: center;
+  }
 }
 
 /* Right rail. */
@@ -2939,7 +3186,7 @@ function goTo(anchor: string) {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.09em;
-  color: var(--faint);
+  color: var(--muted);
 }
 .acp-toc-item {
   display: flex;
@@ -2968,7 +3215,7 @@ function goTo(anchor: string) {
   flex: none;
   font-family: var(--font-mono);
   font-size: 0.625rem;
-  color: var(--faint);
+  color: var(--muted);
 }
 .acp-plan-item {
   display: flex;

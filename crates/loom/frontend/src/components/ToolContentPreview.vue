@@ -7,6 +7,7 @@ const props = defineProps<{
   content: ToolContent;
   title: string;
   thumbnail?: boolean;
+  textLabel?: string;
 }>();
 
 function diffLines(content: Extract<ToolContent, { type: 'diff' }>) {
@@ -21,7 +22,7 @@ const imageSrc = computed(() => {
 const detailLabel = computed(() => {
   if (props.content.type === 'diff') return props.content.path;
   if (props.content.type === 'image') return props.content.uri ?? props.content.mime_type;
-  return 'Command output';
+  return props.textLabel === 'command' ? 'Command' : 'Command output';
 });
 const imageName = computed(() => {
   if (props.content.type !== 'image') return '';
@@ -131,7 +132,7 @@ onBeforeUnmount(() => {
         data-testid="tool-content-expand"
         @click="openViewer"
       >
-        Expand output <span aria-hidden="true">↗</span>
+        Expand {{ textLabel || 'output' }} <span aria-hidden="true">↗</span>
       </button>
     </div>
 

@@ -273,6 +273,10 @@ pub struct ToolCall {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub raw_input: Option<Value>,
+    #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     pub status: Option<String>,

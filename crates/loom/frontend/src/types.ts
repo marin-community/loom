@@ -255,6 +255,8 @@ export interface ToolLocation {
 export interface ToolCallPayload {
   tool_call_id: string;
   title: string;
+  name?: string | null;
+  input?: unknown;
   tool_kind: string;
   status: string;
   content: ToolContent[];
@@ -366,14 +368,8 @@ export interface SseDelta {
 }
 /** `tool` — live tool-call state, before it reaches a terminal status (then a
  *  `tool_call` block supersedes it). */
-export interface SseTool {
+export interface SseTool extends ToolCallPayload {
   turn: number;
-  tool_call_id: string;
-  title: string;
-  tool_kind: string;
-  status: string;
-  content: ToolContent[];
-  locations: ToolLocation[];
 }
 /** `turn` — the turn drove live (`started`) or ended (`ended` + stop reason). */
 export interface SseTurn {

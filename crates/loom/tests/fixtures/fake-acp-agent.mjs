@@ -263,6 +263,8 @@ async function runToken(tok) {
       toolCallId,
       title,
       kind: "execute",
+      name: "exec_command",
+      rawInput: { command: title },
       status: "in_progress",
       content: [{ type: "content", content: { type: "text", text: "exit 1: boom" } }],
     });
@@ -327,6 +329,8 @@ async function runToken(tok) {
       toolCallId,
       title: title || "Tool " + kind,
       kind,
+      name: kind === "execute" ? "exec_command" : kind,
+      rawInput: kind === "execute" ? { command: title || "Tool " + kind } : null,
       status: "in_progress",
       content,
       locations: [{ path: "/w/file.rs", line: 1 }],
