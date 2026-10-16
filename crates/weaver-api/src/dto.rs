@@ -2833,6 +2833,25 @@ pub struct SessionUrlView {
     pub url: String,
 }
 
+/// Rendering supported by the shared artifact and worktree file viewer.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FilePreviewKind {
+    Markdown,
+    Html,
+    Image,
+    Text,
+    Download,
+}
+
+/// A bounded preview; binary and oversized files remain available through `sessions.raw`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionFileView {
+    pub path: String,
+    pub kind: FilePreviewKind,
+    pub content: Option<String>,
+}
+
 /// Result of `sessions.files`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionFilesView {

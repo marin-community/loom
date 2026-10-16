@@ -81,7 +81,14 @@ export function resolveUrl(ctx: RenderContext, url: string): string {
   const dir = ctx.filePath.includes('/')
     ? ctx.filePath.slice(0, ctx.filePath.lastIndexOf('/'))
     : '';
-  const path = resolvePath(dir, url.replace(/^\.\//, ''));
+  let relative: string;
+  try {
+    // Markdown URLs are encoded; the raw operation expects a filesystem path.
+    relative = decodeURIComponent(url.split(/[?#]/, 1)[0]);
+  } catch {
+    return url;
+  }
+  const path = resolvePath(dir, relative);
   return `${operationPath('sessions.raw')}?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(path)}`;
 }
 

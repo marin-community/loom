@@ -51,6 +51,9 @@ pub enum SessionCmd {
     /// loom's externally-visible address — building it from `$WEAVER_API` inside
     /// a session would yield a loopback link nobody else can open.
     Url {
+        /// Worktree-relative file to open in the viewer.
+        #[arg(long)]
+        path: Option<String>,
         /// Session key: id, branch id, branch name, or `repo:branch`.
         /// Defaults to the current session.
         session: Option<String>,
@@ -322,7 +325,7 @@ pub struct LaunchOpts {
 pub async fn run_session(cmd: SessionCmd) -> Result<()> {
     match cmd {
         SessionCmd::Launch(opts) => cmd_launch(opts.into()).await,
-        SessionCmd::Url { session } => cmd_session_url(session).await,
+        SessionCmd::Url { session, path } => cmd_session_url(session, path).await,
         SessionCmd::Poll { session } => cmd_session_poll(session).await,
         SessionCmd::Wait {
             session,
@@ -671,7 +674,7 @@ pub(crate) fn attention_summary(ws: &SessionView) -> String {
 /// session we are running inside. The server resolves the URL (only it knows
 /// loom's public origin); this prints it bare, so it composes into a
 /// `gh pr create --body "$(…)"` without any trimming.
-pub(crate) async fn cmd_session_url(key: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_session_url(key: Option<String>, path: Option<String>) -> Result<()> {
     let key = match key {
         Some(k) => k,
         // `$WEAVER_BRANCH` is the branch id loom exports into every session it
@@ -689,6 +692,7 @@ pub(crate) async fn cmd_session_url(key: Option<String>) -> Result<()> {
     let res = client
         .invoke::<sessions::url::Op>(&sessions::url::Input {
             session: key.clone(),
+            path,
         })
         .await
         .with_context(|| format!("no live session for '{key}'"))?;

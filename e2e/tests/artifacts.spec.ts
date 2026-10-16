@@ -237,7 +237,7 @@ test.describe('artifacts surface', () => {
     await weaver.writeArtifact(session, 'shot', png, { title: 'Screenshot' });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/shot`);
-    await expect(page.getByTestId('artifact-image')).toBeVisible();
+    await expect(page.getByTestId('document-image')).toBeVisible();
 
     // The name carries no extension, so the download stamps PNG's on.
     const [download] = await Promise.all([
@@ -268,20 +268,20 @@ test.describe('artifacts surface', () => {
 
     // Preview is a sandboxed iframe: scripts run, but with no same-origin grant
     // it cannot reach loom's cookies/API as the signed-in user.
-    const frame = page.getByTestId('artifact-html');
+    const frame = page.getByTestId('document-html');
     await expect(frame).toBeVisible();
     const sandbox = (await frame.getAttribute('sandbox')) ?? '';
     expect(sandbox).toContain('allow-scripts');
     expect(sandbox).not.toContain('allow-same-origin');
     // It's a real document — the markup rendered and its script executed.
-    const inner = page.frameLocator('[data-testid="artifact-html"]');
+    const inner = page.frameLocator('[data-testid="document-html"]');
     await expect(inner.locator('#hi')).toHaveText('Live report');
     await expect(inner.locator('html')).toHaveAttribute('data-ran', '1');
 
     // The Source toggle swaps the live iframe for the raw HTML source.
     await page.getByRole('button', { name: 'Source' }).click();
     await expect(page.locator('pre', { hasText: 'Live report' })).toBeVisible();
-    await expect(page.getByTestId('artifact-html')).toHaveCount(0);
+    await expect(page.getByTestId('document-html')).toHaveCount(0);
   });
 
   test('a long popped artifact has a bounded scroller and keeps its place when docked', async ({
@@ -455,7 +455,7 @@ test.describe('artifacts surface', () => {
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/A.png`);
 
     // Standalone image artifacts use the authenticated raw-bytes route.
-    const standalone = page.getByTestId('artifact-image');
+    const standalone = page.getByTestId('document-image');
     await expect(standalone).toHaveAttribute(
       'src',
       new RegExp(`/api/artifacts/raw\\?branch=${session.id}&name=A\\.png&rev=1$`),

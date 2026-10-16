@@ -1292,6 +1292,29 @@ async fn session_url_resolves_by_key_and_honours_the_public_base() {
         "the configured public origin wins, with no doubled slash"
     );
 
+    let out = Command::new(env!("CARGO_BIN_EXE_loom"))
+        .args(["sessions", "url", "--path", "reports/a #?% café.md"])
+        .env("WEAVER_API", ts.addr.to_string())
+        .env("WEAVER_BRANCH", &branch_id)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let link = reqwest::Url::parse(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(
+        link.origin().ascii_serialization(),
+        "https://loom.example.com"
+    );
+    assert_eq!(
+        link.path(),
+        format!("/s/{id}/files/reports/a%20%23%3F%25%20caf%C3%A9%2Emd")
+    );
+    assert_eq!(link.query(), None);
+    assert_eq!(link.fragment(), None);
+
     // And the CLI an agent actually runs: no argument, `$WEAVER_BRANCH` as loom
     // exports it into a session. It must print the bare URL and nothing else, so
     // `$(loom session url)` drops straight into a PR body.

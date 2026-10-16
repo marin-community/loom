@@ -95,7 +95,7 @@ loom sessions poll <session>
 loom sessions wait <session>
 loom sessions send <session> "try the curl again"
 loom sessions interrupt <session>
-loom sessions url [<session>]
+loom sessions url [<session>] [--path reports/index.md]
 loom sessions archive <session>
 ```
 
@@ -172,6 +172,9 @@ source fingerprints prevent stale generated text from overwriting newer state.
 resolved against loom's externally-visible address (the `auth.base_url` setting,
 else the address you reached it on). With no key it is the session you are
 running inside, which is how an agent links a PR back to the work behind it.
+Add `--path reports/index.md` to link a worktree file in Loom's shared document
+viewer. Markdown, HTML, images, and plain text render directly; other files
+offer a download. See [worktree file links](docs/artifacts.md#worktree-file-links).
 
 Channels are the default coordination mechanism. Every session is created with a
 same-id channel whose opening goal records its charter. Messages are append-only,

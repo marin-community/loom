@@ -43,6 +43,7 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 clap_complete = "4"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"
+mime_guess = "2"
 percent-encoding = "2"
 # Generate and load the machine-local Ed25519 keypair used to sign scoped
 # automation JWTs. jsonwebtoken performs the actual JWT signing/verification.

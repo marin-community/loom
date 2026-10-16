@@ -16,7 +16,7 @@ import { confirmAction } from '../lib/confirmation';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { artifactImageUrl as rawArtifactImageUrl } from '../markdown';
 import ArtifactDocument from './ArtifactDocument.vue';
-import HtmlArtifactView from './HtmlArtifactView.vue';
+import DocumentPreview from './DocumentPreview.vue';
 
 // The artifacts surface, as a self-contained panel: a list of the agent's
 // out-of-repo documents (designs, reports, the `plan`) on the left, a viewer on
@@ -92,12 +92,13 @@ const kind = computed(() => view.value?.meta.kind ?? 'markdown');
 const isMarkdown = computed(() => kind.value === 'markdown');
 const isHtml = computed(() => kind.value === 'html');
 const isImage = computed(() => kind.value === 'image');
-function isRenderableKind(value: string): boolean {
+function isRenderableKind(value: string): value is 'markdown' | 'html' | 'image' {
   return value === 'markdown' || value === 'html' || value === 'image';
 }
 // Markdown, HTML, and images have a rendered Preview ⇄ Source toggle; every
 // other kind is shown as read-only source only.
 const isRenderable = computed(() => isRenderableKind(kind.value));
+const previewKind = computed(() => (isRenderableKind(kind.value) ? kind.value : 'text'));
 // The pseudo-path drives the markdown image base. The artifact name carries no
 // extension, so stamp one on from the kind.
 const pseudoPath = computed(() => {
@@ -699,41 +700,30 @@ onUnmounted(() => {
             autocapitalize="off"
           ></textarea>
 
-          <pre
-            v-else-if="view && viewMode === 'source'"
-            class="h-full w-full overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[13px] leading-5 text-fg"
-          ><code>{{ view.content }}</code></pre>
-
-          <ArtifactDocument
-            v-if="showComments && view"
-            ref="commentsRef"
-            :key="selected"
+          <DocumentPreview
+            v-if="view && !editing"
             :id="props.id"
             :path="pseudoPath"
-            :source="view.content"
-            :refs="view.refs.issues"
-            :artifact-name="selected"
-            :rev="viewRev ?? view.meta.rev"
-            class="h-full w-full"
-          />
-
-          <HtmlArtifactView
-            v-if="view && isHtml && viewMode === 'preview' && !editing"
+            :kind="viewMode === 'source' ? 'text' : previewKind"
             :content="view.content"
-            class="h-full w-full"
-          />
-
-          <div
-            v-if="view && isImage && viewMode === 'preview' && !editing"
-            class="flex h-full w-full items-center justify-center overflow-auto bg-surface p-4"
+            :raw-url="artifactImageUrl"
+            :title="view.meta.title || view.meta.name"
           >
-            <img
-              :src="artifactImageUrl"
-              :alt="view.meta.title || view.meta.name"
-              class="max-h-full max-w-full object-contain"
-              data-testid="artifact-image"
-            />
-          </div>
+            <template #markdown>
+              <ArtifactDocument
+                v-if="showComments"
+                ref="commentsRef"
+                :key="selected"
+                :id="props.id"
+                :path="pseudoPath"
+                :source="view.content"
+                :refs="view.refs.issues"
+                :artifact-name="selected"
+                :rev="viewRev ?? view.meta.rev"
+                class="h-full w-full"
+              />
+            </template>
+          </DocumentPreview>
 
           <div
             v-if="!view && !loading"
