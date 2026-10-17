@@ -67,6 +67,7 @@ import {
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import ToolContentPreview from './ToolContentPreview.vue';
+import ScrollToEndButton from './ScrollToEndButton.vue';
 
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
 // dialogue, not chat bubbles. Serif prose for the humans and the agent; the
@@ -1579,10 +1580,19 @@ const progressLabel = computed(() => {
 // ── Follow-the-foot scroll (lib/followFoot.ts): pinned-at-the-newest-exchange. ──
 const convScroll = ref<HTMLElement | null>(null);
 const convBody = ref<HTMLElement | null>(null);
-const { pinned, scrollToBottom, autoFollow, trackPin } = useFollowFoot(convScroll, convBody);
+const { pinned, scrollToBottom, scrollToEnd, autoFollow, trackPin } = useFollowFoot(
+  convScroll,
+  convBody,
+);
 function onScroll() {
   trackPin();
   updateActive();
+}
+// Activating the floating button unmounts it. Hand focus to the transcript so a
+// keyboard reader stays in the conversation instead of falling back to <body>.
+function jumpToEnd() {
+  scrollToEnd();
+  convScroll.value?.focus({ preventScroll: true });
 }
 
 // ── Jump-list scroll-spy ─────────────────────────────────────────────────────
@@ -1665,6 +1675,7 @@ async function goToActivity(target: {
           ref="convScroll"
           data-testid="acp-conversation"
           class="acp-scroll min-h-0 flex-1 overflow-auto pb-6 pr-1"
+          tabindex="-1"
           @scroll.passive="onScroll"
         >
           <div ref="convBody">
@@ -2108,6 +2119,7 @@ async function goToActivity(target: {
               >
             </div>
           </div>
+          <ScrollToEndButton :visible="!pinned" @click="jumpToEnd" />
         </div>
 
         <!-- Optional context: turns, images, failures, and the current plan. -->

@@ -37,6 +37,12 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
   function autoFollow() {
     if (pinned.value) nextTick(scrollToBottom);
   }
+  /** Re-arm the pin and jump to the foot — the reader asked for the end
+   *  explicitly, so following resumes from here. */
+  function scrollToEnd() {
+    pinned.value = true;
+    scrollToBottom();
+  }
   /** The scroll-handler half: re-derive the pin from the reader's position. */
   function trackPin() {
     const el = scrollEl.value;
@@ -72,5 +78,5 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
     bodyRO = null;
   });
 
-  return { pinned, scrollToBottom, autoFollow, trackPin };
+  return { pinned, scrollToBottom, scrollToEnd, autoFollow, trackPin };
 }
