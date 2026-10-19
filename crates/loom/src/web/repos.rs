@@ -301,10 +301,32 @@ async fn handle_trigger(
     // 9. If an active session already owns the target branch, forward the new
     //    request into it rather than spawning a duplicate — unless its terminal is
     //    unreachable, in which case retire it and fall through to a fresh launch
-    //    (below) so the request isn't dropped.
+    //    (below) so the request isn't dropped. A suspended session is woken
+    //    first: its missing terminal is dormancy, not loss.
     if let Some(branch) = target_branch.as_deref() {
         if let Ok(Some(b)) = branch_mod::find_by_repo_branch(&st.db, &repo_root_str, branch).await {
-            if let Ok(Some(sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
+            if let Ok(Some(mut sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
+                if session_mod::is_suspended(&sess.status) {
+                    // The trigger is a wake signal: bring the runtime back,
+                    // then forward into it. A failed wake leaves the session
+                    // suspended and reports the miss rather than archiving a
+                    // perfectly good dormant session — the next trigger
+                    // retries.
+                    match crate::lifecycle::wake(&st, &sess).await {
+                        Ok(refreshed) => sess = refreshed,
+                        Err(e) => {
+                            tracing::warn!(
+                                session = %sess.id,
+                                error = %e,
+                                "github webhook: waking suspended session failed"
+                            );
+                            return Err(format!(
+                                "could not wake suspended session {} for this trigger",
+                                sess.id
+                            ));
+                        }
+                    }
+                }
                 if forward_trigger_to_session(
                     &sess,
                     &author,

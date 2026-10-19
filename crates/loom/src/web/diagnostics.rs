@@ -88,7 +88,8 @@ struct FederationRow {
 
 fn bounded_status(value: &str) -> &str {
     match value {
-        "created" | "launching" | "running" | "orphaned" | "done" | "error" | "archived" => value,
+        "created" | "launching" | "running" | "orphaned" | "suspended" | "done" | "error"
+        | "archived" => value,
         _ => "other",
     }
 }

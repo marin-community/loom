@@ -388,6 +388,7 @@ wire_enum!(SessionSearchStatus {
     Created => "created",
     Running => "running",
     Orphaned => "orphaned",
+    Suspended => "suspended",
     Done => "done",
     Error => "error",
     Archived => "archived",
@@ -2871,6 +2872,15 @@ pub struct SessionArchiveResult {
     pub archived: bool,
     pub kind: String,
     pub branch: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Result of `sessions.suspend`. Warnings report a runtime stop that could not
+/// be confirmed; the session still reaches `suspended`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionSuspendResult {
+    pub suspended: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

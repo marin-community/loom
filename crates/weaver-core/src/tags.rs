@@ -79,6 +79,14 @@ pub const AUTO_ARCHIVE_KEY: &str = "auto-archive";
 /// The fixed opt-out value carried by [`AUTO_ARCHIVE_KEY`].
 pub const AUTO_ARCHIVE_DISABLED_VALUE: &str = "disabled";
 
+/// A quiet operator override that keeps the idle monitor from suspending this
+/// branch's live session (stopping its runtime to free memory). Manual
+/// Suspend and every wake path remain available.
+pub const AUTO_SUSPEND_KEY: &str = "auto-suspend";
+
+/// The fixed opt-out value carried by [`AUTO_SUSPEND_KEY`].
+pub const AUTO_SUSPEND_DISABLED_VALUE: &str = "disabled";
+
 /// Branch tag wiring a session to a GitHub thread; the value is
 /// `owner/name#number` (an issue or a PR — GitHub comments treat them alike).
 /// Quiet. While present, Loom mirrors every `loom status` write onto one
@@ -336,6 +344,13 @@ pub async fn auto_archive_disabled(db: &Db, branch_id: &str) -> Result<bool> {
         .is_some_and(|tag| tag.value == AUTO_ARCHIVE_DISABLED_VALUE))
 }
 
+/// Whether this branch explicitly opts out of the idle monitor's suspend path.
+pub async fn auto_suspend_disabled(db: &Db, branch_id: &str) -> Result<bool> {
+    Ok(get(db, branch_id, AUTO_SUSPEND_KEY)
+        .await?
+        .is_some_and(|tag| tag.value == AUTO_SUSPEND_DISABLED_VALUE))
+}
+
 /// Every tag on a branch, ordered by key for a stable presentation.
 pub async fn list(db: &Db, branch_id: &str) -> Result<Vec<Tag>> {
     let rows = sqlx::query_as::<_, Tag>(
@@ -382,6 +397,12 @@ mod tests {
         assert!(is_valid_value(
             AUTO_ARCHIVE_KEY,
             AUTO_ARCHIVE_DISABLED_VALUE
+        ));
+        assert!(!is_loud(AUTO_SUSPEND_KEY));
+        assert!(!is_loud_value(AUTO_SUSPEND_DISABLED_VALUE));
+        assert!(is_valid_value(
+            AUTO_SUSPEND_KEY,
+            AUTO_SUSPEND_DISABLED_VALUE
         ));
 
         // Loudness is value-driven: any key holding a ladder value is loud (a

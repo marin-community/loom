@@ -106,6 +106,14 @@ pub const DEFAULT_COOKIE_SECURE: bool = false;
 /// OOMs alone instead of taking the whole host down. 0 disables the limit.
 pub const DEFAULT_SESSION_MEMORY_MAX_GB: i64 = 8;
 
+/// Idle TTL after which the retention reaper suspends an ordinary running
+/// session: its runtime is stopped (freeing its memory) while the session,
+/// worktree, and branch stay in place, and any wake path — a new message, a
+/// GitHub trigger, opening a shell — brings it back. Off by default (0); set a
+/// positive number of seconds to enable. A session is never suspended within
+/// the reaper's activity grace window.
+pub const DEFAULT_SESSION_IDLE_SUSPEND_SECS: i64 = 0;
+
 // ---------------------------------------------------------------------------
 // Setting registry
 // ---------------------------------------------------------------------------
@@ -656,6 +664,24 @@ pub const REGISTRY: &[SettingSpec] = &[
             limit. Takes effect for sessions launched after the change.",
         kind: SettingKind::Int,
         default: "8",
+        group: "Sessions",
+        options: &[],
+    },
+    SettingSpec {
+        key: "session.idle_suspend_secs",
+        label: "Idle suspend (seconds)",
+        description: "Once an ordinary running session has gone this long \
+            without activity (and has no live turn), the retention reaper \
+            suspends it: the runtime is stopped — freeing its memory — while \
+            the session, worktree, and branch stay in place. The next signal \
+            (a message, a GitHub trigger, a code review) or the Wake action \
+            restarts it in seconds. Warm (watch-managed) sessions are exempt; \
+            a session is never suspended within 15 minutes of its last \
+            activity. Off by default — set a positive number of seconds (e.g. \
+            3600 for one hour) to enable; an individual session can opt out \
+            with auto-suspend.",
+        kind: SettingKind::Int,
+        default: "0",
         group: "Sessions",
         options: &[],
     },

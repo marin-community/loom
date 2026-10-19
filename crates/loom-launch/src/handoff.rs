@@ -601,6 +601,11 @@ async fn handoff_session_inner(
             runtime::MISSING_GITHUB_TOKEN_MESSAGE.to_string(),
         ));
     }
+    // A handoff is operator activity: refresh the idle anchor so the swapped
+    // runtime is not suspended as stale before its first turn. Before the
+    // transition is claimed, so a failed write aborts the handoff cleanly
+    // instead of stranding a published `handoff` marker.
+    session_mod::touch(&st.db, &session.id).await?;
     if !session_mod::begin_transition(&st.db, &session.id, "handoff", "Pausing session").await? {
         return Err(HandoffError::conflict(
             "another lifecycle transition already owns this session",

@@ -267,6 +267,12 @@ async fn reconcile_sessions(state: &AppState) {
         if session.managed_by.is_some() {
             continue;
         }
+        // A suspended session's missing supervisor is deliberate dormancy —
+        // adoption would undo the very memory saving suspend performed. Wake
+        // is the only thing that un-parks it.
+        if session_mod::is_suspended(&session.status) {
+            continue;
+        }
         if session_mod::is_terminal(&session.status) {
             continue;
         }
@@ -349,8 +355,9 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         }
 
         // The owner is alive: re-adopt a recoverable warm session whose terminal is
-        // gone, so the watcher resumes its across-round memory.
-        if session_mod::is_terminal(&session.status) {
+        // gone, so the watcher resumes its across-round memory. A manually
+        // suspended session stays parked — its next delivered round wakes it.
+        if session_mod::is_terminal(&session.status) || session_mod::is_suspended(&session.status) {
             continue;
         }
         if backend::has_session(&session.term_session).await {
