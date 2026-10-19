@@ -273,7 +273,18 @@ pub fn cleared_environment(
     ambient_allowlist: &[String],
 ) -> Vec<(String, String)> {
     const BASELINE: &[&str] = &[
-        "PATH", "HOME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+        "PATH",
+        "HOME",
+        "SHELL",
+        "TMPDIR",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "USER",
+        "LOGNAME",
+        // Keep environment-cleared agents on the deployment's shared uv storage.
+        "UV_CACHE_DIR",
+        "UV_PYTHON_INSTALL_DIR",
     ];
     let mut env = Vec::new();
     for name in BASELINE.iter().copied().chain(
@@ -288,4 +299,40 @@ pub fn cleared_environment(
     }
     crate::repo_env::layer(&mut env, explicit);
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn cleared_environment_preserves_uv_storage_and_explicit_overrides() {
+        let ambient = [
+            ("UV_CACHE_DIR", "/opt/uv/cache"),
+            ("UV_PYTHON_INSTALL_DIR", "/opt/uv/python"),
+            ("LOOM_TEST_SECRET", "not-for-the-agent"),
+        ];
+        let previous = ambient.map(|(name, _)| (name, std::env::var_os(name)));
+        for (name, value) in ambient {
+            std::env::set_var(name, value);
+        }
+        let inherited: std::collections::BTreeMap<_, _> =
+            cleared_environment(Vec::new(), &[]).into_iter().collect();
+        let explicit = vec![("UV_CACHE_DIR".to_string(), "/custom/cache".to_string())];
+        let overridden: std::collections::BTreeMap<_, _> =
+            cleared_environment(explicit, &[]).into_iter().collect();
+        for (name, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+
+        assert_eq!(inherited["UV_CACHE_DIR"], "/opt/uv/cache");
+        assert_eq!(inherited["UV_PYTHON_INSTALL_DIR"], "/opt/uv/python");
+        assert!(!inherited.contains_key("LOOM_TEST_SECRET"));
+        assert_eq!(overridden["UV_CACHE_DIR"], "/custom/cache");
+        assert_eq!(overridden["UV_PYTHON_INSTALL_DIR"], "/opt/uv/python");
+    }
 }
