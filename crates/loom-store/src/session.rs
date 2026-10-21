@@ -308,6 +308,60 @@ async fn bump_layout_revision_tx(tx: &mut SqliteConnection) -> sqlx::Result<()> 
     Ok(())
 }
 
+/// Repo selector values a session can match: an explicit GitHub slug, the
+/// registered slug for its worktree root, and the root path itself.
+async fn repo_selector_values_tx(
+    tx: &mut SqliteConnection,
+    session: &NewSession,
+) -> Result<Vec<String>> {
+    let mut values = Vec::new();
+    if let Some(repo) = session
+        .github_repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        values.push(repo.to_string());
+    }
+    if let Some(repo_root) =
+        sqlx::query_scalar::<_, String>("SELECT repo_root FROM branches WHERE id = ?")
+            .bind(&session.branch_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    {
+        if let Some(slug) = registered_slug_tx(tx, &repo_root).await? {
+            values.push(slug);
+        }
+        values.push(repo_root);
+    }
+    values.dedup();
+    Ok(values)
+}
+
+/// The registered `owner/name` slug for a worktree root, if the repo is in the
+/// managed store. Paths compare canonically so a symlinked home still matches.
+async fn registered_slug_tx(tx: &mut SqliteConnection, repo_root: &str) -> Result<Option<String>> {
+    if let Some(slug) = sqlx::query_scalar::<_, String>("SELECT slug FROM repos WHERE path = ?")
+        .bind(repo_root)
+        .fetch_optional(&mut *tx)
+        .await?
+    {
+        return Ok(Some(slug));
+    }
+    let target = std::path::Path::new(repo_root);
+    let target = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
+    let registered = sqlx::query_as::<_, (String, String)>("SELECT slug, path FROM repos")
+        .fetch_all(&mut *tx)
+        .await?;
+    Ok(registered.into_iter().find_map(|(slug, path)| {
+        let path = std::path::Path::new(&path);
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        (path == target).then_some(slug)
+    }))
+}
+
 /// Add the canonical placement while the session insertion transaction is
 /// still open. Session creation owns this invariant; the layout module owns
 /// later user-driven layout mutations.
@@ -347,13 +401,18 @@ async fn insert_default_placement_tx(
         } else {
             None
         };
-        let selectors = [
-            watch_id.as_deref().map(|id| ("watch", id)),
-            Some(("profile", policy.profile.as_str())),
-            Some(("origin", session.origin.as_str())),
-            Some(("origin", "*")),
-        ];
-        for (kind, value) in selectors.into_iter().flatten() {
+        let repo_values = repo_selector_values_tx(tx, session).await?;
+        let mut selectors: Vec<(&str, &str)> = Vec::new();
+        if let Some(id) = watch_id.as_deref() {
+            selectors.push(("watch", id));
+        }
+        selectors.push(("profile", policy.profile.as_str()));
+        selectors.push(("origin", session.origin.as_str()));
+        for repo in &repo_values {
+            selectors.push(("repo", repo.as_str()));
+        }
+        selectors.push(("origin", "*"));
+        for (kind, value) in selectors {
             group_id = sqlx::query_scalar::<_, String>(
                 "SELECT group_id FROM session_placement_defaults
                  WHERE selector_kind = ? AND selector_value = ?",
@@ -1729,6 +1788,108 @@ mod tests {
                     .unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn repo_default_routes_matching_repository_after_profile_and_origin() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO repos (slug, remote_url, path)
+             VALUES ('wmoss/loom', 'https://github.com/wmoss/loom', '/repo')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let seeded_branch = branch_id(&db, "weaver/repo-seeded").await;
+        insert(&db, &new_session("repo-seeded", &seeded_branch, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::session_layout::placement(&db, "repo-seeded")
+                .await
+                .unwrap()
+                .unwrap()
+                .group_id,
+            "group-user-inbox"
+        );
+
+        let layout = crate::session_layout::get_layout(&db, "test")
+            .await
+            .unwrap();
+        let layout = crate::session_layout::set_default(
+            &db,
+            "test",
+            &weaver_api::operations::session_layout::defaults::set::Input {
+                selector_kind: weaver_api::SessionPlacementSelectorKind::Repo,
+                selector_value: "wmoss/loom".to_string(),
+                group_id: "group-ops-inbox".to_string(),
+                expected_revision: Some(layout.revision),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(layout.defaults.iter().any(|default| {
+            default.selector_kind == weaver_api::SessionPlacementSelectorKind::Repo
+                && default.selector_value == "wmoss/loom"
+        }));
+
+        // The seeded origin:user default is more specific and still wins.
+        let origin_branch = branch_id(&db, "weaver/repo-origin").await;
+        insert(&db, &new_session("repo-origin", &origin_branch, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::session_layout::placement(&db, "repo-origin")
+                .await
+                .unwrap()
+                .unwrap()
+                .group_id,
+            "group-user-inbox"
+        );
+
+        let revision = crate::session_layout::get_layout(&db, "test")
+            .await
+            .unwrap()
+            .revision;
+        crate::session_layout::delete_default(
+            &db,
+            "test",
+            weaver_api::SessionPlacementSelectorKind::Origin,
+            "user",
+            Some(revision),
+        )
+        .await
+        .unwrap();
+
+        let routed_branch = branch_id(&db, "weaver/repo-routed").await;
+        insert(&db, &new_session("repo-routed", &routed_branch, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::session_layout::placement(&db, "repo-routed")
+                .await
+                .unwrap()
+                .unwrap()
+                .group_id,
+            "group-ops-inbox"
+        );
+
+        // A different repository falls through to the origin:* fallback.
+        let other_branch = branch_mod::upsert(&db, "/other", "weaver/repo-other", "main")
+            .await
+            .unwrap();
+        insert(&db, &new_session("repo-other", &other_branch.id, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::session_layout::placement(&db, "repo-other")
+                .await
+                .unwrap()
+                .unwrap()
+                .group_id,
+            "group-user-inbox"
+        );
     }
 
     /// Regression: archive kills the terminal before its final status write, so

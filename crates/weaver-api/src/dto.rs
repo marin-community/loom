@@ -2316,6 +2316,7 @@ wire_enum!(SessionPlacementSelectorKind {
     Origin => "origin",
     Profile => "profile",
     Watch => "watch",
+    Repo => "repo",
 });
 
 /// One desired tag in `sessions.tags.replace`.

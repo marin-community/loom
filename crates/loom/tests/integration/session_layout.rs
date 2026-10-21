@@ -145,3 +145,90 @@ async fn layout_http_session_view_conflict_and_cli_share_one_contract() {
         .await
         .unwrap();
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repo_default_routes_launches_by_worktree_root() {
+    let ts = TestServer::start().await;
+    let repo_root = ts
+        .repo_path()
+        .canonicalize()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let seeded = ts
+        .client
+        .post("/api/session_layout/get", json!({}))
+        .await
+        .unwrap();
+    let with_group = ts
+        .client
+        .post(
+            "/api/session_layout/groups/create",
+            json!({
+                "space_id": "space-user",
+                "name": "Loom",
+                "expected_revision": seeded["revision"]
+            }),
+        )
+        .await
+        .unwrap();
+    let loom_group = with_group["spaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|space| space["groups"].as_array().unwrap())
+        .find(|group| group["name"] == "Loom")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let defaulted = ts
+        .client
+        .post(
+            "/api/session_layout/defaults/set",
+            json!({
+                "selector_kind": "repo",
+                "selector_value": repo_root.clone(),
+                "group_id": loom_group,
+                "expected_revision": with_group["revision"]
+            }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/session_layout/defaults/delete",
+            json!({
+                "selector_kind": "origin",
+                "selector_value": "user",
+                "expected_revision": defaulted["revision"]
+            }),
+        )
+        .await
+        .unwrap();
+
+    let created = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "repo-routed launch",
+                "cwd": repo_root,
+                "agent": "shell",
+                "name": "repo-routed"
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["placement"]["space_name"], "User");
+    assert_eq!(created["placement"]["group_id"], loom_group);
+    assert_eq!(created["placement"]["group_name"], "Loom");
+
+    ts.client
+        .post("/api/sessions/delete", json!({ "session": created["id"] }))
+        .await
+        .unwrap();
+}
