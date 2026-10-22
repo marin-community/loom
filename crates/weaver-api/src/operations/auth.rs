@@ -278,8 +278,9 @@ pub mod oauth_clients {
             /// The name people see on the consent page (e.g. `claude.ai`).
             #[operand(positional)]
             pub name: String,
-            /// An exact redirect URI the client may receive codes at. Repeat
-            /// for several.
+            /// A redirect URI the client may receive codes at, matched
+            /// exactly except that a loopback `http` URI matches on any
+            /// port. Repeat for several.
             #[operand(long = "redirect-uri")]
             pub redirect_uris: Vec<String>,
             /// Register a public client that proves itself with PKCE alone and

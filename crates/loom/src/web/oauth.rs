@@ -43,6 +43,8 @@ const CONSENT_COOKIE: &str = "loom_oauth_consent";
 pub(super) const MCP_PATH: &str = "/mcp";
 pub(super) const PROTECTED_RESOURCE_METADATA_PATH: &str =
     "/.well-known/oauth-protected-resource/mcp";
+pub(super) const AUTHORIZE_PATH: &str = "/oauth/authorize";
+pub(super) const TOKEN_PATH: &str = "/oauth/token";
 
 pub(super) async fn connector_enabled(st: &AppState) -> bool {
     config::get_bool(
@@ -86,8 +88,8 @@ pub(super) async fn authorization_server(
     let base = public_base(&st, &headers).await;
     Json(json!({
         "issuer": base,
-        "authorization_endpoint": format!("{base}/oauth/authorize"),
-        "token_endpoint": format!("{base}/oauth/token"),
+        "authorization_endpoint": format!("{base}{AUTHORIZE_PATH}"),
+        "token_endpoint": format!("{base}{TOKEN_PATH}"),
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
@@ -133,14 +135,20 @@ struct Validated {
     state: Option<String>,
 }
 
-/// Validate the client and its redirect URI. A failure here is shown to the
-/// person rather than sent anywhere, so a bad request cannot redirect them to
-/// an unregistered URI.
-async fn validate_client(st: &AppState, params: &AuthorizeParams) -> Result<Client, Response> {
+/// The registered client the request names. A failure here is shown to the
+/// person rather than sent anywhere: an unknown client has no redirect URI
+/// Loom may trust.
+async fn registered_client(st: &AppState, params: &AuthorizeParams) -> Result<Client, Response> {
     let client_id = params.client_id.as_deref().unwrap_or_default();
     let Some(client) = oauth::get_client(&st.db, client_id)
         .await
-        .map_err(|error| error_page(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()))?
+        .map_err(|error| {
+            tracing::error!(%error, "OAuth client lookup failed");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Loom could not look up this application. Try again.",
+            )
+        })?
     else {
         return Err(error_page(
             StatusCode::BAD_REQUEST,
@@ -191,7 +199,7 @@ async fn validate(
     headers: &HeaderMap,
     params: &AuthorizeParams,
 ) -> Result<Validated, Response> {
-    let client = validate_client(st, params).await?;
+    let client = registered_client(st, params).await?;
     let redirect_uri = chosen_redirect(&client, params)
         .map_err(|message| error_page(StatusCode::BAD_REQUEST, message))?;
     let base = public_base(st, headers).await;
@@ -244,9 +252,33 @@ async fn validate(
 
 /// The signed-in person behind the login cookie, if any. A login cookie is
 /// always a person's, never a session or automation credential.
-async fn signed_in(st: &AppState, headers: &HeaderMap) -> Option<auth::Principal> {
-    let cookie = cookie_value(headers, auth::SESSION_COOKIE)?;
-    auth::lookup_session(&st.db, &cookie).await.ok().flatten()
+async fn signed_in(
+    st: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<auth::Principal>, Response> {
+    let Some(cookie) = cookie_value(headers, auth::SESSION_COOKIE) else {
+        return Ok(None);
+    };
+    auth::lookup_session(&st.db, &cookie)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "OAuth sign-in lookup failed");
+            error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Loom could not check your sign-in. Try again.",
+            )
+        })
+}
+
+/// The consent form's double-submit CSRF cookie; `Max-Age=0` clears it.
+async fn consent_cookie(st: &AppState, value: &str, max_age: u32) -> String {
+    let mut cookie = format!(
+        "{CONSENT_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/oauth; Max-Age={max_age}"
+    );
+    if cookie_secure(st).await {
+        cookie.push_str("; Secure");
+    }
+    cookie
 }
 
 /// `GET /oauth/authorize` — show the consent page, or send the person to sign
@@ -264,25 +296,22 @@ pub(super) async fn authorize(
         Ok(validated) => validated,
         Err(response) => return response,
     };
-    let Some(person) = signed_in(&st, &headers).await else {
+    let person = match signed_in(&st, &headers).await {
+        Ok(person) => person,
+        Err(response) => return response,
+    };
+    let Some(person) = person else {
         let here = uri
             .path_and_query()
             .map(|value| value.as_str())
-            .unwrap_or("/oauth/authorize");
+            .unwrap_or(AUTHORIZE_PATH);
         let encoded =
             percent_encoding::utf8_percent_encode(here, percent_encoding::NON_ALPHANUMERIC);
         return redirect_with_cookies(&format!("/login?redirect={encoded}"), &[]);
     };
     let csrf = auth::random_state();
     let mut response = consent_page(&validated, &params, &person.username, &csrf).into_response();
-    let mut cookie =
-        format!("{CONSENT_COOKIE}={csrf}; HttpOnly; SameSite=Strict; Path=/oauth; Max-Age=600");
-    if cookie_secure(&st).await {
-        cookie.push_str("; Secure");
-    }
-    if let Ok(value) = HeaderValue::from_str(&cookie) {
-        response.headers_mut().append(header::SET_COOKIE, value);
-    }
+    append_cookie(&mut response, &consent_cookie(&st, &csrf, 600).await);
     response
 }
 
@@ -308,14 +337,18 @@ pub(super) async fn decide(
         Ok(validated) => validated,
         Err(response) => return response,
     };
-    let Some(person) = signed_in(&st, &headers).await else {
+    let person = match signed_in(&st, &headers).await {
+        Ok(person) => person,
+        Err(response) => return response,
+    };
+    let Some(person) = person else {
         return error_page(
             StatusCode::UNAUTHORIZED,
             "Your Loom sign-in ended. Start again from the application.",
         );
     };
     let base = public_base(&st, &headers).await;
-    let clear = format!("{CONSENT_COOKIE}=; HttpOnly; SameSite=Strict; Path=/oauth; Max-Age=0");
+    let clear = consent_cookie(&st, "", 0).await;
     if form.decision != "approve" {
         let mut response = redirect_to_client(
             &validated.redirect_uri,
@@ -686,7 +719,7 @@ fn consent_page(
          <li>send them instructions, interrupt them, and archive them.</li></ul>\
          <p>It acts with your ordinary user permissions, never administrator ones, \
          and loses access when your Loom access ends.</p>\
-         <form method=\"post\" action=\"/oauth/authorize\">{fields}\
+         <form method=\"post\" action=\"{AUTHORIZE_PATH}\">{fields}\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
          <div class=\"actions\">\
          <button class=\"primary\" type=\"submit\" name=\"decision\" value=\"approve\">Allow</button>\

@@ -268,17 +268,29 @@ settings:
 ```
 
 Register each client once as an administrator. A confidential client's secret
-is printed once:
+is printed once. Loom has no dynamic client registration.
 
 ```sh
-loom oauth-client add claude.ai --redirect-uri https://claude.ai/api/mcp/auth_callback
+loom oauth-client add claude.ai \
+  --redirect-uri https://claude.ai/api/mcp/auth_callback \
+  --redirect-uri https://claude.com/api/mcp/auth_callback
 loom oauth-client ls
 loom oauth-client rm <client-id>   # also revokes every token it was issued
 ```
 
-For claude.ai, enter `https://<loom>/mcp` as the custom connector URL. Put
-the client id and secret under its advanced settings. Pass `--public` for a
-client that cannot keep a secret; it then authenticates with PKCE alone.
+Anthropic has said claude.ai's callback may move to claude.com, hence both
+redirect URIs. In claude.ai, enter `https://<loom>/mcp` as the custom
+connector URL, choose your own OAuth client under its advanced settings, and
+enter the client id and secret.
+
+Pass `--public` for a client that cannot keep a secret; it then authenticates
+with PKCE alone. Claude Code is one. It listens on a loopback port, and a
+registered loopback redirect matches on any port:
+
+```sh
+loom oauth-client add claude-code --public --redirect-uri http://localhost/callback
+claude mcp add --transport http --client-id <client-id> loom https://<loom>/mcp
+```
 
 People connect by signing in to Loom, through GitHub or a password, and
 approving the client. The client receives an hour-long Loom API token with

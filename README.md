@@ -504,11 +504,13 @@ on and registers each assistant once:
 
 ```sh
 loom settings patch --changes '{"connector.enabled": "true"}'
-loom oauth-client add claude.ai --redirect-uri https://claude.ai/api/mcp/auth_callback
+loom oauth-client add claude.ai \
+  --redirect-uri https://claude.ai/api/mcp/auth_callback \
+  --redirect-uri https://claude.com/api/mcp/auth_callback
 ```
 
 See [Remote MCP connector](docs/configuration.md#remote-mcp-connector) for the
-claude.ai steps and token lifetimes.
+claude.ai and Claude Code steps and token lifetimes.
 
 ## Configuration
 

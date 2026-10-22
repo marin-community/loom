@@ -934,7 +934,7 @@ fn root_router() -> Router<AppState> {
         // own terms — a bearer token, the login cookie plus consent, or client
         // credentials — so they sit outside `require_auth`. All answer 404
         // unless `connector.enabled` is on.
-        .route("/mcp", post(mcp::post_mcp))
+        .route(oauth::MCP_PATH, post(mcp::post_mcp))
         .route(
             "/.well-known/oauth-protected-resource",
             get(oauth::protected_resource),
@@ -948,10 +948,10 @@ fn root_router() -> Router<AppState> {
             get(oauth::authorization_server),
         )
         .route(
-            "/oauth/authorize",
+            oauth::AUTHORIZE_PATH,
             get(oauth::authorize).post(oauth::decide),
         )
-        .route("/oauth/token", post(oauth::token))
+        .route(oauth::TOKEN_PATH, post(oauth::token))
 }
 
 pub fn router(state: AppState) -> Router {

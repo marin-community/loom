@@ -1288,7 +1288,8 @@ credential. Everything here answers `404` until `connector.enabled` is on.
   `/.well-known/oauth-protected-resource/mcp`. That document names Loom
   itself as the issuer (RFC 8414). `/oauth/authorize` accepts only the code
   flow with PKCE S256 and a client and exact redirect URI registered with
-  `auth.oauth_clients.create` (`loom oauth-client add`). A bad client or
+  `auth.oauth_clients.create` (`loom oauth-client add`); a loopback `http`
+  redirect matches on any port (RFC 8252). A bad client or
   redirect URI is shown to the person, never redirected. The identity step is
   ordinary sign-in: without a login cookie the person goes to
   `/login?redirect=…`, and GitHub sign-in carries a validated same-origin

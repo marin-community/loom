@@ -18,7 +18,9 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use weaver_core::db::{iso_in_days, iso_in_seconds};
 
-use crate::auth::{get_user, mint_token, random_b64, random_id, sha256_hex, SESSION_TTL_DAYS};
+use crate::auth::{
+    get_user, mint_token, random_b64, random_id, sha256_hex, Grant, SESSION_TTL_DAYS,
+};
 use crate::db::{now_iso, Db};
 
 /// Access-token lifetime. It matches the one-hour organization lease, so a
@@ -29,9 +31,6 @@ pub const CODE_TTL_SECONDS: i64 = 5 * 60;
 /// How long one consent lasts. Rotation keeps this deadline, so a client must
 /// send the person back through consent after it, like a browser login.
 pub const GRANT_TTL_DAYS: i64 = SESSION_TTL_DAYS;
-/// The grant every OAuth access token carries. An admin's connector works
-/// with user authority; administration stays in the browser and the CLI.
-const ACCESS_GRANT_JSON: &str = r#"{"kind":"user"}"#;
 /// Refresh tokens never start with the API-token prefix, so presenting one as
 /// a bearer credential cannot match a row.
 const REFRESH_TOKEN_PREFIX: &str = "loomrt_";
@@ -56,9 +55,13 @@ impl Client {
         self.secret_hash.is_some()
     }
 
-    /// Redirect URIs match exactly, as OAuth 2.1 requires.
+    /// Redirect URIs match exactly, as OAuth 2.1 requires, except that a
+    /// loopback redirect matches on any port: a native client such as Claude
+    /// Code listens on whatever port it is given (RFC 8252 §7.3).
     pub fn allows_redirect(&self, redirect_uri: &str) -> bool {
-        self.redirect_uris.iter().any(|uri| uri == redirect_uri)
+        self.redirect_uris.iter().any(|registered| {
+            registered == redirect_uri || same_loopback_redirect(registered, redirect_uri)
+        })
     }
 
     /// Whether `secret` authenticates this client. A public client presents
@@ -86,6 +89,24 @@ fn client_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Client> {
     })
 }
 
+fn is_loopback_http(url: &reqwest::Url) -> bool {
+    url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"))
+}
+
+/// Whether `requested` is the registered loopback redirect on some port.
+fn same_loopback_redirect(registered: &str, requested: &str) -> bool {
+    let (Ok(mut registered), Ok(mut requested)) = (
+        reqwest::Url::parse(registered),
+        reqwest::Url::parse(requested),
+    ) else {
+        return false;
+    };
+    is_loopback_http(&registered)
+        && registered.set_port(None).is_ok()
+        && requested.set_port(None).is_ok()
+        && registered == requested
+}
+
 /// A redirect URI an operator may register: an absolute HTTPS URL, or HTTP on
 /// a loopback host for a native client (RFC 8252). Never a fragment.
 pub fn validate_redirect_uri(uri: &str) -> Result<()> {
@@ -93,12 +114,10 @@ pub fn validate_redirect_uri(uri: &str) -> Result<()> {
     if parsed.fragment().is_some() {
         bail!("redirect URI '{uri}' must not contain a fragment");
     }
-    let loopback = matches!(parsed.host_str(), Some("127.0.0.1" | "[::1]" | "localhost"));
-    match parsed.scheme() {
-        "https" => Ok(()),
-        "http" if loopback => Ok(()),
-        _ => bail!("redirect URI '{uri}' must use https, or http on a loopback host"),
+    if parsed.scheme() == "https" || is_loopback_http(&parsed) {
+        return Ok(());
     }
+    bail!("redirect URI '{uri}' must use https, or http on a loopback host")
 }
 
 /// Register a client. Returns the client and, for a confidential one, its
@@ -363,7 +382,9 @@ async fn insert_tokens(
     .bind(&access_hash)
     .bind(&prefix)
     .bind(&access_expires_at)
-    .bind(ACCESS_GRANT_JSON)
+    // An admin's connector works with user authority; administration stays in
+    // the browser and the CLI.
+    .bind(serde_json::to_string(&Grant::User)?)
     .execute(&mut **tx)
     .await
     .context("issuing OAuth access token")?;
@@ -449,6 +470,42 @@ mod tests {
             "javascript:alert(1)",
         ] {
             assert!(validate_redirect_uri(uri).is_err(), "{uri}");
+        }
+    }
+
+    #[test]
+    fn loopback_redirects_match_on_any_port_and_others_match_exactly() {
+        let client = Client {
+            client_id: "loom-test".to_string(),
+            name: "test".to_string(),
+            secret_hash: None,
+            redirect_uris: vec![
+                CLAUDE_CALLBACK.to_string(),
+                "http://localhost/callback".to_string(),
+                "http://127.0.0.1:8080/callback".to_string(),
+            ],
+            created_by: "ada".to_string(),
+            created_at: String::new(),
+        };
+        for allowed in [
+            CLAUDE_CALLBACK,
+            "http://localhost/callback",
+            "http://localhost:3118/callback",
+            "http://127.0.0.1/callback",
+            "http://127.0.0.1:49152/callback",
+        ] {
+            assert!(client.allows_redirect(allowed), "{allowed}");
+        }
+        for refused in [
+            "https://claude.ai/api/mcp/auth_callback/",
+            "https://claude.ai:8443/api/mcp/auth_callback",
+            "http://localhost:3118/other",
+            "http://localhost:3118/callback?next=x",
+            "https://localhost:3118/callback",
+            "http://127.0.0.2:3118/callback",
+            "http://localhost.example.com/callback",
+        ] {
+            assert!(!client.allows_redirect(refused), "{refused}");
         }
     }
 
