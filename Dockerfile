@@ -194,7 +194,7 @@ RUN set -eux; \
 # UV_PYTHON_INSTALL_DIR / UV_CACHE_DIR below + docker-compose.yml), so the
 # container manages its own Pythons — self-contained and persisted across
 # recreates, isolated from the host's uv. Pinned to a recent uv.
-COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /usr/local/bin/
 
 # Run as the host user that owns the bind-mounted code, so the worktrees and
 # edits loom's agents create are owned by you on the host, not root. The uid/gid
