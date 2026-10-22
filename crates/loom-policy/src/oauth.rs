@@ -44,6 +44,7 @@ pub const CONSENT_TTL_SECONDS: i64 = 10 * 60;
 const REFRESH_TOKEN_PREFIX: &str = "loomrt_";
 const CLIENT_SECRET_PREFIX: &str = "loomcs_";
 const MAX_CLIENT_NAME_BYTES: usize = 100;
+const MAX_DECLARED_CLIENT_ID_BYTES: usize = 64;
 
 /// A registered OAuth client.
 #[derive(Debug, Clone)]
@@ -54,6 +55,8 @@ pub struct Client {
     pub redirect_uris: Vec<String>,
     pub created_by: String,
     pub created_at: String,
+    /// Declared by the deployment stack rather than registered by hand.
+    pub deployment_managed: bool,
 }
 
 impl Client {
@@ -94,6 +97,7 @@ fn client_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Client> {
             .context("invalid stored OAuth redirect URIs")?,
         created_by: row.get("created_by"),
         created_at: row.get("created_at"),
+        deployment_managed: row.get("managed_by_deployment"),
     })
 }
 
@@ -128,15 +132,9 @@ pub fn validate_redirect_uri(uri: &str) -> Result<()> {
     bail!("redirect URI '{uri}' must use https, or http on a loopback host")
 }
 
-/// Register a client. Returns the client and, for a confidential one, its
-/// secret — the only time the plaintext exists.
-pub async fn create_client(
-    db: &Db,
-    name: &str,
-    redirect_uris: &[String],
-    confidential: bool,
-    created_by: &str,
-) -> Result<(Client, Option<String>)> {
+/// Check a client's consent-page name and redirect URIs, returning the
+/// trimmed name.
+fn validate_client<'a>(name: &'a str, redirect_uris: &[String]) -> Result<&'a str> {
     let name = name.trim();
     if name.is_empty() {
         bail!("a client name is required");
@@ -150,6 +148,19 @@ pub async fn create_client(
     for uri in redirect_uris {
         validate_redirect_uri(uri)?;
     }
+    Ok(name)
+}
+
+/// Register a client. Returns the client and, for a confidential one, its
+/// secret — the only time the plaintext exists.
+pub async fn create_client(
+    db: &Db,
+    name: &str,
+    redirect_uris: &[String],
+    confidential: bool,
+    created_by: &str,
+) -> Result<(Client, Option<String>)> {
+    let name = validate_client(name, redirect_uris)?;
     let secret = confidential.then(|| format!("{CLIENT_SECRET_PREFIX}{}", random_b64(32)));
     let client_id = format!("loom-{}", random_id());
     sqlx::query(
@@ -170,6 +181,64 @@ pub async fn create_client(
         .await?
         .ok_or_else(|| anyhow!("OAuth client vanished after insert"))?;
     Ok((client, secret))
+}
+
+/// Create or update a public client the deployment stack declares under a
+/// stable id, which an operator can enter in a client such as claude.ai
+/// before the first deploy. The manifest never carries secrets, so a declared
+/// client is always public. An update keeps the client's grants, so people
+/// stay connected; a client registered by hand under the same id is refused
+/// rather than taken over.
+pub async fn declare_client(
+    db: &Db,
+    client_id: &str,
+    name: &str,
+    redirect_uris: &[String],
+) -> Result<Client> {
+    if client_id.is_empty()
+        || client_id.len() > MAX_DECLARED_CLIENT_ID_BYTES
+        || !client_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!(
+            "client id '{client_id}' must be 1 to {MAX_DECLARED_CLIENT_ID_BYTES} letters, \
+             digits, '.', '_' or '-'"
+        );
+    }
+    let name = validate_client(name, redirect_uris)?;
+    let saved = sqlx::query(
+        "INSERT INTO oauth_clients
+           (client_id, name, secret_hash, redirect_uris, created_by, created_at,
+            managed_by_deployment)
+         VALUES (?, ?, NULL, ?, 'deployment', ?, 1)
+         ON CONFLICT(client_id) DO UPDATE SET
+           name = excluded.name, redirect_uris = excluded.redirect_uris
+         WHERE oauth_clients.managed_by_deployment = 1",
+    )
+    .bind(client_id)
+    .bind(name)
+    .bind(serde_json::to_string(redirect_uris)?)
+    .bind(now_iso())
+    .execute(db)
+    .await
+    .context("declaring OAuth client")?
+    .rows_affected();
+    if saved == 0 {
+        bail!("OAuth client '{client_id}' was registered by hand, not by the deployment");
+    }
+    get_client(db, client_id)
+        .await?
+        .ok_or_else(|| anyhow!("OAuth client vanished after upsert"))
+}
+
+/// Ids of the clients the deployment stack declared.
+pub async fn deployment_managed_client_ids(db: &Db) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT client_id FROM oauth_clients WHERE managed_by_deployment = 1 ORDER BY client_id",
+    )
+    .fetch_all(db)
+    .await?)
 }
 
 pub async fn get_client(db: &Db, client_id: &str) -> Result<Option<Client>> {
@@ -628,6 +697,7 @@ mod tests {
             ],
             created_by: "ada".to_string(),
             created_at: String::new(),
+            deployment_managed: false,
         };
         for allowed in [
             CLAUDE_CALLBACK,
@@ -724,6 +794,52 @@ mod tests {
         assert_eq!(
             remove_client(&db, &client.client_id).await.unwrap(),
             Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_client_updates_in_place_and_never_takes_over_a_registered_one() {
+        let (db, registered) = setup().await;
+        let declared = declare_client(&db, "claude-ai", "claude.ai", &[CLAUDE_CALLBACK.into()])
+            .await
+            .unwrap();
+        assert!(declared.deployment_managed && !declared.is_confidential());
+        assert!(!registered.deployment_managed);
+        let issued = issue_tokens(&db, &declared, "ada").await.unwrap();
+
+        let claude_com = vec!["https://claude.com/api/mcp/auth_callback".to_string()];
+        let updated = declare_client(&db, "claude-ai", "Claude", &claude_com)
+            .await
+            .unwrap();
+        assert_eq!(
+            (updated.name.as_str(), updated.redirect_uris),
+            ("Claude", claude_com)
+        );
+        assert!(
+            connects(&db, &issued.access_token).await,
+            "redeclaring a client keeps the grants people already made"
+        );
+
+        let takeover = declare_client(&db, &registered.client_id, "x", &[CLAUDE_CALLBACK.into()])
+            .await
+            .unwrap_err();
+        assert!(
+            takeover.to_string().contains("registered by hand"),
+            "{takeover}"
+        );
+        assert!(get_client(&db, &registered.client_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_confidential());
+        for bad in ["", "has space", "slash/id", &"x".repeat(65)] {
+            assert!(declare_client(&db, bad, "x", &[CLAUDE_CALLBACK.into()])
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            deployment_managed_client_ids(&db).await.unwrap(),
+            vec!["claude-ai".to_string()]
         );
     }
 

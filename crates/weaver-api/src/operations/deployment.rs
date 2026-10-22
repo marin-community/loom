@@ -1,5 +1,5 @@
-//! Declarative reconciliation of runtime settings, launch profiles, and
-//! workload federation mappings against one deployment stack.
+//! Declarative reconciliation of runtime settings, launch profiles, workload
+//! federation mappings, and OAuth clients against one deployment stack.
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -11,7 +11,8 @@ pub mod reconcile {
     use super::prelude::*;
 
     /// Reconcile the runtime resources declared by a deployment stack: settings,
-    /// remote MCP servers, launch profiles, and federation mappings.
+    /// remote MCP servers, launch profiles, federation mappings, watches, and
+    /// OAuth clients.
     ///
     /// The manifest carries references and policy, never secret values.
     #[operation(id = "deployment.reconcile", actor = Admin, scope = Global, risk = ExternalWrite,
@@ -34,6 +35,10 @@ pub mod reconcile {
         /// Agent watches owned by this deployment.
         #[operand(json, default = Vec::new())]
         pub watches: Vec<DeploymentWatchReq>,
+        /// Public OAuth clients, such as the claude.ai connector, under the
+        /// stable ids people enter in those clients.
+        #[operand(json, default = Vec::new())]
+        pub oauth_clients: Vec<DeploymentOAuthClientReq>,
         /// Remove previously deployment-managed resources omitted from this
         /// request.
         #[operand(default = false)]

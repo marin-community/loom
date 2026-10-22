@@ -775,9 +775,10 @@ fn consent_page(
 
 // -- Client administration --------------------------------------------------------
 
-fn client_view(client: Client) -> OAuthClientView {
+pub(super) fn client_view(client: Client) -> OAuthClientView {
     OAuthClientView {
         confidential: client.is_confidential(),
+        deployment_managed: client.deployment_managed,
         client_id: client.client_id,
         name: client.name,
         redirect_uris: client.redirect_uris,

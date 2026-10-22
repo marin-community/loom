@@ -499,14 +499,18 @@ endpoint at `https://<loom>/mcp`. Its tools launch a session, list and inspect
 sessions, read a session's results, send follow-ups, interrupt, return the
 dashboard link, and archive. People connect by signing in to Loom and
 approving the assistant. The assistant then holds a short-lived Loom token
-with the person's ordinary user authority. An administrator turns the endpoint
-on and registers each assistant once:
+with the person's ordinary user authority. The deployment manifest turns the
+endpoint on and declares each assistant as an OAuth client:
 
-```sh
-loom settings patch --changes '{"connector.enabled": "true"}'
-loom oauth-client add claude.ai \
-  --redirect-uri https://claude.ai/api/mcp/auth_callback \
-  --redirect-uri https://claude.com/api/mcp/auth_callback
+```yaml
+settings:
+  connector.enabled: "true"
+oauth_clients:
+  - client_id: claude-ai
+    name: claude.ai
+    redirect_uris:
+      - https://claude.ai/api/mcp/auth_callback
+      - https://claude.com/api/mcp/auth_callback
 ```
 
 See [Remote MCP connector](docs/configuration.md#remote-mcp-connector) for the

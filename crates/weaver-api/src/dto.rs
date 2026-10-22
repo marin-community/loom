@@ -1225,6 +1225,20 @@ pub struct DeploymentProfileReq {
     pub env: Vec<DeploymentProfileEnvReq>,
 }
 
+/// A public OAuth client the deployment declares under a stable id, so an
+/// operator can enter the id in a client such as claude.ai before deploying.
+/// The manifest never carries secrets; the client proves itself with PKCE.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DeploymentOAuthClientReq {
+    /// 1 to 64 letters, digits, `.`, `_` or `-`.
+    pub client_id: String,
+    /// The name shown on the consent page.
+    pub name: String,
+    /// The redirect URIs authorization codes may be returned to, matched
+    /// exactly except that a loopback `http` URI matches on any port.
+    pub redirect_uris: Vec<String>,
+}
+
 /// A scalar setting value in a JSON or YAML deployment manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
@@ -1253,6 +1267,7 @@ pub struct DeploymentView {
     pub remote_mcps: Vec<RemoteMcpView>,
     pub profiles: Vec<ProfileView>,
     pub federations: Vec<FederationView>,
+    pub oauth_clients: Vec<OAuthClientView>,
 }
 
 pub use weaver_core::occurrence::SlackDeliveryStatus;
@@ -2814,6 +2829,8 @@ pub struct OAuthClientView {
     pub confidential: bool,
     pub created_by: String,
     pub created_at: String,
+    /// Declared by the deployment stack, which updates and prunes it.
+    pub deployment_managed: bool,
 }
 
 /// `auth.oauth_clients.create` reply — the one time a confidential client's
