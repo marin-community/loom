@@ -53,7 +53,7 @@ pub(super) async fn connector_enabled(st: &AppState) -> bool {
     .await
 }
 
-fn not_found() -> Response {
+pub(super) fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response()
 }
 

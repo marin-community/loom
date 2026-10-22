@@ -925,14 +925,19 @@ pub enum TokenKind {
     /// Minted by the server for one of its own subprocesses; see
     /// [`create_engine_token`].
     Engine,
+    /// An OAuth access token for the remote MCP endpoint; see
+    /// [`crate::oauth`]. It authenticates only through
+    /// [`lookup_connector_token`].
+    OAuth,
 }
 
 impl TokenKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TokenKind::Pat => "pat",
             TokenKind::Local => "local",
             TokenKind::Engine => "engine",
+            TokenKind::OAuth => "oauth",
         }
     }
 }
@@ -1094,7 +1099,7 @@ async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Optio
     };
     let id: String = row.get("id");
     let kind: String = row.get("kind");
-    if kind == crate::oauth::ACCESS_TOKEN_KIND && !accept_oauth {
+    if kind == TokenKind::OAuth.as_str() && !accept_oauth {
         return Ok(None);
     }
     if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {

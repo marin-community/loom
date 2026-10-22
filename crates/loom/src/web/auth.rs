@@ -328,8 +328,13 @@ fn session_cookie(value: &str, max_age: i64, secure: bool) -> String {
 }
 
 /// Build the `Set-Cookie` value for the short-lived OAuth state cookie.
+/// A short-lived cookie that carries GitHub sign-in through its round trip.
+fn sign_in_cookie(name: &str, value: &str, max_age: i64) -> String {
+    format!("{name}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
+}
+
 fn state_cookie(value: &str, max_age: i64) -> String {
-    format!("{OAUTH_STATE_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
+    sign_in_cookie(OAUTH_STATE_COOKIE, value, max_age)
 }
 
 /// A 303 redirect to `location`, appending each given `Set-Cookie` header.
@@ -447,7 +452,7 @@ pub(super) async fn auth_logout(
 
 /// Build the `Set-Cookie` value carrying where to land after GitHub sign-in.
 fn login_next_cookie(value: &str, max_age: i64) -> String {
-    format!("{LOGIN_NEXT_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
+    sign_in_cookie(LOGIN_NEXT_COOKIE, value, max_age)
 }
 
 /// Whether `next` is a path on this origin, safe to redirect to after

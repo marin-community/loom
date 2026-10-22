@@ -25,7 +25,7 @@ use sqlx::Row;
 use weaver_core::db::{iso_in_days, iso_in_seconds};
 
 use crate::auth::{
-    self, get_user, mint_token, random_b64, random_id, sha256_hex, SESSION_TTL_DAYS,
+    self, get_user, mint_token, random_b64, random_id, sha256_hex, TokenKind, SESSION_TTL_DAYS,
 };
 use crate::db::{now_iso, Db};
 
@@ -39,8 +39,6 @@ pub const CODE_TTL_SECONDS: i64 = 5 * 60;
 pub const GRANT_TTL_DAYS: i64 = SESSION_TTL_DAYS;
 /// How long a consent page may wait for the person's answer.
 pub const CONSENT_TTL_SECONDS: i64 = 10 * 60;
-/// The `api_tokens.kind` of an OAuth access token.
-pub const ACCESS_TOKEN_KIND: &str = "oauth";
 /// Refresh tokens never start with the API-token prefix, so presenting one as
 /// a bearer credential cannot match a row.
 const REFRESH_TOKEN_PREFIX: &str = "loomrt_";
@@ -203,7 +201,7 @@ pub async fn remove_client(db: &Db, client_id: &str) -> Result<Option<i64>> {
            SELECT access_token_id FROM oauth_refresh_tokens WHERE client_id = ?
          )",
     )
-    .bind(ACCESS_TOKEN_KIND)
+    .bind(TokenKind::OAuth.as_str())
     .bind(client_id)
     .execute(&mut *tx)
     .await?
@@ -408,7 +406,7 @@ pub async fn refresh_tokens(
     };
     sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind = ?")
         .bind(&previous_access)
-        .bind(ACCESS_TOKEN_KIND)
+        .bind(TokenKind::OAuth.as_str())
         .execute(&mut *tx)
         .await?;
     let issued = insert_tokens(&mut tx, client, &username, &grant).await?;
@@ -423,7 +421,7 @@ async fn revoke_grant(tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>, grant_id: &s
            SELECT access_token_id FROM oauth_refresh_tokens WHERE grant_id = ?
          )",
     )
-    .bind(ACCESS_TOKEN_KIND)
+    .bind(TokenKind::OAuth.as_str())
     .bind(grant_id)
     .execute(&mut **tx)
     .await?;
@@ -454,7 +452,7 @@ async fn insert_tokens(
     .bind(format!("OAuth: {}", client.name))
     .bind(&access_hash)
     .bind(&prefix)
-    .bind(ACCESS_TOKEN_KIND)
+    .bind(TokenKind::OAuth.as_str())
     .bind(&access_expires_at)
     // An admin's connector works with user authority; administration stays in
     // the browser and the CLI.

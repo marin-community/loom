@@ -31,7 +31,7 @@ use crate::mcp::{connector, handle_message, ServerInfo, PROTOCOL_VERSIONS};
 use crate::AppState;
 
 use super::auth::{bearer_token, public_base};
-use super::oauth::{connector_enabled, resource_metadata_url};
+use super::oauth::{connector_enabled, not_found, resource_metadata_url};
 
 const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
 
@@ -112,7 +112,7 @@ pub(super) async fn post_mcp(
     body: Bytes,
 ) -> Response {
     if !connector_enabled(&st).await {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "not found" }))).into_response();
+        return not_found();
     }
     let principal = match authenticate(&st, &headers).await {
         Ok(principal) => principal,
