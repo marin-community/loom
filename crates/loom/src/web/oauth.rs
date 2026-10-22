@@ -138,7 +138,10 @@ struct Validated {
 /// The registered client the request names. A failure here is shown to the
 /// person rather than sent anywhere: an unknown client has no redirect URI
 /// Loom may trust.
-async fn registered_client(st: &AppState, params: &AuthorizeParams) -> Result<Client, Response> {
+async fn registered_client(
+    st: &AppState,
+    params: &AuthorizeParams,
+) -> Result<Client, Box<Response>> {
     let client_id = params.client_id.as_deref().unwrap_or_default();
     let Some(client) = oauth::get_client(&st.db, client_id)
         .await
@@ -150,10 +153,10 @@ async fn registered_client(st: &AppState, params: &AuthorizeParams) -> Result<Cl
             )
         })?
     else {
-        return Err(error_page(
+        return Err(Box::new(error_page(
             StatusCode::BAD_REQUEST,
             "This application is not registered with Loom. Ask a Loom administrator to add it.",
-        ));
+        )));
     };
     Ok(client)
 }
@@ -198,13 +201,13 @@ async fn validate(
     st: &AppState,
     headers: &HeaderMap,
     params: &AuthorizeParams,
-) -> Result<Validated, Response> {
+) -> Result<Validated, Box<Response>> {
     let client = registered_client(st, params).await?;
     let redirect_uri = chosen_redirect(&client, params)
         .map_err(|message| error_page(StatusCode::BAD_REQUEST, message))?;
     let base = public_base(st, headers).await;
     let back = |error: &str, description: &str| {
-        redirect_to_client(
+        Box::new(redirect_to_client(
             &redirect_uri,
             &[
                 ("error", error),
@@ -212,7 +215,7 @@ async fn validate(
                 ("iss", &base),
             ],
             params.state.as_deref(),
-        )
+        ))
     };
     if params.response_type.as_deref() != Some("code") {
         return Err(back(
@@ -255,7 +258,7 @@ async fn validate(
 async fn signed_in(
     st: &AppState,
     headers: &HeaderMap,
-) -> Result<Option<auth::Principal>, Response> {
+) -> Result<Option<auth::Principal>, Box<Response>> {
     let Some(cookie) = cookie_value(headers, auth::SESSION_COOKIE) else {
         return Ok(None);
     };
@@ -263,10 +266,10 @@ async fn signed_in(
         .await
         .map_err(|error| {
             tracing::error!(%error, "OAuth sign-in lookup failed");
-            error_page(
+            Box::new(error_page(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Loom could not check your sign-in. Try again.",
-            )
+            ))
         })
 }
 
@@ -294,11 +297,11 @@ pub(super) async fn authorize(
     }
     let validated = match validate(&st, &headers, &params).await {
         Ok(validated) => validated,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let person = match signed_in(&st, &headers).await {
         Ok(person) => person,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(person) = person else {
         let here = uri
@@ -335,11 +338,11 @@ pub(super) async fn decide(
     }
     let validated = match validate(&st, &headers, &form.params).await {
         Ok(validated) => validated,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let person = match signed_in(&st, &headers).await {
         Ok(person) => person,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let Some(person) = person else {
         return error_page(
@@ -538,19 +541,19 @@ pub(super) async fn token(
             };
             match oauth::refresh_tokens(&st.db, &client, refresh_token).await {
                 Ok(Some(issued)) => Ok(issued),
-                Ok(None) => Err(token_error(
+                Ok(None) => Err(Box::new(token_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_grant",
                     "the refresh token is invalid, expired, or its user is no longer authorized",
-                )),
-                Err(error) => Err(server_error(error)),
+                ))),
+                Err(error) => Err(Box::new(server_error(error))),
             }
         }
-        _ => Err(token_error(
+        _ => Err(Box::new(token_error(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
             "grant_type must be authorization_code or refresh_token",
-        )),
+        ))),
     };
     match issued {
         Ok(issued) => {
@@ -564,7 +567,7 @@ pub(super) async fn token(
             no_store(&mut response);
             response
         }
-        Err(response) => response,
+        Err(response) => *response,
     }
 }
 
@@ -581,15 +584,20 @@ async fn exchange_code(
     st: &AppState,
     client: &Client,
     form: &HashMap<String, String>,
-) -> Result<oauth::IssuedTokens, Response> {
-    let invalid_grant =
-        |description: &str| token_error(StatusCode::BAD_REQUEST, "invalid_grant", description);
+) -> Result<oauth::IssuedTokens, Box<Response>> {
+    let invalid_grant = |description: &str| {
+        Box::new(token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            description,
+        ))
+    };
     let (Some(code), Some(verifier)) = (form.get("code"), form.get("code_verifier")) else {
-        return Err(token_error(
+        return Err(Box::new(token_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "code and code_verifier are required",
-        ));
+        )));
     };
     let Some(grant) = oauth::redeem_code(&st.db, code)
         .await

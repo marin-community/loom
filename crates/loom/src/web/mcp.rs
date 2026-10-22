@@ -73,32 +73,34 @@ fn unauthorized(base: &str, presented: bool) -> Response {
 /// The person behind the bearer token. Session and automation credentials
 /// have their own MCP server and their own operations; this door is for
 /// people.
-async fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Response> {
+async fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, Box<Response>> {
     let base = public_base(st, headers).await;
     let Some(token) = bearer_token(headers) else {
-        return Err(unauthorized(
+        return Err(Box::new(unauthorized(
             &base,
             headers.contains_key(header::AUTHORIZATION),
-        ));
+        )));
     };
     let principal = match auth::lookup_token(&st.db, &token).await {
         Ok(Some(principal)) => principal,
-        Ok(None) => return Err(unauthorized(&base, true)),
+        Ok(None) => return Err(Box::new(unauthorized(&base, true))),
         Err(error) => {
             tracing::error!(%error, "MCP bearer lookup failed");
-            return Err(rpc_error(
+            return Err(Box::new(rpc_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 -32603,
                 "credential lookup failed",
-            ));
+            )));
         }
     };
     if !principal.is_human() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "the remote MCP endpoint serves people's credentials" })),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "the remote MCP endpoint serves people's credentials" })),
+            )
+                .into_response(),
+        ));
     }
     Ok(principal)
 }
@@ -114,7 +116,7 @@ pub(super) async fn post_mcp(
     }
     let principal = match authenticate(&st, &headers).await {
         Ok(principal) => principal,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if let Some(version) = headers.get(PROTOCOL_VERSION_HEADER) {
         let supported = version
