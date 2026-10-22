@@ -572,6 +572,26 @@ fn pkce_pair() -> (String, String) {
     (verifier, challenge)
 }
 
+/// The consent form's hidden fields, as a browser would submit them.
+fn hidden_fields(html: &str) -> Vec<(String, String)> {
+    let unescape = |value: &str| {
+        value
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+    };
+    html.split("<input type=\"hidden\" name=\"")
+        .skip(1)
+        .map(|field| {
+            let (name, rest) = field.split_once("\" value=\"").unwrap();
+            let value = rest.split_once('"').unwrap().0;
+            (name.to_string(), unescape(value))
+        })
+        .collect()
+}
+
 fn query_value(location: &str, key: &str) -> Option<String> {
     reqwest::Url::parse(location)
         .unwrap()
@@ -635,34 +655,55 @@ async fn connect(ts: &TestServer, username: &str) -> (String, String, Value) {
         .unwrap();
     assert_eq!(consent.status(), 200);
     assert_eq!(consent.headers()["x-frame-options"], "DENY");
-    let consent_cookie = consent.headers()["set-cookie"]
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
     let html = consent.text().await.unwrap();
     assert!(html.contains("Test &lt;assistant&gt;"), "{html}");
     assert!(html.contains(username));
-    let csrf = consent_cookie.split_once('=').unwrap().1.to_string();
+    let fields = hidden_fields(&html);
+    assert!(fields.iter().any(|(name, _)| name == "csrf"), "{html}");
+    let origin = remote_url(ts, "");
+    let submit = |fields: Vec<(String, String)>, origin: &str| {
+        let mut form = fields;
+        form.push(("decision".to_string(), "approve".to_string()));
+        http.post(remote_url(ts, "/oauth/authorize"))
+            .header("Cookie", format!("loom_session={cookie}"))
+            .header("Origin", origin)
+            .form(&form)
+            .send()
+    };
 
-    let approved = http
+    // A form posted from another origin, even a sibling subdomain, is refused.
+    let foreign = submit(fields.clone(), "https://applets.example.test")
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), 403);
+    // So is one whose token the attacker chose, as planting a cookie on a
+    // sibling subdomain would let it: the token must be bound to the login.
+    let planted: Vec<(String, String)> = fields
+        .iter()
+        .map(|(name, value)| match name.as_str() {
+            "csrf" => (name.clone(), "attacker-chosen".to_string()),
+            _ => (name.clone(), value.clone()),
+        })
+        .collect();
+    let forged = http
         .post(remote_url(ts, "/oauth/authorize"))
-        .header("Cookie", format!("loom_session={cookie}; {consent_cookie}"))
-        .form(&[
-            ("response_type", "code"),
-            ("client_id", client_id.as_str()),
-            ("redirect_uri", CALLBACK),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("state", "opaque-state"),
-            ("csrf", csrf.as_str()),
-            ("decision", "approve"),
-        ])
+        .header(
+            "Cookie",
+            format!("loom_session={cookie}; loom_oauth_consent=attacker-chosen"),
+        )
+        .form(
+            &[
+                planted,
+                vec![("decision".to_string(), "approve".to_string())],
+            ]
+            .concat(),
+        )
         .send()
         .await
         .unwrap();
+    assert_eq!(forged.status(), 403);
+
+    let approved = submit(fields, &origin).await.unwrap();
     assert_eq!(approved.status(), 303);
     let location = approved.headers()["location"].to_str().unwrap().to_string();
     assert!(location.starts_with(CALLBACK), "{location}");
@@ -917,29 +958,52 @@ async fn remote_endpoint_speaks_mcp_over_http_with_an_oauth_credential() {
         .unwrap()
         .contains("does not accept argument(s): parent_branch"));
 
-    // Refresh rotates the pair; the old access token stops working.
+    // The token is good only here. On the REST API it could otherwise mint a
+    // personal token carrying the person's role, or set their password.
     let http = remote_http();
-    let refreshed = http
-        .post(remote_url(&ts, "/oauth/token"))
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", tokens["refresh_token"].as_str().unwrap()),
-            ("client_id", client_id.as_str()),
-            ("client_secret", secret.as_str()),
-        ])
-        .send()
-        .await
-        .unwrap();
+    for path in ["/api/auth/tokens/create", "/api/auth/set_password"] {
+        let refused = http
+            .post(remote_url(&ts, path))
+            .bearer_auth(&token)
+            .json(&json!({ "name": "escalate", "password": "attacker-password" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), 401, "{path}");
+    }
+
+    // Refresh rotates the pair; the old access token stops working.
+    let refresh = |refresh_token: String| {
+        http.post(remote_url(&ts, "/oauth/token"))
+            .form(&[
+                ("grant_type", "refresh_token".to_string()),
+                ("refresh_token", refresh_token),
+                ("client_id", client_id.clone()),
+                ("client_secret", secret.clone()),
+            ])
+            .send()
+    };
+    let original_refresh = tokens["refresh_token"].as_str().unwrap().to_string();
+    let refreshed = refresh(original_refresh.clone()).await.unwrap();
     assert_eq!(refreshed.status(), 200);
     let refreshed: Value = refreshed.json().await.unwrap();
     let rotated = refreshed["access_token"].as_str().unwrap().to_string();
-    let stale = rpc(
-        &ts,
-        &token,
-        json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" }),
-    )
-    .await;
-    assert_eq!(stale.status(), 401);
+    let tools_list = json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/list" });
+    assert_eq!(rpc(&ts, &token, tools_list.clone()).await.status(), 401);
+    assert_eq!(rpc(&ts, &rotated, tools_list.clone()).await.status(), 200);
+
+    // Presenting the exchanged token again means it leaked: the whole grant
+    // goes, including the successor an attacker may be holding.
+    let replayed = refresh(original_refresh).await.unwrap();
+    assert_eq!(replayed.status(), 400);
+    assert_eq!(rpc(&ts, &rotated, tools_list.clone()).await.status(), 401);
+    let successor = refresh(refreshed["refresh_token"].as_str().unwrap().to_string())
+        .await
+        .unwrap();
+    assert_eq!(
+        successor.json::<Value>().await.unwrap()["error"],
+        "invalid_grant"
+    );
 
     // An agent's session credential has its own server; this door is for people.
     let session_token =
@@ -954,22 +1018,22 @@ async fn remote_endpoint_speaks_mcp_over_http_with_an_oauth_credential() {
     .await;
     assert_eq!(refused.status(), 403);
 
-    // Removing the client revokes what it was issued.
+    // Removing a client revokes what it was issued.
+    let (other_client, _, other_tokens) = connect(&ts, "ada").await;
+    let other_token = other_tokens["access_token"].as_str().unwrap();
+    assert_eq!(
+        rpc(&ts, other_token, tools_list.clone()).await.status(),
+        200
+    );
     ts.client
         .invoke::<weaver_api::operations::auth::oauth_clients::remove::Op>(
             &weaver_api::operations::auth::oauth_clients::remove::Input {
-                client_id: client_id.clone(),
+                client_id: other_client,
             },
         )
         .await
         .unwrap();
-    let revoked = rpc(
-        &ts,
-        &rotated,
-        json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }),
-    )
-    .await;
-    assert_eq!(revoked.status(), 401);
+    assert_eq!(rpc(&ts, other_token, tools_list).await.status(), 401);
 
     ts.client
         .post("/api/sessions/delete", json!({ "session": created.id }))

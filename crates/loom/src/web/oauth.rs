@@ -33,12 +33,10 @@ use crate::config;
 use crate::oauth::{self, AuthorizationCode, Client};
 use crate::AppState;
 
-use super::auth::{cookie_secure, cookie_value, public_base, redirect_with_cookies};
+use super::auth::{cookie_value, public_base, redirect_with_cookies};
 use super::operations::{register, Bound, OperationContext};
 use super::{ApiResult, AppError};
 
-/// Double-submit CSRF cookie for the consent form.
-const CONSENT_COOKIE: &str = "loom_oauth_consent";
 /// The MCP endpoint path these credentials are for.
 pub(super) const MCP_PATH: &str = "/mcp";
 pub(super) const PROTECTED_RESOURCE_METADATA_PATH: &str =
@@ -133,6 +131,20 @@ struct Validated {
     redirect_uri: String,
     code_challenge: String,
     state: Option<String>,
+    resource: Option<String>,
+}
+
+impl Validated {
+    /// What the consent token binds to.
+    fn consent_request(&self) -> oauth::ConsentRequest<'_> {
+        oauth::ConsentRequest {
+            client_id: &self.client.client_id,
+            redirect_uri: &self.redirect_uri,
+            code_challenge: &self.code_challenge,
+            state: self.state.as_deref(),
+            resource: self.resource.as_deref(),
+        }
+    }
 }
 
 /// The registered client the request names. A failure here is shown to the
@@ -250,19 +262,22 @@ async fn validate(
         redirect_uri,
         code_challenge: code_challenge.to_string(),
         state: params.state.clone(),
+        resource: params.resource.clone(),
     })
 }
 
-/// The signed-in person behind the login cookie, if any. A login cookie is
+/// A signed-in person and the login cookie that proves it. A login cookie is
 /// always a person's, never a session or automation credential.
-async fn signed_in(
-    st: &AppState,
-    headers: &HeaderMap,
-) -> Result<Option<auth::Principal>, Box<Response>> {
+struct SignedIn {
+    person: auth::Principal,
+    cookie: String,
+}
+
+async fn signed_in(st: &AppState, headers: &HeaderMap) -> Result<Option<SignedIn>, Box<Response>> {
     let Some(cookie) = cookie_value(headers, auth::SESSION_COOKIE) else {
         return Ok(None);
     };
-    auth::lookup_session(&st.db, &cookie)
+    let person = auth::lookup_session(&st.db, &cookie)
         .await
         .map_err(|error| {
             tracing::error!(%error, "OAuth sign-in lookup failed");
@@ -270,18 +285,28 @@ async fn signed_in(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Loom could not check your sign-in. Try again.",
             ))
-        })
+        })?;
+    Ok(person.map(|person| SignedIn { person, cookie }))
 }
 
-/// The consent form's double-submit CSRF cookie; `Max-Age=0` clears it.
-async fn consent_cookie(st: &AppState, value: &str, max_age: u32) -> String {
-    let mut cookie = format!(
-        "{CONSENT_COOKIE}={value}; HttpOnly; SameSite=Strict; Path=/oauth; Max-Age={max_age}"
-    );
-    if cookie_secure(st).await {
-        cookie.push_str("; Secure");
-    }
-    cookie
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+/// Whether a consent POST came from a page on this server. Browsers send
+/// `Origin` with every form POST, so a foreign one is refused outright. A
+/// request without one still has to carry the consent token, which only the
+/// signed-in browser can produce.
+fn from_this_origin(base: &str, headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return true;
+    };
+    let Ok(base) = reqwest::Url::parse(base) else {
+        return false;
+    };
+    origin
+        .to_str()
+        .is_ok_and(|origin| origin == base.origin().ascii_serialization())
 }
 
 /// `GET /oauth/authorize` — show the consent page, or send the person to sign
@@ -299,11 +324,11 @@ pub(super) async fn authorize(
         Ok(validated) => validated,
         Err(response) => return *response,
     };
-    let person = match signed_in(&st, &headers).await {
-        Ok(person) => person,
+    let signed_in = match signed_in(&st, &headers).await {
+        Ok(signed_in) => signed_in,
         Err(response) => return *response,
     };
-    let Some(person) = person else {
+    let Some(signed_in) = signed_in else {
         let here = uri
             .path_and_query()
             .map(|value| value.as_str())
@@ -312,10 +337,8 @@ pub(super) async fn authorize(
             percent_encoding::utf8_percent_encode(here, percent_encoding::NON_ALPHANUMERIC);
         return redirect_with_cookies(&format!("/login?redirect={encoded}"), &[]);
     };
-    let csrf = auth::random_state();
-    let mut response = consent_page(&validated, &params, &person.username, &csrf).into_response();
-    append_cookie(&mut response, &consent_cookie(&st, &csrf, 600).await);
-    response
+    let token = oauth::consent_token(&signed_in.cookie, &validated.consent_request(), unix_now());
+    consent_page(&validated, &params, &signed_in.person.username, &token)
 }
 
 /// `POST /oauth/authorize` — the person's answer from the consent page.
@@ -330,30 +353,40 @@ pub(super) async fn decide(
     let Ok(Form(form)) = form else {
         return error_page(StatusCode::BAD_REQUEST, "The consent form was malformed.");
     };
-    if cookie_value(&headers, CONSENT_COOKIE).as_deref() != Some(form.csrf.as_str()) {
+    let base = public_base(&st, &headers).await;
+    if !from_this_origin(&base, &headers) {
         return error_page(
-            StatusCode::BAD_REQUEST,
-            "This consent page expired. Start again from the application.",
+            StatusCode::FORBIDDEN,
+            "Loom accepts an approval only from its own consent page.",
         );
     }
     let validated = match validate(&st, &headers, &form.params).await {
         Ok(validated) => validated,
         Err(response) => return *response,
     };
-    let person = match signed_in(&st, &headers).await {
-        Ok(person) => person,
+    let signed_in = match signed_in(&st, &headers).await {
+        Ok(signed_in) => signed_in,
         Err(response) => return *response,
     };
-    let Some(person) = person else {
+    let Some(SignedIn { person, cookie }) = signed_in else {
         return error_page(
             StatusCode::UNAUTHORIZED,
             "Your Loom sign-in ended. Start again from the application.",
         );
     };
-    let base = public_base(&st, &headers).await;
-    let clear = consent_cookie(&st, "", 0).await;
+    if !oauth::consent_token_valid(
+        &form.csrf,
+        &cookie,
+        &validated.consent_request(),
+        unix_now(),
+    ) {
+        return error_page(
+            StatusCode::FORBIDDEN,
+            "This consent page expired. Start again from the application.",
+        );
+    }
     if form.decision != "approve" {
-        let mut response = redirect_to_client(
+        return redirect_to_client(
             &validated.redirect_uri,
             &[
                 ("error", "access_denied"),
@@ -362,8 +395,6 @@ pub(super) async fn decide(
             ],
             validated.state.as_deref(),
         );
-        append_cookie(&mut response, &clear);
-        return response;
     }
     let approval = AuthorizationCode {
         client_id: validated.client.client_id.clone(),
@@ -386,19 +417,11 @@ pub(super) async fn decide(
         client = %validated.client.client_id,
         "OAuth client approved"
     );
-    let mut response = redirect_to_client(
+    redirect_to_client(
         &validated.redirect_uri,
         &[("code", &code), ("iss", &base)],
         validated.state.as_deref(),
-    );
-    append_cookie(&mut response, &clear);
-    response
-}
-
-fn append_cookie(response: &mut Response, cookie: &str) {
-    if let Ok(value) = HeaderValue::from_str(cookie) {
-        response.headers_mut().append(header::SET_COOKIE, value);
-    }
+    )
 }
 
 /// A 303 to a registered redirect URI with `pairs` (and `state`) appended to
@@ -725,8 +748,8 @@ fn consent_page(
          <ul><li>start Loom sessions on repositories you can use,</li>\
          <li>read your sessions' status, messages and links,</li>\
          <li>send them instructions, interrupt them, and archive them.</li></ul>\
-         <p>It acts with your ordinary user permissions, never administrator ones, \
-         and loses access when your Loom access ends.</p>\
+         <p>It can do only these things, with your ordinary user permissions and \
+         never administrator ones, and it loses access when your Loom access ends.</p>\
          <form method=\"post\" action=\"{AUTHORIZE_PATH}\">{fields}\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
          <div class=\"actions\">\

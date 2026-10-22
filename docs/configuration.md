@@ -293,10 +293,11 @@ claude mcp add --transport http --client-id <client-id> loom https://<loom>/mcp
 ```
 
 People connect by signing in to Loom, through GitHub or a password, and
-approving the client. The client receives an hour-long Loom API token with
+approving the client. The client receives an hour-long Loom token with
 ordinary user authority, even for an administrator, plus a refresh token. The
-refresh token works for 30 days after consent while the person's
-authorization holds. Organization-admitted people lose access whenever their
+token works only at `/mcp`, never on the REST API. The refresh token works for
+30 days after consent while the person's authorization holds. A refresh token
+presented twice revokes the grant, and the person approves the client again. Organization-admitted people lose access whenever their
 one-hour lease lapses, exactly as their browser sessions do. The routes must
 be reachable from the client's servers, so a deployment behind an identity
 proxy needs an exception for `/mcp`, `/oauth/*` and `/.well-known/oauth-*`.

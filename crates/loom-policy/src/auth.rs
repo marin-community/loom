@@ -1040,8 +1040,22 @@ pub async fn revoke_token(db: &Db, username: &str, id: &str) -> Result<bool> {
 
 /// Resolve an `Authorization: Bearer` token to its [`Principal`]. Touches
 /// `last_used_at` on a hit (best-effort). `None` for an unknown, expired, or
-/// orphaned token.
+/// orphaned token, and for an OAuth access token: a person consented to let a
+/// connector use the remote MCP endpoint, not the whole API, so those tokens
+/// authenticate only through [`lookup_connector_token`].
 pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
+    resolve_token(db, token, false).await
+}
+
+/// [`lookup_token`] for the remote MCP endpoint, the one place an OAuth
+/// access token is good. That endpoint offers only its reviewed tools, so the
+/// token cannot reach the rest of the API: minting a personal token, setting
+/// a password, or anything else outside the consent.
+pub async fn lookup_connector_token(db: &Db, token: &str) -> Result<Option<Principal>> {
+    resolve_token(db, token, true).await
+}
+
+async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Option<Principal>> {
     if !token.starts_with(TOKEN_PREFIX) {
         return Ok(crate::automation::verify(db, token)
             .await?
@@ -1080,6 +1094,9 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     };
     let id: String = row.get("id");
     let kind: String = row.get("kind");
+    if kind == crate::oauth::ACCESS_TOKEN_KIND && !accept_oauth {
+        return Ok(None);
+    }
     if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
         return Ok(None);
     }

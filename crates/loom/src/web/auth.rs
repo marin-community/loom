@@ -353,7 +353,7 @@ fn login_error_redirect(code: &str) -> Response {
     redirect_with_cookies(&format!("/login?error={code}"), &[])
 }
 
-pub(super) async fn cookie_secure(st: &AppState) -> bool {
+async fn cookie_secure(st: &AppState) -> bool {
     config::get_bool(&st.db, "auth.cookie_secure", config::DEFAULT_COOKIE_SECURE).await
 }
 

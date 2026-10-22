@@ -1293,18 +1293,24 @@ credential. Everything here answers `404` until `connector.enabled` is on.
   redirect URI is shown to the person, never redirected. The identity step is
   ordinary sign-in: without a login cookie the person goes to
   `/login?redirect=…`, and GitHub sign-in carries a validated same-origin
-  `next` back. The consent page is framing-proof and CSRF-checked with a
-  double-submit cookie. `/oauth/token` authenticates confidential clients by
-  `client_secret_basic` or `client_secret_post`, public ones by PKCE alone.
+  `next` back. The consent page is framing-proof. Its form carries an HMAC
+  keyed by the login cookie over the exact request and the time the page was
+  shown, valid for ten minutes, and a POST with a foreign `Origin` is refused.
+  A sibling subdomain that can plant cookies still cannot forge an approval.
+  `/oauth/token` authenticates confidential clients by `client_secret_basic`
+  or `client_secret_post`, public ones by PKCE alone.
 * **Credentials.** `loom_policy::oauth` stores clients, single-use codes (five
   minutes), and rotating refresh tokens. The access token is an `api_tokens`
   row of kind `oauth` carrying the `user` grant whatever the person's role. It
-  lives an hour, matching the organization lease. `lookup_token` applies
-  unchanged, so a lapsed lease stops the token exactly as it stops a browser
-  session. A refresh re-checks the lease instead of extending it, and is
-  refused but kept while the lease is lapsed. The grant itself ends 30 days
-  after consent. Each refresh revokes the previous pair, and removing a client
-  revokes everything it was issued.
+  authenticates only at `/mcp`, through `lookup_connector_token`; the REST API
+  refuses it, so a connector cannot mint a personal token, set a password, or
+  do anything else the consent page does not list. It lives an hour, matching
+  the organization lease, and a lapsed lease stops it exactly as it stops a
+  browser session. A refresh re-checks the lease instead of extending it, and
+  is refused but kept while the lease is lapsed. The grant itself ends 30 days
+  after consent. Each refresh marks its token used and revokes the previous
+  access token. A used token presented again revokes the whole grant (RFC 9700
+  section 4.14.2), and removing a client revokes everything it was issued.
 
 ## Watches
 

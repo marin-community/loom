@@ -81,7 +81,7 @@ async fn authenticate(st: &AppState, headers: &HeaderMap) -> Result<Principal, B
             headers.contains_key(header::AUTHORIZATION),
         )));
     };
-    let principal = match auth::lookup_token(&st.db, &token).await {
+    let principal = match auth::lookup_connector_token(&st.db, &token).await {
         Ok(Some(principal)) => principal,
         Ok(None) => return Err(Box::new(unauthorized(&base, true))),
         Err(error) => {
