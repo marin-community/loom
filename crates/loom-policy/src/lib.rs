@@ -4,6 +4,7 @@ pub mod auth;
 pub mod automation;
 pub mod custom_mcp;
 pub mod db;
+pub mod oauth;
 pub mod profile;
 pub mod remote_mcp;
 

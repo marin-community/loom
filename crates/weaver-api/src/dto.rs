@@ -2800,6 +2800,42 @@ pub struct RemoveFederationResult {
     pub id: String,
 }
 
+/// One registered OAuth client (`auth.oauth_clients.list`). A confidential
+/// client's secret is shown only once, in [`CreatedOAuthClientView`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct OAuthClientView {
+    pub client_id: String,
+    /// The name shown on the consent page.
+    pub name: String,
+    /// The exact redirect URIs authorization codes may be returned to.
+    pub redirect_uris: Vec<String>,
+    /// Whether the client must present its secret at the token endpoint.
+    /// A public client relies on PKCE alone.
+    pub confidential: bool,
+    pub created_by: String,
+    pub created_at: String,
+}
+
+/// `auth.oauth_clients.create` reply — the one time a confidential client's
+/// secret is shown.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CreatedOAuthClientView {
+    /// The client secret, present once for a confidential client and absent
+    /// for a public one.
+    pub client_secret: Option<String>,
+    #[serde(flatten)]
+    pub client: OAuthClientView,
+}
+
+/// Result of `auth.oauth_clients.remove`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct RemoveOAuthClientResult {
+    pub removed: bool,
+    pub client_id: String,
+    /// Access and refresh credentials revoked with the client.
+    pub revoked_credentials: i64,
+}
+
 /// Result of `auth.users.remove`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct RemoveUserResult {

@@ -87,6 +87,15 @@ pub const DEFAULT_TERMINAL_FONT_SIZE: i64 = 13;
 /// same-host reverse proxy, where forwarded requests appear to come from
 /// loopback (the proxy and local automation then authenticate with tokens).
 pub const DEFAULT_TRUST_LOOPBACK: bool = true;
+/// Whether the remote MCP endpoint (`/mcp`) and its OAuth authorization
+/// server (`/oauth/*`, `/.well-known/oauth-*`) answer. Off by default: a
+/// deployment opts into letting outside assistants hold people's credentials.
+pub const CONNECTOR_ENABLED_KEY: &str = "connector.enabled";
+pub const DEFAULT_CONNECTOR_ENABLED: bool = false;
+/// The launch profile the remote MCP endpoint's `launch` tool uses when the
+/// caller names none.
+pub const CONNECTOR_DEFAULT_PROFILE_KEY: &str = "connector.default_profile";
+pub const DEFAULT_CONNECTOR_PROFILE: &str = "claude";
 /// Whether the login cookie carries the `Secure` attribute (HTTPS-only). Off by
 /// default so plain-HTTP and direct-IP access work; turn it on when loom is
 /// reached over HTTPS (e.g. behind a TLS-terminating proxy).
@@ -411,6 +420,30 @@ pub const REGISTRY: &[SettingSpec] = &[
         description: "Comma-separated exact origins allowed to call the small browser-embedding API with Loom's login cookie. Leave blank to disable cross-origin browser access.",
         kind: SettingKind::String,
         default: "",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
+        key: CONNECTOR_ENABLED_KEY,
+        label: "Remote MCP connector",
+        description: "Serve the remote MCP endpoint at `/mcp` and the OAuth \
+            authorization server that issues its credentials, so an outside \
+            assistant such as a claude.ai custom connector can launch and follow \
+            sessions for a person. Clients must be registered with `loom \
+            oauth-client add`. Off by default.",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
+        key: CONNECTOR_DEFAULT_PROFILE_KEY,
+        label: "Connector launch profile",
+        description: "The launch profile the remote MCP connector's `launch` \
+            tool uses when the caller names none. Blank uses the default \
+            profile.",
+        kind: SettingKind::String,
+        default: DEFAULT_CONNECTOR_PROFILE,
         group: "Authentication",
         options: &[],
     },

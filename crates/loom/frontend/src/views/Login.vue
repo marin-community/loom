@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { computed, ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import * as api from '../api';
 import { me, loadMe } from '../auth';
+import { githubLoginHref, loginDestination } from '../lib/loginRedirect';
 
 // The chrome-free sign-in screen (App.vue renders this bare, without the nav
 // rail, whenever the caller is unauthenticated). Offers GitHub sign-in when an
@@ -24,10 +25,21 @@ const OAUTH_ERRORS: Record<string, string> = {
   'missing-code': 'GitHub did not return an authorization code. Try again.',
 };
 
+const redirect = computed(() => route.query.redirect as string | undefined);
+const githubHref = computed(() => githubLoginHref(api.githubLoginUrl, redirect.value));
+
+// Land where the person was headed. The OAuth consent page is served by the
+// server, so it needs a full page load rather than a router navigation.
+function leave() {
+  const destination = loginDestination(redirect.value);
+  if (destination.kind === 'server') window.location.assign(destination.path);
+  else router.replace(destination.path);
+}
+
 onMounted(() => {
   const code = route.query.error as string | undefined;
   if (code) error.value = OAUTH_ERRORS[code] ?? `Sign-in failed (${code}).`;
-  if (me.authenticated) router.replace('/');
+  if (me.authenticated) leave();
 });
 
 async function submit() {
@@ -37,7 +49,7 @@ async function submit() {
   try {
     await api.login(username.value, password.value);
     await loadMe();
-    router.replace((route.query.redirect as string) || '/');
+    leave();
   } catch (e) {
     error.value = (e as Error).message || 'Sign-in failed';
   } finally {
@@ -77,7 +89,7 @@ async function submit() {
 
         <a
           v-if="me.methods.github"
-          :href="api.githubLoginUrl"
+          :href="githubHref"
           class="btn-secondary mb-3 flex w-full items-center justify-center gap-2 py-2 text-sm"
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

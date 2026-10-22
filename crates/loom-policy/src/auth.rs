@@ -166,21 +166,21 @@ impl Principal {
 // Crypto primitives
 // ---------------------------------------------------------------------------
 
-fn sha256_hex(s: &str) -> String {
+pub(crate) fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     hex::encode(h.finalize())
 }
 
 /// `bytes` cryptographically-random bytes as url-safe base64 (no padding).
-fn random_b64(bytes: usize) -> String {
+pub(crate) fn random_b64(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::rng().fill_bytes(&mut buf);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
 /// A short random hex id (token / row identifier).
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     let mut buf = [0u8; 8];
     rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
@@ -194,7 +194,7 @@ pub fn random_state() -> String {
 /// Mint a fresh secret token: `(plaintext, sha256-hash, display-prefix)`. Only
 /// the hash and prefix are persisted; the plaintext is returned to the caller
 /// once and never stored.
-fn mint_token() -> (String, String, String) {
+pub(crate) fn mint_token() -> (String, String, String) {
     let plain = format!("{TOKEN_PREFIX}{}", random_b64(32));
     let hash = sha256_hex(&plain);
     let prefix: String = plain.chars().take(PREFIX_KEEP).collect();
@@ -330,7 +330,7 @@ impl User {
         self.authorization_kind == UserAuthorizationKind::Manual
     }
 
-    fn is_authorized_at(&self, now: &str) -> bool {
+    pub(crate) fn is_authorized_at(&self, now: &str) -> bool {
         self.is_manually_authorized()
             || self
                 .authorization_valid_until

@@ -43,6 +43,8 @@ use super::{ApiResult, AppError, AppState};
 const SESSION_MAX_AGE: i64 = auth::SESSION_TTL_DAYS * 24 * 60 * 60;
 /// The short-lived cookie carrying the OAuth CSRF state across the round-trip.
 const OAUTH_STATE_COOKIE: &str = "loom_oauth_state";
+/// The short-lived cookie carrying where to land after GitHub sign-in.
+const LOGIN_NEXT_COOKIE: &str = "loom_login_next";
 /// The GitHub OAuth callback path — the redirect URI registered on the app and
 /// reported to the settings UI.
 const GITHUB_CALLBACK_PATH: &str = "/api/auth/github/callback";
@@ -183,7 +185,7 @@ pub(super) fn operation_grant_allows(
 }
 
 /// Pull the token out of an `Authorization: Bearer <token>` header.
-fn bearer_token(headers: &HeaderMap) -> Option<String> {
+pub(super) fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let rest = raw
         .strip_prefix("Bearer ")
@@ -193,7 +195,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Read one cookie value by name out of the `Cookie` request header.
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';').find_map(|part| {
         let (k, v) = part.trim().split_once('=')?;
@@ -331,7 +333,7 @@ fn state_cookie(value: &str, max_age: i64) -> String {
 }
 
 /// A 303 redirect to `location`, appending each given `Set-Cookie` header.
-fn redirect_with_cookies(location: &str, cookies: &[String]) -> Response {
+pub(super) fn redirect_with_cookies(location: &str, cookies: &[String]) -> Response {
     let mut resp = Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, location)
@@ -351,7 +353,7 @@ fn login_error_redirect(code: &str) -> Response {
     redirect_with_cookies(&format!("/login?error={code}"), &[])
 }
 
-async fn cookie_secure(st: &AppState) -> bool {
+pub(super) async fn cookie_secure(st: &AppState) -> bool {
     config::get_bool(&st.db, "auth.cookie_secure", config::DEFAULT_COOKIE_SECURE).await
 }
 
@@ -443,10 +445,34 @@ pub(super) async fn auth_logout(
 
 // -- GitHub OAuth ------------------------------------------------------------
 
+/// Build the `Set-Cookie` value carrying where to land after GitHub sign-in.
+fn login_next_cookie(value: &str, max_age: i64) -> String {
+    format!("{LOGIN_NEXT_COOKIE}={value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
+}
+
+/// Whether `next` is a path on this origin, safe to redirect to after
+/// sign-in. Anything that a browser could read as another origin — `//host`,
+/// a backslash form, a scheme — is refused, so sign-in is never an open
+/// redirect.
+pub(super) fn is_local_path(next: &str) -> bool {
+    next.starts_with('/')
+        && !next.starts_with("//")
+        && !next.contains('\\')
+        && !next.chars().any(char::is_control)
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct GithubLoginQuery {
+    /// A same-origin path to return to after signing in, such as the OAuth
+    /// consent page that sent the person here.
+    next: Option<String>,
+}
+
 /// `GET /api/auth/github/login` — begin the OAuth dance.
 pub(super) async fn github_login(
     State(st): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<GithubLoginQuery>,
 ) -> ApiResult<Response> {
     let cfg = auth::github_oauth(&st.db)
         .await
@@ -457,7 +483,13 @@ pub(super) async fn github_login(
     let redirect_uri = format!("{base}{GITHUB_CALLBACK_PATH}");
     let state = auth::random_state();
     let url = auth::authorize_url(&cfg, &state, &redirect_uri);
-    Ok(redirect_with_cookies(&url, &[state_cookie(&state, 600)]))
+    let mut cookies = vec![state_cookie(&state, 600)];
+    if let Some(next) = query.next.filter(|next| is_local_path(next)) {
+        let encoded =
+            percent_encoding::utf8_percent_encode(&next, percent_encoding::NON_ALPHANUMERIC);
+        cookies.push(login_next_cookie(&encoded.to_string(), 600));
+    }
+    Ok(redirect_with_cookies(&url, &cookies))
 }
 
 #[derive(Debug, Deserialize)]
@@ -521,11 +553,21 @@ pub(super) async fn github_callback(
     };
     let cookie = auth::create_session(&st.db, &user.username).await?;
     tracing::info!(username = %user.username, method = "github", "signed in");
+    let next = cookie_value(&headers, LOGIN_NEXT_COOKIE)
+        .and_then(|value| {
+            percent_encoding::percent_decode_str(&value)
+                .decode_utf8()
+                .ok()
+                .map(|value| value.into_owned())
+        })
+        .filter(|next| is_local_path(next))
+        .unwrap_or_else(|| "/".to_string());
     Ok(redirect_with_cookies(
-        "/",
+        &next,
         &[
             session_cookie(&cookie, SESSION_MAX_AGE, cookie_secure(&st).await),
             state_cookie("", 0),
+            login_next_cookie("", 0),
         ],
     ))
 }
@@ -1092,7 +1134,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dialable_host, is_local_deployment_request, operation_grant_allows, FORWARDED_HEADER,
+        dialable_host, is_local_deployment_request, is_local_path, operation_grant_allows,
+        FORWARDED_HEADER,
     };
     use crate::auth::{AuthVia, Grant, Principal};
     use axum::http::{HeaderMap, Method};
@@ -1135,6 +1178,21 @@ mod tests {
             &Method::POST,
             "/api/sessions/list"
         ));
+    }
+
+    #[test]
+    fn sign_in_returns_only_to_paths_on_this_origin() {
+        assert!(is_local_path("/oauth/authorize?client_id=x&state=y"));
+        assert!(is_local_path("/"));
+        for next in [
+            "//evil.example/",
+            "/\\evil.example",
+            "https://evil.example/",
+            "evil",
+            "/ok\nSet-Cookie: x",
+        ] {
+            assert!(!is_local_path(next), "{next}");
+        }
     }
 
     #[test]

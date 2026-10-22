@@ -252,6 +252,43 @@ issue, or other operations; those retain Loom's existing non-credentialed
 wildcard policy. The origin setting grants browser transport; normal Loom
 authentication and operation authorization still apply.
 
+### Remote MCP connector
+
+`connector.enabled` turns on Loom's remote MCP endpoint at `/mcp` and the
+OAuth 2.1 authorization server that issues its credentials. With it, an
+outside assistant can launch and follow sessions for a person. A claude.ai
+custom connector is the intended client. The built-in value is `false`, and
+`/mcp`, `/oauth/*` and `/.well-known/oauth-*` answer `404` until it is on.
+`connector.default_profile` (built-in `claude`) names the launch profile used
+when the assistant names none. Blank uses the default profile.
+
+```yaml
+settings:
+  connector.enabled: "true"
+```
+
+Register each client once as an administrator. A confidential client's secret
+is printed once:
+
+```sh
+loom oauth-client add claude.ai --redirect-uri https://claude.ai/api/mcp/auth_callback
+loom oauth-client ls
+loom oauth-client rm <client-id>   # also revokes every token it was issued
+```
+
+For claude.ai, enter `https://<loom>/mcp` as the custom connector URL. Put
+the client id and secret under its advanced settings. Pass `--public` for a
+client that cannot keep a secret; it then authenticates with PKCE alone.
+
+People connect by signing in to Loom, through GitHub or a password, and
+approving the client. The client receives an hour-long Loom API token with
+ordinary user authority, even for an administrator, plus a refresh token. The
+refresh token works for 30 days after consent while the person's
+authorization holds. Organization-admitted people lose access whenever their
+one-hour lease lapses, exactly as their browser sessions do. The routes must
+be reachable from the client's servers, so a deployment behind an identity
+proxy needs an exception for `/mcp`, `/oauth/*` and `/.well-known/oauth-*`.
+
 Infrastructure tooling may instead send the same document as JSON to the
 admin-only `POST /api/deployment/reconcile` route. Reconciliation is
 idempotent, so the normal deployment loop can apply it on every rollout.

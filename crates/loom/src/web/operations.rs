@@ -267,6 +267,7 @@ pub(super) fn registry() -> Vec<Bound> {
     bound.extend(super::issues::bound_operations());
     bound.extend(super::logview::bound_operations());
     bound.extend(super::mcps::bound_operations());
+    bound.extend(super::oauth::bound_operations());
     bound.extend(super::permission_requests::bound_operations());
     bound.extend(super::profiles::bound_operations());
     bound.extend(super::repos::bound_operations());
@@ -286,6 +287,26 @@ fn by_id() -> BTreeMap<&'static str, Bound> {
         .into_iter()
         .map(|entry| (entry.operation.id, entry))
         .collect()
+}
+
+/// Run one registered JSON operation in-process for a caller a transport has
+/// already authenticated.
+///
+/// The remote MCP endpoint calls this instead of making a loopback HTTP
+/// request. The bound entry runs the same decode, context fill and
+/// [`authorize`] as the REST route, so a transport cannot change authority.
+pub(super) async fn invoke(
+    state: AppState,
+    principal: Principal,
+    id: &str,
+    input: Value,
+) -> ApiResult<Value> {
+    static BY_ID: std::sync::OnceLock<BTreeMap<&'static str, Bound>> = std::sync::OnceLock::new();
+    let entry = BY_ID
+        .get_or_init(by_id)
+        .get(id)
+        .ok_or_else(|| AppError::not_found("operation"))?;
+    (entry.invoke)(OperationContext::new(state, principal), input).await
 }
 
 /// Assert that declarations and implementations are the same set.

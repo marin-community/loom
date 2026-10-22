@@ -492,6 +492,24 @@ ignores both loopback trust and the machine-local token; every request instead
 resolves to a manual user, an organization-authorized user with a current
 lease, or an engine token minted for a watch script or the scratch shell.
 
+### Remote MCP connector
+
+An assistant such as claude.ai can hand work to Loom through a remote MCP
+endpoint at `https://<loom>/mcp`. Its tools launch a session, list and inspect
+sessions, read a session's results, send follow-ups, interrupt, return the
+dashboard link, and archive. People connect by signing in to Loom and
+approving the assistant. The assistant then holds a short-lived Loom token
+with the person's ordinary user authority. An administrator turns the endpoint
+on and registers each assistant once:
+
+```sh
+loom settings patch --changes '{"connector.enabled": "true"}'
+loom oauth-client add claude.ai --redirect-uri https://claude.ai/api/mcp/auth_callback
+```
+
+See [Remote MCP connector](docs/configuration.md#remote-mcp-connector) for the
+claude.ai steps and token lifetimes.
+
 ## Configuration
 
 General settings and named launch profiles have separate ownership. Settings
