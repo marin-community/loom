@@ -80,6 +80,23 @@ async fn reconcile_deployment_core(
             )));
         }
     }
+    let mut oauth_client_ids = BTreeSet::new();
+    for declared in &req.oauth_clients {
+        if !oauth_client_ids.insert(declared.client_id.clone()) {
+            return Err(AppError::bad_request(format!(
+                "OAuth client '{}' is declared more than once",
+                declared.client_id
+            )));
+        }
+        if let Some(existing) = crate::oauth::get_client(&st.db, &declared.client_id).await? {
+            if !existing.deployment_managed {
+                return Err(AppError::conflict(format!(
+                    "OAuth client '{}' is not deployment-managed",
+                    declared.client_id
+                )));
+            }
+        }
+    }
 
     // Deployment reconciliation is another profile editor. Serialize every
     // declared lifetime plus any deployment-owned lifetime it may prune with
@@ -171,6 +188,19 @@ async fn reconcile_deployment_core(
         crate::automation::federation_mark_deployment_managed(&st.db, &mapping.name).await?;
     }
 
+    let mut oauth_clients = Vec::with_capacity(req.oauth_clients.len());
+    for declared in &req.oauth_clients {
+        let client = crate::oauth::declare_client(
+            &st.db,
+            &declared.client_id,
+            &declared.name,
+            &declared.redirect_uris,
+        )
+        .await
+        .map_err(|error| AppError::bad_request(error.to_string()))?;
+        oauth_clients.push(super::oauth::client_view(client));
+    }
+
     if req.prune {
         for name in crate::automation::deployment_managed_federation_names(&st.db).await? {
             if !federation_names.contains(&name) {
@@ -200,6 +230,12 @@ async fn reconcile_deployment_core(
                 crate::remote_mcp::remove(&st.db, &identity)
                     .await
                     .map_err(|error| AppError::bad_request(error.to_string()))?;
+            }
+        }
+        // Removing a client revokes every grant people made through it.
+        for client_id in crate::oauth::deployment_managed_client_ids(&st.db).await? {
+            if !oauth_client_ids.contains(&client_id) {
+                crate::oauth::remove_client(&st.db, &client_id).await?;
             }
         }
     }
@@ -240,6 +276,7 @@ async fn reconcile_deployment_core(
         remote_mcps,
         profiles: profile_views,
         federations: mappings,
+        oauth_clients,
     })
 }
 

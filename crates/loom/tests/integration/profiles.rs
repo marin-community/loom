@@ -1059,6 +1059,11 @@ async fn deployment_reconcile_rest_journey() {
             "service_tag": "marin-ops",
             "profiles": ["ops"]
         }],
+        "oauth_clients": [{
+            "client_id": "claude-ai",
+            "name": "claude.ai",
+            "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]
+        }],
         "prune": true
     });
 
@@ -1102,6 +1107,10 @@ async fn deployment_reconcile_rest_journey() {
     assert!(first["profiles"][0]["env"][0].get("value").is_none());
     let mapping_id = first["federations"][0]["id"].clone();
     assert_eq!(first["federations"][0]["service_tag"], "marin-ops");
+    let declared_client = &first["oauth_clients"][0];
+    assert_eq!(declared_client["client_id"], "claude-ai");
+    assert_eq!(declared_client["deployment_managed"], true);
+    assert_eq!(declared_client["confidential"], false);
 
     let runtime = ts
         .client
@@ -1146,6 +1155,35 @@ async fn deployment_reconcile_rest_journey() {
     assert_eq!(second["profiles"][0]["revision"], 2);
     assert_eq!(second["federations"][0]["id"], mapping_id);
     assert_eq!(second["remote_mcps"][0]["revision"], 1);
+    assert_eq!(second["oauth_clients"][0], first["oauth_clients"][0]);
+
+    let registered = ts
+        .client
+        .invoke::<weaver_api::operations::auth::oauth_clients::create::Op>(
+            &weaver_api::operations::auth::oauth_clients::create::Input {
+                name: "hand-registered".to_string(),
+                redirect_uris: vec!["https://claude.ai/api/mcp/auth_callback".to_string()],
+                public: true,
+            },
+        )
+        .await
+        .unwrap();
+    let takeover = ts
+        .client
+        .post(
+            "/api/deployment/reconcile",
+            json!({ "oauth_clients": [{
+                "client_id": registered.client.client_id,
+                "name": "taken over",
+                "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"]
+            }] }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        takeover.to_string().contains("not deployment-managed"),
+        "a declaration must not take over a client registered by hand: {takeover}"
+    );
 
     ts.client
         .post(
@@ -1184,6 +1222,17 @@ async fn deployment_reconcile_rest_journey() {
         .await
         .unwrap()
         .is_none());
+    assert!(loom::oauth::get_client(&ts.state.db, "claude-ai")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        loom::oauth::get_client(&ts.state.db, &registered.client.client_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "pruning leaves clients registered by hand alone"
+    );
 
     let resolver = ts.state.launch_gate.acquire_resolver().await;
     let reconcile_url = format!("http://{}/api/deployment/reconcile", ts.addr);

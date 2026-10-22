@@ -181,6 +181,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         include_str!("../migrations/0034_unified_input_queue.sql"),
     ),
     (35, "oauth", include_str!("../migrations/0035_oauth.sql")),
+    (
+        36,
+        "deployment-oauth-clients",
+        include_str!("../migrations/0036_deployment_oauth_clients.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

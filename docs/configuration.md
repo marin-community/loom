@@ -223,8 +223,8 @@ overwrites `X-Loom-Forwarded`; other containers cannot use the exception by
 calling Loom over the Docker network.
 
 With `prune: true`, deployment-managed settings, remote MCP servers, profiles,
-and federation mappings omitted from the manifest are removed from the
-deployment layer.
+federation mappings, and OAuth clients omitted from the manifest are removed
+from the deployment layer.
 Runtime setting overrides are never pruned. A full desired-state manifest
 should use `prune: true`; a partial update should use `false`.
 
@@ -267,8 +267,41 @@ settings:
   connector.enabled: "true"
 ```
 
-Register each client once as an administrator. A confidential client's secret
-is printed once. Loom has no dynamic client registration.
+Loom has no dynamic client registration. Declare each client in the
+deployment manifest under a stable id of your choosing, which people enter in
+the client:
+
+```yaml
+oauth_clients:
+  - client_id: claude-ai
+    name: claude.ai
+    redirect_uris:
+      - https://claude.ai/api/mcp/auth_callback
+      - https://claude.com/api/mcp/auth_callback
+  - client_id: claude-code
+    name: Claude Code
+    redirect_uris:
+      - http://localhost/callback
+```
+
+The manifest carries no secrets, so a declared client is public and proves
+itself with PKCE alone. Reconciling updates a declared client's name and
+redirect URIs in place and keeps the grants people made. A pruning reconcile
+that no longer declares it removes it and revokes every token it was issued.
+A declaration never takes over a client registered by hand.
+
+Anthropic has said claude.ai's callback may move to claude.com, hence both
+redirect URIs. In claude.ai, enter `https://<loom>/mcp` as the custom
+connector URL, choose your own OAuth client under its advanced settings, enter
+the client id, and leave the secret blank. Claude Code listens on a loopback
+port, and a registered loopback redirect matches on any port:
+
+```sh
+claude mcp add --transport http --client-id claude-code loom https://<loom>/mcp
+```
+
+An administrator can also register a client by hand. Without `--public` the
+client is confidential, and its secret is printed once:
 
 ```sh
 loom oauth-client add claude.ai \
@@ -276,20 +309,6 @@ loom oauth-client add claude.ai \
   --redirect-uri https://claude.com/api/mcp/auth_callback
 loom oauth-client ls
 loom oauth-client rm <client-id>   # also revokes every token it was issued
-```
-
-Anthropic has said claude.ai's callback may move to claude.com, hence both
-redirect URIs. In claude.ai, enter `https://<loom>/mcp` as the custom
-connector URL, choose your own OAuth client under its advanced settings, and
-enter the client id and secret.
-
-Pass `--public` for a client that cannot keep a secret; it then authenticates
-with PKCE alone. Claude Code is one. It listens on a loopback port, and a
-registered loopback redirect matches on any port:
-
-```sh
-loom oauth-client add claude-code --public --redirect-uri http://localhost/callback
-claude mcp add --transport http --client-id <client-id> loom https://<loom>/mcp
 ```
 
 People connect by signing in to Loom, through GitHub or a password, and
