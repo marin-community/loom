@@ -53,6 +53,16 @@ impl ActorPolicy {
     pub const fn agent_reachable(self) -> bool {
         matches!(self, Self::SessionSelf | Self::SessionOnly)
     }
+
+    /// Whether a non-admin person may reach this operation with their own
+    /// credential.
+    ///
+    /// Gates the tools Loom's remote MCP endpoint offers people: `SessionOnly`
+    /// would hand a person a session's own credential, and `Admin`, `Internal`
+    /// and `Anonymous` operations are not ordinary user work.
+    pub const fn user_reachable(self) -> bool {
+        matches!(self, Self::SessionSelf | Self::User)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -509,5 +519,15 @@ mod tests {
         assert!(!ActorPolicy::User.agent_reachable());
         assert!(!ActorPolicy::Admin.agent_reachable());
         assert!(!ActorPolicy::Internal.agent_reachable());
+    }
+
+    #[test]
+    fn only_session_self_and_user_operations_may_reach_people() {
+        assert!(ActorPolicy::SessionSelf.user_reachable());
+        assert!(ActorPolicy::User.user_reachable());
+        assert!(!ActorPolicy::SessionOnly.user_reachable());
+        assert!(!ActorPolicy::Admin.user_reachable());
+        assert!(!ActorPolicy::Internal.user_reachable());
+        assert!(!ActorPolicy::Anonymous.user_reachable());
     }
 }

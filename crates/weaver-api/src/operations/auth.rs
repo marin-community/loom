@@ -261,6 +261,64 @@ pub mod set_password {
     pub type Output = UserView;
 }
 
+pub mod oauth_clients {
+    //! OAuth clients allowed to send a person through `/oauth/authorize` and
+    //! exchange the result for a Loom credential, such as the claude.ai
+    //! connector. The protocol endpoints themselves return redirects and
+    //! form-encoded bodies, so they are routes rather than operations.
+    pub(super) use super::prelude;
+    pub mod create {
+        use super::prelude::*;
+
+        /// Register an OAuth client for Loom's MCP connector. A confidential
+        /// client's secret is returned once; the server keeps only a hash.
+        #[operation(id = "auth.oauth_clients.create", actor = Admin, scope = Global, risk = Write,
+                    cli = "oauth-client add")]
+        pub struct Input {
+            /// The name people see on the consent page (e.g. `claude.ai`).
+            #[operand(positional)]
+            pub name: String,
+            /// A redirect URI the client may receive codes at, matched
+            /// exactly except that a loopback `http` URI matches on any
+            /// port. Repeat for several.
+            #[operand(long = "redirect-uri")]
+            pub redirect_uris: Vec<String>,
+            /// Register a public client that proves itself with PKCE alone and
+            /// receives no secret.
+            #[operand(default = false)]
+            pub public: bool,
+        }
+
+        pub type Output = CreatedOAuthClientView;
+    }
+
+    pub mod list {
+        use super::prelude::*;
+
+        /// List the registered OAuth clients (secrets are never returned).
+        #[operation(id = "auth.oauth_clients.list", actor = Admin, scope = Global, risk = Read,
+                    cli = "oauth-client ls")]
+        pub struct Input {}
+
+        pub type Output = Vec<OAuthClientView>;
+    }
+
+    pub mod remove {
+        use super::prelude::*;
+
+        /// Remove an OAuth client and revoke every credential issued to it.
+        #[operation(id = "auth.oauth_clients.remove", actor = Admin, scope = Global,
+                    risk = Destructive, cli = "oauth-client rm")]
+        pub struct Input {
+            /// The client id (from `oauth-client ls`).
+            #[operand(positional)]
+            pub client_id: String,
+        }
+
+        pub type Output = RemoveOAuthClientResult;
+    }
+}
+
 pub mod tokens {
     //! The caller's own personal API tokens.
     pub(super) use super::prelude;
@@ -448,6 +506,9 @@ static OPERATIONS: &[&OperationSpec] = &[
     federations::list::SPEC,
     federations::create::SPEC,
     federations::remove::SPEC,
+    oauth_clients::list::SPEC,
+    oauth_clients::create::SPEC,
+    oauth_clients::remove::SPEC,
     users::list::SPEC,
     users::create::SPEC,
     users::approve_manually::SPEC,

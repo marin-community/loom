@@ -25,6 +25,8 @@ use weaver_api::{
 // doc on `github` for the full reasoning.
 pub mod github;
 
+pub mod connector;
+
 pub(crate) mod channel;
 pub(crate) mod context;
 pub(crate) mod issue;
@@ -715,6 +717,100 @@ pub(crate) fn structured_result<T: Serialize>(summary: &str, value: &T) -> Resul
     }))
 }
 
+/// MCP protocol revisions this server speaks, newest first.
+pub const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The revision to answer `initialize` with: the client's when this server
+/// speaks it, otherwise the newest this server speaks, leaving the client to
+/// decide whether to continue.
+pub fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| Some(*version) == requested)
+        .unwrap_or(PROTOCOL_VERSIONS[0])
+}
+
+/// What a server says about itself in its `initialize` result.
+pub struct ServerInfo<'a> {
+    pub name: &'a str,
+    /// Guidance for the model on how the tools fit together.
+    pub instructions: Option<&'a str>,
+}
+
+/// Answer one JSON-RPC message for a tools-only server. Returns `None` for a
+/// notification, which gets no reply.
+///
+/// Shared by the in-session stdio server and Loom's HTTP endpoint, so both
+/// frame requests, results, and tool errors the same way. A failed tool call
+/// is an `isError` result the model can read, not a protocol error.
+pub async fn handle_message<F, Fut>(
+    request: &Value,
+    server: &ServerInfo<'_>,
+    tools: impl FnOnce() -> Value,
+    call_tool: F,
+) -> Option<Value>
+where
+    F: FnOnce(String, Value) -> Fut,
+    Fut: Future<Output = Result<Value>>,
+{
+    let id = request.get("id").cloned()?;
+    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
+    let response = match method {
+        "initialize" => {
+            let requested = request
+                .pointer("/params/protocolVersion")
+                .and_then(Value::as_str);
+            let mut result = json!({
+                "protocolVersion": negotiate_protocol_version(requested),
+                "capabilities": { "tools": {} },
+                "serverInfo": { "name": server.name, "version": env!("CARGO_PKG_VERSION") }
+            });
+            if let Some(instructions) = server.instructions {
+                result["instructions"] = json!(instructions);
+            }
+            json!({ "jsonrpc": "2.0", "id": id, "result": result })
+        }
+        "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+        "tools/list" => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": { "tools": tools() }
+        }),
+        "tools/call" => {
+            let name = request.pointer("/params/name").and_then(Value::as_str);
+            let arguments = request
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            match name {
+                Some(name) => match call_tool(name.to_string(), arguments).await {
+                    Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
+                    Err(error) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "content": [{ "type": "text", "text": format!("{error:#}") }],
+                            "isError": true
+                        }
+                    }),
+                },
+                None => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": { "code": -32602, "message": "tools/call requires params.name" }
+                }),
+            }
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("method not found: {method}") }
+        }),
+    };
+    Some(response)
+}
+
 /// Shared JSON-RPC stdio loop for the aggregate server. Domain modules own
 /// only their schemas and REST calls; framing stays consistent.
 pub(crate) async fn serve_stdio(
@@ -722,6 +818,10 @@ pub(crate) async fn serve_stdio(
     tools: fn() -> Value,
     call_tool: fn(&str, Value) -> ToolFuture,
 ) -> Result<()> {
+    let server = ServerInfo {
+        name: server_name,
+        instructions: None,
+    };
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {
@@ -730,57 +830,15 @@ pub(crate) async fn serve_stdio(
         }
         let request: Value = serde_json::from_str(&line)
             .map_err(|error| anyhow::anyhow!("invalid MCP request: {error}"))?;
-        let Some(id) = request.get("id").cloned() else {
+        let Some(response) = handle_message(
+            &request,
+            &server,
+            || runtime_tools(tools()),
+            |name, arguments| call_tool(&name, arguments),
+        )
+        .await
+        else {
             continue;
-        };
-        let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-        let response = match method {
-            "initialize" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": request.pointer("/params/protocolVersion")
-                        .and_then(Value::as_str).unwrap_or("2024-11-05"),
-                    "capabilities": { "tools": {} },
-                    "serverInfo": { "name": server_name, "version": env!("CARGO_PKG_VERSION") }
-                }
-            }),
-            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
-            "tools/list" => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": { "tools": runtime_tools(tools()) }
-            }),
-            "tools/call" => {
-                let name = request.pointer("/params/name").and_then(Value::as_str);
-                let arguments = request
-                    .pointer("/params/arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                match name {
-                    Some(name) => match call_tool(name, arguments).await {
-                        Ok(value) => json!({ "jsonrpc": "2.0", "id": id, "result": value }),
-                        Err(error) => json!({
-                            "jsonrpc": "2.0",
-                            "id": id,
-                            "result": {
-                                "content": [{ "type": "text", "text": format!("{error:#}") }],
-                                "isError": true
-                            }
-                        }),
-                    },
-                    None => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": { "code": -32602, "message": "tools/call requires params.name" }
-                    }),
-                }
-            }
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": { "code": -32601, "message": format!("method not found: {method}") }
-            }),
         };
         stdout
             .write_all(serde_json::to_string(&response)?.as_bytes())

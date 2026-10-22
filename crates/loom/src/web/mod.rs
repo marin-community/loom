@@ -30,6 +30,13 @@
 //! here — an endpoint that carries a JSON contract and a Loom principal is an
 //! `#[operation]`, and its route is derived from its id.
 //!
+//! Outside `/api`, `root_router` mounts the metrics scrape and the remote MCP
+//! connector: the Streamable HTTP endpoint at `/mcp` and the OAuth 2.1
+//! authorization server (`/oauth/*` and the `/.well-known/oauth-*` documents)
+//! that issues its credentials. They are a transport and protocol endpoints
+//! whose paths and shapes the MCP and OAuth standards fix; every tool call
+//! still runs a registered operation through the same authorization.
+//!
 //! Response encoding is the only thing an operation's declaration varies about
 //! its transport; see the response-encoding table in `docs/ARCHITECTURE.md`.
 //!
@@ -90,7 +97,9 @@ mod github_access;
 mod issues;
 mod launches;
 mod logview;
+mod mcp;
 mod mcps;
+mod oauth;
 mod operations;
 mod permission_requests;
 mod profiles;
@@ -909,6 +918,42 @@ fn protected_api_router() -> Router<AppState> {
     registered_api_router()
 }
 
+/// Routes outside `/api`, each a transport or a protocol endpoint whose shape a
+/// standard fixes rather than an operation.
+///
+/// Built without state for the same reason as [`public_api_router`]: the
+/// route-overlap test constructs it.
+fn root_router() -> Router<AppState> {
+    Router::new()
+        // Conventional root scrape endpoint. The public edge may block it
+        // while a same-host metrics agent scrapes the loopback listener.
+        .route("/metrics", get(metrics))
+        // The remote MCP endpoint (Streamable HTTP) and the OAuth 2.1
+        // authorization server that issues its credentials. MCP clients find
+        // them at these fixed, root-level paths, and each authenticates on its
+        // own terms — a bearer token, the login cookie plus consent, or client
+        // credentials — so they sit outside `require_auth`. All answer 404
+        // unless `connector.enabled` is on.
+        .route(oauth::MCP_PATH, post(mcp::post_mcp))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(oauth::protected_resource),
+        )
+        .route(
+            oauth::PROTECTED_RESOURCE_METADATA_PATH,
+            get(oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(oauth::authorization_server),
+        )
+        .route(
+            oauth::AUTHORIZE_PATH,
+            get(oauth::authorize).post(oauth::decide),
+        )
+        .route(oauth::TOKEN_PATH, post(oauth::token))
+}
+
 pub fn router(state: AppState) -> Router {
     let protected = protected_api_router()
         .route_layer(axum::middleware::from_fn_with_state(
@@ -926,10 +971,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state.clone());
 
     let index = static_dir().join("index.html");
-    Router::new()
-        // Conventional root scrape endpoint. The public edge may block it
-        // while a same-host metrics agent scrapes the loopback listener.
-        .route("/metrics", get(metrics))
+    root_router()
         .nest("/api", api)
         .fallback_service(ServeDir::new(static_dir()).fallback(ServeFile::new(index)))
         .layer(axum::middleware::from_fn(static_cache_middleware))
@@ -1049,5 +1091,6 @@ mod route_table_tests {
         let _ = super::protected_api_router();
         // The merge is where a public route can collide with a protected one.
         let _ = super::public_api_router().merge(super::protected_api_router());
+        let _ = super::root_router();
     }
 }

@@ -252,6 +252,56 @@ issue, or other operations; those retain Loom's existing non-credentialed
 wildcard policy. The origin setting grants browser transport; normal Loom
 authentication and operation authorization still apply.
 
+### Remote MCP connector
+
+`connector.enabled` turns on Loom's remote MCP endpoint at `/mcp` and the
+OAuth 2.1 authorization server that issues its credentials. With it, an
+outside assistant can launch and follow sessions for a person. A claude.ai
+custom connector is the intended client. The built-in value is `false`, and
+`/mcp`, `/oauth/*` and `/.well-known/oauth-*` answer `404` until it is on.
+`connector.default_profile` (built-in `claude`) names the launch profile used
+when the assistant names none. Blank uses the default profile.
+
+```yaml
+settings:
+  connector.enabled: "true"
+```
+
+Register each client once as an administrator. A confidential client's secret
+is printed once. Loom has no dynamic client registration.
+
+```sh
+loom oauth-client add claude.ai \
+  --redirect-uri https://claude.ai/api/mcp/auth_callback \
+  --redirect-uri https://claude.com/api/mcp/auth_callback
+loom oauth-client ls
+loom oauth-client rm <client-id>   # also revokes every token it was issued
+```
+
+Anthropic has said claude.ai's callback may move to claude.com, hence both
+redirect URIs. In claude.ai, enter `https://<loom>/mcp` as the custom
+connector URL, choose your own OAuth client under its advanced settings, and
+enter the client id and secret.
+
+Pass `--public` for a client that cannot keep a secret; it then authenticates
+with PKCE alone. Claude Code is one. It listens on a loopback port, and a
+registered loopback redirect matches on any port:
+
+```sh
+loom oauth-client add claude-code --public --redirect-uri http://localhost/callback
+claude mcp add --transport http --client-id <client-id> loom https://<loom>/mcp
+```
+
+People connect by signing in to Loom, through GitHub or a password, and
+approving the client. The client receives an hour-long Loom token with
+ordinary user authority, even for an administrator, plus a refresh token. The
+token works only at `/mcp`, never on the REST API. The refresh token works for
+30 days after consent while the person's authorization holds. A refresh token
+presented twice revokes the grant, and the person approves the client again. Organization-admitted people lose access whenever their
+one-hour lease lapses, exactly as their browser sessions do. The routes must
+be reachable from the client's servers, so a deployment behind an identity
+proxy needs an exception for `/mcp`, `/oauth/*` and `/.well-known/oauth-*`.
+
 Infrastructure tooling may instead send the same document as JSON to the
 admin-only `POST /api/deployment/reconcile` route. Reconciliation is
 idempotent, so the normal deployment loop can apply it on every rollout.

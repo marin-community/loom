@@ -400,6 +400,12 @@ written beside it:
 * registry discovery (`/api/meta`, `/api/operations`, `/api/openapi.json`) —
   making those operations would be circular.
 
+Outside `/api`, `root_router` mounts the remote MCP connector: `/mcp` (a
+transport, like the editor proxy) and the OAuth 2.1 authorization server that
+issues its credentials (`/oauth/authorize`, `/oauth/token`, and the
+`/.well-known/oauth-*` documents), whose paths and shapes the MCP and OAuth
+standards fix. See [Remote MCP connector](#remote-mcp-connector).
+
 That is the entire hand-mounted route list, and it is the whole of what
 `.route(` appears for. An endpoint carrying a JSON contract and a Loom principal is an
 `#[operation]`; its route is derived from its id and mounted by the dispatcher,
@@ -1251,6 +1257,60 @@ loom terminates no TLS itself — run it behind a TLS-terminating proxy for remo
 use. The `auth.*` settings live in `weaver-core::config::registry()` under the
 **Authentication** group; the GitHub client id/secret are stored outside the
 registry so the secret never rides `settings.get`.
+
+### Remote MCP connector
+
+An outside assistant — a claude.ai custom connector, say — reaches Loom
+through a Streamable HTTP MCP endpoint at `/mcp` and holds a person's own
+credential. Everything here answers `404` until `connector.enabled` is on.
+
+* **Tools.** `loom_agent::mcp::connector` lists nine tools, each an
+  `export_user` of a registered operation: `launch`, `list`, `get`, `status`,
+  `messages`, `send`, `interrupt`, `url`, and `archive`. `export_user` is the
+  people-facing sibling of `export`: it compiles only for `SessionSelf` and
+  `User` operations. The person must name the resource field the operation's
+  scope implies, such as `session`, or `channel` for `messages`. Other context
+  operands stay empty, so a launch has no parent branch and counts as a
+  person's launch. A tool accepts only the arguments it advertises, and
+  `launch` is narrowed to `title`, `goal`, `repo`, `base` and `profile`, whose
+  default comes from `connector.default_profile`. The waiting operations and
+  permission answers are deliberately absent.
+* **Transport.** `web/mcp.rs` is stateless: one JSON-RPC message per `POST`,
+  one JSON response, no `Mcp-Session-Id`, and `405` for `GET`. Framing is the
+  same `handle_message` the in-session stdio server uses. A call runs
+  in-process through `operations::invoke`, which uses the bound operation's
+  decode and `authorize()`, so the endpoint cannot widen authority. Only a
+  bearer token authenticates. The login cookie never does, so a web page
+  cannot ride a person's sign-in into a tool call. Session and automation
+  credentials get `403`.
+* **Authorization server.** A missing or invalid token gets `401` with
+  `WWW-Authenticate: Bearer resource_metadata=…` (RFC 9728), naming
+  `/.well-known/oauth-protected-resource/mcp`. That document names Loom
+  itself as the issuer (RFC 8414). `/oauth/authorize` accepts only the code
+  flow with PKCE S256 and a client and exact redirect URI registered with
+  `auth.oauth_clients.create` (`loom oauth-client add`); a loopback `http`
+  redirect matches on any port (RFC 8252). A bad client or
+  redirect URI is shown to the person, never redirected. The identity step is
+  ordinary sign-in: without a login cookie the person goes to
+  `/login?redirect=…`, and GitHub sign-in carries a validated same-origin
+  `next` back. The consent page is framing-proof. Its form carries an HMAC
+  keyed by the login cookie over the exact request and the time the page was
+  shown, valid for ten minutes, and a POST with a foreign `Origin` is refused.
+  A sibling subdomain that can plant cookies still cannot forge an approval.
+  `/oauth/token` authenticates confidential clients by `client_secret_basic`
+  or `client_secret_post`, public ones by PKCE alone.
+* **Credentials.** `loom_policy::oauth` stores clients, single-use codes (five
+  minutes), and rotating refresh tokens. The access token is an `api_tokens`
+  row of kind `oauth` carrying the `user` grant whatever the person's role. It
+  authenticates only at `/mcp`, through `lookup_connector_token`; the REST API
+  refuses it, so a connector cannot mint a personal token, set a password, or
+  do anything else the consent page does not list. It lives an hour, matching
+  the organization lease, and a lapsed lease stops it exactly as it stops a
+  browser session. A refresh re-checks the lease instead of extending it, and
+  is refused but kept while the lease is lapsed. The grant itself ends 30 days
+  after consent. Each refresh marks its token used and revokes the previous
+  access token. A used token presented again revokes the whole grant (RFC 9700
+  section 4.14.2), and removing a client revokes everything it was issued.
 
 ## Watches
 

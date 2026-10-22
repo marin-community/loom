@@ -166,21 +166,21 @@ impl Principal {
 // Crypto primitives
 // ---------------------------------------------------------------------------
 
-fn sha256_hex(s: &str) -> String {
+pub(crate) fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     hex::encode(h.finalize())
 }
 
 /// `bytes` cryptographically-random bytes as url-safe base64 (no padding).
-fn random_b64(bytes: usize) -> String {
+pub(crate) fn random_b64(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
     rand::rng().fill_bytes(&mut buf);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
 /// A short random hex id (token / row identifier).
-fn random_id() -> String {
+pub(crate) fn random_id() -> String {
     let mut buf = [0u8; 8];
     rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
@@ -194,7 +194,7 @@ pub fn random_state() -> String {
 /// Mint a fresh secret token: `(plaintext, sha256-hash, display-prefix)`. Only
 /// the hash and prefix are persisted; the plaintext is returned to the caller
 /// once and never stored.
-fn mint_token() -> (String, String, String) {
+pub(crate) fn mint_token() -> (String, String, String) {
     let plain = format!("{TOKEN_PREFIX}{}", random_b64(32));
     let hash = sha256_hex(&plain);
     let prefix: String = plain.chars().take(PREFIX_KEEP).collect();
@@ -330,7 +330,7 @@ impl User {
         self.authorization_kind == UserAuthorizationKind::Manual
     }
 
-    fn is_authorized_at(&self, now: &str) -> bool {
+    pub(crate) fn is_authorized_at(&self, now: &str) -> bool {
         self.is_manually_authorized()
             || self
                 .authorization_valid_until
@@ -925,14 +925,19 @@ pub enum TokenKind {
     /// Minted by the server for one of its own subprocesses; see
     /// [`create_engine_token`].
     Engine,
+    /// An OAuth access token for the remote MCP endpoint; see
+    /// [`crate::oauth`]. It authenticates only through
+    /// [`lookup_connector_token`].
+    OAuth,
 }
 
 impl TokenKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TokenKind::Pat => "pat",
             TokenKind::Local => "local",
             TokenKind::Engine => "engine",
+            TokenKind::OAuth => "oauth",
         }
     }
 }
@@ -1040,8 +1045,22 @@ pub async fn revoke_token(db: &Db, username: &str, id: &str) -> Result<bool> {
 
 /// Resolve an `Authorization: Bearer` token to its [`Principal`]. Touches
 /// `last_used_at` on a hit (best-effort). `None` for an unknown, expired, or
-/// orphaned token.
+/// orphaned token, and for an OAuth access token: a person consented to let a
+/// connector use the remote MCP endpoint, not the whole API, so those tokens
+/// authenticate only through [`lookup_connector_token`].
 pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
+    resolve_token(db, token, false).await
+}
+
+/// [`lookup_token`] for the remote MCP endpoint, the one place an OAuth
+/// access token is good. That endpoint offers only its reviewed tools, so the
+/// token cannot reach the rest of the API: minting a personal token, setting
+/// a password, or anything else outside the consent.
+pub async fn lookup_connector_token(db: &Db, token: &str) -> Result<Option<Principal>> {
+    resolve_token(db, token, true).await
+}
+
+async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Option<Principal>> {
     if !token.starts_with(TOKEN_PREFIX) {
         return Ok(crate::automation::verify(db, token)
             .await?
@@ -1080,6 +1099,9 @@ pub async fn lookup_token(db: &Db, token: &str) -> Result<Option<Principal>> {
     };
     let id: String = row.get("id");
     let kind: String = row.get("kind");
+    if kind == TokenKind::OAuth.as_str() && !accept_oauth {
+        return Ok(None);
+    }
     if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
         return Ok(None);
     }
