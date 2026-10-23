@@ -135,6 +135,27 @@ async function queueAcpPrompt(
   if (!res.ok) throw new Error(`queueing ACP prompt failed: ${await res.text()}`);
 }
 
+async function holdNextChatSnapshot(page: Page): Promise<{
+  read: Promise<void>;
+  release: () => void;
+}> {
+  let releaseSnapshot!: () => void;
+  let snapshotRead!: () => void;
+  const release = new Promise<void>((resolve) => (releaseSnapshot = resolve));
+  const read = new Promise<void>((resolve) => (snapshotRead = resolve));
+  await page.route(
+    '**/api/sessions/chat',
+    async (route) => {
+      const response = await route.fetch();
+      snapshotRead();
+      await release;
+      await route.fulfill({ response });
+    },
+    { times: 1 },
+  );
+  return { read, release: releaseSnapshot };
+}
+
 test.describe('acp conversation', () => {
   test('an unfinished reply survives reloads and resumed tabs', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
@@ -170,32 +191,19 @@ test.describe('acp conversation', () => {
       name: 'live-turn-snapshot',
     });
     await expect(page.getByText('ready', { exact: true })).toBeVisible();
-    let releaseSnapshot!: () => void;
-    let snapshotRead!: () => void;
-    const release = new Promise<void>((resolve) => (releaseSnapshot = resolve));
-    const read = new Promise<void>((resolve) => (snapshotRead = resolve));
-    await page.route(
-      '**/api/sessions/chat',
-      async (route) => {
-        const response = await route.fetch();
-        snapshotRead();
-        await release;
-        await route.fulfill({ response });
-      },
-      { times: 1 },
-    );
+    const snapshot = await holdNextChatSnapshot(page);
     await page.getByTestId('acp-composer-input').fill('say:completed reply|wait:30000');
     await page.getByTestId('acp-composer-send').click();
-    await read;
+    await snapshot.read;
     try {
       await expect(page.getByTestId('acp-working')).toBeVisible();
       await page.getByTestId('acp-composer-stop').click();
       await expect(page.getByTestId('acp-working')).toBeHidden();
     } finally {
-      releaseSnapshot();
+      snapshot.release();
     }
     await expect(page.getByText('completed reply', { exact: true })).toBeVisible();
-    await expect(page.getByTestId('acp-composer-send')).toBeEnabled();
+    await expect(page.getByTestId('acp-composer-input')).toBeEnabled();
     await expect(page.getByTestId('acp-working')).toBeHidden();
   });
 
@@ -205,32 +213,15 @@ test.describe('acp conversation', () => {
       name: 'queue-snapshot',
     });
     await expect(page.getByText('ready', { exact: true })).toBeVisible();
-    let releaseSnapshot!: () => void;
-    let snapshotRead!: () => void;
-    const release = new Promise<void>((resolve) => {
-      releaseSnapshot = resolve;
-    });
-    const read = new Promise<void>((resolve) => {
-      snapshotRead = resolve;
-    });
-    await page.route(
-      '**/api/sessions/chat',
-      async (route) => {
-        const response = await route.fetch();
-        snapshotRead();
-        await release;
-        await route.fulfill({ response });
-      },
-      { times: 1 },
-    );
+    const snapshot = await holdNextChatSnapshot(page);
     await page.getByTestId('acp-composer-input').fill('wait:30000|say:unfinished');
     await page.getByTestId('acp-composer-send').click();
-    await read;
+    await snapshot.read;
     try {
       await queueAcpPrompt(weaver, session, 'say:keep this queued');
       await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued');
     } finally {
-      releaseSnapshot();
+      snapshot.release();
     }
     await expect(page.getByTestId('acp-composer-send')).toHaveText('Send');
     await expect(page.getByTestId('acp-pending')).toContainText('say:keep this queued', {
