@@ -2874,6 +2874,14 @@ mod tests {
         );
     }
 
+    fn codex_environment_config(env: &[(String, String)]) -> Value {
+        let config = env
+            .iter()
+            .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
+            .unwrap();
+        serde_json::from_str(config).unwrap()
+    }
+
     #[test]
     fn codex_acp_config_carries_only_configured_fields() {
         assert!(codex_acp_config("", "").is_empty());
@@ -2903,12 +2911,7 @@ mod tests {
 
         configure_codex_acp(&mut env, "ignored", "high", "agent").unwrap();
 
-        let config: Value = serde_json::from_str(
-            env.iter()
-                .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
-                .unwrap(),
-        )
-        .unwrap();
+        let config = codex_environment_config(&env);
         assert_eq!(config["model"], "operator");
         assert_eq!(config["approvals_reviewer"], "user");
         assert_eq!(config["sandbox_workspace_write"]["network_access"], true);
@@ -2935,13 +2938,7 @@ mod tests {
         for mode in ["broker", "direct", "disabled", ""] {
             let mut env = vec![("LOOM_GITHUB_AUTH_MODE".to_string(), mode.to_string())];
             configure_codex_acp(&mut env, "", "", "agent").unwrap();
-            let config: Value = serde_json::from_str(
-                &env.iter()
-                    .find(|(name, _)| name == "CODEX_CONFIG")
-                    .unwrap()
-                    .1,
-            )
-            .unwrap();
+            let config = codex_environment_config(&env);
             let domains = &config["features"]["network_proxy"]["domains"];
             for host in ["github.com", "api.github.com"] {
                 if matches!(mode, "broker" | "direct") {
@@ -2964,13 +2961,7 @@ mod tests {
             ),
         ];
         configure_codex_acp(&mut env, "", "", "agent").unwrap();
-        let config: Value = serde_json::from_str(
-            &env.iter()
-                .find(|(name, _)| name == "CODEX_CONFIG")
-                .unwrap()
-                .1,
-        )
-        .unwrap();
+        let config = codex_environment_config(&env);
         let domains = &config["features"]["network_proxy"]["domains"];
         assert_eq!(domains["api.github.com"], "deny");
         assert_eq!(domains["packages.example.com"], "allow");
