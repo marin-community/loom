@@ -713,6 +713,134 @@ async fn restricted_github_profile_launch_wires_policy_prompt_and_server_api() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrestricted_github_tools_enforce_repository_and_thread_grants() {
+    let _adapter = EnvVarGuard::set(
+        "WEAVER_CODEX_ACP_CMD",
+        &format!(
+            "FAKE_ACP_MODELS=gpt-6-sol {}",
+            crate::fixtures::fake_acp_agent_cmd()
+        ),
+    );
+    let ts = TestServer::start_with_app().await;
+    let mut profile = interactive_shell_profile("github-tools");
+    profile["agent_kind"] = json!("codex");
+    profile["protocol"] = json!("acp");
+    profile["model"] = json!("gpt-6-sol");
+    profile["mcp_access"] = json!({"mode": "groups", "groups": ["github"]});
+    ts.client
+        .post("/api/profiles/create", profile)
+        .await
+        .unwrap();
+    let session = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({"cwd": ts.cwd(), "profile": "github-tools", "goal": "GitHub tools"}),
+        )
+        .await
+        .unwrap();
+    let id = session["id"].as_str().unwrap();
+    let tracking = weaver_core::issue::add(
+        &ts.state.db,
+        &weaver_core::issue::NewIssue {
+            repo_root: ts.cwd(),
+            github_repo: Some("octo/fixed".to_string()),
+            github_issue: Some(7),
+            title: "GitHub tool target".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE sessions SET github_repo = 'octo/fixed', tracking_issue_id = ? WHERE id = ?",
+    )
+    .bind(tracking.id)
+    .bind(id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let token = loom::auth::create_session_token(
+        &ts.state.db,
+        None,
+        id,
+        session["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let url = format!(
+        "http://{}/api/permissions/github/restricted/invoke",
+        ts.addr
+    );
+    let view = json!({"session": id, "tool": "issue_view", "arguments": {"number": 7}});
+
+    // A linked thread and exposed MCP tool do not grant repository access.
+    let denied = http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    ts.client
+        .post(
+            "/api/permissions/github/grant",
+            json!({"session": id, "repository": "octo/fixed"}),
+        )
+        .await
+        .unwrap();
+    let allowed = http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let output: serde_json::Value = allowed.json().await.unwrap();
+    let issue: serde_json::Value = serde_json::from_str(output["text"].as_str().unwrap()).unwrap();
+    assert_eq!(issue["number"], 7);
+    assert_eq!(issue["title"], "issue 7 of octo/fixed");
+
+    let wrong_thread = http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&json!({"session": id, "tool": "issue_edit", "arguments": {"number": 8, "body": "wrong target"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_thread.status(), StatusCode::FORBIDDEN);
+
+    let edited = http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&json!({"session": id, "tool": "issue_edit", "arguments": {"number": 7, "body": "clean body"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(edited.status(), StatusCode::OK);
+
+    ts.client
+        .post(
+            "/api/permissions/github/revoke",
+            json!({"session": id, "repository": "octo/fixed"}),
+        )
+        .await
+        .unwrap();
+    let revoked = http
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&view)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::FORBIDDEN);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn automation_subject_without_user_can_launch_and_rotate_session_credentials() {
     let ts = TestServer::start().await;
     let subject = "github:775839592:marin-community/marin/.github/workflows/ops-loom-review.yaml@refs/heads/main:repo:marin-community/marin:pull_request";
