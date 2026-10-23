@@ -759,6 +759,12 @@ pub struct SseEvent {
     pub data: Value,
 }
 
+/// The live buffers and the broadcast tail captured at the same task boundary.
+pub struct AcpSubscription {
+    pub snapshot: SseEvent,
+    pub events: broadcast::Receiver<SseEvent>,
+}
+
 /// Agent-owned controls for the conversation composer, kept as ACP-shaped
 /// JSON: command inputs and config options are open-ended, so loom forwards
 /// fields it doesn't render instead of dropping them.
@@ -786,6 +792,12 @@ impl AcpHandle {
     /// Subscribe to the session's SSE broadcast.
     pub fn subscribe(&self) -> broadcast::Receiver<SseEvent> {
         self.events_tx.subscribe()
+    }
+
+    pub async fn subscribe_with_snapshot(&self) -> Result<AcpSubscription> {
+        let (reply, response) = oneshot::channel();
+        self.cmd_tx.send(Command::Subscribe { reply }).await?;
+        Ok(response.await?)
     }
 
     /// Snapshot the latest agent-owned composer metadata. The `/chat` snapshot
@@ -1434,6 +1446,9 @@ enum InputDispatch<'a> {
 }
 
 enum Command {
+    Subscribe {
+        reply: oneshot::Sender<AcpSubscription>,
+    },
     Prompt {
         text: String,
         by: Option<String>,
@@ -1972,6 +1987,38 @@ impl Task {
         });
     }
 
+    fn subscription(&self) -> AcpSubscription {
+        // A journal read cannot recover chunks still being consolidated. Capture
+        // those buffers and subscribe here, where no frame can slip between the
+        // snapshot and its tail. Keep the journal's semantic block boundaries.
+        let deltas: Vec<_> = [&self.message_buf, &self.thought_buf]
+            .into_iter()
+            .flatten()
+            .map(|buffer| {
+                json!({ "turn": self.current_turn, "kind": buffer.kind, "text": buffer.text })
+            })
+            .collect();
+        let tools: Vec<_> = self
+            .tools
+            .values()
+            .map(|tool| tool.sse(self.current_turn))
+            .collect();
+        let live_turn = (self.turn_live || !deltas.is_empty() || !tools.is_empty())
+            .then_some(self.current_turn);
+        AcpSubscription {
+            snapshot: SseEvent {
+                event: "snapshot".to_string(),
+                data: json!({
+                    "live_turn": live_turn,
+                    "effective_mode": self.effective_mode,
+                    "deltas": deltas,
+                    "tools": tools,
+                }),
+            },
+            events: self.events_tx.subscribe(),
+        }
+    }
+
     async fn emit_queue(&self) {
         match crate::conversation_inbox::pending_inputs(&self.db, &self.session_id).await {
             Ok(pending) => self.emit("queue", json!({ "pending_inputs": pending })),
@@ -2308,6 +2355,9 @@ impl Task {
     async fn on_setup_command(&mut self, cmd: Command) {
         let setup_error = || anyhow!("ACP session setup is still in progress");
         match cmd {
+            Command::Subscribe { reply } => {
+                let _ = reply.send(self.subscription());
+            }
             Command::AnswerPermission {
                 request_id,
                 option_id,
@@ -3616,6 +3666,9 @@ impl Task {
 
     async fn on_command(&mut self, cmd: Command) {
         match cmd {
+            Command::Subscribe { reply } => {
+                let _ = reply.send(self.subscription());
+            }
             Command::Prompt {
                 text,
                 by,

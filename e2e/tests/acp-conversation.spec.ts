@@ -136,6 +136,69 @@ async function queueAcpPrompt(
 }
 
 test.describe('acp conversation', () => {
+  test('an unfinished reply survives reloads and resumed tabs', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:running checks|tool:execute|say:the checks already passed|wait:30000',
+      name: 'live-reply-replay',
+    });
+    const reply = page.getByTestId('acp-conversation').getByText('the checks already passed', {
+      exact: true,
+    });
+    await expect(reply).toBeVisible();
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+
+    await page.reload();
+    await expect(reply).toBeVisible();
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+
+    const reconnected = page.waitForRequest((request) =>
+      request.url().includes('/api/events/stream?'),
+    );
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await reconnected;
+    await expect(reply).toBeVisible();
+    await expect(reply).toHaveCount(1);
+    await page.getByTestId('acp-composer-stop').click();
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(reply).toBeVisible();
+    await expect(reply).toHaveCount(1);
+  });
+
+  test('a turn end wins over an older chat snapshot', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'live-turn-snapshot',
+    });
+    await expect(page.getByText('ready', { exact: true })).toBeVisible();
+    let releaseSnapshot!: () => void;
+    let snapshotRead!: () => void;
+    const release = new Promise<void>((resolve) => (releaseSnapshot = resolve));
+    const read = new Promise<void>((resolve) => (snapshotRead = resolve));
+    await page.route(
+      '**/api/sessions/chat',
+      async (route) => {
+        const response = await route.fetch();
+        snapshotRead();
+        await release;
+        await route.fulfill({ response });
+      },
+      { times: 1 },
+    );
+    await page.getByTestId('acp-composer-input').fill('say:completed reply|wait:30000');
+    await page.getByTestId('acp-composer-send').click();
+    await read;
+    try {
+      await expect(page.getByTestId('acp-working')).toBeVisible();
+      await page.getByTestId('acp-composer-stop').click();
+      await expect(page.getByTestId('acp-working')).toBeHidden();
+    } finally {
+      releaseSnapshot();
+    }
+    await expect(page.getByText('completed reply', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('acp-composer-send')).toBeEnabled();
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+  });
+
   test('a queue event wins over an older chat snapshot', async ({ page, weaver }) => {
     const session = await openAcp(page, weaver, {
       goal: 'say:ready',

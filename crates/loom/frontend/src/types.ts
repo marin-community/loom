@@ -366,6 +366,13 @@ export interface SseDelta {
   kind: 'agent_message' | 'thought';
   text: string;
 }
+/** `snapshot` — the task's live buffers at subscription time, followed by its tail. */
+export interface SseSnapshot {
+  live_turn: number | null;
+  effective_mode: string | null;
+  deltas: SseDelta[];
+  tools: SseTool[];
+}
 /** `tool` — live tool-call state, before it reaches a terminal status (then a
  *  `tool_call` block supersedes it). */
 export interface SseTool extends ToolCallPayload {

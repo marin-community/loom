@@ -271,9 +271,11 @@ async fn topic_stream(
             };
             match st.acp.get(&session.id) {
                 Some(handle) => {
-                    let stream = BroadcastStream::new(handle.subscribe())
+                    let subscription = handle.subscribe_with_snapshot().await?;
+                    let first = chat_frame(&owned, Ok(subscription.snapshot));
+                    let stream = BroadcastStream::new(subscription.events)
                         .map(move |result| chat_frame(&owned, result));
-                    Box::pin(stream)
+                    Box::pin(tokio_stream::once(first).chain(stream))
                 }
                 // No live task yet: hold the topic open with no events, exactly
                 // as the single-stream route does. A handoff installs a new task

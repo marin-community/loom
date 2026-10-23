@@ -939,6 +939,74 @@ async fn interleaved_thought_deltas_do_not_split_prose() {
     assert_eq!(count_kind(blocks, "thought"), 1);
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_subscription_replays_uncommitted_prose() {
+    let ts = TestServer::start().await;
+    start_new(&ts, "acp-live-snapshot", None, None).await;
+    let handle = ts.state.acp.get("acp-live-snapshot").unwrap();
+    let mut rx = handle.subscribe();
+    handle
+        .prompt(
+            "think:checking|say:already answered|wait:30000".to_string(),
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let events = drain_events(&mut rx, Duration::from_secs(10), |event| {
+        event.event == "delta" && event.data["text"] == "answered"
+    })
+    .await;
+    assert!(events.iter().any(|event| event.data["text"] == "answered"));
+
+    let mut subscription = handle.subscribe_with_snapshot().await.unwrap();
+    assert_eq!(subscription.snapshot.event, "snapshot");
+    assert_eq!(subscription.snapshot.data["live_turn"], 0);
+    assert_eq!(
+        subscription.snapshot.data["deltas"],
+        json!([
+            {"turn": 0, "kind": "agent_message", "text": "already answered"},
+            {"turn": 0, "kind": "thought", "text": "checking"},
+        ])
+    );
+    let journal = loom::chat::list(&ts.state.db, "acp-live-snapshot")
+        .await
+        .unwrap();
+    assert!(!journal.iter().any(|block| block.kind == "agent_message"));
+
+    handle.cancel().await.unwrap();
+    let tail = drain_events(&mut subscription.events, Duration::from_secs(10), |event| {
+        event.event == "turn" && event.data["state"] == "ended"
+    })
+    .await;
+    assert_eq!(
+        tail.iter().filter(|event| event.event == "delta").count(),
+        0
+    );
+    assert!(
+        tail.iter()
+            .any(|event| event.event == "block"
+                && event.data["payload"]["text"] == "already answered")
+    );
+    let idle = handle.subscribe_with_snapshot().await.unwrap();
+    assert_eq!(idle.snapshot.data["live_turn"], Value::Null);
+    assert_eq!(idle.snapshot.data["deltas"], json!([]));
+
+    handle
+        .prompt("toolwait:30000:checks running".to_string(), None, vec![])
+        .await
+        .unwrap();
+    drain_events(&mut rx, Duration::from_secs(10), |event| {
+        event.event == "tool" && event.data["title"] == "checks running"
+    })
+    .await;
+    let working = handle.subscribe_with_snapshot().await.unwrap();
+    assert_eq!(working.snapshot.data["tools"][0]["title"], "checks running");
+    assert_eq!(working.snapshot.data["tools"][0]["status"], "in_progress");
+    handle.cancel().await.unwrap();
+}
+
 /// 1b. The `sessions.chat.stream` operation streams the same events over SSE.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

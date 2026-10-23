@@ -17,7 +17,8 @@
 // topic set only changes by reconnecting, and reconnecting on every unsubscribe
 // would churn the shared stream on each navigation. A dropped topic simply stops
 // having listeners and is pruned at the next reconnect, which keeps returning to
-// a recently-viewed session free.
+// a recently-viewed topic cheap. Subscribers that need a fresh bootstrap and
+// tabs returning from suspension explicitly reopen the stream.
 
 import { operationPath } from '../api';
 
@@ -111,6 +112,22 @@ function closeSource(): void {
   connected = new Set();
 }
 
+function resume(): void {
+  if (document.visibilityState === 'visible') ensureConnected(true);
+}
+
+function watchResume(): void {
+  document.addEventListener('visibilitychange', resume);
+  window.addEventListener('pageshow', resume);
+  window.addEventListener('focus', resume);
+}
+
+function unwatchResume(): void {
+  document.removeEventListener('visibilitychange', resume);
+  window.removeEventListener('pageshow', resume);
+  window.removeEventListener('focus', resume);
+}
+
 function connect(): void {
   closeSource();
   if (retryTimer) {
@@ -186,6 +203,7 @@ function ensureConnected(force = false): void {
 }
 
 export function openTopic(topic: string): TopicHandle {
+  if (subs.size === 0) watchResume();
   const sub: Sub = { topic, listeners: new Map(), opens: new Set(), closed: false };
   let set = subs.get(topic);
   if (!set) {
@@ -231,13 +249,17 @@ export function openTopic(topic: string): TopicHandle {
       // Deliberately no reconnect: the topic keeps flowing on the existing
       // connection with no listeners until something else forces a reconnect,
       // and is dropped then.
-      if (subs.size === 0) closeSource();
+      if (subs.size === 0) {
+        closeSource();
+        unwatchResume();
+      }
     },
   };
 }
 
 /** Test seam: drop all state and close the connection. */
 export function resetEventStream(): void {
+  unwatchResume();
   subs.clear();
   closeSource();
   if (retryTimer) {
