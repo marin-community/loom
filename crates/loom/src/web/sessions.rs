@@ -1031,9 +1031,10 @@ fn effective_turn_mode(session: &Session) -> Option<String> {
 
 const CHAT_PAGE_SIZE: usize = 200;
 
-/// The live SSE tail of the conversation — `block` / `delta` / `tool` / `turn`
+/// The live SSE tail of the conversation, starting with a `snapshot` of the
+/// task's uncommitted prose/tools, then `block` / `delta` / `tool` / `turn`
 /// events (see [`crate::acp`]), plus `resync` when the bounded broadcast drops
-/// frames. A client reads `sessions.chat` first, then applies this tail. When no
+/// frames. Subscribe before reading `sessions.chat` to avoid a gap. When no
 /// task is running the stream stays open but silent (keep-alive).
 pub(super) async fn chat_stream(
     State(st): State<AppState>,
@@ -1047,7 +1048,10 @@ pub(super) async fn chat_stream(
     let boxed: Pin<Box<dyn Stream<Item = Result<sse::Event, Infallible>> + Send>> =
         match st.acp.get(&session.id) {
             Some(handle) => {
-                let stream = BroadcastStream::new(handle.subscribe()).map(|result| {
+                let subscription = handle.subscribe_with_snapshot().await?;
+                let events = tokio_stream::once(Ok(subscription.snapshot))
+                    .chain(BroadcastStream::new(subscription.events));
+                let stream = events.map(|result| {
                     let (event, data) = super::eventmux::chat_event_parts(result);
                     Ok(sse::Event::default()
                         .event(event)

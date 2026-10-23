@@ -28,6 +28,7 @@ import type {
   Session,
   ChatBlock,
   SseDelta,
+  SseSnapshot,
   SseTool,
   SseTurn,
   SseQueue,
@@ -141,6 +142,8 @@ const decodeMetadata = (view: AcpMetadataView): AcpMetadata => ({
 // a local set — so the composer chip reads true without a refetch.
 const currentMode = ref<string | null>(props.session.current_mode);
 const effectiveMode = ref<string | null>(null);
+let liveRevision = 0;
+let hasLiveSnapshot = false;
 watch(
   () => props.session.current_mode,
   (m) => {
@@ -220,17 +223,19 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
   }
   const journalRevision = journal.beginSnapshot();
   const queueAt = queueRevision;
+  const liveAt = liveRevision;
   try {
     const snap = await getSessionChat(id.value);
     if (seq !== loadSeq) return;
-    const preserveObservedTiming = preserve && liveTurnNo.value === snap.live_turn;
     const accepted = journal.applySnapshot(journalRevision, snap.blocks);
     for (const b of accepted) settleDurableBlock(b);
     if (!preserve) olderCursor.value = snap.older_cursor;
-    liveTurnNo.value = snap.live_turn;
-    turnLive.value = snap.live_turn != null;
-    restoreLiveTiming(snap.live_turn, preserveObservedTiming);
-    effectiveMode.value = snap.effective_mode ?? null;
+    if (!hasLiveSnapshot && liveAt === liveRevision) {
+      liveTurnNo.value = snap.live_turn;
+      turnLive.value = snap.live_turn != null;
+      effectiveMode.value = snap.effective_mode ?? null;
+    }
+    restoreLiveTiming(liveTurnNo.value, preserve);
     // A queue event received during this request is newer than its snapshot.
     if (queueAt === queueRevision) applyQueue(snap.pending_inputs);
     applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
@@ -281,12 +286,7 @@ async function loadOlder() {
 // ── Stream application ───────────────────────────────────────────────────────
 function settleDurableBlock(b: ChatBlock) {
   if (b.turn === liveTurnNo.value) markProgress(b.created_at);
-  if (b.kind === 'tool_call') {
-    const tid = (b.payload as unknown as ToolCallPayload).tool_call_id;
-    if (tid) liveTools.delete(tid);
-  } else if (b.kind === 'agent_message' || b.kind === 'thought') {
-    shadows.delete(`${b.turn}:${b.kind}`);
-  } else if (b.kind === 'mode_change') {
+  if (b.kind === 'mode_change') {
     const m = (b.payload as { mode_id?: string }).mode_id;
     if (m) currentMode.value = m;
   } else if (b.kind === 'user_message') {
@@ -297,12 +297,22 @@ function settleDurableBlock(b: ChatBlock) {
 }
 
 function onBlock(b: ChatBlock) {
+  liveRevision++;
   journal.applyStream(b);
+  // Only the ordered stream can settle a live buffer. A REST page can contain
+  // earlier prose of the same kind and turn while newer chunks are streaming.
+  if (b.kind === 'tool_call') {
+    const tid = (b.payload as unknown as ToolCallPayload).tool_call_id;
+    if (tid) liveTools.delete(tid);
+  } else if (b.kind === 'agent_message' || b.kind === 'thought') {
+    shadows.delete(`${b.turn}:${b.kind}`);
+  }
   settleDurableBlock(b);
   autoFollow();
 }
 
 function onDelta(d: SseDelta) {
+  liveRevision++;
   turnLive.value = true;
   liveTurnNo.value = d.turn;
   markProgress();
@@ -314,6 +324,7 @@ function onDelta(d: SseDelta) {
 }
 
 function onTool(t: SseTool) {
+  liveRevision++;
   liveTools.set(t.tool_call_id, t);
   turnLive.value = true;
   liveTurnNo.value = t.turn;
@@ -322,6 +333,7 @@ function onTool(t: SseTool) {
 }
 
 function onTurn(ev: SseTurn) {
+  liveRevision++;
   if (ev.state === 'started') {
     turnLive.value = true;
     liveTurnNo.value = ev.turn;
@@ -336,6 +348,22 @@ function onTurn(ev: SseTurn) {
     lastProgressAt.value = null;
     effectiveMode.value = null;
   }
+}
+
+function onSnapshot(snapshot: SseSnapshot) {
+  hasLiveSnapshot = true;
+  liveRevision++;
+  shadows.clear();
+  liveTools.clear();
+  liveTurnNo.value = snapshot.live_turn;
+  turnLive.value = snapshot.live_turn != null;
+  effectiveMode.value = snapshot.effective_mode;
+  for (const delta of snapshot.deltas) {
+    shadows.set(`${delta.turn}:${delta.kind}`, { ...delta });
+  }
+  for (const tool of snapshot.tools) liveTools.set(tool.tool_call_id, tool);
+  restoreLiveTiming(snapshot.live_turn);
+  autoFollow();
 }
 
 function applyQueue(inputs: QueuedInputView[]) {
@@ -375,27 +403,30 @@ function openStream() {
     }, 1500);
   }
   topic.on('block', (d) => onBlock(d as ChatBlock));
+  topic.on('snapshot', (d) => onSnapshot(d as SseSnapshot));
   topic.on('delta', (d) => onDelta(d as SseDelta));
   topic.on('tool', (d) => onTool(d as SseTool));
   topic.on('turn', (d) => onTurn(d as SseTurn));
   topic.on('queue', (d) => onQueue(d as SseQueue));
   topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
-  // A bounded server broadcast can overrun a slow client. `resync` turns that
-  // explicit gap into a fresh read of the durable journal instead of leaving
-  // the conversation incomplete until a manual browser refresh.
-  // Reset the page cursor too: an extreme gap may contain more blocks than the
-  // newest page, and retaining an older cursor would leave a hole in the middle.
-  topic.on('resync', () => load());
+  topic.on('resync', () => {
+    state.value = 'loading';
+    topic.refresh();
+  });
   // Fetch only after the server installed the subscription, closing the
   // snapshot-to-stream gap without the former duplicate journal request. A
   // reconnect reconciles the newest page while retaining explicitly loaded
   // older pages. `onOpen` also fires when the shared stream reconnects for an
   // unrelated topic, which is exactly when a gap could have opened here.
   topic.onOpen(() => {
+    hasLiveSnapshot = false;
     if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
     snapshotFallbackTimer = null;
     load({ preserve: state.value === 'ready' });
   });
+  // The shared connection may still carry this topic from a previous visit.
+  // Rebind so this subscriber receives the current live buffers as well.
+  topic.refresh();
 }
 function closeStream() {
   if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
