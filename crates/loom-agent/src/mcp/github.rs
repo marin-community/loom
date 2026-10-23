@@ -1,18 +1,18 @@
-//! Built-in MCP adapter for restricted GitHub sessions.
+//! Built-in MCP adapter for fixed-thread GitHub operations.
 //!
 //! All six tools call one registered operation,
 //! `permissions.github.restricted.invoke`: the security boundary here is a
 //! runtime check against the session's stored tool allowlist
-//! (`session.policy_allowed_tools`), not a compile-time grant, so a restricted
-//! session's policy — not its credential — decides which of these six tools
-//! it may use. `super::dispatch::bind` assumes one tool name maps to one
-//! operation; this is six tool names gated through one, so it keeps its own
+//! (`session.policy_allowed_tools`), not a compile-time grant, so the
+//! session's policy decides which tools it may use. `super::dispatch::bind`
+//! assumes one tool name maps to one operation; this is six tool names gated
+//! through one, so it keeps its own
 //! schemas and call handler instead.
 //!
-//! Claude sees these fixed tools instead of `Bash`. The bridge carries only the
-//! session-scoped Loom token and forwards each call to Loom's REST API; the
-//! GitHub credential remains in Loom's profile/user-token store and never enters
-//! the aggregate MCP process.
+//! Restricted Claude sessions see these tools instead of `Bash`; unrestricted
+//! sessions can use them alongside the CLI. The bridge carries only the
+//! session-scoped Loom token and forwards each call to Loom's REST API. The
+//! GitHub App credential never enters the aggregate MCP process.
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

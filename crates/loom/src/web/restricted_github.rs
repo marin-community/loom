@@ -1,4 +1,4 @@
-//! Server-side GitHub tools for restricted sessions.
+//! Server-side GitHub tools bound to a session's repository and thread.
 //!
 //! The agent-facing MCP bridge authenticates with the session token. This
 //! handler resolves the fixed repository from durable session state, validates
@@ -192,12 +192,6 @@ pub(super) async fn restricted_github_invoke_operation(
     let session = crate::session::get(&st.db, &input.session)
         .await?
         .ok_or_else(|| AppError::not_found("session"))?;
-    if !session.policy_restricted {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "session is not restricted",
-        ));
-    }
     let rule = crate::mcp::github::permission_rule(&input.tool)
         .ok_or_else(|| AppError::not_found("restricted GitHub tool"))?;
     let allowed: Vec<String> = serde_json::from_str(&session.policy_allowed_tools)
@@ -215,6 +209,16 @@ pub(super) async fn restricted_github_invoke_operation(
     let repo = crate::repo::parse_slug(repo)
         .map_err(|_| AppError::bad_request("session GitHub repository is invalid"))?;
     let repo_slug = repo.slug();
+    if !session.policy_restricted
+        && !super::github_access::effective_repositories(&st.db, &session)
+            .await?
+            .contains(&repo_slug)
+    {
+        return Err(AppError::new(
+            StatusCode::FORBIDDEN,
+            format!("session has no GitHub access to {repo_slug}"),
+        ));
+    }
     let arguments = validate_arguments(&input.tool, input.arguments)?;
     let tracking_issue = match session.tracking_issue_id {
         Some(id) => weaver_core::issue::get(&st.db, id).await?,

@@ -164,12 +164,11 @@ pub mod github {
         pub mod invoke {
             use super::prelude::*;
 
-            /// Invoke one fixed-target GitHub operation granted by restricted session
-            /// policy.
+            /// Invoke one fixed-target GitHub operation granted by session policy.
             #[operation(id = "permissions.github.restricted.invoke", actor = SessionSelf,
                         scope = Session, risk = ExternalWrite, grants = ["loom/github/use@v1"])]
             pub struct Input {
-                /// The fixed restricted-GitHub tool to invoke, e.g. `issue_comment`.
+                /// The fixed GitHub tool to invoke, e.g. `issue_comment`.
                 pub tool: String,
                 /// Tool-specific arguments (`number`, optional `body`/`title`).
                 #[operand(json)]

@@ -1208,6 +1208,18 @@ CLI's native authentication contract for each invocation. In broker mode every
 invocation asks Loom for a current token, so long-running programs can make
 calls beyond GitHub's one-hour installation-token lifetime without managing the
 credential themselves.
+
+In Codex ACP `agent` mode, Loom also allows `github.com` and `api.github.com`
+through the sandbox network proxy when the session uses `broker` or `direct`
+authentication. Explicit operator domain rules take precedence. Reaching Loom's
+broker does not by itself permit the subsequent GitHub request: a proxy denial
+can make `gh auth status` report a valid token as invalid.
+
+The fixed-thread GitHub MCP tools also work for unrestricted sessions that
+hold the matching tool and repository grants. Repository revocation takes
+effect on subsequent calls. Both postures keep the linked-thread target check;
+restricted sessions keep their tool-only access without exposing App tokens.
+
 Git adapter registration stays in the image's system config: linked worktrees
 share repository-local config, agents may clone additional repositories, and
 the helper must be available before a target repository exists. Session

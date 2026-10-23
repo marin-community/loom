@@ -1353,7 +1353,7 @@ async fn codex_acp_cmd(db: &Db) -> String {
 /// its deterministic one-shot decisions, so the default reviewer is `user`
 /// unless `CODEX_CONFIG` already names one. Weaver commands still need to
 /// reach Loom from inside that sandbox, so `agent` mode also enables Codex's
-/// network proxy, scoped to loopback and the runner's control-plane host.
+/// network proxy for the control plane and, when GitHub auth is enabled, GitHub.
 fn configure_codex_acp(
     env: &mut Vec<(String, String)>,
     model: &str,
@@ -1424,6 +1424,15 @@ fn configure_codex_acp(
             .chain(api_host.as_deref())
         {
             domains.insert(host.to_string(), json!("allow"));
+        }
+        if env.iter().any(|(name, value)| {
+            name == "LOOM_GITHUB_AUTH_MODE" && matches!(value.as_str(), "broker" | "direct")
+        }) {
+            // Credential brokerage and GitHub transport need separate network
+            // access. Preserve an operator's explicit GitHub deny rule.
+            for host in ["github.com", "api.github.com"] {
+                domains.entry(host.to_string()).or_insert(json!("allow"));
+            }
         }
     }
 
@@ -2865,6 +2874,14 @@ mod tests {
         );
     }
 
+    fn codex_environment_config(env: &[(String, String)]) -> Value {
+        let config = env
+            .iter()
+            .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
+            .unwrap();
+        serde_json::from_str(config).unwrap()
+    }
+
     #[test]
     fn codex_acp_config_carries_only_configured_fields() {
         assert!(codex_acp_config("", "").is_empty());
@@ -2894,12 +2911,7 @@ mod tests {
 
         configure_codex_acp(&mut env, "ignored", "high", "agent").unwrap();
 
-        let config: Value = serde_json::from_str(
-            env.iter()
-                .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
-                .unwrap(),
-        )
-        .unwrap();
+        let config = codex_environment_config(&env);
         assert_eq!(config["model"], "operator");
         assert_eq!(config["approvals_reviewer"], "user");
         assert_eq!(config["sandbox_workspace_write"]["network_access"], true);
@@ -2919,6 +2931,40 @@ mod tests {
         assert!(config["features"]["network_proxy"]["domains"]
             .get("*")
             .is_none());
+    }
+
+    #[test]
+    fn codex_acp_github_network_access_follows_the_credential_policy() {
+        for mode in ["broker", "direct", "disabled", ""] {
+            let mut env = vec![("LOOM_GITHUB_AUTH_MODE".to_string(), mode.to_string())];
+            configure_codex_acp(&mut env, "", "", "agent").unwrap();
+            let config = codex_environment_config(&env);
+            let domains = &config["features"]["network_proxy"]["domains"];
+            for host in ["github.com", "api.github.com"] {
+                if matches!(mode, "broker" | "direct") {
+                    assert_eq!(domains[host], "allow", "{mode}: {host}");
+                } else {
+                    assert!(domains.get(host).is_none(), "{mode}: {host}");
+                }
+            }
+            assert!(domains.get("*").is_none());
+        }
+
+        let mut env = vec![
+            ("LOOM_GITHUB_AUTH_MODE".to_string(), "broker".to_string()),
+            (
+                "CODEX_CONFIG".to_string(),
+                json!({"features": {"network_proxy": {"domains": {
+                    "api.github.com": "deny", "packages.example.com": "allow"
+                }}}})
+                .to_string(),
+            ),
+        ];
+        configure_codex_acp(&mut env, "", "", "agent").unwrap();
+        let config = codex_environment_config(&env);
+        let domains = &config["features"]["network_proxy"]["domains"];
+        assert_eq!(domains["api.github.com"], "deny");
+        assert_eq!(domains["packages.example.com"], "allow");
     }
 
     #[test]
