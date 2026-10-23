@@ -3,7 +3,7 @@
 
 # ---- build: Loom + Tapestry, plus the embedded Vue bundle ----
 FROM rust:1-bookworm AS build
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
  && apt-get install -y --no-install-recommends nodejs sccache \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
@@ -48,8 +48,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # ---- runtime: loom + the toolchain its agents shell out to ----
 FROM rust:1-bookworm
+# Pinned so a version bump invalidates the cached install layer; an unpinned
+# install keeps serving the cached release while the base image is unchanged.
+ARG GOOGLE_CLOUD_CLI_VERSION=590.0.1-0
 RUN set -eux; \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -; \
+    curl -fsSL https://deb.nodesource.com/setup_24.x | bash -; \
     install -m 0755 -d /etc/apt/keyrings; \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
@@ -115,7 +118,7 @@ RUN set -eux; \
     # across commands. graphviz renders dot; poppler-utils (pdftotext) reads the
     # PDFs agents are pointed at. (ImageMagick already ships in the rust base.)
     apt-get install -y --no-install-recommends \
-      nodejs git git-lfs ca-certificates gh google-cloud-cli tini \
+      nodejs git git-lfs ca-certificates gh "google-cloud-cli=${GOOGLE_CLOUD_CLI_VERSION}" tini \
       docker-ce-cli docker-buildx-plugin docker-compose-plugin sudo \
       jq ripgrep fd-find build-essential pkg-config cmake ninja-build \
       python3 python3-pip python3-venv python3-dev \
@@ -194,7 +197,7 @@ RUN set -eux; \
 # UV_PYTHON_INSTALL_DIR / UV_CACHE_DIR below + docker-compose.yml), so the
 # container manages its own Pythons — self-contained and persisted across
 # recreates, isolated from the host's uv. Pinned to a recent uv.
-COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /usr/local/bin/
 
 # Run as the host user that owns the bind-mounted code, so the worktrees and
 # edits loom's agents create are owned by you on the host, not root. The uid/gid

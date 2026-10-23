@@ -38,7 +38,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          check-latest: true
           cache: npm
           cache-dependency-path: crates/loom/frontend/package-lock.json
       # build.rs runs the frontend toolchain (npm + rspack); this is the check
@@ -59,7 +60,8 @@ jobs:
       # needed here too.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          check-latest: true
           cache: npm
           cache-dependency-path: crates/loom/frontend/package-lock.json
       # Same fmt + clippy gate developers run locally via the pre-commit hook
@@ -76,7 +78,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          check-latest: true
           cache: npm
           cache-dependency-path: crates/loom/frontend/package-lock.json
       # Custom MCP integration tests execute their exact PEP 723 scripts through
@@ -84,7 +87,7 @@ jobs:
       - name: Install uv for custom MCP tests
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
-          version: "0.13.1"
+          version: "0.13.5"
       # Integration tests shell out to real `git` and spawn `tapestry` terminal
       # supervisors (PTYs); both are available on the runner without extra setup.
       - run: cargo test --workspace --locked
@@ -128,7 +131,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
+          check-latest: true
           cache: npm
           cache-dependency-path: crates/loom/frontend/package-lock.json
       - run: cp .env.example .env
