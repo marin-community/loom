@@ -26,7 +26,8 @@ pub mod defaults {
                     cli = "sessions layout default-delete")]
         pub struct Input {
             /// Which kind of selector the default to clear matches on: `origin`,
-            /// `profile`, or `watch`.
+            /// `profile`, `watch`, or `repo`. A `repo` value is a GitHub
+            /// `owner/name` slug or a worktree root path.
             #[operand(string, positional)]
             pub selector_kind: SessionPlacementSelectorKind,
             #[operand(positional)]
@@ -58,7 +59,8 @@ pub mod defaults {
                     default = custom, render = custom, cli = "sessions layout default-set")]
         pub struct Input {
             /// Which kind of selector this default matches on: `origin`,
-            /// `profile`, or `watch`.
+            /// `profile`, `watch`, or `repo`. A `repo` value is a GitHub
+            /// `owner/name` slug or a worktree root path.
             #[operand(string, positional)]
             pub selector_kind: SessionPlacementSelectorKind,
             #[operand(positional)]
