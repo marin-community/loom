@@ -208,6 +208,15 @@ function cacheKey(route: { path: string; params: Record<string, string | string[
     :error="confirmation.error"
     @confirm="acceptConfirmation"
     @cancel="cancelConfirmation"
-  />
+  >
+    <label
+      v-if="confirmation.optionLabel"
+      class="flex items-center gap-2 text-sm text-muted"
+      data-testid="confirm-dialog-option"
+    >
+      <input v-model="confirmation.optionChecked" type="checkbox" />
+      {{ confirmation.optionLabel }}
+    </label>
+  </ConfirmDialog>
   <ShortcutHelp />
 </template>

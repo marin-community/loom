@@ -9,7 +9,14 @@ import {
   setSessionTitleGeneration,
 } from '../api';
 import { confirmAction } from './confirmation';
-import { AUTO_ARCHIVE_DISABLED_VALUE, AUTO_ARCHIVE_KEY, type LifecycleVerb } from './sessionState';
+import { useFleet } from './sessionsStore';
+import {
+  AUTO_ARCHIVE_DISABLED_VALUE,
+  AUTO_ARCHIVE_KEY,
+  childSessionsPhrase,
+  sessionDescendants,
+  type LifecycleVerb,
+} from './sessionState';
 
 // The session's write surface, shared by every place that can act on a session:
 // the detail page's header and the fleet list's per-row menu.
@@ -132,21 +139,41 @@ export function useSessionActions(
       await reload();
     });
 
-  const archive = () =>
-    confirmAction({
+  const archive = () => {
+    const id = getId();
+    const children = sessionDescendants(
+      useFleet().sessions.value.filter((session) => session.status !== 'archived'),
+      id,
+    );
+    return confirmAction({
       title: 'Archive this session?',
       description:
         'Its terminal and worktree will be removed. The branch, conversation, placement, and Loom history remain recoverable in History.',
       confirmLabel: 'Archive session',
       danger: true,
-      action: async () => {
+      option: children.length
+        ? { label: `Also archive ${childSessionsPhrase(children.length)}` }
+        : undefined,
+      action: async ({ optionChecked }) => {
         error.value = '';
         notice.value = '';
-        const res = (await archiveSession(getId())) as { branch: string };
-        notice.value = `Archived ${res.branch}.`;
+        const res = (await archiveSession(id)) as { branch: string };
+        if (!optionChecked) {
+          notice.value = `Archived ${res.branch}.`;
+        } else {
+          const results = await Promise.allSettled(
+            children.map((child) => archiveSession(child.id)),
+          );
+          const failed = results.filter((result) => result.status === 'rejected').length;
+          const scope = childSessionsPhrase(children.length);
+          notice.value = failed
+            ? `Archived ${res.branch}; ${failed} of ${scope} failed to archive.`
+            : `Archived ${res.branch} and ${scope}.`;
+        }
         await reload();
       },
     });
+  };
 
   const recover = () =>
     act('recover', async () => {

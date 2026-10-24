@@ -35,9 +35,15 @@ import {
   updateSessionSpace,
 } from '../api';
 import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
-import { effectiveAttention } from '../lib/sessionState';
+import {
+  childSessionsPhrase,
+  effectiveAttention,
+  sessionAncestry,
+  sessionDescendants,
+} from '../lib/sessionState';
 import { sessionPathSegments } from '../lib/sessionTitle';
 import { useLayoutCommands } from '../lib/layoutCommands';
+import { confirmAction } from '../lib/confirmation';
 import {
   FILTER_PREFERENCE_KEYS as FILTER_PREFERENCES,
   FILTER_QUERY_KEYS,
@@ -377,24 +383,15 @@ const visibleSessions = computed(() => baseSessions.value.filter(matchesFilters)
 const visibleById = computed(
   () => new Map(visibleSessions.value.map((session) => [session.id, session])),
 );
-const sessionsByBranch = computed(() =>
-  sessions.value.reduce((byBranch, session) => {
-    const candidates = byBranch.get(session.branch.id) ?? [];
-    candidates.push(session);
-    byBranch.set(session.branch.id, candidates);
-    return byBranch;
-  }, new Map<string, SessionSummary[]>()),
-);
 const sessionsById = computed(
   () => new Map(sessions.value.map((session) => [session.id, session])),
 );
+// The fleet-wide parentage index (lib/sessionState's shared rule), rebuilt
+// whenever the fleet snapshot changes; the row tree and the details panel
+// both read it.
+const fleetAncestry = computed(() => sessionAncestry(sessions.value));
 function parentSessionOf(session: SessionSummary) {
-  if (session.parent_session_id) {
-    return sessionsById.value.get(session.parent_session_id);
-  }
-  if (!session.parent_id) return undefined;
-  const legacyCandidates = sessionsByBranch.value.get(session.parent_id) ?? [];
-  return legacyCandidates.length === 1 ? legacyCandidates[0] : undefined;
+  return fleetAncestry.value.parentOf(session);
 }
 function sessionName(session: SessionSummary) {
   return session.branch.title || session.branch.name;
@@ -437,26 +434,19 @@ function nameParentOf(session: SessionSummary, input: SessionSummary[]) {
 }
 function sessionTree(input: SessionSummary[]): SessionTreeRow[] {
   const inputIndex = new Map(input.map((session, index) => [session.id, index]));
-  const inputById = new Map(input.map((session) => [session.id, session]));
-  const inputByBranch = input.reduce((byBranch, session) => {
-    const candidates = byBranch.get(session.branch.id) ?? [];
-    candidates.push(session);
-    byBranch.set(session.branch.id, candidates);
-    return byBranch;
-  }, new Map<string, SessionSummary[]>());
   const inputIds = new Set(inputIndex.keys());
+  const ancestry = sessionAncestry(input);
   const children = new Map<string, SessionSummary[]>();
   const roots: SessionSummary[] = [];
 
   for (const session of input) {
-    const legacyParents = session.parent_id ? (inputByBranch.get(session.parent_id) ?? []) : [];
-    const persistedParent = session.parent_session_id
-      ? inputById.get(session.parent_session_id)
-      : legacyParents.length === 1
-        ? legacyParents[0]
-        : parentSessionOf(session);
+    // Parentage resolves within this view through the shared index, falls
+    // back to the fleet-wide one for legacy ids that are ambiguous here,
+    // then to the name-derived heuristic for sessions with no recorded
+    // parent at all.
     const parent =
-      persistedParent ??
+      ancestry.parentOf(session) ??
+      (session.parent_session_id ? undefined : parentSessionOf(session)) ??
       (!session.parent_session_id && !session.parent_id ? nameParentOf(session, input) : undefined);
     if (!parent || parent.id === session.id || !inputIds.has(parent.id)) {
       roots.push(session);
@@ -1052,15 +1042,51 @@ function moveGroupToSpace(group: SessionGroup) {
   });
 }
 
-const pendingBulkArchive = ref(false);
 const archiveResult = ref('');
-async function confirmBulkArchive() {
-  pendingBulkArchive.value = false;
-  error.value = '';
+// The one archive confirmation the app has (lib/confirmation, rendered by the
+// shell) also carries the optional add-on: children of the selected parents
+// that the selection itself doesn't cover can ride along, checked per dialog.
+function unselectedDescendants(ids: string[]): string[] {
+  const live = sessions.value.filter((session) => session.status !== 'archived');
+  const seen = new Set(ids);
+  const extra: string[] = [];
+  for (const id of ids) {
+    for (const child of sessionDescendants(live, id)) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      extra.push(child.id);
+    }
+  }
+  return extra;
+}
+function requestBulkArchive() {
   const ids = [...selected.value];
-  const results = await Promise.allSettled(ids.map(archiveSession));
-  const failed = ids.filter((_, index) => results[index].status === 'rejected');
-  const archived = ids.length - failed.length;
+  if (!ids.length) return;
+  const extraChildren = unselectedDescendants(ids);
+  void confirmAction({
+    title: `Archive ${ids.length} selected session${ids.length === 1 ? '' : 's'}?`,
+    description:
+      'Their terminals and worktrees will be removed. Branches, conversations, placement, and Loom history remain recoverable in History. Failures remain selected so they can be retried.',
+    confirmLabel: 'Archive selected',
+    danger: true,
+    option: extraChildren.length
+      ? { label: `Also archive ${childSessionsPhrase(extraChildren.length)}` }
+      : undefined,
+    // The batch outlives the dialog: the server serializes teardowns behind
+    // its lifecycle lock, so a large selection must not pin a modal. Confirm
+    // resolves immediately and the archive-result banner reports the outcome.
+    action: async ({ optionChecked }) => {
+      const targets = [...ids, ...(optionChecked ? extraChildren : [])];
+      void archiveBatch(targets);
+    },
+  });
+}
+
+async function archiveBatch(targets: string[]) {
+  error.value = '';
+  const results = await Promise.allSettled(targets.map((target) => archiveSession(target)));
+  const failed = targets.filter((_, index) => results[index].status === 'rejected');
+  const archived = targets.length - failed.length;
   selected.value = new Set(failed);
   announcement.value = `Archived ${archived} session${archived === 1 ? '' : 's'}${
     failed.length ? `; ${failed.length} failed and remain selected` : ''
@@ -1619,11 +1645,7 @@ function scrollSpaces(direction: number) {
           >
             Move
           </button>
-          <button
-            class="btn-secondary px-2 py-1 text-xs"
-            type="button"
-            @click="pendingBulkArchive = true"
-          >
+          <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="requestBulkArchive">
             Archive
           </button>
           <button class="btn-secondary px-2 py-1 text-xs" type="button" @click="clearSelection">
@@ -1848,14 +1870,6 @@ function scrollSpaces(direction: number) {
       danger
       @confirm="confirmLayoutDelete"
       @cancel="pendingDelete = null"
-    />
-    <ConfirmDialog
-      :open="pendingBulkArchive"
-      title="Archive selected sessions?"
-      :description="`${selected.size} selected session${selected.size === 1 ? '' : 's'} will be torn down and kept in History. Failures remain selected so they can be retried.`"
-      confirm-label="Archive selected"
-      @confirm="confirmBulkArchive"
-      @cancel="pendingBulkArchive = false"
     />
   </div>
 </template>
