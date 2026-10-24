@@ -233,6 +233,67 @@ pub async fn clear(db: &Db, branch_id: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
+/// Clear a tag only if it still carries the expected value and a note
+/// starting with `note_prefix` — a compare-and-clear, so a concurrent
+/// replacement written between a caller's read and this delete (an outside
+/// assessment overwriting a mechanical stamp, say) is never clobbered.
+/// Returns whether the exact tag was removed.
+pub async fn clear_if(
+    db: &Db,
+    branch_id: &str,
+    key: &str,
+    value: &str,
+    note_prefix: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "DELETE FROM tags
+         WHERE branch_id = ? AND key = ? AND value = ? AND note LIKE ? || '%'",
+    )
+    .bind(branch_id)
+    .bind(key)
+    .bind(value)
+    .bind(note_prefix)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Stamp a tag only when the slot is empty or already carries this value
+/// with a note starting with `note_prefix` — the stamping path refreshing
+/// its own marker. An assessment another author already wrote (a watch's
+/// triage, say) is neither overwritten nor later swept away by the
+/// stamping path's own recovery, which clears by the same prefix.
+/// Returns whether the stamp landed.
+pub async fn set_owned(
+    db: &Db,
+    branch_id: &str,
+    key: &str,
+    value: &str,
+    note: &str,
+    note_prefix: &str,
+    set_by: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "INSERT INTO tags (branch_id, key, value, note, set_by, set_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(branch_id, key) DO UPDATE SET
+           value = excluded.value, note = excluded.note,
+           set_by = excluded.set_by, set_at = excluded.set_at
+         WHERE tags.value = ? AND tags.note LIKE ? || '%'",
+    )
+    .bind(branch_id)
+    .bind(key)
+    .bind(value)
+    .bind(note)
+    .bind(set_by)
+    .bind(crate::db::now_iso())
+    .bind(value)
+    .bind(note_prefix)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
 /// One desired tag in an atomic author-scoped replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagInput {

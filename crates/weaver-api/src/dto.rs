@@ -186,7 +186,8 @@ impl From<&BranchView> for BranchSummaryView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionTransitionView {
-    /// Stable operation name: `archiving`, `adopting`, or `handoff`.
+    /// Stable operation name: `archiving`, `adopting`, `waking`, `suspending`,
+    /// `handoff`, or `finishing`.
     pub kind: String,
     /// Human-readable current stage, suitable for direct UI presentation.
     pub step: String,
@@ -203,6 +204,11 @@ pub struct SessionTransitionView {
 pub struct SessionSummaryView {
     pub id: String,
     pub status: String,
+    /// Execution backend of the session: `"acp"` or `"terminal"`. The
+    /// frontend's send affordances differ by protocol — a suspended ACP
+    /// row is sendable (the send wakes it), a suspended terminal row is
+    /// not (the terminal lane has no queue and no auto-wake).
+    pub protocol: String,
     #[serde(default)]
     pub transition: Option<SessionTransitionView>,
     pub github_repo: Option<String>,

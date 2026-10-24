@@ -198,6 +198,17 @@ pub async fn enqueue_session_update(
     Ok(key)
 }
 
+/// The durable state of one inbox delivery, if the entry exists — `queued`
+/// means the protected entry has never been drained by a runtime.
+pub async fn delivery_state(db: &crate::db::Db, delivery_key: &str) -> Result<Option<String>> {
+    let state: Option<String> =
+        sqlx::query_scalar("SELECT state FROM conversation_inbox WHERE delivery_key = ?")
+            .bind(delivery_key)
+            .fetch_optional(db)
+            .await?;
+    Ok(state)
+}
+
 /// A source message returned by an agent read or wait is already in its context.
 /// Only queued notices are consumed; a concurrent claimed turn keeps ownership.
 pub async fn consume_source(db: &crate::db::Db, session: &str, message: &str) -> Result<()> {
@@ -484,13 +495,21 @@ async fn persist_conversation_inbox_turn(
     if journaled.rows_affected() != 1 {
         anyhow::bail!("protected inbox turn journal position is already occupied");
     }
-    let session = sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
-        .bind(boundary.inflight)
-        .bind(session_id)
-        .execute(&mut *tx)
-        .await?;
+    // The turn-start fence, at the durable claim: a lifecycle teardown that
+    // owns the session must not get a protected turn persisted under it, and
+    // a dormant row outside its own revival (waking/adopting) has no runtime
+    // to run one. One predicate shared with `session::set_inflight`, so the
+    // allow/deny lists cannot drift.
+    let session = sqlx::query(&format!(
+        "UPDATE sessions SET acp_inflight = ? WHERE id = ? AND {}",
+        crate::session::turn_fence_predicate()
+    ))
+    .bind(boundary.inflight)
+    .bind(session_id)
+    .execute(&mut *tx)
+    .await?;
     if session.rows_affected() != 1 {
-        anyhow::bail!("protected inbox target session disappeared");
+        anyhow::bail!("protected inbox turn was fenced out: the session changed lifecycle state");
     }
     sqlx::query(
         "UPDATE channel_deliveries SET state = 'delivered', attempts = attempts + 1,
@@ -544,6 +563,25 @@ where
     };
     if !owns_claim {
         return InboxTurnStartOutcome::ClaimLostBeforeWrite;
+    }
+
+    // The turn-start fence, checked before the wire write: a lifecycle
+    // teardown that owns the session must never receive the turn at all.
+    // The persist below re-fences the durable claim; this keeps the relay
+    // clean, and the not-written outcome releases the claim so the item
+    // stays queued for the next wake.
+    match crate::session::turn_start_allowed(db, session_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return InboxTurnStartOutcome::TransportNotWritten {
+                error: anyhow::anyhow!(
+                    "the session changed lifecycle state; the protected turn was fenced out"
+                ),
+            };
+        }
+        Err(error) => {
+            return InboxTurnStartOutcome::TransportNotWritten { error };
+        }
     }
 
     if let Err(error) = transport

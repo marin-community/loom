@@ -698,24 +698,14 @@ pub async fn delivery_succeeded(db: &Db, message_id: &str, binding_id: &str) -> 
     .await?)
 }
 
-/// Claim a terminal send before crossing the unacknowledged PTY boundary.
-/// An uncertain send requires an explicit new publication, never a blind retry.
-pub async fn claim_terminal_delivery(db: &Db, message: &str, binding: &str) -> Result<bool> {
-    Ok(sqlx::query(
-        "UPDATE channel_deliveries SET state = 'uncertain', attempts = attempts + 1,
-             last_error = 'terminal send started without a confirmed receipt', updated_at = ?
-         WHERE message_id = ? AND binding_id = ? AND state IN ('queued', 'failed')",
-    )
-    .bind(now_iso())
-    .bind(message)
-    .bind(binding)
-    .execute(db)
-    .await?
-    .rows_affected()
-        == 1)
-}
-
-pub async fn finish_terminal_delivery(
+/// Settle a terminal channel delivery's receipt after an inline paste:
+/// `delivered` on success, `failed` (with the error) otherwise. There is
+/// no claim and no retry queue on this lane — a terminal target that is
+/// not cleanly running is refused outright, so the receipt only records
+/// what already happened. The row starts `queued` at publication; a
+/// re-publication of the same message while the session is awake is the
+/// retry.
+pub async fn settle_terminal_delivery(
     db: &Db,
     message: &str,
     binding: &str,
@@ -723,10 +713,10 @@ pub async fn finish_terminal_delivery(
 ) -> Result<()> {
     sqlx::query(
         "UPDATE channel_deliveries SET state = ?, last_error = ?, updated_at = ?
-         WHERE message_id = ? AND binding_id = ? AND state = 'uncertain'",
+         WHERE message_id = ? AND binding_id = ? AND state = 'queued'",
     )
     .bind(if error.is_some() {
-        "uncertain"
+        "failed"
     } else {
         "delivered"
     })
@@ -1001,21 +991,15 @@ mod tests {
         assert_eq!(posted.id, replay.id, "idempotent replay appends once");
 
         let binding = weaver_api::channel_session_binding_id("session-1");
-        assert!(claim_terminal_delivery(&db, &posted.id, &binding)
-            .await
-            .unwrap());
-        assert!(!claim_terminal_delivery(&db, &posted.id, &binding)
-            .await
-            .unwrap());
-        finish_terminal_delivery(&db, &posted.id, &binding, Some("receipt lost"))
+        // The terminal lane has no claims: a paste settles its receipt
+        // outright, and a failed settle stays settleable by a later
+        // re-publication — the caller's retry is the only retry.
+        settle_terminal_delivery(&db, &posted.id, &binding, Some("paste refused"))
             .await
             .unwrap();
-        assert!(
-            !claim_terminal_delivery(&db, &posted.id, &binding)
-                .await
-                .unwrap(),
-            "uncertain terminal writes are not blindly replayed"
-        );
+        settle_terminal_delivery(&db, &posted.id, &binding, None)
+            .await
+            .unwrap();
 
         create_delivery(
             &db,

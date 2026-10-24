@@ -88,6 +88,15 @@ async fn usable_session(state: &AppState, target: &session::Session) -> bool {
     if target.status != "running" {
         return false;
     }
+    if let Some(transition) = target.lifecycle_transition.as_deref() {
+        // A row under a stop transition reads `running`, but its runtime is
+        // being torn down: pasting a review into it would mark the delivery
+        // done and lose it. The outbox retries once the transition settles
+        // (the wake the delivery scheduled has run by then).
+        if session::TURN_FENCE_STOP_TRANSITIONS.contains(&transition) {
+            return false;
+        }
+    }
     if target.protocol == "acp" {
         state.acp.is_live(&target.id)
     } else {
@@ -100,22 +109,41 @@ async fn usable_session(state: &AppState, target: &session::Session) -> bool {
     }
 }
 
-/// A submitted review is a wake signal: a suspended target comes back first
-/// (the outbox retries on the next drain if the wake fails), then the delivery
-/// proceeds against the live runtime.
+/// A submitted review is a wake signal: the shared `wake_or_drivable` seam
+/// resolves the target — waking a dormant row, waiting out a seconds-long
+/// revival or swap transition, and refusing a stop transition — before the
+/// delivery proceeds against the live runtime. On refusal the wake is
+/// scheduled detached and this attempt fails into the outbox's retry, by
+/// which time the session is back.
 async fn wake_if_suspended(state: &AppState, target: &session::Session) -> session::Session {
-    if !session::is_suspended(&target.status) {
-        return target.clone();
-    }
-    match crate::lifecycle::wake(state, target).await {
-        Ok(refreshed) => refreshed,
+    match crate::lifecycle::wake_or_drivable(state, target).await {
+        Ok(session) => session,
         Err(error) => {
             tracing::warn!(
                 review_session = %target.id,
                 %error,
-                "review delivery: waking suspended session failed; outbox will retry"
+                "review delivery: preparing the session failed; scheduling the wake, outbox will retry"
             );
-            target.clone()
+            let state_for_wake = state.clone();
+            let target_id = target.id.clone();
+            tokio::spawn(async move {
+                crate::lifecycle::wake_dormant_session(
+                    &state_for_wake,
+                    &target_id,
+                    "review delivery",
+                    false,
+                )
+                .await;
+            });
+            // The fresh row, not the pre-wake snapshot: `usable_session`'s
+            // stop-transition guard must see a suspend that started while
+            // we were resolving, or the review is pasted into the dying
+            // runtime and acked-and-lost. The stale clone is the
+            // disappeared-row fallback only.
+            match session::get(&state.db, &target.id).await {
+                Ok(Some(fresh)) => fresh,
+                _ => target.clone(),
+            }
         }
     }
 }

@@ -261,10 +261,6 @@ test.describe('session lifecycle actions', () => {
     await expect
       .poll(async () => (await weaver.getSession(s.id)).status)
       .toBe('suspended');
-    // Sending into a suspended session wakes it too. A shell runtime respawns
-    // in tens of milliseconds, so the foot's waking strip (unit-covered in
-    // `sessionState.test.mjs`) is not assertable here — pin the contract the
-    // strip narrates instead: the runtime returns and the message lands in it.
     await page.goto(`${weaver.baseUrl}/s/${s.id}`);
     // A terminal session opens on its Agent tab; the composer lives in the
     // Conversation tab.

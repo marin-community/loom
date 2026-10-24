@@ -200,6 +200,12 @@ watch(
 // half-typed message; every later mutation re-saves it there.
 const draft = ref(restoreDraft(id.value, draftStorage()));
 watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
+// An in-place session switch adopts the destination's saved draft, rather
+// than carrying the previous session's text across and persisting it under
+// the new id (which would clobber that session's stored draft).
+watch(id, () => {
+  draft.value = restoreDraft(id.value, draftStorage());
+});
 const sending = ref(false);
 const sendError = ref('');
 const composerVisible = computed(

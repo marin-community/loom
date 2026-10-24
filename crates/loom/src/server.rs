@@ -205,6 +205,15 @@ pub async fn repair_acp_sessions(state: &AppState) {
         if session.protocol != "acp" || session_mod::is_terminal(&session.status) {
             continue;
         }
+        // Deliberate dormancy is outside repair's remit. A suspended row whose
+        // relay survived a warned-about kill keeps its dormant label — `wake`
+        // owns reviving it (and settles it, if a driver is somehow already
+        // live) — and attaching here would put the memory back while the row
+        // still reads suspended. A row mid-transition is owned by whatever
+        // claimed it; attaching under a suspending wake would race its kill.
+        if session_mod::is_suspended(&session.status) || session.lifecycle_transition.is_some() {
+            continue;
+        }
         if state.acp.is_live(&session.id) {
             continue;
         }

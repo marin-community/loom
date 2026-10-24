@@ -497,7 +497,7 @@ pub const REGISTRY: &[SettingSpec] = &[
         kind: SettingKind::Enum,
         default: "",
         group: "Workbench",
-        options: &["", "created", "running", "orphaned", "done", "error", "archived"],
+        options: &["", "created", "running", "orphaned", "suspended", "done", "error", "archived"],
     },
     SettingSpec {
         key: "workbench.attention_filter",
@@ -677,9 +677,11 @@ pub const REGISTRY: &[SettingSpec] = &[
             (a message, a GitHub trigger, a code review) or the Wake action \
             restarts it in seconds. Warm (watch-managed) sessions are exempt; \
             a session is never suspended within 15 minutes of its last \
-            activity. Off by default — set a positive number of seconds (e.g. \
-            3600 for one hour) to enable; an individual session can opt out \
-            with auto-suspend.",
+            activity. Activity means what the monitor can see — screen \
+            movement for a terminal session — so a long silent command still \
+            reads as idle once the grace window passes. Off by default — set \
+            a positive number of seconds (e.g. 3600 for one hour) to enable; \
+            an individual session can opt out with auto-suspend.",
         kind: SettingKind::Int,
         default: "0",
         group: "Sessions",

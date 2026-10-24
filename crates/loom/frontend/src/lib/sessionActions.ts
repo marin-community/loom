@@ -191,10 +191,13 @@ export function useSessionActions(
   const suspend = () =>
     act('suspend', async () => {
       const res = await suspendSession(getId());
-      // Warnings ride with the success: the session did reach `suspended`, so
-      // they extend the notice rather than surfacing as a failure.
-      const warnings = res.warnings.length ? ` (${res.warnings.join(' ')})` : '';
-      notice.value = `Session suspended — runtime stopped, memory freed.${warnings}`;
+      if (res.warnings.length) {
+        // The row reached `suspended`, but a warning means the runtime stop
+        // could not be confirmed — do not also claim the memory was freed.
+        notice.value = `Session suspended with warnings — ${res.warnings.join(' ')}`;
+      } else {
+        notice.value = 'Session suspended — runtime stopped, memory freed.';
+      }
       await reload();
     });
 

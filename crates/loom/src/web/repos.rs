@@ -306,38 +306,49 @@ async fn handle_trigger(
     if let Some(branch) = target_branch.as_deref() {
         if let Ok(Some(b)) = branch_mod::find_by_repo_branch(&st.db, &repo_root_str, branch).await {
             if let Ok(Some(mut sess)) = session_mod::active_for_branch(&st.db, &b.id).await {
-                if session_mod::is_suspended(&sess.status) {
-                    // The trigger is a wake signal: bring the runtime back,
-                    // then forward into it. A failed wake leaves the session
-                    // suspended and reports the miss rather than archiving a
-                    // perfectly good dormant session — the next trigger
-                    // retries.
-                    match crate::lifecycle::wake(&st, &sess).await {
-                        Ok(refreshed) => sess = refreshed,
-                        Err(e) => {
-                            tracing::warn!(
-                                session = %sess.id,
-                                error = %e,
-                                "github webhook: waking suspended session failed"
-                            );
-                            return Err(format!(
-                                "could not wake suspended session {} for this trigger",
-                                sess.id
-                            ));
-                        }
+                // The trigger is a wake signal: a dormant owner is brought
+                // back, and a row mid-lifecycle-transition — its runtime is
+                // being torn down or swapped — is refused rather than pasted
+                // into and acked-and-lost. A failed wake or refusal reports
+                // the miss rather than archiving a perfectly good session;
+                // the next trigger retries.
+                match crate::lifecycle::wake_or_drivable(&st, &sess).await {
+                    Ok(refreshed) => sess = refreshed,
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %sess.id,
+                            error = %e,
+                            "github webhook: preparing the session for this trigger failed"
+                        );
+                        return Err(format!(
+                            "could not prepare session {} for this trigger",
+                            sess.id
+                        ));
                     }
                 }
-                if forward_trigger_to_session(
+                let forwarded = forward_trigger_to_session(
+                    &st,
                     &sess,
-                    &author,
-                    is_pr,
-                    number,
-                    event.request_body(),
-                    event.source(),
-                    &phrase,
+                    &TriggerForward {
+                        author: &author,
+                        is_pr,
+                        number,
+                        request: event.request_body(),
+                        source: event.source(),
+                        phrase: &phrase,
+                    },
                 )
-                .await
-                {
+                .await;
+                let forwarded = match forwarded {
+                    Ok(forwarded) => forwarded,
+                    Err(message) => {
+                        // Transient (a running ACP row whose driver is not
+                        // attached yet, a refused send): report the miss —
+                        // archiving here would tear down a healthy session.
+                        return Err(message);
+                    }
+                };
+                if forwarded {
                     crate::events::record(
                         &st.db,
                         &st.bus,
@@ -393,6 +404,31 @@ async fn handle_trigger(
                 // dead session's commits are on the branch, so nothing is dropped.
                 // The fresh launch re-provisions the branch's worktree (see
                 // `existing_branch`).
+                //
+                // Unless it went dormant underneath us: the row above is a
+                // stale read, and a suspend that committed (or is still
+                // committing) between that read and this failed forward leaves
+                // a perfectly good suspended session whose *next* trigger
+                // wakes it — archiving here would tear down its worktree on a
+                // misread. Re-read and stand down for dormancy.
+                match session_mod::get(&st.db, &sess.id).await {
+                    Ok(Some(fresh))
+                        if session_mod::is_suspended(&fresh.status)
+                            || fresh.lifecycle_transition.is_some() =>
+                    {
+                        tracing::warn!(
+                            session = %sess.id,
+                            branch = %b.id,
+                            repo = %slug.slug(),
+                            "github webhook: session went dormant mid-trigger; leaving it for the next trigger to wake"
+                        );
+                        return Err(format!(
+                            "session {} went dormant while this trigger was being forwarded",
+                            sess.id
+                        ));
+                    }
+                    _ => {}
+                }
                 tracing::warn!(
                     session = %sess.id,
                     branch = %b.id,
@@ -655,42 +691,105 @@ fn trigger_goal(
     )
 }
 
-/// Inject a new GitHub trigger into an already-running session's terminal so the
-/// thread continues in one session. Returns whether the note was delivered.
-async fn forward_trigger_to_session(
-    session: &Session,
-    author: &str,
+/// A resolved GitHub trigger's forwarding payload — what the session-bound
+/// note is built from, independent of which session receives it.
+struct TriggerForward<'a> {
+    author: &'a str,
     is_pr: bool,
     number: i64,
-    request: &str,
+    request: &'a str,
     source: github_trigger::TriggerSource,
-    phrase: &str,
-) -> bool {
-    let (thread, cmd) = if is_pr {
+    phrase: &'a str,
+}
+
+/// Inject a new GitHub trigger into the branch's active session so the
+/// thread continues in one session. Protocol-aware, like the Slack forward:
+/// an ACP relay speaks JSON-RPC on stdin, so a terminal paste would corrupt
+/// that stream — an ACP target is driven through its live task instead.
+///
+/// `Ok(true)` = delivered; `Ok(false)` = a terminal target whose pane is
+/// unreachable (the caller may archive and relaunch); `Err` = transient —
+/// a running ACP row whose driver is not attached yet (the repair loop
+/// will attach one; a trigger that archives here would tear down a
+/// healthy session's worktree), so the caller reports the miss and the
+/// next trigger retries.
+async fn forward_trigger_to_session(
+    st: &AppState,
+    session: &Session,
+    trigger: &TriggerForward<'_>,
+) -> std::result::Result<bool, String> {
+    let (thread, cmd) = if trigger.is_pr {
         ("PR", "pr")
     } else {
         ("issue", "issue")
     };
-    let source = match source {
+    let source = match trigger.source {
         github_trigger::TriggerSource::CommentCreated => "comment",
         github_trigger::TriggerSource::CommentEdited => "edited comment",
         github_trigger::TriggerSource::IssueOpened => "request in the issue body",
         github_trigger::TriggerSource::IssueEdited => "edited request in the issue body",
         github_trigger::TriggerSource::PullRequestReviewSubmitted => "submitted review",
     };
+    let phrase = trigger.phrase;
+    let author = trigger.author;
+    let number = trigger.number;
     let note = format!(
         "New {phrase} {source} from @{author} on {thread} #{number}:\n\n{}\n\n\
          (Reply on the thread with `gh {cmd} comment {number} --body \"…\"` if a response is warranted.)",
-        request.trim(),
+        trigger.request.trim(),
     );
+    if session.protocol == "acp" {
+        let handle = match st.acp.get(&session.id) {
+            Some(handle) => handle,
+            None => {
+                if session.status == "running" {
+                    // A healthy running row whose driver is not attached
+                    // yet: the repair loop will attach one — report the
+                    // miss so the next trigger retries, and never archive
+                    // a live session over a transient.
+                    tracing::warn!(
+                        session = %session.id,
+                        "github webhook: forwarding request deferred: no live ACP task yet"
+                    );
+                    return Err(format!(
+                        "session {} is running with no live ACP task yet — a repair will attach one; retry this trigger in a moment",
+                        session.id
+                    ));
+                }
+                // An orphaned (or errored) row whose relay is gone never
+                // self-recovers — the repair loop skips it and there is no
+                // adopt here. Report it as unreachable so the caller's
+                // archive-and-relaunch gives the thread a live owner.
+                tracing::warn!(
+                    session = %session.id,
+                    status = %session.status,
+                    "github webhook: forwarding request failed: no live ACP task on a non-running row"
+                );
+                return Ok(false);
+            }
+        };
+        let by = format!("github ({author})");
+        if let Err(e) = handle.stop_and_send(note, Some(by), Vec::new()).await {
+            tracing::warn!(
+                session = %session.id,
+                error = %e,
+                "github webhook: forwarding request to ACP conversation failed"
+            );
+            return Err(format!(
+                "forwarding this trigger to session {} failed: {e}",
+                session.id
+            ));
+        }
+        return Ok(true);
+    }
     if let Err(e) = backend::paste(&session.term_session, &note).await {
         tracing::warn!(session = %session.id, error = %e, "github webhook: forwarding request to session failed");
-        return false;
+        return Ok(false);
     }
     if let Err(e) = backend::send_enter(&session.term_session).await {
         tracing::warn!(session = %session.id, error = %e, "github webhook: submitting forwarded request failed");
     }
-    true
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

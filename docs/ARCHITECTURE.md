@@ -568,6 +568,8 @@ one-line current-state message) are the **agent-declared** "does this need
 me?" signal, both set via `loom status`. The dashboard resolves and filters on
 the attention signal.
 
+### Suspend & wake
+
 **Suspend/wake** is deliberate dormancy between `running` and `archived`:
 `sessions.suspend` (`loom sessions suspend`) stops a session's runtime —
 agent supervisor, debug shells, IDE sessions — freeing its memory, while the
@@ -933,7 +935,7 @@ Retention is layered: before the archive TTL fires, the same reaper suspends an
 ordinary running session idle past `session.idle_suspend_secs` (off by
 default — set a positive number of seconds to enable) — stopping its runtime to
 free memory while everything
-durable stays in place (see [Suspend/wake](#rest-api)). The suspend
+durable stays in place (see [Suspend & wake](#suspend--wake)). The suspend
 trigger shares the reaper's guards (no live ACP turn, no lifecycle transition,
 warm sessions exempt, a fresh-activity grace window) and its own
 `auto-suspend: disabled` per-session opt-out. A suspended session remains an

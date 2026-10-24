@@ -941,10 +941,7 @@ pub(super) async fn send_session(
     Path(key): Path<String>,
     Json(req): Json<SendReq>,
 ) -> ApiResult<Json<Value>> {
-    let (session, branch) = require_session(&st.db, &key).await?;
-    // Sending to a suspended session is one of its wake signals — the
-    // runtime comes back first, then the message is delivered to it.
-    let session = ensure_awake(&st, &session).await?;
+    let (session, branch) = require_sendable_session(&st, &key).await?;
     // A cross-session send must not sit behind an ordinary ACP turn indefinitely
     // or be discarded with an adapter's in-memory steer. Cancel and replace that
     // turn, while allowing a provider-owned compaction to finish before the
@@ -994,48 +991,6 @@ pub(super) async fn send_session(
     Ok(Json(json!({ "sent": true, "submitted": req.submit })))
 }
 
-/// Deliver a channel notification after the current ACP turn, preserving a
-/// parent's work when a child reports a result mid-turn. Terminal sessions use
-/// their ordinary pane delivery path.
-pub(super) async fn queue_session_message(
-    st: &AppState,
-    key: &str,
-    text: &str,
-    by: &str,
-) -> ApiResult<()> {
-    let (session, branch) = require_session(&st.db, key).await?;
-    // A channel delivery is a wake signal like any other: a suspended child
-    // or parent comes back before the note is queued into it.
-    let session = ensure_awake(st, &session).await?;
-    if session.protocol != "acp" {
-        let _ = send_session(
-            State(st.clone()),
-            Path(key.to_string()),
-            Json(SendReq {
-                text: text.to_string(),
-                submit: true,
-                by: Some(by.to_string()),
-            }),
-        )
-        .await?;
-        return Ok(());
-    }
-    require_acp_task(st, &session)?
-        .prompt(text.to_string(), Some(by.to_string()), Vec::new())
-        .await
-        .map_err(|error| AppError::conflict(error.to_string()))?;
-    events::record(
-        &st.db,
-        &st.bus,
-        &branch.id,
-        "nudge",
-        json!({ "by": by, "text": text, "send_now": false }),
-    )
-    .await
-    .ok();
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // The ACP chat journal + drive routes (protocol='acp' sessions)
 //
@@ -1078,10 +1033,19 @@ fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::A
         )));
     }
     st.acp.get(&session.id).ok_or_else(|| {
-        AppError::conflict(format!(
-            "session '{}' has no live ACP task to drive",
-            session.id
-        ))
+        if session_mod::is_suspended(&session.status) {
+            // Name dormancy rather than the generic "no task": the runtime is
+            // deliberately stopped, and the operator's move is Wake.
+            AppError::conflict(format!(
+                "session '{}' is suspended — `loom sessions wake {}` brings it back",
+                session.id, session.id
+            ))
+        } else {
+            AppError::conflict(format!(
+                "session '{}' has no live ACP task to drive",
+                session.id
+            ))
+        }
     })
 }
 
@@ -1091,24 +1055,88 @@ fn require_acp_task(st: &AppState, session: &Session) -> ApiResult<crate::acp::A
 /// dormancy costs nothing in reachability. The refreshed row is returned; the
 /// ACP registry it repopulates is what `require_acp_task` then finds.
 pub(super) async fn ensure_awake(st: &AppState, session: &Session) -> ApiResult<Session> {
+    // Re-read rather than trust the caller's snapshot: an ingress that read
+    // the row just before a suspend's CAS would otherwise pass through and
+    // collide with the teardown instead of waking.
+    let session = match crate::session::get(&st.db, &session.id).await? {
+        Some(fresh) => fresh,
+        None => session.clone(),
+    };
     if !session_mod::is_suspended(&session.status) {
-        return Ok(session.clone());
-    }
-    crate::lifecycle::wake(st, session).await.map_err(|error| {
-        // A refusal names a state the caller can act on (another
-        // transition owns the session, the profile lifetime moved); only
-        // a genuine failure becomes the 500.
-        if error.downcast_ref::<crate::lifecycle::Refusal>().is_some() {
-            return AppError::from(error);
+        if let Some(transition) = session.lifecycle_transition.as_deref() {
+            if session_mod::TURN_FENCE_STOP_TRANSITIONS.contains(&transition) {
+                // The runtime is being torn down under a stop transition:
+                // not wakeable (its owner holds the row) and not drivable
+                // (its supervisor is dying). Refuse with a retryable conflict
+                // rather than letting an ingress attach to a runtime
+                // disappearing underneath it.
+                return Err(AppError::conflict(format!(
+                    "the session is {transition} — try again in a few seconds"
+                )));
+            }
         }
-        AppError::internal(
-            format!(
-                "Could not wake suspended session {}. It stayed suspended; retry in a moment.",
-                session.id
-            ),
-            error,
-        )
-    })
+        return Ok(session);
+    }
+    crate::lifecycle::wake(st, &session)
+        .await
+        .map_err(|error| {
+            // A refusal names a state the caller can act on (another
+            // transition owns the session, the profile lifetime moved); only
+            // a genuine failure becomes the 500.
+            if error.downcast_ref::<crate::lifecycle::Refusal>().is_some() {
+                return AppError::from(error);
+            }
+            AppError::internal(
+                format!(
+                    "Could not wake suspended session {}. It stayed suspended; retry in a moment.",
+                    session.id
+                ),
+                error,
+            )
+        })?;
+    // The runtime is back; any queued terminal channel deliveries for this
+    // session are picked up by the delivery sweep rather than here — the
+    // drain re-enters this very send path, so inlining it would be a cycle.
+    let (session, _) = require_session(&st.db, &session.id).await?;
+    Ok(session)
+}
+
+/// The terminal lane's one rule: a terminal session takes a send only
+/// when it is cleanly running. Anything else — dormant, or mid-lifecycle —
+/// refuses with the remedy. Terminal sessions never queue and never
+/// auto-wake; the manual Wake action is the only way back.
+pub(super) fn require_drivable_terminal(session: &Session) -> ApiResult<()> {
+    if session.status == "running" && session.lifecycle_transition.is_none() {
+        return Ok(());
+    }
+    if let Some(transition) = session.lifecycle_transition.as_deref() {
+        return Err(AppError::conflict(format!(
+            "session '{}' is {transition} — retry once it settles",
+            session.id
+        )));
+    }
+    Err(AppError::conflict(format!(
+        "session '{}' is suspended — wake it first (`loom sessions wake {}` or the Wake action)",
+        session.id, session.id
+    )))
+}
+
+/// Resolve a session key to one that can take a direct send right now.
+/// An ACP row is woken first — a direct send is one of its wake signals,
+/// and its inbox lane makes the delivery durable. A terminal row must
+/// already be cleanly running: the terminal lane has no queue and no
+/// auto-wake, so anything else refuses with the wake remedy.
+pub(super) async fn require_sendable_session(
+    st: &AppState,
+    key: &str,
+) -> ApiResult<(Session, Branch)> {
+    let (session, branch) = require_session(&st.db, key).await?;
+    if session.protocol == "acp" {
+        let session = ensure_awake(st, &session).await?;
+        return Ok((session, branch));
+    }
+    require_drivable_terminal(&session)?;
+    Ok((session, branch))
 }
 
 /// Permission posture captured when the persisted in-flight turn started. This
@@ -1378,16 +1406,9 @@ async fn op_send(
     mut input: ops::send::Input,
 ) -> ApiResult<SessionSendResult> {
     let st = &context.state;
-    let (session, branch) = require_session(&st.db, &input.session).await?;
-    let session = ensure_awake(st, &session).await?;
-    let submit = input.submit.unwrap_or(true);
-    if let crate::auth::Grant::Session {
-        session_id: source, ..
-    } = &context.principal.grant
-    {
-        if session.status == "archived" {
-            return Err(AppError::conflict("session is archived"));
-        }
+    // Validate before waking: a rejected update must not pay a dormant
+    // session's respawn. These are the session-grant-only rules below, hoisted.
+    if let crate::auth::Grant::Session { .. } = &context.principal.grant {
         if input
             .idempotency_key
             .as_ref()
@@ -1399,6 +1420,16 @@ async fn op_send(
         }
         if input.text.trim().is_empty() {
             return Err(AppError::bad_request("message must not be empty"));
+        }
+    }
+    let (session, branch) = require_sendable_session(st, &input.session).await?;
+    let submit = input.submit.unwrap_or(true);
+    if let crate::auth::Grant::Session {
+        session_id: source, ..
+    } = &context.principal.grant
+    {
+        if session.status == "archived" {
+            return Err(AppError::conflict("session is archived"));
         }
         if session.protocol == "acp" {
             let key = crate::conversation_inbox::enqueue_session_update(
@@ -2252,7 +2283,24 @@ async fn op_update(context: OperationContext, input: ops::update::Input) -> ApiR
         if !session_mod::STATUSES.contains(&status.as_str()) {
             return Err(AppError::bad_request(format!("invalid status '{status}'")));
         }
-        session_mod::set_status(&st.db, &session.id, status).await?;
+        // Dormancy is lifecycle-owned. A plain status write can neither
+        // fabricate `suspended` (a live session labelled dormant — the
+        // monitor and the repair loop would both treat its live runtime as
+        // fine) nor undo it (a dormant row flipped to `running` reads as an
+        // orphan on the next tick, replacing the Wake affordance with
+        // Adopt). The suspend/wake verbs own the transition, teardown and
+        // all — and the undo side is enforced atomically, so a suspend that
+        // commits between the read above and this write still wins.
+        if status == "suspended" {
+            return Err(AppError::bad_request(
+                "status 'suspended' is reached through `loom sessions suspend`, not a plain status update",
+            ));
+        }
+        if !session_mod::set_status_unless_suspended(&st.db, &session.id, status).await? {
+            return Err(AppError::conflict(
+                "the session is suspended — `loom sessions wake` changes its lifecycle state",
+            ));
+        }
         events::record(
             &st.db,
             &st.bus,
@@ -2475,11 +2523,10 @@ async fn op_prompt_create(
     if input.delivery_key.is_some() && !input.force_queued {
         return Err(AppError::bad_request("delivery_key requires force_queued"));
     }
+    // The protocol gate comes before the wake: a prompt aimed at a
+    // terminal session is rejected without paying the respawn first.
     let (session, branch) = require_session(&st.db, &input.session).await?;
     require_acp(&session)?;
-    // A composer send to a suspended session wakes it first — the request
-    // takes the seconds the restart costs, then the prompt lands on the
-    // live runtime.
     let session = ensure_awake(st, &session).await?;
     let handle = require_acp_task(st, &session)?;
     let by = if context.principal.is_human() {

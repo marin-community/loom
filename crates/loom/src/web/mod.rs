@@ -47,7 +47,7 @@
 //! ```json
 //! {
 //!   "id": "<session id>",
-//!   "status": "running",            // lifecycle: created|launching|running|orphaned|done|error
+//!   "status": "running",            // lifecycle: created|launching|running|orphaned|suspended|done|error
 //!   "work_dir": "/path/to/.worktrees/foo",
 //!   "term_session": "weaver-abcd1234",
 //!   "agent_kind": "claude",
@@ -86,7 +86,7 @@ mod auth;
 mod automation;
 mod branches;
 mod changes;
-mod channels;
+pub(crate) mod channels;
 mod deployment;
 mod diagnostics;
 mod discussion;
@@ -243,8 +243,10 @@ impl AppError {
     fn is_not_found(&self) -> bool {
         self.status == StatusCode::NOT_FOUND
     }
-    #[cfg(test)]
-    fn status(&self) -> StatusCode {
+    /// The HTTP status this error will render with — callers that need to
+    /// distinguish a refusal (409: the operation never started) from a
+    /// transport failure (5xx: it may have partially happened).
+    pub fn status(&self) -> StatusCode {
         self.status
     }
 }
@@ -495,6 +497,7 @@ pub(crate) async fn session_summary_view(
     Ok(SessionSummaryView {
         id: session.id.clone(),
         status: session.status.clone(),
+        protocol: session.protocol.clone(),
         transition: session_transition_view(session),
         github_repo: session.github_repo.clone(),
         github_issue,

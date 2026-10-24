@@ -523,7 +523,10 @@ function resizeComposer() {
 watch([draft, composerInput], resizeComposer, { immediate: true });
 watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
 watch(id, () => {
-  draft.value = '';
+  // An in-place switch must adopt the destination's saved draft, not clear
+  // the slot: writing '' here would ripple through the saver below and
+  // delete the new session's stored draft under its key.
+  draft.value = restoreDraft(id.value, draftStorage());
   selectedFiles.value = [];
   sendError.value = '';
   settingsOpen.value = false;
@@ -873,7 +876,13 @@ const modeLabel = (m: string | null) => {
   if (!m) return 'mode';
   return metadata.value.modes.find((mode) => mode.id === m)?.name ?? MODE_LABEL[m] ?? m;
 };
-const modeInteractive = computed(() => canSend(props.session) && modeOptions.value.length > 1);
+// Mode changes need a live ACP task — `sessions.mode` refuses a dormant row —
+// so the control is interactive only for a clean running session, unlike the
+// composer (whose send is itself a wake signal).
+const modeInteractive = computed(
+  () =>
+    props.session.status === 'running' && !props.session.transition && modeOptions.value.length > 1,
+);
 const legacyModeVisible = computed(() => !metadata.value.config_options.some(isModeOption));
 async function pickMode(m: string) {
   if (m === currentMode.value) return;

@@ -775,6 +775,10 @@ pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session
 /// Error rows are intentionally included even though they do not consume
 /// capacity: a branch-goal edit must advance their mutation generation too, or
 /// a handoff can commit a prompt built from the superseded goal.
+///
+/// `suspended` is the one deliberate exception to that invariant: handoff
+/// cannot start from dormancy, and a wake re-reads the goal through
+/// `resume_prompt_files`, so a superseded goal is never resurrected.
 pub async fn handoff_capable_for_branch(db: &Db, branch_id: &str) -> Result<Vec<Session>> {
     let query = select_sessions(
         "WHERE branch_id = ?
@@ -840,6 +844,23 @@ pub async fn set_status(db: &Db, id: &str, status: &str) -> Result<()> {
         "session status changed"
     );
     Ok(())
+}
+
+/// Like [`set_status`], but the write is fenced against dormancy: a plain
+/// status update must never undo `suspended` by label — the wake verbs own
+/// that transition, teardown and all. Returns `false` when the row is (or has
+/// become) suspended, leaving it untouched.
+pub async fn set_status_unless_suspended(db: &Db, id: &str, status: &str) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE sessions
+         SET status = ?, mutation_revision = mutation_revision + 1
+         WHERE id = ? AND status != 'suspended'",
+    )
+    .bind(status)
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 /// Begin an externally visible lifecycle transition if no other operation owns
@@ -1123,15 +1144,87 @@ pub async fn set_ack_seq(db: &Db, id: &str, seq: i64) -> Result<()> {
     Ok(())
 }
 
+/// The lifecycle transitions whose owner stops the runtime underneath the
+/// driver — a turn claimed under one would be torn down mid-flight, and an
+/// ingress colliding with one is hitting a runtime about to disappear.
+/// Shared by every spelling of the turn-start fence so the allow/deny lists
+/// cannot drift apart.
+pub const TURN_FENCE_STOP_TRANSITIONS: &[&str] = &["suspending", "archiving", "finishing"];
+
+/// The revival transitions that may run turns while the row still reads
+/// `suspended` — a wake's own fresh-open goal turn and the adoption inbox
+/// drain, both of which run before the revival commits `running`.
+pub const TURN_FENCE_REVIVE_TRANSITIONS: &[&str] = &["waking", "adopting"];
+
+/// Render a `&[&str]` as a SQL `IN` list.
+fn sql_list(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("'{value}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The one SQL predicate every turn-start fence agrees on: no turn under a
+/// stop-the-runtime transition, and no turn on a dormant row outside its own
+/// revival.
+pub(crate) fn turn_fence_predicate() -> String {
+    format!(
+        "(lifecycle_transition IS NULL \
+         OR lifecycle_transition NOT IN ({})) \
+     AND (status != 'suspended' \
+         OR lifecycle_transition IN ({}))",
+        sql_list(TURN_FENCE_STOP_TRANSITIONS),
+        sql_list(TURN_FENCE_REVIVE_TRANSITIONS)
+    )
+}
+
+/// Whether a turn may start on this session right now — the read-side form of
+/// the [`set_inflight`] fence, for dispatch paths that must decide before any
+/// transport write reaches the agent.
+pub async fn turn_start_allowed(db: &Db, id: &str) -> Result<bool> {
+    let allowed: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT 1 FROM sessions WHERE id = ? AND {}",
+        turn_fence_predicate()
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(allowed.is_some())
+}
+
 /// Persist (or clear, with `None`) the outstanding client->agent request state.
 /// See [`Session::acp_inflight`].
-pub async fn set_inflight(db: &Db, id: &str, inflight: Option<&str>) -> Result<()> {
-    sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
-        .bind(inflight)
-        .bind(id)
-        .execute(db)
-        .await?;
-    Ok(())
+///
+/// Starting a turn (`Some`) is a fenced claim — see [`turn_fence_predicate`]:
+/// denied under a stop-the-runtime teardown (suspend, archive, a scheduled
+/// finish), denied on a dormant row outside its own revival, and allowed under
+/// `waking`/`adopting` (whose opening turn and inbox drain run while the row
+/// still reads `suspended`) and under `handoff`, which pauses and resumes its
+/// queue itself. Clearing (`None`) is always allowed: settle paths must clean
+/// up regardless.
+pub async fn set_inflight(db: &Db, id: &str, inflight: Option<&str>) -> Result<bool> {
+    match inflight {
+        Some(inflight) => {
+            let result = sqlx::query(&format!(
+                "UPDATE sessions SET acp_inflight = ? WHERE id = ? AND {}",
+                turn_fence_predicate()
+            ))
+            .bind(inflight)
+            .bind(id)
+            .execute(db)
+            .await?;
+            Ok(result.rows_affected() == 1)
+        }
+        None => {
+            sqlx::query("UPDATE sessions SET acp_inflight = ? WHERE id = ?")
+                .bind(inflight)
+                .bind(id)
+                .execute(db)
+                .await?;
+            Ok(true)
+        }
+    }
 }
 
 /// Record the session's current ACP mode id (the gating posture).
@@ -2268,5 +2361,86 @@ mod tests {
         assert_eq!(session.agent_kind, "claude");
         assert_eq!(session.profile, crate::agent_kind::DEFAULT_PROFILE);
         assert_eq!(session.mutation_revision, 3);
+    }
+
+    #[tokio::test]
+    async fn turn_start_claims_are_fenced_by_lifecycle_state() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let branch = branch_id(&db, "weaver/turn-fence").await;
+        insert(&db, &new_session("turn-fence", &branch, None))
+            .await
+            .unwrap();
+        let inflight = r#"{"prompt_id":1,"turn":1}"#;
+        let clear_marker = "UPDATE sessions SET lifecycle_transition = NULL,
+             lifecycle_step = NULL, lifecycle_transition_owner_pid = NULL,
+             lifecycle_transition_started_at = NULL WHERE id = ?";
+        let set_status = "UPDATE sessions SET status = ? WHERE id = ?";
+
+        // A plain running row starts turns.
+        assert!(set_inflight(&db, "turn-fence", Some(inflight))
+            .await
+            .unwrap());
+
+        // Teardown markers deny — suspend, archive, and a scheduled finish
+        // stop the runtime underneath the driver, so a turn must refuse.
+        for transition in ["suspending", "archiving", "finishing"] {
+            assert!(begin_transition(&db, "turn-fence", transition, "step")
+                .await
+                .unwrap());
+            assert!(
+                !set_inflight(&db, "turn-fence", Some(inflight))
+                    .await
+                    .unwrap(),
+                "{transition} owns the session; the turn must be fenced out"
+            );
+            sqlx::query(clear_marker)
+                .bind("turn-fence")
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        // Revival markers allow — the wake's own opening turn and the inbox
+        // drain run under them, even while the row still reads `suspended`.
+        for transition in ["waking", "adopting", "handoff"] {
+            assert!(begin_transition(&db, "turn-fence", transition, "step")
+                .await
+                .unwrap());
+            assert!(
+                set_inflight(&db, "turn-fence", Some(inflight))
+                    .await
+                    .unwrap(),
+                "{transition} must not fence its own session's turns"
+            );
+            sqlx::query(clear_marker)
+                .bind("turn-fence")
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+
+        // A dormant row outside its own revival has no runtime to run a turn.
+        sqlx::query(set_status)
+            .bind("suspended")
+            .bind("turn-fence")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(
+            !set_inflight(&db, "turn-fence", Some(inflight))
+                .await
+                .unwrap(),
+            "a dormant row must not claim a turn outside waking/adopting"
+        );
+        // ...but its revival is exactly the carve-out.
+        assert!(begin_transition(&db, "turn-fence", "waking", "step")
+            .await
+            .unwrap());
+        assert!(set_inflight(&db, "turn-fence", Some(inflight))
+            .await
+            .unwrap());
+
+        // Clearing is always allowed: settle paths clean up regardless.
+        assert!(set_inflight(&db, "turn-fence", None).await.unwrap());
     }
 }

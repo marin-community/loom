@@ -278,19 +278,33 @@ loom sessions wake <session>       # or the Wake action in the row ⋯ / Details
 
 Idle sessions can suspend on their own: after `session.idle_suspend_secs`
 without activity, the monitor suspends them. This is off by default — set a
-positive number of seconds (e.g. `3600` for one hour) to enable it. A
+positive number of seconds (e.g. `3600` for one hour) to enable it. An ACP
 session is never suspended mid-turn or within fifteen minutes of its last
-activity, and a session carrying the `auto-suspend: disabled` tag is exempt:
+activity; a terminal session has no durable turn marker, so only the
+fifteen-minute window protects a long silent command. "Activity" is what the
+monitor can see — screen movement for a terminal session — so a command that
+grinds quietly still counts as idle once the grace window passes: exempt a
+session that works silently for hours, or set the threshold above its worst
+case. A session carrying the `auto-suspend: disabled` tag is exempt entirely:
 
 ```sh
 loom sessions tags set auto-suspend disabled
 loom sessions tags delete auto-suspend     # allow automatic suspend again
 ```
 
-A suspended session stays reachable: sending it a message, a GitHub `@loom`
-trigger, a submitted code review, or an automation delivery wakes it first and
-then lands, and the composer still accepts a message (the send just takes the
-few seconds the restart costs).
+A suspended ACP session stays reachable: sending it a message, a GitHub
+`@loom` trigger, or a submitted code review wakes it first and then lands,
+and the composer still accepts a message (the send just takes the few
+seconds the restart costs). A channel delivery — a plain message or a
+child's committed result — wakes its dormant recipient the same way, so
+finished work always reaches its consumer.
+
+A suspended **terminal** session (a shell) is deliberately dumber: nothing
+queues for it and nothing auto-wakes it. Any send, trigger, or reply
+refuses with "wake it first," a channel message stays durable in channel
+history until a re-post delivers it, and a child's committed result raises
+the parent's triage tag instead of waking it. Wake it with the Wake action,
+and everything waiting is right there.
 
 ## Recovery
 

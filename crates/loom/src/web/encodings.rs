@@ -44,7 +44,7 @@ use crate::auth::Principal;
 use crate::{AppState, EditorState};
 
 use super::operations::{self as ops, Bound, OperationContext};
-use super::ApiResult;
+use super::{ApiResult, AppError};
 
 /// Mount every non-JSON operation at its derived route.
 ///
@@ -182,12 +182,26 @@ async fn session_shell_terminal(
     };
     // Opening a shell is an explicit reach for the session's runtime — a debug
     // shell is derived from the agent's supervisor, which dormancy stopped —
-    // so the attach wakes a suspended session first. (The agent-terminal
-    // attach deliberately does not: it auto-connects on page load, and merely
-    // viewing a dormant session must not revive it.)
-    if let Ok(Some((session, _))) = crate::session::resolve_key(&st.db, &input.session).await {
-        if let Err(error) = super::sessions::ensure_awake(&st, &session).await {
-            return error.into_response();
+    // so for an ACP session the attach wakes it first. A terminal session
+    // refuses instead, per the uniform terminal rule: dormant terminal rows
+    // are woken by the Wake action, never implicitly. (The agent-terminal
+    // attach deliberately does neither: it auto-connects on page load, and
+    // merely viewing a dormant session must not revive it.)
+    match crate::session::resolve_key(&st.db, &input.session).await {
+        Ok(Some((session, _))) => {
+            if session.protocol == "acp" {
+                if let Err(error) = super::sessions::ensure_awake(&st, &session).await {
+                    return error.into_response();
+                }
+            } else if let Err(error) = super::sessions::require_drivable_terminal(&session) {
+                return error.into_response();
+            }
+        }
+        // A miss surfaces at the attach below; a genuine resolution failure
+        // must not be swallowed into a silent no-wake.
+        Ok(None) => {}
+        Err(error) => {
+            return AppError::internal("could not resolve the session", error).into_response();
         }
     }
     let editor = EditorState::from_ref(&st);

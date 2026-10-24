@@ -147,8 +147,11 @@ test('a suspended session reads as dormant but reachable', () => {
     branch: { description: 'What the agent was doing', tags: [] },
   };
 
-  // Sending is a wake signal, so the composer stays open.
-  assert.equal(canSend(session), true);
+  // Sending is a wake signal for an ACP session, so the composer stays
+  // open there; a terminal session has no queue and no auto-wake, so its
+  // composer hides until the row is woken.
+  assert.equal(canSend({ ...session, protocol: 'acp' }), true);
+  assert.equal(canSend({ ...session, protocol: 'terminal' }), false);
   assert.deepEqual(conversationState(session), {
     glyph: '◦',
     label: 'Suspended',

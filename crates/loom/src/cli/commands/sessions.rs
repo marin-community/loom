@@ -1207,8 +1207,20 @@ pub async fn cmd_attach(key: String) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let client = client::default()?;
     let ws = client
-        .invoke::<sessions::get::Op>(&sessions::get::Input { session: key })
+        .invoke::<sessions::get::Op>(&sessions::get::Input {
+            session: key.clone(),
+        })
         .await?;
+    if ws.status == "suspended" {
+        // Attach would land on a dead pane: the runtime is deliberately
+        // stopped. Say so and leave — waking is a separate, explicit act
+        // (`loom sessions wake` or the row's Wake action).
+        eprintln!(
+            "session {} is suspended — its runtime is stopped; run `loom sessions wake {}` to bring it back",
+            key, key
+        );
+        return Ok(());
+    }
     let session = ws.term_session.as_str();
     // The `tapestry` binary ships beside `loom`; resolve it as a sibling so an
     // attach works regardless of PATH, then hand off to its native attach.

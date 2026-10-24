@@ -182,6 +182,90 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
     assert!(!backend::has_session(&session.term_session).await);
 }
 
+/// A setup request rejected while the adapter's location plugins are still
+/// activating is retried in place instead of failing the session start.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_error_retries_until_the_adapter_is_ready() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-readiness-retry",
+        None,
+        None,
+        vec![("FAKE_ACP_UNAVAILABLE_ATTEMPTS".to_string(), "1".to_string())],
+    )
+    .await;
+    assert!(ts.state.acp.is_live("acp-readiness-retry"));
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:ready", "session": "acp-readiness-retry" }),
+        )
+        .await
+        .unwrap();
+    let chat = poll_chat(
+        &ts,
+        "acp-readiness-retry",
+        Duration::from_secs(5),
+        |blocks| {
+            blocks.iter().any(|block| {
+                block["kind"] == "agent_message" && block["payload"]["text"] == "ready"
+            }) && blocks.iter().any(|block| {
+                block["kind"] == "turn_end" && block["payload"]["stop_reason"] == "end_turn"
+            })
+        },
+    )
+    .await;
+    assert!(!chat["blocks"].as_array().unwrap().is_empty());
+}
+
+/// An exhausted transient setup failure must not erase the loadable session id:
+/// the next wake/adoption needs it to `session/load` instead of opening fresh
+/// and re-sending the goal.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transient_setup_failure_preserves_the_acp_session_id() {
+    let ts = TestServer::start().await;
+    make_session(&ts, "acp-readiness-keep").await;
+    session_mod::set_acp(&ts.state.db, "acp-readiness-keep", "ses-existing")
+        .await
+        .unwrap();
+    let cwd = ts.repo_path().to_path_buf();
+    let launch = AcpLaunch {
+        additional_directories: Vec::new(),
+        adapter_cmd: agent_cmd(),
+        cwd,
+        env: vec![(
+            "FAKE_ACP_UNAVAILABLE_ATTEMPTS".to_string(),
+            "99".to_string(),
+        )],
+        env_clear: false,
+        mcp_servers: vec![],
+        new_or_load: NewOrLoad::Load {
+            acp_session_id: "ses-existing".to_string(),
+            meta: None,
+        },
+        mode: None,
+        initial_model: None,
+        initial_effort: None,
+        goal: None,
+        setup_timeout: Duration::from_millis(200),
+    };
+    let error = acp::start(&ts.state.acp_ctx(), "acp-readiness-keep", launch)
+        .await
+        .expect_err("an unavailable adapter still fails after the retries");
+    assert!(error.to_string().contains("session/load"), "{error}");
+    let session = session_mod::get(&ts.state.db, "acp-readiness-keep")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.acp_session_id.as_deref(), Some("ses-existing"));
+    assert!(session.acp_inflight.is_none());
+    assert!(!ts.state.acp.is_live("acp-readiness-keep"));
+    assert!(!backend::has_session(&session.term_session).await);
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn transient_prompt_uses_acp_and_cleans_its_relay() {
@@ -2698,6 +2782,61 @@ async fn prompt_send_now_restarts_an_unsteerable_live_turn() {
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:replacement"
     }));
+}
+
+/// A replacement prompt must wait for the adapter to acknowledge the cancelled
+/// prompt. Dispatched too early, an adapter with a single active prompt rejects
+/// it and the replacement turn dies before the model runs.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_now_waits_for_the_cancelled_prompt_before_dispatching() {
+    let ts = TestServer::start().await;
+    start_new_with_env(
+        &ts,
+        "acp-prompt-race",
+        None,
+        None,
+        vec![("FAKE_ACP_SINGLE_PROMPT".to_string(), "1".to_string())],
+    )
+    .await;
+
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:3000|say:stale", "session": "acp-prompt-race" }),
+        )
+        .await
+        .unwrap();
+    let sent = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:replacement", "send_now": true, "session": "acp-prompt-race" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent["queued"], false, "response: {sent}");
+
+    let chat = poll_chat(&ts, "acp-prompt-race", Duration::from_secs(10), |blocks| {
+        blocks.iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "replacement"
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| {
+        block["turn"] == 0
+            && block["kind"] == "turn_end"
+            && block["payload"]["stop_reason"] == "cancelled"
+    }));
+    assert!(
+        !blocks.iter().any(|block| {
+            block["turn"] == 1
+                && block["kind"] == "turn_end"
+                && block["payload"]["stop_reason"] == "error"
+        }),
+        "the replacement raced the cancelled prompt: {chat}"
+    );
 }
 
 /// Compaction mutates provider-owned conversation state and must finish at its
@@ -5933,4 +6072,337 @@ async fn scheduled_watch_dispatches_agent_through_automation_launch() {
     assert_eq!(session.class, "automation");
     assert_eq!(session.status, "done");
     assert!(!loom::backend::has_session(&session.term_session).await);
+}
+
+// ---------------------------------------------------------------------------
+// Suspend/wake × the ACP repair loop
+// ---------------------------------------------------------------------------
+
+/// The wedge the round-4 review found: `repair_acp_sessions` attached a live
+/// driver to a suspended row (one whose relay survived a warned-about kill),
+/// after which every wake refused on "session already has a live ACP task"
+/// until a server restart. The repair loop must leave deliberate dormancy
+/// alone, and a wake that finds a live driver under a suspended row must
+/// settle it back to running rather than refuse.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repair_leaves_suspended_acp_dormant_and_wake_settles_a_live_driver() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-suspend-repair").await;
+    let created = rest_create(&ts, "fake-suspend-repair", "say:dormant").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    poll_view(&ts, &id, Duration::from_secs(15), |v| {
+        v["status"] == "running"
+    })
+    .await;
+
+    // The reachable-but-rare state a warned-about kill leaves behind: the
+    // Loom-side driver is gone, the relay supervisor is alive, and the row
+    // reads `suspended` (planted directly — the update op refuses dormancy).
+    assert!(
+        ts.state.acp.stop(&id),
+        "an ACP task should have been running"
+    );
+    sqlx::query("UPDATE sessions SET status = 'suspended' WHERE id = ?")
+        .bind(&id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    // The repair loop's job is crashed drivers under live relays — but a
+    // deliberately suspended row is outside its remit. No driver may be
+    // attached, and the dormant label must survive the pass.
+    loom::server::repair_acp_sessions(&ts.state).await;
+    assert!(
+        !ts.state.acp.is_live(&id),
+        "repair must not attach a driver to a suspended row"
+    );
+    let view = ts
+        .client
+        .post("/api/sessions/get", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "suspended", "{view}");
+
+    // The pre-fix wedge, recreated by hand: something attaches a driver under
+    // the suspended row anyway. Wake must not refuse on the live task — the
+    // goal is already met, so it settles the row back to running.
+    loom::acp::attach(&ts.state.acp_ctx(), &id)
+        .await
+        .expect("attaching to the live relay should work");
+    let woken = ts
+        .client
+        .post("/api/sessions/wake", json!({ "session": id }))
+        .await
+        .expect("wake must settle a suspended row with a live driver, not refuse");
+    assert_eq!(woken["status"], "running", "{woken}");
+
+    ts.client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+}
+
+/// Wake must revive a suspended ACP session with no recorded adapter session:
+/// adoption falls back to a Fresh open that runs the goal turn *while the row
+/// still reads `suspended`* (the status flips only after `acp::start`
+/// returns). The turn-start fence has to allow exactly that revival turn —
+/// its `status != 'suspended'` clause once denied it, making every wake of
+/// such a session fail permanently.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wake_opens_a_fresh_acp_session_when_no_adapter_session_is_recorded() {
+    let ts = TestServer::start().await;
+    seed_acp_agent(&ts, "fake-fresh-wake").await;
+    let created = rest_create(&ts, "fake-fresh-wake", "say:fresh wake").await;
+    let id = created["id"].as_str().unwrap().to_string();
+    poll_view(&ts, &id, Duration::from_secs(15), |v| {
+        v["status"] == "running"
+    })
+    .await;
+
+    // Park it, then lose the adapter's session id — the state adoption falls
+    // back to a Fresh open for.
+    ts.client
+        .post("/api/sessions/suspend", json!({ "session": id }))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE sessions SET acp_session_id = NULL WHERE id = ?")
+        .bind(&id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    // The fresh open's goal turn runs under `waking` on a row that still
+    // reads `suspended`; the fence must allow it.
+    let woken = ts
+        .client
+        .post("/api/sessions/wake", json!({ "session": id }))
+        .await
+        .expect("the fresh open's opening turn must not be fenced out");
+    assert_eq!(woken["status"], "running", "{woken}");
+
+    // The opening goal turn actually ran.
+    poll_chat(&ts, &id, Duration::from_secs(15), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    ts.client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+}
+
+/// A wake that re-opens fresh (no loadable session id) re-sends the goal as
+/// its first turn, and a queued prompt must not dispatch on top of it: the
+/// inbox holds the prompt until the goal turn settles and starts it as the
+/// next turn — no update-policy cancellation, no errored turn. The
+/// 5ijvbegy failure is the concrete shape: the queued prompt immediately
+/// cancelled the resumed goal turn, and the replacement errored before any
+/// model output.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("acp.codex_cmd".to_string(), Some(agent_cmd()))],
+    )
+    .await
+    .unwrap();
+    let created = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "title": "wake serializes", "goal": "wait:3000 say:ready", "cwd": ts.cwd(),
+                    "agent": "codex", "protocol": "acp" }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let branch = created["branch"]["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(20), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    // Park it, and leave a due queued prompt behind — as an automation or a
+    // channel delivery would.
+    client
+        .post("/api/sessions/suspend", json!({ "session": id }))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO conversation_inbox
+         (delivery_key, branch_id, preferred_session_id, payload, author, resources, interrupt_at)
+         VALUES (?, ?, ?, 'the queued follow-up', 'manual', '[]', NULL)",
+    )
+    .bind(format!("prompt:{id}:test"))
+    .bind(&branch)
+    .bind(&id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
+    // No loadable session id: the wake re-opens fresh and re-sends the goal
+    // as its first turn — the turn the queued prompt must wait behind.
+    sqlx::query("UPDATE sessions SET acp_session_id = NULL WHERE id = ?")
+        .bind(&id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let woken = client
+        .post("/api/sessions/wake", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(woken["status"], "running", "{woken}");
+
+    // The queued prompt starts only after the goal turn settles (the gate
+    // under test), so that arrival — not a turn count, which the original
+    // opening turn already satisfies — is what we wait for.
+    let chat = poll_chat(&ts, &id, Duration::from_secs(30), |blocks| {
+        blocks.iter().any(|b| {
+            b["kind"] == "user_message"
+                && b["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("the queued follow-up"))
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    let goal_at = blocks
+        .iter()
+        .position(|b| {
+            b["kind"] == "user_message"
+                && b["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("wait:3000"))
+        })
+        .expect("the resumed goal turn's prompt");
+    let goal_end = blocks
+        .iter()
+        .skip(goal_at)
+        .position(|b| b["kind"] == "turn_end")
+        .map(|offset| goal_at + offset)
+        .expect("the goal turn's end");
+    assert_eq!(
+        blocks[goal_end]["payload"]["stop_reason"], "end_turn",
+        "the goal turn must settle on its own, not be cancelled: {}",
+        blocks[goal_end]
+    );
+    let queued_at = blocks
+        .iter()
+        .position(|b| {
+            b["kind"] == "user_message"
+                && b["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("the queued follow-up"))
+        })
+        .unwrap_or_else(|| panic!("the queued prompt's turn; snapshot: {chat}"));
+    assert!(
+        queued_at > goal_end,
+        "the queued prompt must start after the goal turn settles, not cancel it: queued@{queued_at} goal_end@{goal_end}"
+    );
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| { b["kind"] == "turn_end" && b["payload"]["stop_reason"] == "error" }),
+        "no turn may end with an error: {chat}"
+    );
+
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
+}
+
+/// A wake that re-opens via `session/load` injects no extra goal turn —
+/// `build_acp_launch` carries no goal for a load, and history replays
+/// instead — so the queued prompt is the first new turn and starts without
+/// waiting.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_load_wake_injects_no_goal_turn_and_dispatches_the_queued_prompt() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[("acp.codex_cmd".to_string(), Some(agent_cmd()))],
+    )
+    .await
+    .unwrap();
+    let created = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "title": "wake loads", "goal": "say:ready", "cwd": ts.cwd(),
+                    "agent": "codex", "protocol": "acp" }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let branch = created["branch"]["id"].as_str().unwrap().to_string();
+    poll_chat(&ts, &id, Duration::from_secs(20), |blocks| {
+        blocks.iter().any(|b| b["kind"] == "turn_end")
+    })
+    .await;
+
+    client
+        .post("/api/sessions/suspend", json!({ "session": id }))
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO conversation_inbox
+         (delivery_key, branch_id, preferred_session_id, payload, author, resources, interrupt_at)
+         VALUES (?, ?, ?, 'the queued follow-up', 'manual', '[]', NULL)",
+    )
+    .bind(format!("prompt:{id}:test"))
+    .bind(&branch)
+    .bind(&id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
+    // The loadable id survives the park, so the wake re-opens via
+    // session/load.
+    let woken = client
+        .post("/api/sessions/wake", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(woken["status"], "running", "{woken}");
+
+    let chat = poll_chat(&ts, &id, Duration::from_secs(20), |blocks| {
+        blocks.iter().any(|b| {
+            b["kind"] == "user_message"
+                && b["payload"]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("the queued follow-up"))
+        })
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(
+        blocks
+            .iter()
+            .filter(|b| {
+                b["kind"] == "user_message"
+                    && b["payload"]["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("say:ready"))
+            })
+            .count(),
+        1,
+        "session/load replays history: the goal must not be re-sent as a new turn: {chat}"
+    );
+    assert!(
+        !blocks
+            .iter()
+            .any(|b| { b["kind"] == "turn_end" && b["payload"]["stop_reason"] == "error" }),
+        "no turn may end with an error: {chat}"
+    );
+
+    client
+        .post("/api/sessions/delete", json!({ "session": id }))
+        .await
+        .unwrap();
 }

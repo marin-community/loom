@@ -220,11 +220,16 @@ const LIVE_STATUSES = new Set(['running']);
 // Whether the session still has a live agent pane to type into — the gate for
 // the conversation composer. `POST /sessions/{id}/send` 409s once the terminal
 // is gone (orphaned / done / error / archived), so the composer only shows
-// while the agent is running. A suspended session is included: sending to it
-// is one of its wake signals — the server restarts the runtime first, then
-// delivers the message (the request just takes those few seconds).
+// while the agent is running. A suspended ACP session is included: sending
+// to it is one of its wake signals — the server restarts the runtime
+// first, then delivers the message (the request just takes those few
+// seconds). A suspended terminal session is excluded: the terminal lane
+// has no queue and no auto-wake, so a send would refuse — the row must be
+// woken first, and the Wake action is right there.
 export function canSend(s: SessionSummary): boolean {
-  return !s.transition && (LIVE_STATUSES.has(s.status) || s.status === 'suspended');
+  if (s.transition) return false;
+  if (LIVE_STATUSES.has(s.status)) return true;
+  return s.status === 'suspended' && s.protocol === 'acp';
 }
 
 export function idleTag(s: SessionSummary): Tag | null {

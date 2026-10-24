@@ -81,6 +81,30 @@ const ACK_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 /// chatty adapter doesn't turn every delta into a write.
 const ACTIVITY_TOUCH_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Setup requests retry this many times when the adapter reports that its
+/// location plugins are still activating.
+const SETUP_READINESS_RETRIES: u32 = 2;
+
+/// Base backoff between setup readiness retries, multiplied by the attempt.
+const SETUP_READINESS_BACKOFF: Duration = Duration::from_millis(500);
+
+/// How long a cancelled turn waits for the adapter's prompt response before
+/// Loom settles the turn locally. Matches opencode's cancel-drain budget.
+const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether an adapter's setup error is the transient "not ready yet" class.
+fn retryable_setup_error(error: &Value) -> bool {
+    let text = error.to_string();
+    text.contains("ServiceUnavailableError")
+        || text.contains("Location plugins did not finish activating")
+}
+
+fn retryable_setup_error_anyhow(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("ServiceUnavailableError")
+        || text.contains("Location plugins did not finish activating")
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -1364,11 +1388,33 @@ async fn start_inner(
             if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
                 let _ = chat::close_abandoned_turn(&state.db, session_id, turn).await;
             }
-            let _ = session::clear_acp_state(&state.db, session_id).await;
+            let retryable = retryable_setup_error_anyhow(&error);
+            // The abandoned turn claim must not outlive this cleanup even
+            // when the kill below fails: the retry path that would re-attach
+            // reads `acp_inflight` and would otherwise resurrect the
+            // just-closed turn as live, refusing suspend and skipping
+            // auto-suspend forever. Only the claim goes here — the durable
+            // adapter state is settled after the kill below.
+            let _ = session::set_inflight(&state.db, session_id, None).await;
+            if retryable {
+                // An adapter that is still activating is not an invalid
+                // session id: keep it so the next attempt can session/load
+                // instead of opening a fresh conversation and re-sending
+                // the goal. Replay from the beginning of the journal.
+                let _ = session::set_ack_seq(&state.db, session_id, 0).await;
+            }
+            // Kill the relay BEFORE clearing the durable adapter state: a
+            // kill that fails must leave the session attachable
+            // (acp_session_id intact), or the retry wedges on "has no
+            // acp_session_id" with no fresh-open fallback while a healthy
+            // relay keeps running.
             if let Err(cleanup) = crate::backend::kill_session_and_wait(&relay_name).await {
                 return Err(anyhow!(
                     "{error}; failed to clean up ACP relay after setup error: {cleanup}"
                 ));
+            }
+            if !retryable {
+                let _ = session::clear_acp_state(&state.db, session_id).await;
             }
             return Err(error);
         }
@@ -1749,6 +1795,14 @@ struct Task {
     next_seq: i64,
     turns_dispatched: i64,
     turn_live: bool,
+    /// The launch's goal turn is live: set when the handshake starts one
+    /// (a fresh open re-orienting the session from its goal) and cleared
+    /// at that turn's end. While it runs, the inbox does not dispatch —
+    /// a queued prompt would otherwise cancel the goal turn to start
+    /// itself, racing the freshly respawned adapter (the 5ijvbegy
+    /// failure). The goal turn is the session's reorientation; it goes
+    /// first, and queued input starts as the next turn.
+    goal_turn_live: bool,
     /// A provider-owned `/compact` mutates the conversation state behind the
     /// ACP session. Ordinary incoming messages wait for that turn boundary so
     /// `session/cancel` cannot leave the provider's context half-compacted.
@@ -1842,6 +1896,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: false,
+            goal_turn_live: false,
             compaction_turn: false,
             message_buf: None,
             thought_buf: None,
@@ -1951,6 +2006,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: live_turn.is_some(),
+            goal_turn_live: false,
             compaction_turn,
             message_buf: None,
             thought_buf: None,
@@ -2183,19 +2239,31 @@ impl Task {
 
         match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => {
-                let id = self.next_id();
                 let params = wire::new_session_params(
                     &cwd.to_string_lossy(),
                     &launch.mcp_servers,
                     &launch.additional_directories,
                     meta.as_ref(),
                 );
-                self.stream
-                    .write(&wire::request_line(id, method::SESSION_NEW, params))
-                    .await?;
-                let (res, err) = self
-                    .recv_until_response(id, method::SESSION_NEW, launch.setup_timeout, cmd_rx)
-                    .await?;
+                let mut attempts = 0;
+                let (res, err) = loop {
+                    let id = self.next_id();
+                    self.stream
+                        .write(&wire::request_line(id, method::SESSION_NEW, params.clone()))
+                        .await?;
+                    let (res, err) = self
+                        .recv_until_response(id, method::SESSION_NEW, launch.setup_timeout, cmd_rx)
+                        .await?;
+                    if res.is_none()
+                        && err.as_ref().is_some_and(retryable_setup_error)
+                        && attempts < SETUP_READINESS_RETRIES
+                    {
+                        attempts += 1;
+                        tokio::time::sleep(SETUP_READINESS_BACKOFF * attempts).await;
+                        continue;
+                    }
+                    break (res, err);
+                };
                 let res = res.ok_or_else(|| anyhow!("session/new failed: {err:?}"))?;
                 let ns: wire::NewSessionResult = serde_json::from_value(res)?;
                 self.acp_session_id = ns.session_id.clone();
@@ -2225,7 +2293,6 @@ impl Task {
                 // notifications during the load — we already hold it — so suppress
                 // re-journaling for the duration of the call.
                 self.suppress_journal = true;
-                let id = self.next_id();
                 let params = wire::load_session_params(
                     acp_session_id,
                     &launch.cwd.to_string_lossy(),
@@ -2233,14 +2300,35 @@ impl Task {
                     &launch.additional_directories,
                     meta.as_ref(),
                 );
-                self.stream
-                    .write(&wire::request_line(id, method::SESSION_LOAD, params))
-                    .await?;
                 // Full history replays synchronously before the response, so allow more time.
                 let load_timeout = launch.setup_timeout.saturating_mul(4);
-                let (res, err) = self
-                    .recv_until_response(id, method::SESSION_LOAD, load_timeout, cmd_rx)
-                    .await?;
+                let mut attempts = 0;
+                let (res, err) = loop {
+                    let id = self.next_id();
+                    self.stream
+                        .write(&wire::request_line(
+                            id,
+                            method::SESSION_LOAD,
+                            params.clone(),
+                        ))
+                        .await?;
+                    let (res, err) = self
+                        .recv_until_response(id, method::SESSION_LOAD, load_timeout, cmd_rx)
+                        .await?;
+                    if res.is_none()
+                        && err.as_ref().is_some_and(retryable_setup_error)
+                        && attempts < SETUP_READINESS_RETRIES
+                    {
+                        attempts += 1;
+                        // The failed attempt may have streamed part of the replay.
+                        self.message_buf = None;
+                        self.thought_buf = None;
+                        self.tools.clear();
+                        tokio::time::sleep(SETUP_READINESS_BACKOFF * attempts).await;
+                        continue;
+                    }
+                    break (res, err);
+                };
                 self.suppress_journal = false;
                 // Drop any consolidation the suppressed replay left half-open
                 // so it can't flush stale history into a later turn.
@@ -2289,6 +2377,10 @@ impl Task {
         self.persist_metadata().await?;
 
         if let Some(goal) = &launch.goal {
+            // The goal turn is the session's reorientation after a (re)spawn:
+            // while it runs, the inbox holds queued input back (see
+            // `goal_turn_live`).
+            self.goal_turn_live = true;
             match handoff {
                 Some(payload) => self.start_handoff_turn(goal.clone(), payload).await?,
                 None => self.start_turn(goal.clone(), None, Vec::new()).await?,
@@ -2969,6 +3061,7 @@ impl Task {
         // Settle the durable turn state *before* signalling the end over SSE, so a
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
+        self.goal_turn_live = false;
         self.compaction_turn = false;
         self.inflight_prompt = None;
         self.external_turn = false;
@@ -3138,6 +3231,13 @@ impl Task {
             InputDispatch::Automatic => None,
             InputDispatch::Force(key) => Some(key),
         };
+        if self.goal_turn_live {
+            // The launch's goal turn is still running: queued input waits for
+            // it to settle and starts as the next turn. Dispatching now would
+            // cancel the goal turn to start itself — an update-policy
+            // replacement racing the freshly respawned adapter.
+            return Ok(false);
+        }
         if (forced_key.is_none() && self.automatic_dispatch_paused)
             || self.compaction_turn
             || (forced_key.is_none()
@@ -3430,6 +3530,29 @@ impl Task {
         if self.journal_failed {
             bail!("could not persist buffered ACP output before starting a new turn");
         }
+        // Durable turn-start claim, before any local state advances: a
+        // lifecycle teardown (suspend/archive/handoff) that claimed the
+        // session between the caller's row read and this write wins here,
+        // and the turn refuses to start under it. The queued delivery, if
+        // any, stays in the inbox for the next wake; a direct send reports
+        // the refusal.
+        let compaction_turn = opening_kind == kind::USER_MESSAGE && is_compaction_prompt(&text);
+        let turn = if self.turns_dispatched > 0 {
+            self.current_turn + 1
+        } else {
+            self.current_turn
+        };
+        let id = self.next_id();
+        let inflight = json!({
+            "prompt_id": id,
+            "turn": turn,
+            "mode": self.current_mode,
+            "compaction": compaction_turn,
+        })
+        .to_string();
+        if !session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await? {
+            bail!("the session changed lifecycle state mid-dispatch; the turn did not start");
+        }
         if self.turns_dispatched > 0 {
             self.current_turn += 1;
             self.next_seq = 0;
@@ -3442,7 +3565,7 @@ impl Task {
         }
         self.turns_dispatched += 1;
         self.turn_live = true;
-        self.compaction_turn = opening_kind == kind::USER_MESSAGE && is_compaction_prompt(&text);
+        self.compaction_turn = compaction_turn;
         self.effective_mode = self.current_mode.clone();
 
         self.emit(
@@ -3455,16 +3578,7 @@ impl Task {
         );
         self.journal_block(opening_kind, opening_payload).await;
 
-        let id = self.next_id();
         self.inflight_prompt = Some((id, self.current_turn));
-        let inflight = json!({
-            "prompt_id": id,
-            "turn": self.current_turn,
-            "mode": self.effective_mode,
-            "compaction": self.compaction_turn,
-        })
-        .to_string();
-        session::set_inflight(&self.db, &self.session_id, Some(&inflight)).await?;
         self.stream
             .write(&wire::request_line(
                 id,
@@ -3633,9 +3747,16 @@ impl Task {
             // suppression to that turn and its successor so later prose is
             // never mistaken for adapter chrome.
             self.pending_interrupt_notice_through = Some(self.current_turn + 1);
-            // Cancellation is a client-owned boundary. Some adapters do not
-            // answer the cancelled prompt, so settle loom's journal and
-            // lifecycle immediately after the notification lands.
+            // Answer pending permissions first: the adapter may block the
+            // cancelled prompt's response until they are settled.
+            self.cancel_pending_permissions().await;
+            // Give the adapter a chance to answer the cancelled prompt before
+            // settling locally. A replacement prompt dispatched before that
+            // response can be rejected as "already has an active prompt".
+            self.await_cancelled_prompt().await;
+            // Cancellation is a client-owned boundary. Some adapters still do
+            // not answer the cancelled prompt, so settle the journal and
+            // lifecycle after the response or the settle timeout.
             self.on_turn_end(
                 self.current_turn,
                 Some(json!({ "stopReason": "cancelled" })),
@@ -3646,7 +3767,14 @@ impl Task {
         }
         // ACP requires the client to answer every pending permission request
         // with the `cancelled` outcome when it cancels a turn.
-        for (_, pp) in self.pending_perms.drain() {
+        self.cancel_pending_permissions().await;
+        result
+    }
+
+    /// Answer every pending permission with the `cancelled` outcome.
+    async fn cancel_pending_permissions(&mut self) {
+        let pending: Vec<_> = self.pending_perms.drain().map(|(_, pp)| pp).collect();
+        for pp in pending {
             let _ = self
                 .stream
                 .write(&wire::response_line(
@@ -3655,7 +3783,44 @@ impl Task {
                 ))
                 .await;
         }
-        result
+    }
+
+    /// Wait up to [`CANCEL_SETTLE_TIMEOUT`] for the cancelled prompt's
+    /// response. Frames keep flowing (notifications and permission requests),
+    /// but the matching response is consumed here so the later synthetic
+    /// `on_turn_end` is the only boundary.
+    async fn await_cancelled_prompt(&mut self) {
+        let Some((want, _)) = self.inflight_prompt.take() else {
+            return;
+        };
+        let deadline = tokio::time::Instant::now() + CANCEL_SETTLE_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            tokio::select! {
+                event = self.stream.recv() => match event {
+                    Some(RelayEvent::Frame { seq, payload }) => {
+                        self.highest_seq = seq;
+                        self.touch_activity().await;
+                        if let Ok(inc) = serde_json::from_slice::<Incoming>(&payload) {
+                            let target = inc.kind() == IncomingKind::Response
+                                && inc.id.as_ref().and_then(Value::as_u64) == Some(want);
+                            if target {
+                                break;
+                            }
+                            self.dispatch_frame(seq, inc).await;
+                        }
+                        self.cancel_pending_permissions().await;
+                        let _ = self.maybe_ack().await;
+                    }
+                    Some(RelayEvent::Exit { .. }) | None => break,
+                },
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+        let _ = self.maybe_ack().await;
     }
 
     fn resume_automatic_dispatch_on<T>(&mut self, explicit_send: &Result<T>) {

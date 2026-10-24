@@ -226,6 +226,12 @@ impl TestServer {
         // Never let the outer loom session's scoped bearer leak into this
         // isolated server or CLI subprocesses spawned by a test.
         std::env::remove_var("LOOM_TOKEN");
+        // Tests exercise the local ProcessRunner: their worktrees live in
+        // temp dirs the ContainerRunner would refuse (any cwd outside
+        // /home/app), and a docker-runner deployment exports LOOM_RUNNER
+        // ambiently — without this scrub, every supervisor-spawning test
+        // fails there with "work directory ... is outside /home/app".
+        std::env::remove_var("LOOM_RUNNER");
         // The suite's requests ride loopback trust, which needs a seeded owner to
         // resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
