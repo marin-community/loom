@@ -210,6 +210,37 @@ test.describe('conversation view', () => {
     expect(await conv.evaluate((el) => el.scrollTop)).toBeLessThan(300);
   });
 
+  // The floating scroll-to-end affordance: gone while the newest exchange is in
+  // view, present once the reader is up in the history, and one click returns
+  // them to the foot.
+  test('a scroll-to-end button appears off the foot and returns to the end', async ({
+    page,
+    weaver,
+  }) => {
+    await openConversation(page, weaver, { name: 'conv-scroll-end', log: longLog() });
+    const conv = page.getByTestId('conversation');
+    const button = page.getByTestId('scroll-to-end');
+
+    // At the foot the end is visible — no button.
+    await expect.poll(() => footDistance(conv), { timeout: 30_000 }).toBeLessThan(120);
+    await expect(button).toBeHidden();
+
+    // Scrolled up, the end is out of sight — the button appears.
+    await conv.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect(button).toBeVisible();
+
+    // Clicking scrolls all the way to the end — exact landing, not merely inside
+    // the pin's 120px "near the foot" window — and hides the button again.
+    await button.click();
+    await expect.poll(() => footDistance(conv)).toBeLessThan(2);
+    await expect(page.getByText('Progress note 40', { exact: false })).toBeVisible();
+    await expect(button).toBeHidden();
+    // The button unmounts on activation; focus stays in the conversation.
+    await expect(conv).toBeFocused();
+  });
+
   test('folds tool activity and run-length collapses repeated calls', async ({ page, weaver }) => {
     await openConversation(page, weaver);
     const conv = page.getByTestId('conversation');

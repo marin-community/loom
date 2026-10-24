@@ -18,6 +18,7 @@ import { useFollowFoot } from '../lib/followFoot';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
 import { localTime } from '../lib/time';
 import MarkdownView from './MarkdownView.vue';
+import ScrollToEndButton from './ScrollToEndButton.vue';
 
 // The Conversation tab for a *terminal-backend* session (`protocol='terminal'`):
 // the agent's chat with the model, rendered for review and — while the agent is
@@ -416,10 +417,16 @@ function toggleAll() {
 // ── Follow-the-foot scroll (lib/followFoot.ts): pinned-at-the-newest-exchange. ──
 const convScroll = ref<HTMLElement | null>(null);
 const convBody = ref<HTMLElement | null>(null);
-const { pinned, scrollToBottom, trackPin } = useFollowFoot(convScroll, convBody);
+const { pinned, scrollToBottom, scrollToEnd, trackPin } = useFollowFoot(convScroll, convBody);
 function onScroll() {
   trackPin();
   updateActive();
+}
+// Activating the floating button unmounts it. Hand focus to the transcript so a
+// keyboard reader stays in the conversation instead of falling back to <body>.
+function jumpToEnd() {
+  scrollToEnd();
+  convScroll.value?.focus({ preventScroll: true });
 }
 
 // ── Prompt jump-list (scroll-spy) ───────────────────────────────────────────
@@ -568,6 +575,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
         ref="convScroll"
         data-testid="conversation"
         class="conv-scroll chat-prose min-h-0 flex-1 overflow-auto pb-6 pr-1"
+        tabindex="-1"
         @scroll.passive="onScroll"
       >
         <div ref="convBody" class="space-y-2">
@@ -702,6 +710,7 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
             <p v-else-if="row.type === 'image'" class="text-xs italic text-muted">[image]</p>
           </template>
         </div>
+        <ScrollToEndButton :visible="!pinned" @click="jumpToEnd" />
       </div>
 
       <!-- Prompt jump-list: one entry per user turn, with scroll-spy highlight. -->
