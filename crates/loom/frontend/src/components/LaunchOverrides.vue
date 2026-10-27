@@ -1,15 +1,26 @@
 <script setup lang="ts">
 import { computed, useId } from 'vue';
 import type { AgentMetadata, LaunchOverrides, ResolvedLaunch } from '../types';
+import {
+  agentOptionsWithCurrent,
+  availableAgents,
+  isAgentAvailable,
+} from '../lib/agentAvailability';
 import ModelCombobox from './ModelCombobox.vue';
 
-const props = defineProps<{
-  agents: AgentMetadata[];
-  modelValue: LaunchOverrides;
-  resolved: ResolvedLaunch | null;
-  fallback?: ResolvedLaunch | null;
-  disabled?: boolean;
-}>();
+const props = withDefaults(
+  defineProps<{
+    agents: AgentMetadata[];
+    modelValue: LaunchOverrides;
+    resolved: ResolvedLaunch | null;
+    fallback?: ResolvedLaunch | null;
+    disabled?: boolean;
+    /** Which way the option lists prefer to grow. The handoff panel sits on
+     *  the right edge, so its lists open leftward. */
+    menuPlacement?: 'left' | 'right';
+  }>(),
+  { menuPlacement: 'right' },
+);
 
 const emit = defineEmits<{
   'update:modelValue': [LaunchOverrides];
@@ -17,10 +28,39 @@ const emit = defineEmits<{
 const uid = useId();
 const settings = computed(() => props.resolved ?? props.fallback ?? null);
 const effectiveAgent = computed(
-  () => props.modelValue.agent ?? settings.value?.agent ?? props.agents[0]?.kind ?? '',
+  () =>
+    props.modelValue.agent ?? settings.value?.agent ?? availableAgents(props.agents)[0]?.kind ?? '',
+);
+// The effective agent is always an option, marked when its harness is missing,
+// so the control can never display a different agent than the one in effect.
+const agentOptions = computed(() => agentOptionsWithCurrent(props.agents, effectiveAgent.value));
+const agentChoices = computed(() =>
+  agentOptions.value.map((agent) => ({
+    id: agent.kind,
+    label: `${agent.label}${isAgentAvailable(agent) ? '' : ' — unavailable'}`,
+  })),
 );
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
-
+const selectedModel = computed(() =>
+  metadata.value?.models.find((model) => model.id === value('model')),
+);
+// A model that scopes effort per model owns the list; one that does not falls
+// back to the agent's global list, which is all there is until a catalogue
+// fetch fills the per-model choices.
+const effortChoices = computed(() =>
+  selectedModel.value?.efforts?.length
+    ? selectedModel.value.efforts
+    : (metadata.value?.efforts ?? []),
+);
+const modeChoices = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'].map((mode) => ({
+  id: mode,
+  label: mode,
+}));
+const protocolChoices = computed(() => [
+  ...(metadata.value?.supports_acp !== false ? [{ id: 'acp', label: 'ACP' }] : []),
+  { id: 'terminal', label: 'Terminal' },
+]);
+const fastChoices = computed(() => selectedModel.value?.fast ?? []);
 function value(field: keyof LaunchOverrides): string {
   return props.modelValue[field] ?? (settings.value?.[field] as string | undefined) ?? '';
 }
@@ -32,8 +72,25 @@ function changed(field: keyof LaunchOverrides): boolean {
 function set(field: keyof LaunchOverrides, nextValue: string) {
   const next = { ...props.modelValue, [field]: nextValue };
   if (field === 'agent') {
-    delete next.model;
-    delete next.effort;
+    // Choosing the agent already in effect is not a change; clearing the
+    // selectors here would drop what the profile resolved.
+    if (nextValue === effectiveAgent.value) return;
+    next.model = '';
+    next.effort = '';
+    next.fast = '';
+  }
+  if (field === 'model') {
+    const model = metadata.value?.models.find((choice) => choice.id === nextValue);
+    // Only prune when the new model states its own choices; an unfetched model
+    // says nothing about what the adapter accepts.
+    const efforts = model?.efforts ?? [];
+    const fast = model?.fast ?? [];
+    if (efforts.length && !efforts.some((choice) => choice.id === value('effort'))) {
+      next.effort = '';
+    }
+    if (fast.length && !fast.some((choice) => choice.id === value('fast'))) {
+      next.fast = '';
+    }
   }
   emit('update:modelValue', next);
 }
@@ -46,27 +103,25 @@ function locked(field: keyof LaunchOverrides): boolean {
 
 <template>
   <div class="space-y-3" data-testid="launch-settings">
-    <div class="grid gap-3 sm:grid-cols-2">
-      <label class="rounded border border-line bg-input p-2 text-xs">
+    <div class="grid gap-3 sm:grid-cols-2" data-testid="launch-selectors">
+      <label class="rounded border border-line bg-input p-2 text-xs sm:col-span-2">
         <span class="mb-1 flex items-center justify-between gap-2">
           <span class="font-medium text-fg">Agent</span>
           <span :class="changed('agent') ? 'text-accent' : 'text-faint'">
             {{ changed('agent') ? 'changed' : 'from profile' }}
           </span>
         </span>
-        <select
+        <ModelCombobox
           :id="`${uid}-agent`"
-          aria-label="Agent"
-          :value="value('agent')"
+          :choices="agentChoices"
+          :model-value="value('agent')"
           :disabled="locked('agent')"
-          data-testid="override-agent"
-          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-          @change="set('agent', ($event.target as HTMLSelectElement).value)"
-        >
-          <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
-            {{ agent.label }}
-          </option>
-        </select>
+          :placement="menuPlacement"
+          placeholder="Select an agent"
+          field-class="bg-surface"
+          testid="override-agent"
+          @update:model-value="set('agent', $event)"
+        />
       </label>
 
       <label class="rounded border border-line bg-input p-2 text-xs">
@@ -77,30 +132,17 @@ function locked(field: keyof LaunchOverrides): boolean {
           </span>
         </span>
         <ModelCombobox
-          v-if="metadata?.accepts_raw_model"
           :id="`${uid}-model`"
-          :choices="metadata.models"
+          :choices="metadata?.models ?? []"
           :model-value="value('model')"
           :disabled="locked('model')"
+          :placement="menuPlacement"
+          :allow-custom="metadata?.accepts_raw_model === true"
+          empty-label="Agent default"
           field-class="bg-surface"
           testid="override-model"
           @update:model-value="set('model', $event)"
         />
-        <select
-          v-else
-          :id="`${uid}-model`"
-          aria-label="Model"
-          :value="value('model')"
-          :disabled="locked('model')"
-          data-testid="override-model"
-          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-          @change="set('model', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">Agent default</option>
-          <option v-for="choice in metadata?.models ?? []" :key="choice.id" :value="choice.id">
-            {{ choice.label }}
-          </option>
-        </select>
       </label>
 
       <label class="rounded border border-line bg-input p-2 text-xs">
@@ -110,46 +152,17 @@ function locked(field: keyof LaunchOverrides): boolean {
             {{ changed('effort') ? 'changed' : 'from profile' }}
           </span>
         </span>
-        <select
+        <ModelCombobox
           :id="`${uid}-effort`"
-          aria-label="Effort"
-          :value="value('effort')"
+          :choices="effortChoices"
+          :model-value="value('effort')"
           :disabled="locked('effort')"
-          data-testid="override-effort"
-          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-          @change="set('effort', ($event.target as HTMLSelectElement).value)"
-        >
-          <option value="">Agent default</option>
-          <option v-for="choice in metadata?.efforts ?? []" :key="choice.id" :value="choice.id">
-            {{ choice.label }}
-          </option>
-        </select>
-      </label>
-
-      <label class="rounded border border-line bg-input p-2 text-xs">
-        <span class="mb-1 flex items-center justify-between gap-2">
-          <span class="font-medium text-fg">Permission mode</span>
-          <span :class="changed('mode') ? 'text-accent' : 'text-faint'">
-            {{ changed('mode') ? 'changed' : 'from profile' }}
-          </span>
-        </span>
-        <select
-          :id="`${uid}-mode`"
-          aria-label="Permission mode"
-          :value="value('mode')"
-          :disabled="locked('mode')"
-          data-testid="override-mode"
-          class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-          @change="set('mode', ($event.target as HTMLSelectElement).value)"
-        >
-          <option
-            v-for="mode in ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions']"
-            :key="mode"
-            :value="mode"
-          >
-            {{ mode }}
-          </option>
-        </select>
+          :placement="menuPlacement"
+          empty-label="Agent default"
+          field-class="bg-surface"
+          testid="override-effort"
+          @update:model-value="set('effort', $event)"
+        />
       </label>
     </div>
 
@@ -158,35 +171,74 @@ function locked(field: keyof LaunchOverrides): boolean {
       <div class="grid gap-3 border-t border-line p-2 sm:grid-cols-2">
         <label class="text-xs">
           <span class="mb-1 flex items-center justify-between gap-2">
-            <span class="font-medium text-fg">Connection</span>
-            <span :class="changed('protocol') ? 'text-accent' : 'text-faint'">
-              {{ changed('protocol') ? 'changed' : 'from profile' }}
+            <span class="font-medium text-fg">Fast</span>
+            <span :class="changed('fast') ? 'text-accent' : 'text-faint'">
+              {{ changed('fast') ? 'changed' : 'from profile' }}
             </span>
           </span>
-          <select
-            :id="`${uid}-protocol`"
-            aria-label="Connection"
-            :value="value('protocol')"
-            :disabled="locked('protocol')"
-            data-testid="override-protocol"
-            class="w-full rounded bg-surface px-2 py-1.5 disabled:opacity-60"
-            @change="set('protocol', ($event.target as HTMLSelectElement).value)"
-          >
-            <option value="acp">ACP</option>
-            <option value="terminal">Terminal</option>
-          </select>
+          <ModelCombobox
+            :id="`${uid}-fast`"
+            :choices="fastChoices"
+            :model-value="value('fast')"
+            :disabled="locked('fast')"
+            :placement="menuPlacement"
+            empty-label="Agent default"
+            field-class="bg-surface"
+            testid="override-fast"
+            @update:model-value="set('fast', $event)"
+          />
         </label>
 
         <label class="text-xs">
           <span class="mb-1 flex items-center justify-between gap-2">
-            <span class="font-medium text-fg">Session type</span>
+            <span class="font-medium text-fg">Mode</span>
+            <span :class="changed('mode') ? 'text-accent' : 'text-faint'">
+              {{ changed('mode') ? 'changed' : 'from profile' }}
+            </span>
+          </span>
+          <ModelCombobox
+            :id="`${uid}-mode`"
+            :choices="modeChoices"
+            :model-value="value('mode')"
+            :disabled="locked('mode')"
+            :placement="menuPlacement"
+            placeholder=""
+            field-class="bg-surface"
+            testid="override-mode"
+            @update:model-value="set('mode', $event)"
+          />
+        </label>
+
+        <label class="text-xs">
+          <span class="mb-1 flex items-center justify-between gap-2">
+            <span class="font-medium text-fg">Protocol</span>
+            <span :class="changed('protocol') ? 'text-accent' : 'text-faint'">
+              {{ changed('protocol') ? 'changed' : 'from profile' }}
+            </span>
+          </span>
+          <ModelCombobox
+            :id="`${uid}-protocol`"
+            :choices="protocolChoices"
+            :model-value="value('protocol')"
+            :disabled="locked('protocol')"
+            :placement="menuPlacement"
+            placeholder=""
+            field-class="bg-surface"
+            testid="override-protocol"
+            @update:model-value="set('protocol', $event)"
+          />
+        </label>
+
+        <label class="text-xs">
+          <span class="mb-1 flex items-center justify-between gap-2">
+            <span class="font-medium text-fg">Class</span>
             <span :class="changed('class') ? 'text-accent' : 'text-faint'">
               {{ changed('class') ? 'changed' : 'from profile' }}
             </span>
           </span>
           <select
             :id="`${uid}-class`"
-            aria-label="Session type"
+            aria-label="Class"
             :value="value('class')"
             :disabled="locked('class')"
             data-testid="override-class"

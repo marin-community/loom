@@ -11,36 +11,66 @@ test.describe('settings · profiles', () => {
     ).json()) as {
       agents: {
         kind: string;
-        models: { id: string; label: string }[];
+        label: string;
+        available?: boolean | null;
+        models: {
+          id: string;
+          label: string;
+          efforts?: { id: string; label: string }[];
+        }[];
         efforts: { id: string; label: string }[];
       }[];
     };
-    const claude = registry.agents.find((agent) => agent.kind === 'claude')!;
-    const codex = registry.agents.find((agent) => agent.kind === 'codex')!;
+    // The picker hides harnesses the host does not have installed, so pick one
+    // that is actually available rather than assuming Codex is on PATH. Prefer
+    // an agent the profile is not already on: re-picking the current one is a
+    // no-op and this test relies on the switch clearing the model.
+    const current = (await (
+      await fetch(`${weaver.baseUrl}/api/profiles/get`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'default' }),
+      })
+    ).json()) as { agent_kind: string };
+    const candidates = registry.agents.filter(
+      (agent) => agent.available !== false && agent.kind !== 'shell' && agent.models.length > 0,
+    );
+    test.skip(candidates.length === 0, 'no installed agent harness advertises models');
+    const target = candidates.find((agent) => agent.kind !== current.agent_kind) ?? candidates[0];
     await page.goto(`${weaver.baseUrl}/settings`);
     await page.getByTestId('settings-category-agents').click();
 
     const agent = page.getByTestId('profile-agent');
     const model = page.getByTestId('profile-model');
     const effort = page.getByTestId('profile-effort');
-    await expect(agent.locator('option')).toContainText(['Claude', 'Codex', 'Shell']);
+    const fast = page.getByTestId('profile-fast');
+    await expect(fast).toBeVisible();
 
-    await agent.selectOption('claude');
+    await agent.click();
+    await page.getByRole('option', { name: target.label, exact: true }).click();
+    if (target.kind !== current.agent_kind) {
+      // Switching agent clears the selectors resolved for the previous one.
+      await expect(model).toHaveValue('');
+    }
     await model.click();
-    await model.fill(claude.models[0].id);
-    await page.keyboard.press('Enter');
-    await agent.selectOption('codex');
-    await expect(model).toHaveValue('');
-    await expect(model.locator('option')).toContainText([
+    await expect(page.getByRole('listbox').getByRole('option')).toHaveText([
       'Agent default',
-      ...codex.models.map((choice) => choice.label),
+      ...target.models.map((choice) => choice.label),
     ]);
-    await expect(effort.locator('option')).toContainText([
+    const selectedModel = target.models[0];
+    await page.getByRole('option', { name: selectedModel.label }).click();
+
+    // A model that scopes effort per model owns the list; otherwise the
+    // picker offers the agent's own effort list.
+    const efforts = selectedModel.efforts?.length ? selectedModel.efforts : target.efforts;
+    await effort.click();
+    await expect(page.getByRole('listbox').getByRole('option')).toHaveText([
       'Agent default',
-      ...codex.efforts.map((choice) => choice.label),
+      ...efforts.map((choice) => choice.label),
     ]);
-    await model.selectOption(codex.models[0].id);
-    await effort.selectOption(codex.efforts[0].id);
+    if (efforts[0]) await page.getByRole('option', { name: efforts[0].label }).click();
+    else await page.keyboard.press('Escape');
+
     await page.getByTestId('profile-save').click();
     await expect(page.getByText('Saved default.')).toBeVisible();
 
@@ -56,9 +86,9 @@ test.describe('settings · profiles', () => {
       effort: string;
     };
     expect(saved).toMatchObject({
-      agent_kind: 'codex',
-      model: codex.models[0].id,
-      effort: codex.efforts[0].id,
+      agent_kind: target.kind,
+      model: selectedModel.id,
+      effort: efforts[0]?.id ?? '',
     });
 
     await expect(page.getByText('Fleet concierge runtime', { exact: true })).toHaveCount(0);
@@ -69,7 +99,8 @@ test.describe('settings · profiles', () => {
     await page.getByTestId('settings-category-agents').click();
     const mode = page.getByTestId('profile-mode');
     await expect(mode).toHaveValue('auto');
-    await mode.selectOption('bypassPermissions');
+    await mode.click();
+    await page.getByRole('option', { name: 'bypassPermissions', exact: true }).click();
     await page.getByTestId('profile-save').click();
     await expect(page.getByText('Saved default.')).toBeVisible();
 
@@ -90,6 +121,19 @@ test.describe('settings · profiles', () => {
     page,
     weaver,
   }) => {
+    const registry = (await (
+      await fetch(`${weaver.baseUrl}/api/agents/list`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+    ).json()) as {
+      agents: { kind: string; label: string; available?: boolean | null; supports_acp: boolean }[];
+    };
+    const acpAgent = registry.agents.find(
+      (agent) => agent.available !== false && agent.supports_acp && agent.kind !== 'shell',
+    );
+    expect(acpAgent).toBeTruthy();
     const source = `# /// script
 # requires-python = ">=3.11"
 # ///
@@ -160,8 +204,12 @@ for line in sys.stdin:
     });
 
     await page.reload();
-    await page.getByTestId('profile-agent').selectOption('codex');
-    await page.getByLabel('Protocol').selectOption('acp');
+    // Pick an installed agent that supports ACP; this test only needs a
+    // profile whose protocol can carry the MCP selection.
+    await page.getByTestId('profile-agent').click();
+    await page.getByRole('option', { name: acpAgent!.label, exact: true }).click();
+    await page.getByLabel('Protocol').click();
+    await page.getByRole('option', { name: 'ACP', exact: true }).click();
     const access = page.getByRole('group', { name: 'MCP access' });
     await access.getByRole('radio', { name: 'groups' }).check();
     await access.getByLabel('docs').check();

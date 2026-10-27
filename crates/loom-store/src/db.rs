@@ -196,6 +196,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "conversation-inbox-coalesce-key",
         include_str!("../migrations/0038_conversation_inbox_coalesce_key.sql"),
     ),
+    (
+        39,
+        "harness-model-catalog",
+        include_str!("../migrations/0039_harness_model_catalog.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

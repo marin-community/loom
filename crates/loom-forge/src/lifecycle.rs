@@ -1379,6 +1379,7 @@ pub async fn create_warm_session(
     let agent = resolved.view.agent;
     let model = resolved.view.model;
     let effort = resolved.view.effort;
+    let fast = resolved.view.fast;
     let protocol = resolved.view.protocol;
     let mode = resolved.view.mode;
     let class = resolved.view.class;
@@ -1530,6 +1531,7 @@ pub async fn create_warm_session(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
                 extra_env: &extra_env,
@@ -1634,6 +1636,12 @@ pub async fn require_session_profile_lifetime(
         ))));
     }
     Ok(profile)
+}
+
+fn snapshot_fast(session: &Session) -> String {
+    crate::launch::deserialize_snapshot(&session.launch_snapshot)
+        .map(|snapshot| snapshot.view.fast)
+        .unwrap_or_default()
 }
 
 pub fn stamped_custom_agent(session: &Session) -> Result<Option<custom_agents::CustomAgent>> {
@@ -1869,6 +1877,7 @@ pub async fn adopt_terminal_into_acp(
     } else {
         agent::AcpOpen::Fresh
     };
+    let fast = snapshot_fast(session);
     let launch = agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {
@@ -1879,6 +1888,7 @@ pub async fn adopt_terminal_into_acp(
             server_addr: &st.addr,
             model: &session.model,
             effort: &session.effort,
+            fast: &fast,
             goal_file: goal_file.as_deref(),
             primer_file: primer_file.as_deref(),
             extra_env: &extra_env,
@@ -1998,6 +2008,7 @@ pub async fn adopt_acp(
             Some(id) => agent::AcpOpen::Load(id.to_string()),
             None => agent::AcpOpen::Fresh,
         };
+        let fast = snapshot_fast(session);
         let launch = agent::build_acp_launch(
             &st.db,
             &agent::AcpLaunchSpec {
@@ -2008,6 +2019,7 @@ pub async fn adopt_acp(
                 server_addr: &st.addr,
                 model: &session.model,
                 effort: &session.effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: primer_file.as_deref(),
                 extra_env: &extra_env,

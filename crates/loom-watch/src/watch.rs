@@ -980,6 +980,11 @@ const ENGINE_TOKEN_GRACE_SECS: i64 = 60;
 /// token; GitHub state reaches builtins through Loom's API snapshots.
 const WATCH_SCRIPT_STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CURSOR_API_KEY",
+    "CURSOR_AUTH_TOKEN",
+    "OPENCODE_AUTH_JSON",
+    "OPENCODE_CONFIG_JSON",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH",

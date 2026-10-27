@@ -16,7 +16,7 @@ pub mod endpoint;
 pub mod server;
 pub mod web;
 
-pub use loom_agent::{acp, agent, custom_agents, mcp};
+pub use loom_agent::{acp, agent, catalog, custom_agents, mcp};
 pub use loom_core::{launch, session_manager, shell};
 pub use loom_ctx::Ctx;
 pub use loom_ctx::{

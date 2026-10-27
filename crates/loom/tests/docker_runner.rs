@@ -101,6 +101,7 @@ fn docker_runner_child() {
                 server_addr: "0.0.0.0:7878",
                 model: "",
                 effort: "",
+                fast: "",
                 goal_file: None,
                 primer_file: None,
                 extra_env: &[],
