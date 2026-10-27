@@ -7,6 +7,8 @@ import {
   regenerateSessionTitle,
   removeSession,
   setSessionTitleGeneration,
+  suspendSession,
+  wakeSession,
 } from '../api';
 import { confirmAction } from './confirmation';
 import { useFleet } from './sessionsStore';
@@ -28,9 +30,11 @@ import {
 //   archive      — tear down terminal + worktree, keep the branch/history
 //   recover      — rebuild an archived session's worktree and resume its agent
 //                  (the inverse of archive — reuses the kept branch/history)
+//   suspend      — stop the runtime to free memory, keep everything in place
+//   wake         — restart a suspended session's runtime (the inverse of suspend)
 //   remove       — delete the session entirely
 //
-// The four lifecycle verbs above are exposed as `run(verb)`, so a caller
+// The lifecycle verbs above are exposed as `run(verb)`, so a caller
 // rendering a list of `lifecycleActions()` can invoke whichever one was clicked
 // without re-switching on the verb.
 //
@@ -182,6 +186,28 @@ export function useSessionActions(
       await reload();
     });
 
+  // Reversible by design, so no confirmation stands between the user and the
+  // memory saving.
+  const suspend = () =>
+    act('suspend', async () => {
+      const res = await suspendSession(getId());
+      if (res.warnings.length) {
+        // The row reached `suspended`, but a warning means the runtime stop
+        // could not be confirmed — do not also claim the memory was freed.
+        notice.value = `Session suspended with warnings — ${res.warnings.join(' ')}`;
+      } else {
+        notice.value = 'Session suspended — runtime stopped, memory freed.';
+      }
+      await reload();
+    });
+
+  const wake = () =>
+    act('wake', async () => {
+      await wakeSession(getId());
+      notice.value = 'Session woken — runtime restarted.';
+      await reload();
+    });
+
   const remove = () =>
     confirmAction({
       title: 'Permanently remove this session?',
@@ -198,10 +224,10 @@ export function useSessionActions(
       },
     });
 
-  // The four lifecycle verbs are only ever reached by name — a caller renders a
+  // The lifecycle verbs are only ever reached by name — a caller renders a
   // list of `LifecycleAction`s and invokes whichever one was clicked — so `run`
   // is the whole surface and the individual verbs stay internal.
-  const run = (verb: LifecycleVerb) => ({ adopt, recover, archive, remove })[verb]();
+  const run = (verb: LifecycleVerb) => ({ adopt, recover, suspend, wake, archive, remove })[verb]();
 
   return {
     busy,

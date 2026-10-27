@@ -66,6 +66,7 @@ import {
 } from '../lib/toolPresentation';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
+import TransitionProgressStrip from './TransitionProgressStrip.vue';
 import ToolContentPreview from './ToolContentPreview.vue';
 import ScrollToEndButton from './ScrollToEndButton.vue';
 
@@ -522,7 +523,10 @@ function resizeComposer() {
 watch([draft, composerInput], resizeComposer, { immediate: true });
 watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
 watch(id, () => {
-  draft.value = '';
+  // An in-place switch must adopt the destination's saved draft, not clear
+  // the slot: writing '' here would ripple through the saver below and
+  // delete the new session's stored draft under its key.
+  draft.value = restoreDraft(id.value, draftStorage());
   selectedFiles.value = [];
   sendError.value = '';
   settingsOpen.value = false;
@@ -872,7 +876,13 @@ const modeLabel = (m: string | null) => {
   if (!m) return 'mode';
   return metadata.value.modes.find((mode) => mode.id === m)?.name ?? MODE_LABEL[m] ?? m;
 };
-const modeInteractive = computed(() => canSend(props.session) && modeOptions.value.length > 1);
+// Mode changes need a live ACP task — `sessions.mode` refuses a dormant row —
+// so the control is interactive only for a clean running session, unlike the
+// composer (whose send is itself a wake signal).
+const modeInteractive = computed(
+  () =>
+    props.session.status === 'running' && !props.session.transition && modeOptions.value.length > 1,
+);
 const legacyModeVisible = computed(() => !metadata.value.config_options.some(isModeOption));
 async function pickMode(m: string) {
   if (m === currentMode.value) return;
@@ -2190,27 +2200,7 @@ async function goToActivity(target: {
       </div>
     </template>
 
-    <div
-      v-if="session.transition?.kind === 'handoff'"
-      class="mx-3 mb-3 flex shrink-0 items-center gap-3 rounded border border-info-line/40 bg-info-soft px-3 py-2 text-info"
-      data-testid="handoff-progress"
-      role="status"
-      aria-live="polite"
-      aria-busy="true"
-    >
-      <span class="relative flex h-3 w-3 shrink-0" aria-hidden="true">
-        <span
-          class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-40"
-        ></span>
-        <span class="relative inline-flex h-3 w-3 rounded-full bg-info"></span>
-      </span>
-      <span class="min-w-0">
-        <span class="block text-xs font-medium">Handoff in progress</span>
-        <span class="block truncate text-2xs">
-          {{ session.transition.step || 'Transferring session context' }} · Session paused
-        </span>
-      </span>
-    </div>
+    <TransitionProgressStrip :session="session" />
 
     <!-- Composer. -->
     <form

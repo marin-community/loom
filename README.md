@@ -226,9 +226,10 @@ approval for that owner, applied without waiting on you.
 Status has two independent axes.
 
 The **lifecycle** (`session.status`) is mechanical and orchestrator-owned:
-`created`, `running`, `orphaned`, `done`, `error`, or `archived`.
+`created`, `running`, `orphaned`, `suspended`, `done`, `error`, or `archived`.
 ACP turn boundaries and terminal-agent hooks feed one promotion path; supervisor
-loss marks a recoverable session orphaned. Runtime permission requests remain in
+loss marks a recoverable session orphaned; suspend (below) deliberately stops a
+runtime to free memory. Runtime permission requests remain in
 the ACP Conversation tab rather than becoming guessed lifecycle state.
 
 The **attention** axis is the agent's own signal of whether it needs you:
@@ -261,6 +262,49 @@ automatically on startup (off by default):
 ```sh
 loom config set server.auto_adopt true
 ```
+
+## Suspend & wake
+
+Suspending a session stops its runtime — the agent, its terminal, and its
+shells — and frees its memory, while the session, worktree, branch, and
+conversation stay exactly in place. It is the light alternative to Archive:
+nothing is torn down, and waking restarts the runtime and resumes the agent in
+seconds.
+
+```sh
+loom sessions suspend <session>   # or the Suspend action in the row ⋯ / Details menus
+loom sessions wake <session>       # or the Wake action in the row ⋯ / Details menus
+```
+
+Idle sessions can suspend on their own: after `session.idle_suspend_secs`
+without activity, the monitor suspends them. This is off by default — set a
+positive number of seconds (e.g. `3600` for one hour) to enable it. An ACP
+session is never suspended mid-turn or within fifteen minutes of its last
+activity; a terminal session has no durable turn marker, so only the
+fifteen-minute window protects a long silent command. "Activity" is what the
+monitor can see — screen movement for a terminal session — so a command that
+grinds quietly still counts as idle once the grace window passes: exempt a
+session that works silently for hours, or set the threshold above its worst
+case. A session carrying the `auto-suspend: disabled` tag is exempt entirely:
+
+```sh
+loom sessions tags set auto-suspend disabled
+loom sessions tags delete auto-suspend     # allow automatic suspend again
+```
+
+A suspended ACP session stays reachable: sending it a message, a GitHub
+`@loom` trigger, or a submitted code review wakes it first and then lands,
+and the composer still accepts a message (the send just takes the few
+seconds the restart costs). A channel delivery — a plain message or a
+child's committed result — wakes its dormant recipient the same way, so
+finished work always reaches its consumer.
+
+A suspended **terminal** session (a shell) is deliberately dumber: nothing
+queues for it and nothing auto-wakes it. Any send, trigger, or reply
+refuses with "wake it first," a channel message stays durable in channel
+history until a re-post delivers it, and a child's committed result raises
+the parent's triage tag instead of waking it. Wake it with the Wake action,
+and everything waiting is right there.
 
 ## Recovery
 
@@ -328,7 +372,10 @@ The aggregate MCP server exposes `loom.session_history` and
 [Session history and search](docs/session-history.md) for the record, cursor,
 source, and authorization contract.
 
-Ordinary sessions are archived after ten days without activity by default. The
+Ordinary sessions are archived after ten days without activity by default;
+long before that, the same idle signal suspends them (see
+[Suspend & wake](#suspend--wake)) so their memory is freed while they stay
+instantly resumable. The
 GitHub poller checks sessions active within the last ten minutes every minute,
 the rest of the first quiet day every ten minutes, and older live sessions every
 hour. A merged PR is archived on the next poll for its activity tier. Both paths

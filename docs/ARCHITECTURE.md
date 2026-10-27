@@ -561,12 +561,32 @@ or `null` when GitHub polling is off, there is no PR, or the App is unavailable.
 See [GitHub integration](#github-integration).
 
 Status is two orthogonal axes. The session's `status` is the **lifecycle**
-(orchestrator-owned, mechanical): `created` / `running` / `orphaned` / `done` /
-`error` / `archived`. The branch's **`attention` tag** (value
-`attention` | `blocked`, absent ⇒ calm) plus its `description` (a one-line
-current-state message) are the **agent-declared** "does this need me?" signal,
-both set via `loom status`. The dashboard resolves and filters on the
-attention signal.
+(orchestrator-owned, mechanical): `created` / `running` / `orphaned` /
+`suspended` / `done` / `error` / `archived`. The branch's **`attention` tag**
+(value `attention` | `blocked`, absent ⇒ calm) plus its `description` (a
+one-line current-state message) are the **agent-declared** "does this need
+me?" signal, both set via `loom status`. The dashboard resolves and filters on
+the attention signal.
+
+### Suspend & wake
+
+**Suspend/wake** is deliberate dormancy between `running` and `archived`:
+`sessions.suspend` (`loom sessions suspend`) stops a session's runtime —
+agent supervisor, debug shells, IDE sessions — freeing its memory, while the
+session row, worktree, branch, and conversation stay in place. The retention
+reaper suspends ordinary running sessions automatically after
+`session.idle_suspend_secs` (off by default; warm watch-managed
+sessions are exempt when enabled; the `auto-suspend: disabled` tag opts a
+session out). Any
+ingress signal wakes a suspended session transparently before driving it — a
+sent message or prompt (`sessions.send`, `sessions.prompt.create`), a channel
+delivery, an automation run, a GitHub `@loom` trigger, a submitted review —
+and `sessions.wake` (`loom sessions wake` / the Wake action in the row ⋯ and
+Details menus) does it manually.
+Wake replays the adoption machinery (respawn + `session/load` reopen for ACP,
+`--continue` for terminal agents), so it costs seconds, not a rebuild: the
+deliberately missing supervisor is never mistaken for an orphaned session, and
+the TTL ladder stays layered — suspend at hours, archive at days.
 
 There is **no** `/api/hook` endpoint — see [Status & tags](#status--tags).
 
@@ -910,6 +930,16 @@ ten-day idle archive policy (`864000` seconds); a profile override is stamped
 onto the session at launch, and an explicit `0` disables that TTL. The monitor
 uses durable `last_activity_at`, falls back to `created_at` for untouched work,
 and can archive completed/error rows as well as live ones once they are old.
+
+Retention is layered: before the archive TTL fires, the same reaper suspends an
+ordinary running session idle past `session.idle_suspend_secs` (off by
+default — set a positive number of seconds to enable) — stopping its runtime to
+free memory while everything
+durable stays in place (see [Suspend & wake](#suspend--wake)). The suspend
+trigger shares the reaper's guards (no live ACP turn, no lifecycle transition,
+warm sessions exempt, a fresh-activity grace window) and its own
+`auto-suspend: disabled` per-session opt-out. A suspended session remains an
+archive candidate, so the ladder reads suspend-at-hours, archive-at-days.
 
 A `class = automation` session — every session not
 launched interactively by a human, excluding a watch's own warm sessions —

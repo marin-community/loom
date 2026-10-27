@@ -88,6 +88,15 @@ async fn usable_session(state: &AppState, target: &session::Session) -> bool {
     if target.status != "running" {
         return false;
     }
+    if let Some(transition) = target.lifecycle_transition.as_deref() {
+        // A row under a stop transition reads `running`, but its runtime is
+        // being torn down: pasting a review into it would mark the delivery
+        // done and lose it. The outbox retries once the transition settles
+        // (the wake the delivery scheduled has run by then).
+        if session::TURN_FENCE_STOP_TRANSITIONS.contains(&transition) {
+            return false;
+        }
+    }
     if target.protocol == "acp" {
         state.acp.is_live(&target.id)
     } else {
@@ -100,18 +109,65 @@ async fn usable_session(state: &AppState, target: &session::Session) -> bool {
     }
 }
 
+/// A submitted review is a wake signal: the shared `wake_or_drivable` seam
+/// resolves the target — waking a dormant row, waiting out a seconds-long
+/// revival or swap transition, and refusing a stop transition — before the
+/// delivery proceeds against the live runtime. On refusal the wake is
+/// scheduled detached and this attempt fails into the outbox's retry, by
+/// which time the session is back.
+async fn wake_if_suspended(state: &AppState, target: &session::Session) -> session::Session {
+    match crate::lifecycle::wake_or_drivable(state, target).await {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::warn!(
+                review_session = %target.id,
+                %error,
+                "review delivery: preparing the session failed; scheduling the wake, outbox will retry"
+            );
+            let state_for_wake = state.clone();
+            let target_id = target.id.clone();
+            tokio::spawn(async move {
+                crate::lifecycle::wake_dormant_session(
+                    &state_for_wake,
+                    &target_id,
+                    "review delivery",
+                    false,
+                )
+                .await;
+            });
+            // The fresh row, not the pre-wake snapshot: `usable_session`'s
+            // stop-transition guard must see a suspend that started while
+            // we were resolving, or the review is pasted into the dying
+            // runtime and acked-and-lost. The stale clone is the
+            // disappeared-row fallback only.
+            match session::get(&state.db, &target.id).await {
+                Ok(Some(fresh)) => fresh,
+                _ => target.clone(),
+            }
+        }
+    }
+}
+
 async fn delivery_session(
     state: &AppState,
     review: &review::Review,
 ) -> Result<Option<session::Session>> {
     if let Some(target) = session::get(&state.db, &review.session_id).await? {
+        let target = wake_if_suspended(state, &target).await;
         if usable_session(state, &target).await {
             return Ok(Some(target));
         }
     }
     let fallback = session::active_for_branch(&state.db, &review.branch_id).await?;
     match fallback {
-        Some(target) if usable_session(state, &target).await => Ok(Some(target)),
+        Some(target) => {
+            let target = wake_if_suspended(state, &target).await;
+            if usable_session(state, &target).await {
+                Ok(Some(target))
+            } else {
+                Ok(None)
+            }
+        }
         _ => Ok(None),
     }
 }

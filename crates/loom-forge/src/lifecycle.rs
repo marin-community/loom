@@ -1,5 +1,5 @@
-//! Session lifecycle operations — archive, adopt, recovery, and warm-session
-//! creation.
+//! Session lifecycle operations — archive, adopt, recovery, suspend/wake, and
+//! warm-session creation.
 //!
 //! The callers that drive a session are mostly *not* requests — the monitor's
 //! reaper, the GitHub merge path, the restart-time adopt sweep, the watch
@@ -454,6 +454,611 @@ pub async fn archive_locked(
     result
 }
 
+/// Suspend from the monitor's idle path unless this branch carries the
+/// explicit `auto-suspend: disabled` opt-out. The check and teardown share the
+/// lifecycle lock, so setting the label before the reaper acquires the lock
+/// reliably prevents the suspension; manual [`suspend`] ignores it.
+/// The idle monitor's suspend hop: `revalidate` carries the monitor's full
+/// verdict (status, transition, turn, watch management, and the idle threshold
+/// with its grace floor) and is re-run against the row *under the lifecycle
+/// lock* — the snapshot the monitor convicted can be a tick stale, and a
+/// session that moved or was adopted by a watch in between must not be
+/// suspended out from under either.
+pub async fn auto_suspend<F>(
+    st: &AppState,
+    session: &Session,
+    _branch: &Branch,
+    revalidate: F,
+) -> Result<Option<Vec<String>>>
+where
+    F: Fn(&Session) -> bool,
+{
+    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+    let Some((current_session, current_branch)) =
+        session_mod::with_branch(&st.db, &session.id).await?
+    else {
+        return Err(anyhow!("session not found"));
+    };
+    if !revalidate(&current_session) {
+        tracing::info!(
+            session = %current_session.id,
+            "automatic suspend skipped: the session changed under the verdict"
+        );
+        return Ok(None);
+    }
+    // The reaper convicted a snapshot that can be a tick stale; the auto policy
+    // covers running sessions only. A session that crashed into `orphaned`
+    // since keeps its own remedy (Adopt) rather than being re-labeled
+    // suspended under it.
+    if current_session.status != "running" {
+        tracing::info!(
+            session = %current_session.id,
+            status = %current_session.status,
+            "automatic suspend skipped: session is no longer running"
+        );
+        return Ok(None);
+    }
+    if tags::auto_suspend_disabled(&st.db, &current_branch.id).await? {
+        tracing::info!(
+            session = %current_session.id,
+            branch = %current_branch.id,
+            "automatic suspend skipped by auto-suspend: disabled tag"
+        );
+        return Ok(None);
+    }
+    suspend_locked(
+        st,
+        &current_session,
+        &current_branch,
+        "session suspended (idle)",
+    )
+    .await
+    .map(Some)
+}
+
+/// Manual suspend entry point. Refresh after acquiring the lifecycle lock so a
+/// request queued behind another transition acts on the completed state rather
+/// than the stale row it resolved before waiting. The operation runs in a
+/// server-owned task, like archive, because dropping an HTTP request future
+/// must not cancel a teardown after its durable transition has been recorded.
+pub async fn suspend(st: &AppState, session: &Session, _branch: &Branch) -> Result<Vec<String>> {
+    let st = st.clone();
+    let session_id = session.id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let result = async {
+            let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+            let Some((current_session, current_branch)) =
+                session_mod::with_branch(&st.db, &session_id).await?
+            else {
+                return Err(anyhow!("session not found"));
+            };
+            suspend_locked(&st, &current_session, &current_branch, "session suspended").await
+        }
+        .await;
+        let _ = result_tx.send(result);
+    }));
+    result_rx
+        .await
+        .map_err(|_| anyhow!("suspend task stopped before reporting its result"))?
+}
+
+/// The external half of suspending: stop the runtime (agent supervisor, debug
+/// shells, IDE sessions) and free its memory, while the conversation, worktree,
+/// branch, and session row all stay in place. Best-effort like archive's
+/// teardown — only losing ownership of the transition aborts.
+async fn suspend_teardown(st: &AppState, session: &Session) -> Result<Vec<String>> {
+    let mut warnings: Vec<String> = Vec::new();
+    // The Loom-side ACP driver goes first so no new turn starts while the
+    // supervisor underneath it is being killed.
+    if session.protocol == "acp" {
+        st.acp.stop(&session.id);
+        let latest = session_mod::get(&st.db, &session.id)
+            .await?
+            .ok_or_else(|| anyhow!("session not found"))?;
+        let abandoned_turn = session_mod::acp_inflight_turn(&latest);
+        settle_abandoned_acp_turn(st, &session.id, abandoned_turn).await?;
+    }
+    if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
+        tracing::warn!(session = %session.id, %error, "suspend could not confirm the agent stopped");
+        warnings.push(format!("stop agent: {error}"));
+    }
+    crate::shell::kill_debug_all(&session.id).await;
+    st.ide.kill(&session.id);
+    Ok(warnings)
+}
+
+/// Suspend a session: stop its runtime to free memory, keeping everything a
+/// wake needs. Idempotent — an already-suspended session succeeds as a no-op.
+/// `reason` lands in the `status` event so the dashboard can distinguish an
+/// idle suspension from a manual one.
+pub async fn suspend_locked(
+    st: &AppState,
+    session: &Session,
+    branch: &Branch,
+    reason: &str,
+) -> Result<Vec<String>> {
+    let refreshed = release_abandoned_transition(&st.db, session).await?;
+    let session = &refreshed;
+    require_no_transition(session)?;
+    if session_mod::is_suspended(&session.status) {
+        return Ok(Vec::new());
+    }
+    if session_mod::is_terminal(&session.status) {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is {} — suspend requires a session that can still run",
+            session.status
+        ))));
+    }
+    // Dormancy is for a live runtime. A `created` session has none yet, and an
+    // `orphaned` one has lost it — suspending either would trade a surfaced
+    // fault (and its Adopt remedy) for calm dormancy that hides it.
+    if session.status == "created" {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is created — it has no runtime to suspend yet".to_string()
+        )));
+    }
+    if session.status == "orphaned" {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is orphaned — adopt it to bring its runtime back first".to_string()
+        )));
+    }
+    if session.protocol == "acp" && session.acp_inflight.is_some() {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is mid-turn; let the turn finish before suspending".to_string()
+        )));
+    }
+    if !session_mod::begin_transition(
+        &st.db,
+        &session.id,
+        "suspending",
+        "Stopping session runtime",
+    )
+    .await?
+    {
+        return Err(anyhow!(Refusal::Conflict(
+            "another lifecycle transition already owns this session".to_string()
+        )));
+    }
+    record_transition(st, branch, "suspending", "Stopping session runtime").await;
+
+    let result: Result<Vec<String>> = async {
+        let mut warnings = Vec::new();
+        // Re-check under the claimed marker: a turn that started between the
+        // mid-turn refusal above and the CAS must not be torn down mid-flight.
+        // The error path below releases the marker on our way out.
+        if session.protocol == "acp"
+            && session_mod::get(&st.db, &session.id)
+                .await?
+                .is_some_and(|latest| latest.acp_inflight.is_some())
+        {
+            return Err(anyhow!(Refusal::Conflict(
+                "session is mid-turn; let the turn finish before suspending".to_string()
+            )));
+        }
+        transition_step(st, session, branch, "suspending", "Stopping agent").await?;
+        warnings.extend(suspend_teardown(st, session).await?);
+        transition_step(st, session, branch, "suspending", "Freeing memory").await?;
+        if !session_mod::complete_transition(&st.db, &session.id, "suspending", "suspended").await?
+        {
+            return Err(anyhow!(
+                "suspend lost ownership of its lifecycle transition"
+            ));
+        }
+        events::record(
+            &st.db,
+            &st.bus,
+            &branch.id,
+            "status",
+            json!({ "status": "suspended", "reason": reason }),
+        )
+        .await
+        .ok();
+        tracing::info!(session = %session.id, branch = %branch.id, "session suspended");
+        Ok(warnings)
+    }
+    .await;
+
+    if result.is_err() {
+        match session_mod::clear_transition(&st.db, &session.id, "suspending").await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(session = %session.id, "suspend error cleanup no longer owned its transition")
+            }
+            Err(cleanup) => {
+                tracing::warn!(session = %session.id, %cleanup, "suspend error cleanup could not clear its transition")
+            }
+        }
+    }
+    result
+}
+
+/// Wake a suspended session: restart its runtime and resume the agent, the
+/// same respawn machinery adoption uses. Idempotent — a session that is not
+/// suspended is returned unchanged, so every ingress path can call it before
+/// driving a session. Returns the refreshed session row.
+///
+/// The locked body runs in a server-owned task, like archive and suspend: a
+/// client disconnecting mid-wake must not cancel a respawn whose `waking`
+/// marker is already published — this process owns the marker, so no
+/// reconciliation would ever release it, and the session would refuse every
+/// transition until a server restart.
+pub async fn wake(st: &AppState, session: &Session) -> Result<Session> {
+    // Re-read rather than trust the caller's snapshot: a row handed over just
+    // before a suspend's CAS would otherwise pass through as awake.
+    let mut session = session_mod::get(&st.db, &session.id)
+        .await?
+        .unwrap_or_else(|| session.clone());
+    // Release a marker whose owner died before finishing — before any
+    // waiting, so a provably abandoned `waking`/`adopting` stamp never
+    // costs the caller the settle window (or the reconciler's pass) to
+    // clear. Idempotent with the same release inside the locked half.
+    session = release_abandoned_transition(&st.db, &session).await?;
+    if !session_mod::is_suspended(&session.status) {
+        // A stop transition owns this row: reporting success here would be a
+        // lie the committing suspend contradicts moments later. The caller
+        // can retry once the transition settles.
+        if let Some(transition) = session.lifecycle_transition.as_deref() {
+            if session_mod::TURN_FENCE_STOP_TRANSITIONS.contains(&transition) {
+                return Err(anyhow!(Refusal::Conflict(format!(
+                    "session is {transition} — try again once it settles"
+                ))));
+            }
+        }
+        // Already running — a manual wake on a row that recovered by other
+        // means (a reconcile settle, a reattach) is still a success, and
+        // the stale "delivery waiting" triage an earlier failure raised is as
+        // stale here as it is in the helper's own awake-on-arrival path.
+        if session.status == "running" && session.lifecycle_transition.is_none() {
+            clear_stale_triage(st, &session).await;
+        }
+        return Ok(session.clone());
+    }
+    if let Some(transition) = session.lifecycle_transition.as_deref() {
+        // Any transition on a suspended row refuses — a concurrent revival,
+        // a suspend committing, a handoff mid-swap. The caller retries once
+        // it settles; whichever operation owns the marker is doing the work.
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is {transition} — try again once it settles"
+        ))));
+    }
+    let task_st = st.clone();
+    let session_id = session.id.clone();
+    let profile_name = session.profile.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let result = async {
+            // Lock order shared with adopt/archive: source session, global
+            // lifecycle mutation, then profile lifetime/admission.
+            let _source_permit = task_st.launch_gate.acquire_session(&session_id).await;
+            let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+            let _profile_permit = task_st.launch_gate.acquire_profile(&profile_name).await;
+            let Some((current_session, current_branch)) =
+                session_mod::with_branch(&task_st.db, &session_id).await?
+            else {
+                return Err(anyhow!("session not found"));
+            };
+            wake_locked(&task_st, current_session, current_branch).await
+        }
+        .await;
+        let _ = result_tx.send(result);
+    }));
+    let woken = result_rx
+        .await
+        .map_err(|_| anyhow!("wake task stopped before reporting its result"))??;
+    // Every successful wake — manual, ingress-driven, or the channel
+    // helper's — clears a triage tag an earlier failed wake raised: the
+    // delivery it was complaining about is now landing. The clear is
+    // guarded on the row actually being drivable: a pass-through Ok (the
+    // row left dormancy on its own while we waited on the locks, or came
+    // back `orphaned` from an abandoned marker) woke nothing, so its
+    // failure signal must stand.
+    if woken.status == "running" && woken.lifecycle_transition.is_none() {
+        clear_stale_triage(st, &woken).await;
+    }
+    Ok(woken)
+}
+
+/// The locked half of [`wake`]: refresh under the lock, run the adoption-shaped
+/// respawn, and return the woken row. Called only from wake's server-owned
+/// task, with the lifecycle lock already held.
+async fn wake_locked(
+    st: &AppState,
+    current_session: Session,
+    current_branch: Branch,
+) -> Result<Session> {
+    let refreshed = release_abandoned_transition(&st.db, &current_session).await?;
+    let session = &refreshed;
+    let branch = &current_branch;
+    if !session_mod::is_suspended(&session.status) {
+        return Ok(session.clone());
+    }
+    require_no_transition(session)?;
+    let profile = require_session_profile_lifetime(&st.db, session).await?;
+    require_resume_capacity(&st.db, session, &profile).await?;
+    let custom_agent = stamped_custom_agent(session)?;
+    require_branch_slot_free(st, session, branch).await?;
+    // Waking is operator activity: refresh the idle anchor so a session whose
+    // dormancy predates the wake is not re-suspended the moment it returns.
+    // Before the transition is claimed, so a failed write aborts the wake
+    // cleanly instead of stranding a published `waking` marker.
+    session_mod::touch(&st.db, &session.id).await?;
+    if !session_mod::begin_transition(&st.db, &session.id, "waking", "Restarting session runtime")
+        .await?
+    {
+        return Err(anyhow!(Refusal::Conflict(
+            "another lifecycle transition already owns this session".to_string()
+        )));
+    }
+    record_transition(st, branch, "waking", "Restarting session runtime").await;
+
+    // The same respawn dispatch adoption performs, from a suspended row
+    // instead of an orphaned one. Both helpers set the stable status and
+    // record their own `status` event; the transition marker is released the
+    // same way adopt releases its own.
+    let result: Result<()> = async {
+        transition_step(st, session, branch, "waking", "Resuming agent").await?;
+        if session.protocol == "acp" {
+            if st.acp.is_live(&session.id) {
+                // The ACP analogue of the live-terminal branch below: the
+                // runtime never actually stopped (a suspend whose driver stop
+                // could only be warned about, or an attach that raced this
+                // wake), so the wake's goal is already met — settle the row
+                // back to running rather than refusing and stranding a live
+                // session behind a `suspended` label.
+                tracing::warn!(
+                    session = %session.id,
+                    "wake found a live ACP driver; settling the suspended row back to running"
+                );
+                session_mod::set_status(&st.db, &session.id, "running").await?;
+                events::record(
+                    &st.db,
+                    &st.bus,
+                    &branch.id,
+                    "status",
+                    json!({ "status": "running", "reason": "session woken (ACP driver still live)" }),
+                )
+                .await
+                .ok();
+                return Ok(());
+            }
+            return adopt_acp(st, session, branch, "session woken", custom_agent.as_ref()).await;
+        }
+        if backend::has_session(&session.term_session).await {
+            // The runtime never actually stopped — reachable when a suspend's
+            // kill could only be warned about (a session nobody can stop still
+            // suspends). The wake's goal is already met, so settle the row
+            // back to running rather than refusing and stranding a live
+            // session behind a `suspended` label.
+            tracing::warn!(
+                session = %session.id,
+                "wake found a live terminal; settling the suspended row back to running"
+            );
+            session_mod::set_status(&st.db, &session.id, "running").await?;
+            events::record(
+                &st.db,
+                &st.bus,
+                &branch.id,
+                "status",
+                json!({ "status": "running", "reason": "session woken (terminal still live)" }),
+            )
+            .await
+            .ok();
+            return Ok(());
+        }
+        let work_dir = PathBuf::from(&session.work_dir);
+        if !work_dir.exists() {
+            return Err(anyhow!(Refusal::Invalid(format!(
+                "worktree {} no longer exists on disk — recover the session instead",
+                session.work_dir
+            ))));
+        }
+        // The post-flip conversion, exactly as adoption does it: a terminal
+        // session whose builtin runtime now declares acp wakes *into* acp.
+        let runtime = session.agent_kind.clone();
+        let declares_acp = session.launch_snapshot.trim().is_empty()
+            && matches!(
+                agent::metadata_for(&st.db, &runtime).await?,
+                Some(meta) if meta.builtin && meta.protocol == "acp"
+            );
+        if declares_acp {
+            return adopt_terminal_into_acp(st, session, branch, &runtime).await;
+        }
+        resume_agent(st, session, branch, "session woken", custom_agent.as_ref()).await
+    }
+    .await;
+    let cleared = session_mod::clear_transition(&st.db, &session.id, "waking").await;
+    match (result, cleared) {
+        (Ok(()), Ok(true)) => {}
+        (Ok(()), Ok(false)) => {
+            return Err(anyhow!("wake lost ownership of its lifecycle transition"))
+        }
+        (Ok(()), Err(error)) => return Err(error),
+        (Err(error), Ok(false)) => {
+            // The row is still `suspended` — the cheap state that can be
+            // retried — so the failure is reported and the session left
+            // wakeable rather than stranded as a half-woken orphan.
+            tracing::warn!(session = %session.id, "wake error cleanup no longer owned its transition");
+            return Err(error);
+        }
+        (Err(error), Err(cleanup)) => {
+            tracing::warn!(session = %session.id, %cleanup, "wake error cleanup could not clear its transition");
+            return Err(error);
+        }
+        (Err(error), _) => return Err(error),
+    }
+    session_mod::get(&st.db, &session.id)
+        .await?
+        .ok_or_else(|| anyhow!("session not found"))
+}
+
+/// Resolve a session to one that may be driven *right now*, for delivery
+/// paths that paste directly (a Slack reply, a GitHub trigger, a review) and
+/// so bypass the ordinary ingress guards: wake a dormant row — this event is
+/// a wake signal — and refuse a row mid-lifecycle-transition, whose runtime is
+/// being torn down or swapped underneath the driver. Pasting into a dying
+/// supervisor would ack the delivery and silently lose it.
+pub async fn wake_or_drivable(st: &AppState, session: &Session) -> Result<Session> {
+    let fresh = session_mod::get(&st.db, &session.id)
+        .await?
+        .ok_or_else(|| anyhow!("session {} disappeared", session.id))?;
+    // Any in-progress lifecycle transition refuses — its runtime is being
+    // torn down or swapped underneath, and pasting into it would ack the
+    // delivery and lose it. The caller (a trigger, a Slack reply, a
+    // review) treats the refusal as a retryable miss; the seconds-long
+    // revival races of old are now just that retry.
+    if let Some(transition) = fresh.lifecycle_transition.as_deref() {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session is {transition} — retry once it settles"
+        ))));
+    }
+    if !session_mod::is_suspended(&fresh.status) {
+        // A running pass-through is this seam's success, and the stale
+        // triage an earlier failed wake raised is as stale here as in
+        // `wake` itself: this row may have come back through a path that
+        // never ran `wake()` — a reconcile settling an interrupted
+        // `waking` marker, say.
+        if fresh.status == "running" && fresh.lifecycle_transition.is_none() {
+            clear_stale_triage(st, &fresh).await;
+        }
+        return Ok(fresh);
+    }
+    // The uniform terminal rule: a dormant terminal row is never a
+    // programmatic ingress's to revive — no queue, no auto-wake. Every
+    // such ingress (a trigger, a Slack reply, a review) refuses with the
+    // remedy; the manual Wake action is the only way back.
+    if fresh.protocol != "acp" {
+        return Err(anyhow!(Refusal::Conflict(format!(
+            "session {} is suspended — wake it first",
+            fresh.id
+        ))));
+    }
+    wake(st, &fresh).await
+}
+
+/// Wake a dormant session for a channel- or delivery-side event, detached
+/// from any request, and raise the branch's triage tag when the wake
+/// refuses. One attempt — no retries, no settle waits: the delivery the
+/// caller queued is durable (the inbox lane), the tag names the remedy,
+/// and the next ingress or the operator retries with the reason in hand.
+/// A concurrent revival needs no help: the tag this may raise underneath
+/// it necessarily precedes the winner's marker release, and the winner's
+/// own `wake` tail clears it.
+pub async fn wake_dormant_session(st: &AppState, session_id: &str, why: &str, surface: bool) {
+    let Ok(Some(session)) = session_mod::get(&st.db, session_id).await else {
+        tracing::warn!(session = %session_id, %why,
+            "reading the dormant session failed; the delivery stays queued");
+        return;
+    };
+    // Awake on arrival (or otherwise not ours to wake — created, orphaned,
+    // archiving): the queued delivery lands on its own for a genuinely
+    // running row, and only then is an earlier failure's triage stale.
+    if !session_mod::is_suspended(&session.status) {
+        if session.status == "running" && session.lifecycle_transition.is_none() {
+            clear_stale_triage(st, &session).await;
+        }
+        return;
+    }
+    // The uniform terminal rule, enforced at the last seam too: a dormant
+    // terminal row is only ever woken by the manual Wake action.
+    if session.protocol != "acp" {
+        tracing::warn!(session = %session_id,
+            "dormant terminal sessions are not woken programmatically");
+        return;
+    }
+    if let Err(error) = wake(st, &session).await {
+        tracing::warn!(session = %session_id, %why, %error,
+            "waking the dormant session failed; the delivery stays queued");
+        if surface {
+            raise_attention(st, &session, &format!("{why} (waking it failed: {error})")).await;
+        }
+    }
+}
+
+/// Clear a triage tag a failed wake raised earlier, if the session is now
+/// awake and the tag is ours (the delivery path stamps its note
+/// "delivery waiting…"):
+/// a wake that eventually succeeded makes it stale. The clear is a
+/// compare-and-clear — a watch's own outside assessment written in between
+/// survives.
+async fn clear_stale_triage(st: &AppState, session: &session_mod::Session) {
+    let key = weaver_core::tags::TRIAGE_KEY;
+    match weaver_core::tags::clear_if(
+        &st.db,
+        &session.branch_id,
+        key,
+        "attention",
+        "delivery waiting",
+    )
+    .await
+    {
+        Ok(true) => {
+            let _ = events::record(
+                &st.db,
+                &st.bus,
+                &session.branch_id,
+                "tag",
+                json!({ "key": key, "value": "", "note": "wake recovered", "by": "system" }),
+            )
+            .await;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(
+                session = %session.id,
+                %error,
+                "could not clear the stale wake triage"
+            );
+        }
+    }
+}
+
+/// Mark a branch as needing the operator — on the triage axis, which is the
+/// outside assessment of a session and never clobbers the agent's own
+/// attention self-report. The stamp is owned: an assessment the delivery
+/// path did not write (a watch's triage, say) is never overwritten here,
+/// and therefore never swept away by the recovery's compare-and-clear,
+/// which matches the same note prefix.
+pub async fn raise_attention(st: &AppState, session: &session_mod::Session, why: &str) {
+    let note = format!("delivery waiting — {why}");
+    let key = weaver_core::tags::TRIAGE_KEY;
+    // Owned stamping, matching the recovery's compare-and-clear: an
+    // assessment the wake path did not write (a watch's triage, say) is
+    // never overwritten here, and therefore never swept away by the clear.
+    match weaver_core::tags::set_owned(
+        &st.db,
+        &session.branch_id,
+        key,
+        "attention",
+        &note,
+        "delivery waiting",
+        "system",
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                session = %session.id,
+                "triage already carries a stronger assessment; leaving it"
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(session = %session.id, %error, "could not raise triage after a failed wake");
+            return;
+        }
+    }
+    let _ = events::record(
+        &st.db,
+        &st.bus,
+        &session.branch_id,
+        "tag",
+        json!({ "key": key, "value": "attention", "note": note, "by": "system" }),
+    )
+    .await;
+}
+
 /// Finish every lifecycle transition whose owner can no longer finish it.
 ///
 /// A process can exit between publishing a transition and committing its stable
@@ -564,6 +1169,69 @@ pub async fn reconcile_interrupted_transitions(state: &AppState) {
                         .await
                 {
                     tracing::warn!(session = %session.id, %error, "transition recovery: could not release failed adoption");
+                }
+            }
+            "suspending" => {
+                // The kill either happened or never will. A surviving
+                // supervisor means the owner died before teardown — release
+                // the marker and leave the live state alone. A missing one
+                // means the session got what it asked for: complete to
+                // `suspended` rather than leaving an undriveable marker.
+                if backend::has_session(&session.term_session).await {
+                    if let Err(error) = session_mod::clear_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "suspending",
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not release suspend marker");
+                    }
+                } else {
+                    // Mirror suspend's settle: an abandoned inflight claim
+                    // must not outlive the dormancy its suspend was
+                    // committing — a stale claim makes the running row look
+                    // mid-turn, refusing suspend and skipping auto-suspend.
+                    let abandoned_turn = session_mod::get(&state.db, &session.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|latest| session_mod::acp_inflight_turn(&latest));
+                    if let Err(error) =
+                        settle_abandoned_acp_turn(state, &session.id, abandoned_turn).await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not settle the abandoned turn");
+                    }
+                    if let Err(error) = session_mod::complete_interrupted_transition(
+                        &state.db,
+                        &session.id,
+                        "suspending",
+                        "suspended",
+                    )
+                    .await
+                    {
+                        tracing::warn!(session = %session.id, %error, "transition recovery: could not commit the interrupted suspension");
+                    }
+                }
+            }
+            "waking" => {
+                // The respawn either took or never started. A surviving
+                // supervisor means the session is live again; a missing one
+                // stays suspended — still cheap to wake.
+                let status = if backend::has_session(&session.term_session).await {
+                    "running"
+                } else {
+                    "suspended"
+                };
+                if let Err(error) = session_mod::complete_interrupted_transition(
+                    &state.db,
+                    &session.id,
+                    "waking",
+                    status,
+                )
+                .await
+                {
+                    tracing::warn!(session = %session.id, %error, "transition recovery: could not settle the interrupted wake");
                 }
             }
             "handoff" => {
@@ -1055,6 +1723,15 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
             "session is done and cannot be adopted".to_string()
         )));
     }
+    // Dormancy belongs to wake: adopt is for a runtime that was lost, and a
+    // dormant row's missing runtime is the point. Routing dormancy through
+    // adoption would bypass wake's guards (and its live-driver settle).
+    if session_mod::is_suspended(&session.status) {
+        return Err(anyhow!(Refusal::Conflict(
+            "session is suspended — `sessions.wake` is its inverse; adopt is for orphaned runtimes"
+                .to_string()
+        )));
+    }
     // A session that is already driveable (orphaned status but a live ACP
     // driver) is settled here rather than routed through `adopt_acp`, which
     // would 409 on it. Settle before claiming a transition — the
@@ -1071,6 +1748,11 @@ pub async fn adopt(st: &AppState, session: &Session, _branch: &Branch) -> Result
     require_resume_capacity(&st.db, session, &profile).await?;
     let custom_agent = stamped_custom_agent(session)?;
     require_branch_slot_free(st, session, branch).await?;
+    // Adoption is operator activity: refresh the idle anchor so an old session
+    // brought back is not suspended as stale on the next monitor tick. Before
+    // the transition is claimed, so a failed write aborts the adoption
+    // cleanly instead of stranding a published `adopting` marker.
+    session_mod::touch(&st.db, &session.id).await?;
     if !session_mod::begin_transition(&st.db, &session.id, "adopting", "Preparing adoption").await?
     {
         return Err(anyhow!(Refusal::Conflict(
@@ -1395,7 +2077,10 @@ async fn settle_abandoned_acp_turn(
     if let Some(turn) = abandoned_turn {
         crate::chat::close_abandoned_turn(&st.db, session_id, turn).await?;
     }
-    session_mod::set_inflight(&st.db, session_id, None).await
+    // The clear form of the fenced write: settle paths may always clean up.
+    session_mod::set_inflight(&st.db, session_id, None)
+        .await
+        .map(|_| ())
 }
 
 /// Restart the provider behind a live ACP session without touching its worktree,

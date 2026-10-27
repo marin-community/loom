@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import type { SessionSummary } from '../types';
-import { remedyAction } from '../lib/sessionState';
+import { remedyButtonAction } from '../lib/sessionState';
 import { useSessionActions } from '../lib/sessionActions';
 
 // The one button that unsticks a stuck session: Adopt for an orphaned one
 // (terminal gone, worktree intact), Recover for an archived one (torn down,
-// branch kept). Renders nothing for a healthy session — there is nothing to fix.
+// branch kept). Renders nothing for a healthy session — there is nothing to
+// fix. A suspended session is deliberate dormancy, not a fault, so its Wake
+// lives in the ⋯/Details action menus instead (see `remedyButtonAction`).
 //
 // It is deliberately parked against the status badge that announces the problem,
 // on every surface that shows one (the fleet-list row and the detail header), so
@@ -15,7 +17,7 @@ import { useSessionActions } from '../lib/sessionActions';
 const props = defineProps<{ ws: SessionSummary }>();
 const emit = defineEmits<{ changed: []; error: [string] }>();
 
-const remedy = computed(() => remedyAction(props.ws));
+const remedy = computed(() => remedyButtonAction(props.ws));
 
 const { busy, error, run } = useSessionActions(
   () => props.ws.id,

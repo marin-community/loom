@@ -19,6 +19,7 @@ import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvent
 import { localTime } from '../lib/time';
 import MarkdownView from './MarkdownView.vue';
 import ScrollToEndButton from './ScrollToEndButton.vue';
+import TransitionProgressStrip from './TransitionProgressStrip.vue';
 
 // The Conversation tab for a *terminal-backend* session (`protocol='terminal'`):
 // the agent's chat with the model, rendered for review and — while the agent is
@@ -199,6 +200,12 @@ watch(
 // half-typed message; every later mutation re-saves it there.
 const draft = ref(restoreDraft(id.value, draftStorage()));
 watch(draft, () => saveDraft(id.value, draft.value, draftStorage()));
+// An in-place session switch adopts the destination's saved draft, rather
+// than carrying the previous session's text across and persisting it under
+// the new id (which would clobber that session's stored draft).
+watch(id, () => {
+  draft.value = restoreDraft(id.value, draftStorage());
+});
 const sending = ref(false);
 const sendError = ref('');
 const composerVisible = computed(
@@ -756,6 +763,10 @@ const groupHasError = (g: ToolGroup) => g.items.some((it) => it.result?.is_error
       }}</span>
       <span>{{ convState.label }}<span v-if="agentWorking">…</span></span>
     </div>
+
+    <!-- The runtime-change progress strip (handoff / waking / suspending) —
+         same banner, same words, as the ACP conversation's foot. -->
+    <TransitionProgressStrip :session="session" />
 
     <!-- Composer — send a new prompt straight to the agent's terminal. Enter
          sends; Shift+Enter inserts a newline. Hidden once the agent is gone, so

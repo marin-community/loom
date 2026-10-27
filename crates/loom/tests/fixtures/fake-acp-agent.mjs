@@ -65,6 +65,9 @@ const steeringQueue = [];
 let promptEpoch = 0;
 let promptResources = [];
 let poisoned = false;
+const singlePrompt = process.env.FAKE_ACP_SINGLE_PROMPT === "1";
+const setupUnavailableAttempts = Number(process.env.FAKE_ACP_UNAVAILABLE_ATTEMPTS || "0");
+let setupAttempts = 0;
 const pending = new Map(); // our request id -> resolver awaiting the client's response
 
 function send(obj) {
@@ -388,6 +391,19 @@ async function runToken(tok) {
 }
 
 async function handlePrompt(id, params) {
+  if (singlePrompt && promptActive) {
+    if (id !== null) {
+      send({
+        jsonrpc: JSONRPC,
+        id,
+        error: {
+          code: -32603,
+          message: `Session already has an active ACP prompt: ${sessionId}`,
+        },
+      });
+    }
+    return;
+  }
   const epoch = ++promptEpoch;
   cancelled = false;
   promptActive = true;
@@ -473,6 +489,24 @@ function handleMessage(msg) {
   // request that otherwise waits forever.
   const ignoredMethods = new Set((process.env.FAKE_ACP_IGNORE_METHOD || "").split(",").filter(Boolean));
   if (ignoredMethods.has(msg.method)) return;
+  if (
+    (msg.method === "session/new" || msg.method === "session/load") &&
+    setupAttempts < setupUnavailableAttempts
+  ) {
+    setupAttempts += 1;
+    if (msg.id !== undefined) {
+      send({
+        jsonrpc: JSONRPC,
+        id: msg.id,
+        error: {
+          code: -32603,
+          data: { errorName: "ServiceUnavailableError" },
+          message: "Internal error: Internal service failure",
+        },
+      });
+    }
+    return;
+  }
   switch (msg.method) {
     case "initialize":
       respond(msg.id, {

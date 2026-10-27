@@ -1209,6 +1209,12 @@ async fn forward_to_routed_session(
     let (route, session) = routed_session(&state.db, trigger).await?;
 
     let prompt = followup_prompt(trigger, instruction);
+    // A dormant thread owner is still the owner: this reply is a wake signal,
+    // exactly like a channel delivery.
+    let session = match wake_or_forward_target(state, &session).await {
+        Ok(session) => session,
+        Err(error) => return Some(Err(error)),
+    };
     if let Err(error) = forward_followup(state, &session, &prompt).await {
         return Some(Err(error));
     }
@@ -1363,6 +1369,12 @@ async fn launch_inner(
         // kept branch.
         if let Ok(Some(session)) = crate::session::active_for_branch(&state.db, &b.id).await {
             let prompt = followup_prompt(trigger, instruction);
+            // A dormant thread owner is still the owner: this reply is a wake
+            // signal, exactly like a channel delivery. Bring it back first —
+            // a suspend still committing is refused by the fresh read and
+            // left for the next follow-up rather than driven into its
+            // teardown.
+            let session = wake_or_forward_target(state, &session).await?;
             match forward_followup(state, &session, &prompt).await {
                 Ok(()) => {
                     if let Err(error) = events::record(
@@ -1411,6 +1423,37 @@ async fn launch_inner(
                         %error,
                         "slack: active session unreachable; archiving it and launching a fresh session"
                     );
+                    // Unless it went dormant underneath us: the row this
+                    // branch acted on can be a stale read, and a suspend that
+                    // committed (or is still committing) between it and the
+                    // failed forward leaves a perfectly good parked session
+                    // whose *next* reply wakes it — archiving here would
+                    // tear down its worktree on a misread.
+                    match crate::session::get(&state.db, &session.id).await {
+                        Ok(Some(fresh))
+                            if crate::session::is_suspended(&fresh.status)
+                                || fresh.lifecycle_transition.is_some() =>
+                        {
+                            return Err(anyhow!(
+                                "session {} went dormant while this reply was being forwarded",
+                                session.id
+                            ));
+                        }
+                        Ok(Some(fresh)) if fresh.status == "running" && fresh.protocol == "acp" => {
+                            // A running ACP row whose forward failed — its
+                            // driver is not attached yet, or the task
+                            // refused the send — is a transient: the repair
+                            // loop attaches, the next reply retries.
+                            // Archiving here would tear down a live session
+                            // over it, a policy the GitHub trigger seam
+                            // already follows for the same failure.
+                            return Err(anyhow!(
+                                "session {} is running but its ACP task could not take this reply — retry in a moment",
+                                fresh.id
+                            ));
+                        }
+                        _ => {}
+                    }
                     match crate::lifecycle::auto_archive(state, &session, b).await {
                         Ok(Some(_)) => {}
                         Ok(None) => {
@@ -1567,6 +1610,24 @@ async fn forward_followup(
             .context("submitting terminal follow-up")?;
         Ok(())
     }
+}
+
+/// A dormant thread owner is still the owner: a Slack reply is a wake signal,
+/// exactly like a channel delivery. `wake_or_drivable` brings the session back
+/// and refuses a row mid-lifecycle-transition — its runtime is being torn
+/// down or swapped, and a paste into it would be acked and lost.
+async fn wake_or_forward_target(
+    state: &AppState,
+    session: &crate::session::Session,
+) -> Result<crate::session::Session> {
+    crate::lifecycle::wake_or_drivable(state, session)
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "could not prepare session {} for this reply: {error:#}",
+                session.id
+            )
+        })
 }
 
 #[derive(Debug, PartialEq)]

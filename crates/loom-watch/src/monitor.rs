@@ -120,6 +120,12 @@ async fn run_inner(state: AppState) {
             if session_mod::is_terminal(&session.status) {
                 continue;
             }
+            // Deliberate dormancy is neither stale nor orphaned: its missing
+            // runtime is the point, and watch staleness must not nag a
+            // session the operator parked on purpose.
+            if session_mod::is_suspended(&session.status) {
+                continue;
+            }
 
             // Staleness: emit `stale` exactly on the not-stale → stale edge.
             if stale_enabled {
@@ -137,7 +143,16 @@ async fn run_inner(state: AppState) {
                 continue;
             }
             if !backend::has_session(&session.term_session).await {
-                if session.status == "orphaned" {
+                // An orphaned session is already marked; a suspended session's
+                // missing supervisor is deliberate dormancy, not loss.
+                if session.status == "orphaned" || session_mod::is_suspended(&session.status) {
+                    continue;
+                }
+                // A row mid-transition is owned by that operation: a
+                // suspending row's dead supervisor is its own teardown, and a
+                // waking or adopting row's is about to be respawned — none of
+                // them is loss, and marking here would race the commit.
+                if session.lifecycle_transition.is_some() {
                     continue;
                 }
                 match session_mod::mark_orphaned(&state.db, &session.id).await {
@@ -194,8 +209,9 @@ async fn run_inner(state: AppState) {
         screen_hash.retain(|k, _| alive.contains(k));
         stale_seen.retain(|k| alive.contains(k));
 
-        // 3. Retention: reap long-idle ordinary sessions, automation work, and
-        //    Slack conversations on a slower cadence than the tick.
+        // 3. Retention: suspend long-idle ordinary sessions (freeing their
+        //    runtime's memory), then reap archived-tier TTLs — on a slower
+        //    cadence than the tick.
         reap_tick += 1;
         if reap_tick >= REAP_EVERY_TICKS {
             reap_tick = 0;
@@ -207,7 +223,106 @@ async fn run_inner(state: AppState) {
                 .await
                 .and_then(|value| value.trim().parse::<i64>().ok())
                 .unwrap_or(core_config::DEFAULT_SLACK_IDLE_ARCHIVE_SECS);
+            // Reap before suspending: a session already past its archive TTL
+            // gets the one teardown that matters (the archive) rather than a
+            // redundant runtime kill followed by a second status event for
+            // the same row on the same tick. Both passes re-read the row
+            // before acting, so a row the reaper archives here is skipped
+            // by the suspend pass's fresh read.
             reap_sessions(&state, &sessions, slack_idle_archive_secs, now).await;
+            let idle_suspend_secs = core_config::get(&state.db, "session.idle_suspend_secs")
+                .await
+                .and_then(|value| value.trim().parse::<i64>().ok())
+                .unwrap_or(core_config::DEFAULT_SESSION_IDLE_SUSPEND_SECS);
+            suspend_sessions(&state, &sessions, idle_suspend_secs, now).await;
+        }
+    }
+}
+
+/// The pure suspend verdict for one session: a running, unmanaged, stable
+/// session with no live ACP turn, idle past the configured threshold. Shares
+/// the reaper's safety guards — a session that just moved is never suspended,
+/// even when the operator sets a sub-grace threshold.
+fn suspend_decision(session: &Session, idle_suspend_secs: i64, now: DateTime<Utc>) -> bool {
+    idle_suspend_secs > 0
+        && session.status == "running"
+        && session.managed_by.is_none()
+        && session.lifecycle_transition.is_none()
+        && session.acp_inflight.is_none()
+        && idle_secs(session, now) >= idle_suspend_secs.max(REAP_GRACE_SECS)
+}
+
+/// One suspend pass: stop the runtime of every session [`suspend_decision`]
+/// convicts via the shared suspend path (runtime kill + the `status` event
+/// that lands on SSE). Errors are logged, never fatal to a tick.
+async fn suspend_sessions(
+    state: &AppState,
+    sessions: &[Session],
+    idle_suspend_secs: i64,
+    now: DateTime<Utc>,
+) {
+    if idle_suspend_secs <= 0 {
+        return;
+    }
+    for session in sessions {
+        if !suspend_decision(session, idle_suspend_secs, now) {
+            continue;
+        }
+        // The snapshot can predate this same tick's walk, which touches any
+        // session whose pane changed — re-convict on a fresh row so a session
+        // that just started working is never suspended out from under it.
+        let fresh = match session_mod::get(&state.db, &session.id).await {
+            Ok(Some(fresh)) => fresh,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e, "suspend pass: session re-read failed");
+                continue;
+            }
+        };
+        if !suspend_decision(&fresh, idle_suspend_secs, now) {
+            tracing::debug!(id = %session.id, "suspend pass: session became active again; skipping");
+            continue;
+        }
+        let branch = match branch_mod::get(&state.db, &session.branch_id).await {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                tracing::warn!(id = %session.id, branch = %session.branch_id,
+                    "suspend pass: session's branch row is missing");
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e, "suspend pass: branch lookup failed");
+                continue;
+            }
+        };
+        tracing::info!(id = %session.id, branch = %branch.branch,
+            idle_secs = idle_secs(session, now),
+            "suspending idle session");
+        match crate::lifecycle::auto_suspend(state, session, &branch, |fresh| {
+            suspend_decision(fresh, idle_suspend_secs, now)
+        })
+        .await
+        {
+            Ok(Some(warnings)) => {
+                if warnings.is_empty() {
+                    tracing::info!(id = %session.id, "suspend pass: idle session suspended");
+                } else {
+                    // The row reached `suspended`, but a warned-about stop
+                    // means the memory saving may not have actually happened.
+                    tracing::warn!(
+                        id = %session.id,
+                        warnings = ?warnings,
+                        "suspend pass: idle session suspended with an unconfirmed runtime stop"
+                    );
+                }
+            }
+            Ok(None) => tracing::info!(
+                id = %session.id,
+                "suspend pass: automatic suspend skipped (opt-out tag or session state changed)"
+            ),
+            Err(e) => {
+                tracing::warn!(id = %session.id, error = %e, "suspend pass: suspend failed")
+            }
         }
     }
 }
@@ -603,6 +718,58 @@ mod tests {
     }
 
     #[test]
+    fn suspend_decision_gates_the_idle_suspend_pass() {
+        use super::{suspend_decision, REAP_GRACE_SECS};
+        let now = Utc::now();
+        let iso = |offset_secs: i64| {
+            (now - Duration::seconds(offset_secs))
+                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .to_string()
+        };
+
+        // Off by default: no threshold, no suspension, however long the idle.
+        let dormant = session_with_activity(Some(&iso(10 * 24 * 3600)), &iso(10 * 24 * 3600));
+        assert!(!suspend_decision(&dormant, 0, now));
+
+        // Running, ordinary, and idle past the threshold: the verdict is yes.
+        let idle = session_with_activity(Some(&iso(2 * 3600)), &iso(2 * 3600));
+        assert!(suspend_decision(&idle, 3600, now));
+
+        // The reaper's grace floor applies even to a tiny threshold: a
+        // session is never suspended within fifteen minutes of activity.
+        let recent = session_with_activity(Some(&iso(600)), &iso(600));
+        assert!(!suspend_decision(&recent, 60, now));
+        assert_eq!(REAP_GRACE_SECS, 900);
+        let past_grace = session_with_activity(Some(&iso(1000)), &iso(1000));
+        assert!(suspend_decision(&past_grace, 60, now));
+
+        // Only a live ordinary session is a candidate: dormancy, loss, and
+        // not-yet-started rows keep their own states and remedies.
+        for status in ["suspended", "orphaned", "created", "done", "error"] {
+            let mut moved_on = session_with_activity(Some(&iso(2 * 3600)), &iso(2 * 3600));
+            moved_on.status = status.to_string();
+            assert!(
+                !suspend_decision(&moved_on, 3600, now),
+                "a {status} session is never a suspend candidate"
+            );
+        }
+
+        // Mid-turn, mid-transition, and watch-managed sessions are all exempt.
+        let mut mid_turn = session_with_activity(Some(&iso(2 * 3600)), &iso(2 * 3600));
+        mid_turn.protocol = "acp".to_string();
+        mid_turn.acp_inflight = Some("{}".to_string());
+        assert!(!suspend_decision(&mid_turn, 3600, now));
+
+        let mut transitioning = session_with_activity(Some(&iso(2 * 3600)), &iso(2 * 3600));
+        transitioning.lifecycle_transition = Some("suspending".to_string());
+        assert!(!suspend_decision(&transitioning, 3600, now));
+
+        let mut managed = session_with_activity(Some(&iso(2 * 3600)), &iso(2 * 3600));
+        managed.managed_by = Some("watch".to_string());
+        assert!(!suspend_decision(&managed, 3600, now));
+    }
+
+    #[test]
     fn reap_decision_triggers_and_guards() {
         use super::{reap_decision, retention_issue_id, ReapReason, REAP_GRACE_SECS};
         let now = Utc::now();
@@ -702,6 +869,60 @@ mod tests {
         session.acp_inflight = None;
         session.status = "running".into();
         assert_eq!(reap_decision(&session, true, 1, later), None);
+    }
+
+    #[test]
+    fn suspend_decision_triggers_and_guards() {
+        use super::{suspend_decision, REAP_GRACE_SECS};
+        let now = Utc::now();
+        let iso = |t: chrono::DateTime<Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let suspend_after = 3600; // a 1h threshold; the shipped default is 0 (off)
+
+        let long_ago = iso(now - Duration::hours(2));
+        let idle = session_with_activity(Some(&long_ago), &long_ago);
+
+        // A running session idle past the threshold suspends.
+        assert!(suspend_decision(&idle, suspend_after, now));
+
+        // A disabled threshold (0) never suspends.
+        assert!(!suspend_decision(&idle, 0, now));
+
+        // The shared guards: recent activity or a live ACP turn blocks the
+        // suspension — and even below the configured threshold, the grace
+        // window applies, so a sub-grace setting suspends no sooner than
+        // REAP_GRACE_SECS.
+        let fresh_at = iso(now - Duration::minutes(5));
+        let fresh = session_with_activity(Some(&fresh_at), &fresh_at);
+        assert!(!suspend_decision(&fresh, suspend_after, now));
+        let mut inflight = idle.clone();
+        inflight.acp_inflight = Some("{}".to_string());
+        assert!(!suspend_decision(&inflight, suspend_after, now));
+        let under_grace = iso(now - Duration::seconds(REAP_GRACE_SECS - 60));
+        let just_shy = session_with_activity(Some(&under_grace), &under_grace);
+        assert!(
+            !suspend_decision(&just_shy, 60, now),
+            "a sub-grace threshold still waits out the grace window"
+        );
+        let over_grace = iso(now - Duration::seconds(REAP_GRACE_SECS + 60));
+        let just_past = session_with_activity(Some(&over_grace), &over_grace);
+        assert!(suspend_decision(&just_past, 60, now));
+
+        // Only a running session is a suspend candidate: warm (watch-managed)
+        // sessions are exempt infrastructure, a suspended session is already
+        // dormant, terminal ones are gone, and another transition's session is
+        // left to that transition.
+        let mut warm = idle.clone();
+        warm.managed_by = Some("w1".to_string());
+        assert!(!suspend_decision(&warm, suspend_after, now));
+        let mut suspended = idle.clone();
+        suspended.status = "suspended".to_string();
+        assert!(!suspend_decision(&suspended, suspend_after, now));
+        let mut orphaned = idle.clone();
+        orphaned.status = "orphaned".to_string();
+        assert!(!suspend_decision(&orphaned, suspend_after, now));
+        let mut transitioning = idle.clone();
+        transitioning.lifecycle_transition = Some("archiving".to_string());
+        assert!(!suspend_decision(&transitioning, suspend_after, now));
     }
 
     #[test]

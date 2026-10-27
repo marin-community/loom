@@ -1,7 +1,7 @@
 import type { AutomationRun, SessionSummary } from '../types';
 import { effectiveAttention } from './sessionState';
 
-const ACTIVE = new Set(['created', 'running']);
+const ACTIVE = new Set(['created', 'running', 'suspended']);
 const HISTORY = new Set(['done', 'archived']);
 
 export function isAutomationHistory(session: SessionSummary): boolean {

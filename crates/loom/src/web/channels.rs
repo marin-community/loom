@@ -124,8 +124,10 @@ pub(super) async fn append_and_deliver(
     // Session channels are durable inboxes; custom channels become inboxes for
     // agents that explicitly subscribe in `deliver` mode. Only ordinary
     // conversation reaches runtimes, and an agent never prompts itself.
+    // A plain message carries its own wake; a result is woken by the parent
+    // notice path below, so the delivery pass does not double-wake for it.
     if kind == MessageKind::Message {
-        deliver_to_subscribers(st, author, &message_id, body).await?;
+        deliver_to_subscribers(st, author, &message_id, body, true).await?;
     }
 
     // A session-authored message or result on its own channel is the canonical
@@ -157,6 +159,7 @@ async fn deliver_to_subscribers(
     author: &Subject,
     message_id: &str,
     body: &str,
+    wake_dormant: bool,
 ) -> ApiResult<()> {
     for target in channels::message_delivery_targets(&st.db, message_id).await? {
         let binding_id = weaver_api::channel_session_binding_id(&target);
@@ -169,43 +172,125 @@ async fn deliver_to_subscribers(
         if session.protocol == "acp" {
             // Publication already committed the protected inbox entry. A wake
             // is only a hint; the task also checks this queue after recovery.
+            if wake_dormant
+                && (session.lifecycle_transition.as_deref() == Some("suspending")
+                    || crate::session::is_suspended(&session.status))
+            {
+                // Dormant — or a suspend still committing. The entry must not
+                // depend on the (possibly already-stopping) live driver
+                // dispatching it in time: schedule the detached wake, whose
+                // helper waits out the settle window on its own budget and
+                // wakes the session, whose inbox drain then lands the entry.
+                // A live driver is still nudged — it may deliver before its
+                // stop, and the scheduled wake covers the case where it
+                // does not.
+                let st_for_wake = st.clone();
+                let target_for_wake = target.clone();
+                tokio::spawn(async move {
+                    crate::lifecycle::wake_dormant_session(
+                        &st_for_wake,
+                        &target_for_wake,
+                        "channel delivery",
+                        false,
+                    )
+                    .await;
+                });
+                if let Some(handle) = st.acp.get(&target) {
+                    if let Err(error) = handle.notify_queue().await {
+                        tracing::debug!(session = %target, %error, "session update remains queued");
+                    }
+                }
+                continue;
+            }
             if let Some(handle) = st.acp.get(&target) {
                 if let Err(error) = handle.notify_queue().await {
                     tracing::debug!(session = %target, %error, "session update remains queued");
                 }
             }
+            // The notify raced a suspend that claimed the row after the
+            // read above: the entry is durable in the inbox, but nothing
+            // would wake the parked row (the inbox drain only runs once a
+            // task exists) and the live driver may stop before it
+            // dispatches. Schedule the wake, whose helper waits out the
+            // settle window; a plain message is its own wake signal.
+            if wake_dormant {
+                if let Ok(Some(fresh)) = crate::session::get(&st.db, &target).await {
+                    if crate::session::is_suspended(&fresh.status)
+                        || fresh.lifecycle_transition.as_deref() == Some("suspending")
+                    {
+                        let st_for_wake = st.clone();
+                        let target_for_wake = target.clone();
+                        tokio::spawn(async move {
+                            crate::lifecycle::wake_dormant_session(
+                                &st_for_wake,
+                                &target_for_wake,
+                                "channel delivery",
+                                false,
+                            )
+                            .await;
+                        });
+                    }
+                }
+            }
             continue;
         }
-        if !channels::claim_terminal_delivery(&st.db, message_id, &binding_id).await? {
-            continue;
-        }
+        // The terminal lane is deliberately dumb: a clean running row is
+        // pasted into inline, anything else — dormant, mid-transition — is
+        // skipped with the message left durable in channel history. A
+        // suspended terminal session never queues and never auto-wakes:
+        // every direct ingress refuses with "wake it first", and the
+        // sender that gets that error (or the operator reading the
+        // channel's unread count) wakes the session and retries.
         let text = if author.kind == SubjectKind::Session {
             crate::conversation_inbox::session_update_text(&author.id, body)
         } else {
             body.to_string()
         };
         let by = format!("channel:{}", author.id);
-        let delivery_error = super::sessions::send_session(
-            State(st.clone()),
-            Path(target.clone()),
-            Json(SendReq {
-                text,
-                submit: true,
-                by: Some(by),
-            }),
-        )
-        .await
-        .err()
-        .map(|error| error.message().to_string());
-        channels::finish_terminal_delivery(
-            &st.db,
-            message_id,
-            &binding_id,
-            delivery_error.as_deref(),
-        )
-        .await?;
+        if session.status != "running" || session.lifecycle_transition.is_some() {
+            tracing::debug!(session = %target,
+                "terminal delivery skipped: the session is not drivable; the message is durable in channel history");
+            continue;
+        }
+        paste_terminal_delivery(st, &target, message_id, &binding_id, &text, &by).await;
     }
     Ok(())
+}
+
+/// Paste one channel message into a cleanly running terminal session and
+/// settle its delivery receipt. The one place the terminal lane touches a
+/// pane: no claims, no retry queue — a failure is recorded and the
+/// re-publication of the same message is the retry.
+async fn paste_terminal_delivery(
+    st: &AppState,
+    target: &str,
+    message_id: &str,
+    binding_id: &str,
+    text: &str,
+    by: &str,
+) {
+    let failure = super::sessions::send_session(
+        State(st.clone()),
+        Path(target.to_string()),
+        Json(SendReq {
+            text: text.to_string(),
+            submit: true,
+            by: Some(by.to_string()),
+        }),
+    )
+    .await
+    .err();
+    let error = failure.map(|error| error.message().to_string());
+    if let Err(settle_error) =
+        channels::settle_terminal_delivery(&st.db, message_id, binding_id, error.as_deref()).await
+    {
+        tracing::warn!(session = %target, %settle_error,
+            "could not settle the terminal delivery receipt");
+    }
+    if let Some(error) = error {
+        tracing::warn!(session = %target, %error,
+            "terminal channel delivery failed; a re-publication of the message is the retry");
+    }
 }
 
 async fn notify_parent_of_result(
@@ -217,7 +302,74 @@ async fn notify_parent_of_result(
         return Ok(());
     };
     let notice_author = Subject::new(SubjectKind::System, "loom");
-    deliver_to_subscribers(st, &notice_author, &notice.id, &notice.body).await?;
+    // The notice's own delivery must not spawn a second wake — the insert
+    // below owns waking the parent, with surfacing on.
+    deliver_to_subscribers(st, &notice_author, &notice.id, &notice.body, false).await?;
+    // A committed result is a wake signal for a dormant ACP parent: the
+    // notice is durable in its protected inbox, and the respawned task's
+    // inbox drain is what makes it land. The wake is guarded on `inserted`
+    // — a duplicate post must not re-wake — with one carve-out: if the
+    // notice is still sitting `queued` in the parent's inbox, the original
+    // wake was lost (a process can die between the insert and this spawn),
+    // so a re-post revives rather than idles. Detached so the child's own
+    // request never waits out the parent's respawn; the wake helper
+    // retries transient refusals and, if the retries run out, raises the
+    // parent's triage tag — a result that cannot reach its consumer must
+    // not sit quietly in a dormant row.
+    //
+    // A dormant TERMINAL parent never wakes on a result: the terminal lane
+    // has no queue and no auto-wake, so the notice stays in channel
+    // history and the parent's triage tag is raised — the operator wakes
+    // it, and the unread result is waiting on the channel.
+    if let Some(parent) = crate::session::get(&st.db, &notice.channel_id).await? {
+        // Covers the mid-`suspending` race too: the helper waits out a
+        // suspend that is still committing, then wakes the committed row.
+        let dormant_or_parking = crate::session::is_suspended(&parent.status)
+            || parent.lifecycle_transition.as_deref() == Some("suspending");
+        let wake = if parent.protocol != "acp" {
+            if dormant_or_parking {
+                crate::lifecycle::raise_attention(
+                    st,
+                    &parent,
+                    &format!(
+                        "a committed result is waiting on the dormant terminal parent (child result {})",
+                        result.id
+                    ),
+                )
+                .await;
+            }
+            false
+        } else if inserted {
+            dormant_or_parking
+        } else {
+            // A duplicate post only re-wakes a result that never landed:
+            // the notice is pending in the parent's inbox lane, which
+            // settles only when the delivery actually happens.
+            dormant_or_parking
+                && crate::conversation_inbox::delivery_state(
+                    &st.db,
+                    &format!("channel:{}:{}", notice.id, parent.id),
+                )
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|state| state == "queued")
+        };
+        if wake {
+            let st = st.clone();
+            let parent_id = parent.id.clone();
+            let result_id = result.id.clone();
+            tokio::spawn(async move {
+                crate::lifecycle::wake_dormant_session(
+                    &st,
+                    &parent_id,
+                    &format!("child result {result_id}"),
+                    true,
+                )
+                .await;
+            });
+        }
+    }
     record_channel_message_event(st, &notice.channel_id, &notice_author, &notice, inserted).await;
     Ok(())
 }

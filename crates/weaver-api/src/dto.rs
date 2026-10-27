@@ -186,7 +186,8 @@ impl From<&BranchView> for BranchSummaryView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct SessionTransitionView {
-    /// Stable operation name: `archiving`, `adopting`, or `handoff`.
+    /// Stable operation name: `archiving`, `adopting`, `waking`, `suspending`,
+    /// `handoff`, or `finishing`.
     pub kind: String,
     /// Human-readable current stage, suitable for direct UI presentation.
     pub step: String,
@@ -203,6 +204,11 @@ pub struct SessionTransitionView {
 pub struct SessionSummaryView {
     pub id: String,
     pub status: String,
+    /// Execution backend of the session: `"acp"` or `"terminal"`. The
+    /// frontend's send affordances differ by protocol — a suspended ACP
+    /// row is sendable (the send wakes it), a suspended terminal row is
+    /// not (the terminal lane has no queue and no auto-wake).
+    pub protocol: String,
     #[serde(default)]
     pub transition: Option<SessionTransitionView>,
     pub github_repo: Option<String>,
@@ -388,6 +394,7 @@ wire_enum!(SessionSearchStatus {
     Created => "created",
     Running => "running",
     Orphaned => "orphaned",
+    Suspended => "suspended",
     Done => "done",
     Error => "error",
     Archived => "archived",
@@ -2871,6 +2878,15 @@ pub struct SessionArchiveResult {
     pub archived: bool,
     pub kind: String,
     pub branch: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Result of `sessions.suspend`. Warnings report a runtime stop that could not
+/// be confirmed; the session still reaches `suspended`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SessionSuspendResult {
+    pub suspended: bool,
     #[serde(default)]
     pub warnings: Vec<String>,
 }

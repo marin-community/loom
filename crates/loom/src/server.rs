@@ -205,6 +205,15 @@ pub async fn repair_acp_sessions(state: &AppState) {
         if session.protocol != "acp" || session_mod::is_terminal(&session.status) {
             continue;
         }
+        // Deliberate dormancy is outside repair's remit. A suspended row whose
+        // relay survived a warned-about kill keeps its dormant label — `wake`
+        // owns reviving it (and settles it, if a driver is somehow already
+        // live) — and attaching here would put the memory back while the row
+        // still reads suspended. A row mid-transition is owned by whatever
+        // claimed it; attaching under a suspending wake would race its kill.
+        if session_mod::is_suspended(&session.status) || session.lifecycle_transition.is_some() {
+            continue;
+        }
         if state.acp.is_live(&session.id) {
             continue;
         }
@@ -265,6 +274,12 @@ async fn reconcile_sessions(state: &AppState) {
     };
     for session in sessions {
         if session.managed_by.is_some() {
+            continue;
+        }
+        // A suspended session's missing supervisor is deliberate dormancy —
+        // adoption would undo the very memory saving suspend performed. Wake
+        // is the only thing that un-parks it.
+        if session_mod::is_suspended(&session.status) {
             continue;
         }
         if session_mod::is_terminal(&session.status) {
@@ -349,8 +364,9 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
         }
 
         // The owner is alive: re-adopt a recoverable warm session whose terminal is
-        // gone, so the watcher resumes its across-round memory.
-        if session_mod::is_terminal(&session.status) {
+        // gone, so the watcher resumes its across-round memory. A manually
+        // suspended session stays parked — its next delivered round wakes it.
+        if session_mod::is_terminal(&session.status) || session_mod::is_suspended(&session.status) {
             continue;
         }
         if backend::has_session(&session.term_session).await {
