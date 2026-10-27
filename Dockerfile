@@ -170,14 +170,19 @@ RUN set -eux; \
       > /etc/sudoers.d/loom-packages; \
     chmod 440 /etc/sudoers.d/loom-packages
 
-# The agent runtimes loom's sessions launch — Claude Code (`claude`) and the
-# OpenAI Codex CLI (`codex`) — are deliberately NOT baked into the image. The
-# container runs as a non-root user, so a runtime installed into the read-only
-# system dirs can neither self-update nor be bumped live. Instead
-# loom-entrypoint (below) installs both native CLIs into the app
-# user's $HOME on the persisted loom_home volume, where they are writable,
-# update in place, and survive container recreates. It checks their versions
-# on every server start so an old persisted install cannot outlive a pin.
+# The agent runtimes loom's sessions launch — Claude Code (`claude`), the
+# OpenAI Codex CLI (`codex`), Opencode, and Cursor's CLI (`cursor-agent`) — are
+# deliberately NOT baked into the image. The container runs as a non-root user,
+# so a runtime installed into the read-only system dirs can neither self-update
+# nor be bumped live. Instead loom-entrypoint (below) installs the CLIs into
+# the app user's $HOME on the persisted loom_home volume, where they are
+# writable, update in place, and survive container recreates. LOOM_AGENTS (see
+# loom_config) selects which of the four to install — it defaults to
+# `claude,codex`, the original two, so an existing deploy's boot behavior
+# doesn't change; opt into the rest by listing them.
+# Cursor needs CURSOR_API_KEY and Opencode needs
+# OPENCODE_AUTH_JSON and OPENCODE_CONFIG_JSON (loom_config fields) to actually
+# authenticate and configure itself once installed.
 
 # code-server — the per-session embedded VS Code that `crate::ide` spawns and
 # reverse-proxies (one rooted at each worktree, behind loom's auth). The `.deb`
@@ -217,9 +222,11 @@ ENV HOME=/home/app
 # packages added at runtime live under the app user's persisted $HOME, early on
 # PATH. NPM_CONFIG_PREFIX points `npm i -g` at a home dir too, so new CLI packages
 # can be installed live (and persist on the loom_home volume) without an image
-# rebuild — only OS/apt packages still need one.
+# rebuild — only OS/apt packages still need one. Opencode's native installer
+# ignores $HOME/.local and always drops its binary in $HOME/.opencode/bin, so
+# that's added here too.
 ENV NPM_CONFIG_PREFIX=/home/app/.npm-global \
-    PATH=/home/app/.local/bin:/home/app/.npm-global/bin:${PATH}
+    PATH=/home/app/.local/bin:/home/app/.npm-global/bin:/home/app/.opencode/bin:${PATH}
 
 # Where uv keeps its managed interpreters and wheel cache. Kept off /home/app so
 # the (large) Python builds don't bloat the home volume and can be reset on their
@@ -439,7 +446,7 @@ chmod 440 /etc/sudoers.d/loom-docker-socket-init
 EOF
 
 # Container entrypoint: before the daemon starts, make sure the agent runtimes
-# (`claude` + `codex`) are installed on the persisted $HOME volume, any
+# selected by LOOM_AGENTS are installed on the persisted $HOME volume, any
 # operator-requested optional installs happen (LOOM_INSTALL_CMD /
 # LOOM_INSTALL_SKILLS), and the delegated session-cgroup subtree is prepared,
 # then hand off to the CMD. All of it runs only for `loom server …` — one-shot
@@ -450,53 +457,154 @@ cat > /usr/local/bin/loom-entrypoint <<'SH'
 #!/bin/sh
 set -eu
 if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
-  claude_version="${CLAUDE_CODE_VERSION:-2.1.280}"
-  codex_version="${CODEX_CLI_VERSION:-0.159.1}"
-  if [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" != "$claude_version (Claude Code)" ]; then
-    echo "loom: installing Claude Code $claude_version into $HOME/.local ..." >&2
-    curl -fsSL https://claude.ai/install.sh | bash -s -- "$claude_version"
+  # Comma-separated subset of claude,codex,opencode,cursor-agent to
+  # install/keep updated this boot (see loom_config's LOOM_AGENTS field).
+  loom_agents="${LOOM_AGENTS:-claude,codex}"
+  # Spaces after a comma are a common slip; trim them so membership and the
+  # install loop agree.
+  loom_agents="$(echo "$loom_agents" | tr -d ' \t')"
+  want_agent() {
+    case ",$loom_agents," in
+      *",$1,"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
+  for entry in $(echo "$loom_agents" | tr ',' ' '); do
+    case "$entry" in
+      claude | codex | opencode | cursor-agent) ;;
+      *)
+        echo "loom: WARNING: LOOM_AGENTS lists unknown agent '$entry' (expected claude, codex, opencode, cursor-agent) — it will not be installed" >&2
+        ;;
+    esac
+  done
+
+  if want_agent claude; then
+    claude_version="${CLAUDE_CODE_VERSION:-2.1.280}"
+    if [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" != "$claude_version (Claude Code)" ]; then
+      echo "loom: installing Claude Code $claude_version into $HOME/.local ..." >&2
+      curl -fsSL https://claude.ai/install.sh | bash -s -- "$claude_version"
+    fi
+    [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" = "$claude_version (Claude Code)" ] \
+      || { echo "loom: Claude Code $claude_version is required" >&2; exit 1; }
+
+    claude_acp_version="${CLAUDE_ACP_VERSION:-0.81.1}"
+    if ! command -v claude-agent-acp >/dev/null 2>&1 \
+      || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1; then
+      echo "loom: installing the pinned Claude ACP adapter into $HOME/.npm-global ..." >&2
+      # The ACP adapter Claude's launch speaks through. An exact pin, not a
+      # dist-tag: the upstream adapter releases weekly, so the fleet moves
+      # versions only via a deliberate CLAUDE_ACP_VERSION bump. Installed on
+      # the volume so it persists across recreates; loom's launch default
+      # (`npx --yes …`) resolves it from PATH without a network fetch.
+      npm install -g "@agentclientprotocol/claude-agent-acp@$claude_acp_version"
+      { command -v claude-agent-acp >/dev/null 2>&1 \
+        && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1; } \
+        || { echo "loom: the pinned Claude ACP adapter is required" >&2; exit 1; }
+    fi
   fi
-  [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" = "$claude_version (Claude Code)" ] \
-    || { echo "loom: Claude Code $claude_version is required" >&2; exit 1; }
-  if [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" != "codex-cli $codex_version" ]; then
-    echo "loom: installing Codex CLI $codex_version into $HOME/.local ..." >&2
-    curl -fsSL https://chatgpt.com/codex/install.sh \
-      | CODEX_RELEASE="$codex_version" CODEX_NON_INTERACTIVE=1 sh
+
+  if want_agent codex; then
+    codex_version="${CODEX_CLI_VERSION:-0.159.1}"
+    if [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" != "codex-cli $codex_version" ]; then
+      echo "loom: installing Codex CLI $codex_version into $HOME/.local ..." >&2
+      curl -fsSL https://chatgpt.com/codex/install.sh \
+        | CODEX_RELEASE="$codex_version" CODEX_NON_INTERACTIVE=1 sh
+    fi
+    [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" = "codex-cli $codex_version" ] \
+      || { echo "loom: Codex CLI $codex_version is required" >&2; exit 1; }
+    if [ -x "$HOME/.local/bin/codex" ]; then
+      # The ChatGPT login is shared for model access, but account-level apps carry
+      # the identity of whoever authorized them. Keep them unavailable to every
+      # Codex process in this multi-user container; Loom supplies GitHub identity.
+      "$HOME/.local/bin/codex" features disable apps >/dev/null \
+        || echo "loom: WARNING: could not disable Codex account-level apps" >&2
+    fi
+
+    codex_acp_version="${CODEX_ACP_VERSION:-1.13.1}"
+    if ! command -v codex-acp >/dev/null 2>&1 \
+      || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
+      || ! npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; then
+      echo "loom: installing the pinned Codex ACP adapter into $HOME/.npm-global ..." >&2
+      # See the matching comment on the Claude ACP adapter above — same
+      # reasoning, pinned independently via CODEX_ACP_VERSION. @openai/codex is
+      # pinned too: codex-acp permits newer versions through its own
+      # dependency range.
+      npm install -g \
+        "@agentclientprotocol/codex-acp@$codex_acp_version" \
+        "@openai/codex@$codex_version"
+      { command -v codex-acp >/dev/null 2>&1 \
+        && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
+        && npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; } \
+        || { echo "loom: the pinned Codex ACP adapter is required" >&2; exit 1; }
+    fi
   fi
-  [ "$("$HOME/.local/bin/codex" --version 2>/dev/null || true)" = "codex-cli $codex_version" ] \
-    || { echo "loom: Codex CLI $codex_version is required" >&2; exit 1; }
-  if [ -x "$HOME/.local/bin/codex" ]; then
-    # The ChatGPT login is shared for model access, but account-level apps carry
-    # the identity of whoever authorized them. Keep them unavailable to every
-    # Codex process in this multi-user container; Loom supplies GitHub identity.
-    "$HOME/.local/bin/codex" features disable apps >/dev/null \
-      || echo "loom: WARNING: could not disable Codex account-level apps" >&2
+
+  if want_agent opencode; then
+    opencode_version="${OPENCODE_VERSION:-2.0.31}"
+    # `opencode acp` is this CLI. The v2 installer takes the same kind of
+    # version argument as Claude's and writes ~/.opencode/bin/opencode.
+    opencode_installed="$("$HOME/.opencode/bin/opencode" --version 2>/dev/null || true)"
+    opencode_installed="$(printf '%s\n' "$opencode_installed" | head -n 1)"
+    opencode_installed="${opencode_installed##* }"
+    opencode_installed="${opencode_installed#v}"
+    if [ "$opencode_installed" != "$opencode_version" ]; then
+      echo "loom: installing Opencode $opencode_version into $HOME/.opencode ..." >&2
+      curl -fsSL https://opencode.ai/v2/install | bash -s -- --version "$opencode_version" --no-modify-path
+    fi
+    opencode_installed="$("$HOME/.opencode/bin/opencode" --version 2>/dev/null || true)"
+    opencode_installed="$(printf '%s\n' "$opencode_installed" | head -n 1)"
+    opencode_installed="${opencode_installed##* }"
+    opencode_installed="${opencode_installed#v}"
+    [ "$opencode_installed" = "$opencode_version" ] \
+      || { echo "loom: Opencode $opencode_version is required" >&2; exit 1; }
   fi
-  claude_acp_version="${CLAUDE_ACP_VERSION:-0.81.1}"
-  codex_acp_version="${CODEX_ACP_VERSION:-1.13.1}"
-  if ! command -v claude-agent-acp >/dev/null 2>&1 \
-    || ! command -v codex-acp >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; then
-    echo "loom: installing pinned ACP adapters into $HOME/.npm-global ..." >&2
-    # The ACP adapters Loom's sessions speak through. Exact
-    # pins, not dist-tags: two upstream projects releasing weekly sit between
-    # loom and the agents, so the fleet moves versions only via a deliberate
-    # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Pin @openai/codex too:
-    # codex-acp permits newer versions through its dependency range. Install
-    # them on the volume so they persist across recreates; loom's launch default (`npx --yes …`)
-    # resolves these installed bins from PATH without a network fetch.
-    npm install -g \
-      "@agentclientprotocol/claude-agent-acp@$claude_acp_version" \
-      "@agentclientprotocol/codex-acp@$codex_acp_version" \
-      "@openai/codex@$codex_version"
-    { command -v claude-agent-acp >/dev/null 2>&1 \
-      && command -v codex-acp >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; } \
-      || { echo "loom: pinned ACP adapters are required" >&2; exit 1; }
+  if want_agent opencode && [ -n "${OPENCODE_AUTH_JSON:-}" ]; then
+    # Materializes the operator-configured provider credentials (loom_config's
+    # OPENCODE_AUTH_JSON) into the exact file Opencode itself reads — there's
+    # no env-var equivalent for a whole auth.json. Written every boot so a
+    # rotated key takes effect on restart; an `opencode auth login` run by hand
+    # inside the container would just be overwritten on the next one.
+    mkdir -p "$HOME/.local/share/opencode"
+    printf '%s' "$OPENCODE_AUTH_JSON" > "$HOME/.local/share/opencode/auth.json"
+    chmod 600 "$HOME/.local/share/opencode/auth.json"
+  fi
+  if want_agent opencode && [ -n "${OPENCODE_CONFIG_JSON:-}" ]; then
+    # Opencode's own opencode.json, written verbatim on every boot.
+    mkdir -p "$HOME/.config/opencode"
+    printf '%s' "$OPENCODE_CONFIG_JSON" > "$HOME/.config/opencode/opencode.json"
+    chmod 600 "$HOME/.config/opencode/opencode.json"
+  fi
+  if want_agent cursor-agent; then
+    # The installer takes no version, so this is an automatic update rather than
+    # an operator-chosen pin: a missing binary must install to boot at all, but
+    # an existing one keeps working if the update cannot reach cursor.com.
+    # Drop cursor-agent from LOOM_AGENTS to start without it.
+    if [ -x "$HOME/.local/bin/cursor-agent" ]; then
+      echo "loom: updating Cursor CLI ..." >&2
+      "$HOME/.local/bin/cursor-agent" update \
+        || echo "loom: WARNING: Cursor CLI update failed; using the installed $HOME/.local/bin/cursor-agent" >&2
+    else
+      echo "loom: installing Cursor CLI into $HOME/.local ..." >&2
+      curl -fsS https://cursor.com/install | bash \
+        || { echo "loom: Cursor CLI install failed" >&2; exit 1; }
+    fi
+    [ -x "$HOME/.local/bin/cursor-agent" ] \
+      || { echo "loom: Cursor CLI is required" >&2; exit 1; }
+  fi
+  # LOOM_AGENTS only ever installs — dropping an agent from it doesn't remove
+  # a binary a previous boot (with a different LOOM_AGENTS) already installed
+  # on this persisted volume, so it stays picker-visible until removed by hand.
+  if ! want_agent claude && [ -x "$HOME/.local/bin/claude" ]; then
+    echo "loom: WARNING: 'claude' is still installed from a previous boot though LOOM_AGENTS no longer lists it; remove $HOME/.local/bin/claude to drop it from the picker" >&2
+  fi
+  if ! want_agent codex && [ -x "$HOME/.local/bin/codex" ]; then
+    echo "loom: WARNING: 'codex' is still installed from a previous boot though LOOM_AGENTS no longer lists it; remove $HOME/.local/bin/codex to drop it from the picker" >&2
+  fi
+  if ! want_agent opencode && [ -x "$HOME/.opencode/bin/opencode" ]; then
+    echo "loom: WARNING: 'opencode' is still installed from a previous boot though LOOM_AGENTS no longer lists it; remove $HOME/.opencode/bin/opencode to drop it from the picker" >&2
+  fi
+  if ! want_agent cursor-agent && [ -x "$HOME/.local/bin/cursor-agent" ]; then
+    echo "loom: WARNING: 'cursor-agent' is still installed from a previous boot though LOOM_AGENTS no longer lists it; remove $HOME/.local/bin/cursor-agent to drop it from the picker" >&2
   fi
   # Optional, operator-supplied installs (see deploy/README.md "Optional tool
   # installs"). LOOM_INSTALL_CMD is arbitrary shell — the generic hook that

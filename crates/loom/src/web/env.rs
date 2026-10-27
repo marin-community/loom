@@ -17,6 +17,19 @@ async fn env_vars(db: &Db) -> ApiResult<Vec<AgentEnvVarView>> {
     Ok(agent_env::list(db).await?)
 }
 
+/// A harness credential lives in the default profile's environment. Changing it
+/// is a full catalogue refresh for the harness that reads that credential.
+pub(super) fn invalidate_cursor_catalog_if_credential(db: &crate::db::Db, name: &str) {
+    let harness = match name {
+        "CURSOR_API_KEY" | "CURSOR_AUTH_TOKEN" => "cursor-agent",
+        "ANTHROPIC_API_KEY" | "CLAUDE_CODE_OAUTH_TOKEN" => "claude",
+        "OPENAI_API_KEY" => "codex",
+        "OPENCODE_AUTH_JSON" | "OPENCODE_CONFIG_JSON" => "opencode",
+        _ => return,
+    };
+    let _ = crate::catalog::spawn_refresh(db.clone(), Some(harness.to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Operation registry — `settings.env.*`. Bound from `web/settings.rs`'s
 // `bound_operations()` (the `settings` bundle owns the descriptors), since
@@ -45,6 +58,7 @@ pub(super) async fn set_settings_env_operation(
         .acquire_profile(profile::DEFAULT_PROFILE)
         .await;
     profile::env_set(&st.db, profile::DEFAULT_PROFILE, &input.name, &input.value).await?;
+    invalidate_cursor_catalog_if_credential(&st.db, &input.name);
     env_vars(&st.db).await
 }
 
@@ -60,5 +74,6 @@ pub(super) async fn delete_settings_env_operation(
         .acquire_profile(profile::DEFAULT_PROFILE)
         .await;
     profile::env_remove(&st.db, profile::DEFAULT_PROFILE, &input.name).await?;
+    invalidate_cursor_catalog_if_credential(&st.db, &input.name);
     env_vars(&st.db).await
 }

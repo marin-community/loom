@@ -221,7 +221,8 @@ async fn validate_input(
         .await?
         .ok_or_else(|| anyhow!("unknown agent '{agent_kind}'"))?;
     crate::agent::validate_model(&meta, input.model.trim()).map_err(|e| anyhow!(e))?;
-    crate::agent::validate_effort(&meta, input.effort.trim()).map_err(|e| anyhow!(e))?;
+    crate::agent::validate_effort(&meta, input.model.trim(), input.effort.trim())
+        .map_err(|e| anyhow!(e))?;
     let protocol = crate::agent::resolve_protocol(
         &meta,
         (!input.protocol.trim().is_empty()).then_some(input.protocol.trim()),
@@ -350,6 +351,7 @@ async fn normalized_input(
         agent_kind: input.agent_kind.trim().to_string(),
         model: input.model.trim().to_string(),
         effort: input.effort.trim().to_string(),
+        fast: input.fast.trim().to_string(),
         protocol,
         mode,
         class: input.class.trim().to_string(),
@@ -399,7 +401,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
     if existing.is_some() {
         sqlx::query(
             "UPDATE profiles SET
-             description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+             description = ?, agent_kind = ?, model = ?, effort = ?, fast = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
              instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
@@ -411,6 +413,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(&normalized.agent_kind)
         .bind(&normalized.model)
         .bind(&normalized.effort)
+        .bind(&normalized.fast)
         .bind(&normalized.protocol)
         .bind(&normalized.mode)
         .bind(&normalized.class)
@@ -440,17 +443,18 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
     } else {
         sqlx::query(
             "INSERT INTO profiles
-             (name, description, agent_kind, model, effort, protocol, mode, class,
+             (name, description, agent_kind, model, effort, fast, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(&normalized.description)
         .bind(&normalized.agent_kind)
         .bind(&normalized.model)
         .bind(&normalized.effort)
+        .bind(&normalized.fast)
         .bind(&normalized.protocol)
         .bind(&normalized.mode)
         .bind(&normalized.class)
@@ -503,14 +507,14 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         .unwrap_or(false);
     sqlx::query(
         "INSERT INTO profiles
-         (name, description, agent_kind, model, effort, protocol, mode, class,
+         (name, description, agent_kind, model, effort, fast, protocol, mode, class,
           strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
           turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
           github_repositories, allowed_tools, mcp_access, mcp_policy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
           description=excluded.description, agent_kind=excluded.agent_kind,
-          model=excluded.model, effort=excluded.effort, protocol=excluded.protocol,
+          model=excluded.model, effort=excluded.effort, fast=excluded.fast, protocol=excluded.protocol,
           mode=excluded.mode, class=excluded.class, strict=excluded.strict,
           env_clear=excluded.env_clear, ambient_allowlist=excluded.ambient_allowlist,
           idle_archive_secs=excluded.idle_archive_secs,
@@ -531,6 +535,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(&normalized.agent_kind)
     .bind(&normalized.model)
     .bind(&normalized.effort)
+    .bind(&normalized.fast)
     .bind(&normalized.protocol)
     .bind(&normalized.mode)
     .bind(&normalized.class)
@@ -611,7 +616,7 @@ pub async fn update_expected(
     }
     sqlx::query(
         "UPDATE profiles SET
-         description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+         description = ?, agent_kind = ?, model = ?, effort = ?, fast = ?, protocol = ?,
          mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
          idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
          instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
@@ -622,6 +627,7 @@ pub async fn update_expected(
     .bind(&normalized.agent_kind)
     .bind(&normalized.model)
     .bind(&normalized.effort)
+    .bind(&normalized.fast)
     .bind(&normalized.protocol)
     .bind(&normalized.mode)
     .bind(&normalized.class)
@@ -755,7 +761,7 @@ pub async fn create_clone_prepared(
     if target.is_some() {
         sqlx::query(
             "UPDATE profiles SET
-             description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
+             description = ?, agent_kind = ?, model = ?, effort = ?, fast = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
              instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
@@ -767,6 +773,7 @@ pub async fn create_clone_prepared(
         .bind(&normalized.agent_kind)
         .bind(&normalized.model)
         .bind(&normalized.effort)
+        .bind(&normalized.fast)
         .bind(&normalized.protocol)
         .bind(&normalized.mode)
         .bind(&normalized.class)
@@ -794,17 +801,18 @@ pub async fn create_clone_prepared(
     } else {
         sqlx::query(
             "INSERT INTO profiles
-             (name, description, agent_kind, model, effort, protocol, mode, class,
+             (name, description, agent_kind, model, effort, fast, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target_name)
         .bind(&normalized.description)
         .bind(&normalized.agent_kind)
         .bind(&normalized.model)
         .bind(&normalized.effort)
+        .bind(&normalized.fast)
         .bind(&normalized.protocol)
         .bind(&normalized.mode)
         .bind(&normalized.class)
@@ -1119,6 +1127,7 @@ pub async fn normalize_default(db: &Db) -> Result<()> {
         agent_kind: current.agent_kind.clone(),
         model: current.model.clone(),
         effort: current.effort.clone(),
+        fast: current.fast.clone(),
         protocol: current.protocol.clone(),
         mode: current.mode.clone(),
         class: current.class.clone(),
@@ -1143,6 +1152,7 @@ pub async fn normalize_default(db: &Db) -> Result<()> {
         agent_kind: weaver_core::config::DEFAULT_AGENT.to_string(),
         model: String::new(),
         effort: String::new(),
+        fast: String::new(),
         protocol: String::new(),
         mode: crate::agent::DEFAULT_ACP_MODE.to_string(),
         ..input

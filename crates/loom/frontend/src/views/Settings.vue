@@ -57,6 +57,7 @@ const categories: CategoryItem[] = [
   {
     id: 'diagnostics',
     label: 'Diagnostics',
+    groups: ['Diagnostics'],
     summary: 'Background tasks, server logs, and build status for debugging this deployment.',
     scope: 'user',
   },
@@ -228,6 +229,13 @@ async function reloadAgents() {
   }
 }
 
+async function refreshCatalog() {
+  await act('catalog', async () => {
+    await invokeOperation('agents.catalog.refresh', { harness: '' });
+    notice.value = 'Catalogue refresh started.';
+  });
+}
+
 async function act(key: string, fn: () => Promise<void>) {
   busy.value = key;
   error.value = '';
@@ -352,6 +360,29 @@ onMounted(() => {
           <p class="mt-0.5 text-xs text-muted">{{ currentCategory.summary }}</p>
         </header>
 
+        <section
+          v-if="category === 'diagnostics' && me.role === 'admin'"
+          class="mb-3 rounded-md border border-line bg-surface p-3"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <h3 class="text-sm font-medium">Model catalogue</h3>
+              <p class="mt-0.5 text-xs text-muted">
+                Re-fetch every installed harness's models and options. The picker keeps serving what
+                is already stored.
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded bg-input px-2 py-1 text-xs"
+              data-testid="catalog-refresh"
+              :disabled="busy === 'catalog'"
+              @click="refreshCatalog"
+            >
+              {{ busy === 'catalog' ? 'Refreshing…' : 'Refresh catalogue' }}
+            </button>
+          </div>
+        </section>
         <LogsPanel v-if="category === 'diagnostics'" />
 
         <div v-else class="space-y-3">
@@ -369,7 +400,14 @@ onMounted(() => {
           <UsersPanel v-if="category === 'people'" />
           <GithubConnectionPanel v-if="category === 'integrations'" />
           <SlackPanel v-if="category === 'integrations'" />
+        </div>
 
+        <div
+          v-if="
+            currentCategory.groups?.length && (category !== 'diagnostics' || me.role === 'admin')
+          "
+          class="mt-3 space-y-3"
+        >
           <section
             v-if="currentSettings.length"
             :data-testid="category === 'agents' ? 'metadata-settings' : undefined"

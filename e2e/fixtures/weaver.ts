@@ -400,6 +400,10 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         WEAVER_TAPESTRY_DIR: join(weaverHome, 'sock'),
         WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, 'debug', 'tapestry'),
         LOOM_RUNNER: 'local',
+        // Keep the model lists deterministic: a background probe landing
+        // mid-test would swap the catalogue a spec just read. The catalogue has
+        // its own Rust coverage.
+        LOOM_CATALOG_DISABLED: '1',
         RUST_LOG: 'loom=warn,weaver_core=warn',
         // Seed an operator: loom refuses to boot with no owner configured, and
         // loopback trust authenticates every test request as this primary user

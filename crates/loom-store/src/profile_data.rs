@@ -15,6 +15,7 @@ pub struct Profile {
     pub agent_kind: String,
     pub model: String,
     pub effort: String,
+    pub fast: String,
     pub protocol: String,
     pub mode: String,
     pub class: String,
@@ -80,6 +81,7 @@ impl Profile {
             agent_kind: self.agent_kind.clone(),
             model: self.model.clone(),
             effort: self.effort.clone(),
+            fast: self.fast.clone(),
             protocol: self.protocol.clone(),
             mode: self.mode.clone(),
             class: self.class.clone(),
@@ -109,6 +111,8 @@ pub struct ProfileInput {
     pub model: String,
     #[serde(default)]
     pub effort: String,
+    #[serde(default)]
+    pub fast: String,
     #[serde(default)]
     pub protocol: String,
     #[serde(default)]
