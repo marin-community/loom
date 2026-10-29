@@ -1,0 +1,105 @@
+name: Holistic PR review
+
+# This workflow runs from the trusted default branch. It never checks out or
+# executes pull-request code; Loom checks out the pinned head in a review session.
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  review:
+    if: >-
+      (github.event_name == 'pull_request_target' &&
+       github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/holistic-review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted workflow actions
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions/check-write-access
+            .github/actions/launch-loom-run
+          sparse-checkout-cone-mode: false
+
+      - name: Check requester write access
+        id: requester
+        uses: ./.github/actions/check-write-access
+        with:
+          login: ${{ github.event.pull_request.user.login || github.event.comment.user.login }}
+          allowed-bots: loom-oa-dev[bot]
+
+      - name: Resolve review target
+        id: target
+        if: steps.requester.outputs.allowed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == issue_comment ]]; then
+            # Only a standalone command launches a manual review. Quoted or
+            # embedded text cannot turn an ordinary discussion into a run.
+            if [[ ! "$COMMENT_BODY" =~ ^[[:space:]]*/holistic-review[[:space:]]*$ ]]; then
+              exit 0
+            fi
+            pr=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")
+            head_repo=$(jq -er '.head.repo.full_name' <<< "$pr")
+            if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+              echo "Fork pull requests are not supported by this review launcher."
+              exit 0
+            fi
+            head_sha=$(jq -er '.head.sha' <<< "$pr")
+            mode=manual
+            key="holistic:manual:$COMMENT_ID"
+          else
+            head_sha="$EVENT_HEAD_SHA"
+            mode=automatic
+            key="holistic:auto:$PR_NUMBER:$head_sha"
+          fi
+          {
+            echo "number=$PR_NUMBER"
+            echo "sha=$head_sha"
+            echo "mode=$mode"
+            echo "key=$key"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Launch holistic review
+        if: steps.target.outputs.sha != ''
+        uses: ./.github/actions/launch-loom-run
+        with:
+          loom-url: ${{ vars.LOOM_URL }}
+          profile: ${{ vars.LOOM_PR_HOLISTIC_REVIEW_PROFILE }}
+          channel: pr-holistic:${{ steps.target.outputs.number }}
+          idempotency-key: ${{ steps.target.outputs.key }}
+          title: "Holistic review for #${{ steps.target.outputs.number }}"
+          goal: >-
+            Review ${{ github.repository }} pull request #${{ steps.target.outputs.number }}
+            at exact head ${{ steps.target.outputs.sha }}. This is a
+            ${{ steps.target.outputs.mode }} request. Follow docs/holistic-review.md
+            and the repository AGENTS.md. Verify the current PR head before
+            posting. For a manual request, review even if the same head was
+            reviewed before; update the existing overview. Stay read-only except
+            for the review comments described in the guide. Send a typed result
+            to your Loom channel when finished.
+          base: ${{ steps.target.outputs.sha }}
+          github-issue: ${{ steps.target.outputs.number }}
