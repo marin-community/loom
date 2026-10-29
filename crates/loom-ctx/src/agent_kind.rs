@@ -17,15 +17,32 @@ pub const DEFAULT_ACP_MODE: &str = weaver_core::config::DEFAULT_AGENT_MODE;
 pub enum BuiltinAgentKind {
     Claude,
     Codex,
+    OpenCode,
+    CursorAgent,
 }
 
 impl BuiltinAgentKind {
-    pub fn parse(kind: &str) -> Option<Self> {
-        match kind {
-            "claude" => Some(Self::Claude),
-            "codex" => Some(Self::Codex),
-            _ => None,
+    /// Every builtin kind, in picker order. The single list a new harness is
+    /// added to; downstream registries (`builtin_metadata`, the custom-agent
+    /// reserved names, …) derive from it, and the per-kind `match`es are
+    /// exhaustive so the compiler flags any that a new variant misses.
+    pub const ALL: [BuiltinAgentKind; 4] =
+        [Self::Claude, Self::Codex, Self::OpenCode, Self::CursorAgent];
+
+    /// The wire id — what a session's `agent_kind` column and the picker store.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::CursorAgent => "cursor-agent",
         }
+    }
+
+    pub fn parse(kind: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == kind)
     }
 }
 
@@ -44,4 +61,19 @@ pub fn auto_approves_permissions(mode: &str) -> bool {
         mode.trim(),
         "bypassPermissions" | "agent-full-access" | CODEX_AGENT_MODE
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_all_entry_round_trips_and_is_unique() {
+        let mut seen = std::collections::HashSet::new();
+        for kind in BuiltinAgentKind::ALL {
+            assert!(seen.insert(kind.as_str()), "duplicate in ALL: {kind:?}");
+            assert_eq!(BuiltinAgentKind::parse(kind.as_str()), Some(kind));
+        }
+        assert_eq!(BuiltinAgentKind::parse("nope"), None);
+    }
 }

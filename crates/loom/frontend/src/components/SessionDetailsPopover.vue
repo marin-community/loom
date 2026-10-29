@@ -76,6 +76,9 @@ function onOutsidePointerDown(event: PointerEvent) {
   const target = event.target;
   if (!(target instanceof Element) || panel.value?.contains(target)) return;
   if (target.closest('[aria-controls="session-details-popover"]')) return;
+  // The model menu is teleported out of the panel so it can grow past the
+  // popover edge. A press on it is still part of this popover.
+  if (target.closest('[data-choice-menu]')) return;
   close('outside');
 }
 

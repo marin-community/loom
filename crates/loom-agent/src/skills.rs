@@ -20,7 +20,7 @@ use loom_store::agent_kind::BuiltinAgentKind;
 /// CLI error message prints them. Extending [`BuiltinAgentKind`] forces a new
 /// arm in the exhaustive `skills_dir_for` match below; grow this list
 /// alongside it (the unit test ties every entry to a builtin kind).
-pub const SUPPORTED_HARNESSES: &[&str] = &["claude", "codex"];
+pub const SUPPORTED_HARNESSES: &[&str] = &["claude", "codex", "opencode", "cursor-agent"];
 
 /// One installed harness and the directory it reads user-level skills from.
 #[derive(Debug, Clone)]
@@ -175,13 +175,16 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 /// The user-level skills directory one harness reads. Pure: the env-derived
 /// inputs are parameters so tests need not race env access.
 ///
-/// Sources: Claude Code (personal `~/.claude/skills/`) and the Codex CLI
-/// (`~/.codex/skills/`, overridable via `CODEX_HOME`). The two read no
-/// shared directory, so each harness's own canonical location is written.
+/// Sources: Claude Code (personal `~/.claude/skills/`), the Codex CLI
+/// (`~/.codex/skills/`, overridable via `CODEX_HOME`), Opencode
+/// (`~/.config/opencode/skills/`), and Cursor (`~/.cursor/skills/`). Each
+/// reads its own canonical location, so each is written separately.
 fn skills_dir_for(kind: BuiltinAgentKind, home: &Path, codex_home: Option<&Path>) -> PathBuf {
     match kind {
         BuiltinAgentKind::Claude => home.join(".claude").join("skills"),
         BuiltinAgentKind::Codex => codex_home.unwrap_or(&home.join(".codex")).join("skills"),
+        BuiltinAgentKind::OpenCode => home.join(".config").join("opencode").join("skills"),
+        BuiltinAgentKind::CursorAgent => home.join(".cursor").join("skills"),
     }
 }
 
@@ -411,6 +414,14 @@ mod tests {
                 Some(Path::new("/custom/codex"))
             ),
             PathBuf::from("/custom/codex/skills")
+        );
+        assert_eq!(
+            skills_dir_for(BuiltinAgentKind::OpenCode, home, None),
+            PathBuf::from("/home/app/.config/opencode/skills")
+        );
+        assert_eq!(
+            skills_dir_for(BuiltinAgentKind::CursorAgent, home, None),
+            PathBuf::from("/home/app/.cursor/skills")
         );
     }
 
@@ -650,7 +661,7 @@ mod tests {
 
         let targets = installed_skill_targets().await;
         let names: Vec<&str> = targets.iter().map(|t| t.harness).collect();
-        assert_eq!(names, ["claude", "codex"]);
+        assert_eq!(names, ["claude", "codex", "opencode", "cursor-agent"]);
         assert_eq!(
             targets[0].skills_dir,
             home.path().join(".claude/skills"),
@@ -661,7 +672,7 @@ mod tests {
         std::fs::remove_file(bin.path().join("codex")).unwrap();
         let targets = installed_skill_targets().await;
         let names: Vec<&str> = targets.iter().map(|t| t.harness).collect();
-        assert_eq!(names, ["claude"]);
+        assert_eq!(names, ["claude", "opencode", "cursor-agent"]);
         drop(restore);
     }
 

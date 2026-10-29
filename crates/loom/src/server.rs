@@ -391,6 +391,9 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
         Ok(_) => tracing::debug!("machine-local token ready"),
         Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
     }
+    // Discover each installed harness's models in the background. Serving and
+    // launch never wait on this; the picker reads whatever rows already exist.
+    weaver_core::spawn_boxed(Box::pin(crate::catalog::run(state.db.clone())));
     weaver_core::spawn_boxed(Box::pin(monitor::run(state.clone())));
     weaver_core::spawn_boxed(Box::pin(repair_acp_sessions_loop(state.clone())));
     weaver_core::spawn_boxed(Box::pin(reap_expired_github_authorizations(state.clone())));

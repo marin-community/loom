@@ -731,6 +731,17 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "catalog.refresh_days",
+        label: "Model catalogue refresh (days)",
+        description: "How old a harness's stored model options may get before the next boot \
+            or daily check re-fetches every model. LOOM_CATALOG_REFRESH_DAYS overrides this. \
+            0 refreshes on every check.",
+        kind: SettingKind::Int,
+        default: "7",
+        group: "Diagnostics",
+        options: &[],
+    },
+    SettingSpec {
         key: "metadata.allow_restricted",
         label: "Allow restricted metadata",
         description: "Explicitly permit bounded title/cue excerpts from restricted sessions \

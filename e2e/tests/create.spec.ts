@@ -61,7 +61,9 @@ test.describe('creating a session via the UI form', () => {
     await repo.fill(weaver.repoPath);
     await goal.fill('Investigate the attached trace');
     await page.getByTestId('launch-profile-picker').selectOption('ui-launch');
-    await page.getByTestId('override-mode').selectOption('plan');
+    await page.getByTestId('launch-settings').locator('summary').click();
+    await page.getByTestId('override-mode').click();
+    await page.getByRole('option', { name: 'plan', exact: true }).click();
     await expect(page.getByTestId('launch-settings')).toContainText('changed');
     await page.getByTestId('clone-profile-open').click();
     await page.getByTestId('clone-profile-name').fill('ui-launch-plan');
@@ -146,8 +148,10 @@ test.describe('creating a session via the UI form', () => {
     const profileEditor = page.getByTestId('profile-editor');
     await profileEditor.getByLabel('Name', { exact: true }).fill('cached-template');
     await profileEditor.getByLabel('Description', { exact: true }).fill('first revision');
-    await page.getByTestId('profile-agent').selectOption('shell');
-    await profileEditor.getByLabel('Protocol', { exact: true }).selectOption('terminal');
+    await page.getByTestId('profile-agent').click();
+    await page.getByRole('option', { name: 'Shell', exact: true }).click();
+    await profileEditor.getByLabel('Protocol', { exact: true }).click();
+    await page.getByRole('option', { name: 'Terminal', exact: true }).click();
     await page.getByTestId('profile-save').click();
     await expect(page.getByText('Saved cached-template.')).toBeVisible();
     await profileEditor.getByLabel('Description', { exact: true }).fill('second revision');
@@ -161,7 +165,9 @@ test.describe('creating a session via the UI form', () => {
       page.getByTestId('launch-profile-picker').locator('option[value="cached-template"]'),
     ).toHaveCount(1);
     await page.getByTestId('launch-profile-picker').selectOption('cached-template');
-    await page.getByTestId('override-mode').selectOption('plan');
+    await page.getByTestId('launch-settings').locator('summary').click();
+    await page.getByTestId('override-mode').click();
+    await page.getByRole('option', { name: 'plan', exact: true }).click();
     const staged = await page.evaluateHandle(() => {
       const transfer = new DataTransfer();
       transfer.items.add(new File(['preserved'], 'preserved.txt'));

@@ -25,6 +25,8 @@ fn agent_choice_view(c: crate::agent::AgentChoice) -> AgentChoiceView {
     AgentChoiceView {
         id: c.id,
         label: c.label,
+        efforts: c.efforts.into_iter().map(agent_choice_view).collect(),
+        fast: c.fast.into_iter().map(agent_choice_view).collect(),
     }
 }
 
@@ -39,6 +41,7 @@ fn agent_metadata_view(m: crate::agent::AgentMetadata) -> AgentMetadataView {
         builtin: m.builtin,
         supports_acp: m.supports_acp,
         protocol: m.protocol,
+        available: m.available,
     }
 }
 
@@ -69,6 +72,7 @@ async fn custom_agents_view(db: &Db) -> ApiResult<CustomAgentsView> {
 pub(super) fn bound_operations() -> Vec<Bound> {
     vec![
         register::<ops::list::Op, _, _>(list_operation),
+        register::<ops::catalog_refresh::Op, _, _>(catalog_refresh_operation),
         register::<ops::custom::create::Op, _, _>(custom_create_operation),
         register::<ops::custom::update::Op, _, _>(custom_update_operation),
         register::<ops::custom::delete::Op, _, _>(custom_delete_operation),
@@ -98,6 +102,18 @@ async fn list_operation(
             .map(custom_agent_view)
             .collect(),
         default_agent,
+    })
+}
+
+/// `agents.catalog.refresh` — queue a full catalogue reconcile.
+async fn catalog_refresh_operation(
+    context: OperationContext,
+    input: ops::catalog_refresh::Input,
+) -> ApiResult<ops::catalog_refresh::Output> {
+    let harness = input.harness.trim();
+    let harness = (!harness.is_empty()).then_some(harness.to_string());
+    Ok(ops::catalog_refresh::Output {
+        started: crate::catalog::spawn_refresh(context.state.db.clone(), harness),
     })
 }
 

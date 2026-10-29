@@ -319,6 +319,7 @@ fn legacy_launch_selection(req: &sessions::launch::Input) -> LaunchSelection {
             // distinct from omission (which inherits the profile).
             model: selected(&req.model),
             effort: selected(&req.effort),
+            fast: None,
             protocol: selected(&req.protocol),
             mode: nonempty(&req.mode),
             class: nonempty(&req.class),
@@ -466,6 +467,7 @@ async fn create_inner(
     let agent = resolved.view.agent.clone();
     let model = resolved.view.model.clone();
     let effort = resolved.view.effort.clone();
+    let fast = resolved.view.fast.clone();
     let protocol = resolved.view.protocol.clone();
     let mode = resolved.view.mode.clone();
     let class = resolved.view.class.clone();
@@ -626,6 +628,7 @@ async fn create_inner(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: None,
                 primer_file: None,
                 extra_env: &extra_env,
@@ -1099,6 +1102,7 @@ async fn create_inner(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
                 extra_env: &extra_env,
