@@ -15,7 +15,7 @@ use weaver_api::operations::sessions;
 const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
 const HANDOFF_RECENT_MESSAGES: usize = 8;
 const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
-const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 #[derive(Debug)]
 pub enum HandoffError {
@@ -724,14 +724,28 @@ async fn handoff_session_inner(
             return Err(HandoffError::internal(error.to_string()));
         }
     };
-    let digest = agent::AgentManager::new(&st.db, &st.acp)
-        .summarize_handoff(
-            &target,
-            &context.summary_request,
-            &launch,
-            HANDOFF_SUMMARY_TIMEOUT,
-        )
-        .await;
+    let read_grant = crate::auth::Grant::Session {
+        session_id: session.id.clone(), branch_id: branch.id.clone(),
+        capabilities: Some(vec!["loom/sessions/read@v1".to_string()]),
+    };
+    let digest = match crate::auth::create_scoped_engine_token(
+        &st.db, &format!("handoff {}", session.id), &read_grant,
+        HANDOFF_SUMMARY_TIMEOUT.as_secs() as i64,
+    ).await {
+        Ok(token) => {
+            let digest = agent::AgentManager::new(&st.db, &st.acp)
+                .summarize_handoff(&target, &context.summary_request, &launch, &token.value, HANDOFF_SUMMARY_TIMEOUT)
+                .await;
+            if let Err(error) = crate::auth::revoke_engine_token(&st.db, &token.id).await {
+                tracing::warn!(%error, session = %session.id, "failed to revoke handoff reader credential");
+            }
+            digest
+        }
+        Err(error) => {
+            tracing::warn!(%error, session = %session.id, "handoff reader credential unavailable");
+            agent::HandoffSummary { text: None, model: None, status: "unavailable" }
+        }
+    };
     let mut handoff_prompt = crate::chat::handoff_prompt(
         &current_goal,
         digest.text.as_deref(),

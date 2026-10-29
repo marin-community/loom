@@ -46,6 +46,7 @@ const JSONRPC = "2.0";
 let sessionId = null;
 let sessionCounter = 0;
 let additionalDirectories = [];
+let mcpServers = [];
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
 const agentName = process.env.FAKE_ACP_AGENT_NAME || "fake-acp-agent";
@@ -436,10 +437,39 @@ async function handlePrompt(id, params) {
   }
   if (summaryOutput !== undefined && text.startsWith("Summarize this coding session")) {
     await sleepCancellable(Number(process.env.FAKE_ACP_SUMMARY_DELAY || "0"));
-    if (summaryOutput.length > 0) {
+    let output = summaryOutput;
+    if (process.env.FAKE_ACP_SUMMARY_HISTORY_QUERY) {
+      const query = process.env.FAKE_ACP_SUMMARY_HISTORY_QUERY;
+      if (text.includes(query)) throw new Error("history evidence leaked into bounded bootstrap");
+      const server = mcpServers.find((server) => server.name === "loom");
+      if (!server || mcpServers.length !== 1) throw new Error("expected only standard Loom history MCP");
+      if (process.env.LOOM_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN) {
+        throw new Error("summary inherited session credentials");
+      }
+      const env = Object.fromEntries(server.env.map(({ name, value }) => [name, value]));
+      const allowed = JSON.parse(env.LOOM_MCP_ALLOWED_TOOLS);
+      if (allowed.length !== 2 || !allowed.includes("session_history") || !allowed.includes("session_search")) {
+        throw new Error("unexpected MCP tool authority");
+      }
+      const headers = { "Content-Type": "application/json", Authorization: `Bearer ${env.LOOM_TOKEN}` };
+      const response = await fetch(`${env.WEAVER_API}/api/sessions/history/search`, {
+        method: "POST", headers,
+        body: JSON.stringify({ session: env.LOOM_SESSION_ID, q: query, role: "user", kinds: ["message"] })
+      });
+      if (!response.ok) throw new Error(`history read failed: ${response.status}`);
+      const page = await response.json();
+      const write = await fetch(`${env.WEAVER_API}/api/sessions/prompt/create`, {
+        method: "POST", headers,
+        body: JSON.stringify({ session: env.LOOM_SESSION_ID, text: "must be denied" })
+      });
+      if (write.status !== 403) throw new Error("reader credential allowed writes");
+      if (page.records.length !== 1) throw new Error("missing historical evidence");
+      output += " " + page.records[0].content;
+    }
+    if (output.length > 0) {
       notify({
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: summaryOutput },
+        content: { type: "text", text: output },
       });
     }
     if (id !== null) respond(id, { stopReason: "end_turn" });
@@ -519,6 +549,7 @@ function handleMessage(msg) {
     case "session/new":
       sessionId = "fake-session-" + ++sessionCounter;
       additionalDirectories = msg.params.additionalDirectories || [];
+      mcpServers = msg.params.mcpServers || [];
       respond(msg.id, {
         sessionId,
         modes: { currentModeId: currentMode, availableModes: MODES },

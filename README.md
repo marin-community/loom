@@ -537,7 +537,8 @@ to present a token or log in. Once `auth.github_organizations` has been
 enabled, Loom permanently latches that database into shared-deployment mode and
 ignores both loopback trust and the machine-local token; every request instead
 resolves to a manual user, an organization-authorized user with a current
-lease, or an engine token minted for a watch script or the scratch shell.
+lease, or an engine token minted for a server subprocess such as a watch script,
+the scratch shell, or a handoff summarizer.
 
 ### Remote MCP connector
 

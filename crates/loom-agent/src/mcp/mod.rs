@@ -1330,7 +1330,7 @@ mod tests {
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:ea41b2aabb6a64e6a8738109c0d56b13363eb3e5d5f2c7aa44ce19e43e1b4752",
+                "sha256:a40d58bf4a0a8f0e22205a8379938c00b00d73941290a106df18411d0b78850f",
             ),
             (
                 "loom/sessions/write@v1",

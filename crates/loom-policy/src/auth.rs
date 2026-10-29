@@ -917,7 +917,7 @@ pub async fn delete_session(db: &Db, cookie: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 'pat' (a user-managed personal access token), 'local' (the machine token),
-/// or 'engine' (minted per subprocess Loom runs itself).
+/// or server-subprocess credentials with role-backed or explicit grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Pat,
@@ -925,6 +925,8 @@ pub enum TokenKind {
     /// Minted by the server for one of its own subprocesses; see
     /// [`create_engine_token`].
     Engine,
+    /// A server subprocess with an explicit grant rather than the user's role.
+    ScopedEngine,
     /// An OAuth access token for the remote MCP endpoint; see
     /// [`crate::oauth`]. It authenticates only through
     /// [`lookup_connector_token`].
@@ -937,6 +939,7 @@ impl TokenKind {
             TokenKind::Pat => "pat",
             TokenKind::Local => "local",
             TokenKind::Engine => "engine",
+            TokenKind::ScopedEngine => "scoped_engine",
             TokenKind::OAuth => "oauth",
         }
     }
@@ -1377,10 +1380,33 @@ pub async fn create_engine_token(
     name: &str,
     ttl_secs: Option<i64>,
 ) -> Result<EngineToken> {
-    sqlx::query("DELETE FROM api_tokens WHERE kind = 'engine' AND expires_at <= ?")
-        .bind(now_iso())
-        .execute(db)
-        .await?;
+    mint_engine_token(db, name, ttl_secs, None).await
+}
+
+/// Give a server subprocess an explicit, expiring grant. Unlike role-backed
+/// engine tokens, this credential cannot gain authority from its owner's role
+/// or an unrestricted runtime session's policy.
+pub async fn create_scoped_engine_token(
+    db: &Db,
+    name: &str,
+    grant: &Grant,
+    ttl_secs: i64,
+) -> Result<EngineToken> {
+    mint_engine_token(db, name, Some(ttl_secs), Some(grant)).await
+}
+
+async fn mint_engine_token(
+    db: &Db,
+    name: &str,
+    ttl_secs: Option<i64>,
+    grant: Option<&Grant>,
+) -> Result<EngineToken> {
+    sqlx::query(
+        "DELETE FROM api_tokens WHERE kind IN ('engine', 'scoped_engine') AND expires_at <= ?",
+    )
+    .bind(now_iso())
+    .execute(db)
+    .await?;
     let owner = primary_user(db)
         .await?
         .ok_or_else(|| anyhow!("no primary user for engine token"))?;
@@ -1393,16 +1419,24 @@ pub async fn create_engine_token(
     };
     let (plain, hash, prefix) = mint_token();
     let id = random_id();
+    let kind = if grant.is_some() {
+        TokenKind::ScopedEngine
+    } else {
+        TokenKind::Engine
+    };
+    let grant_json = serde_json::to_string(grant.unwrap_or(&Grant::Admin))?;
     sqlx::query(
-        "INSERT INTO api_tokens (id, username, name, token_hash, prefix, kind, expires_at)
-         VALUES (?, ?, ?, ?, ?, 'engine', ?)",
+        "INSERT INTO api_tokens (id, username, name, token_hash, prefix, kind, expires_at, grant_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&owner)
     .bind(name)
     .bind(hash)
     .bind(prefix)
+    .bind(kind.as_str())
     .bind(&expires_at)
+    .bind(grant_json)
     .execute(db)
     .await
     .context("creating engine token")?;
@@ -1411,20 +1445,23 @@ pub async fn create_engine_token(
 
 /// Retire one engine token once its subprocess has finished.
 pub async fn revoke_engine_token(db: &Db, id: &str) -> Result<bool> {
-    let res = sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind = 'engine'")
-        .bind(id)
-        .execute(db)
-        .await?;
+    let res =
+        sqlx::query("DELETE FROM api_tokens WHERE id = ? AND kind IN ('engine', 'scoped_engine')")
+            .bind(id)
+            .execute(db)
+            .await?;
     Ok(res.rows_affected() > 0)
 }
 
 /// Retire every engine token recorded under `name`, for a subprocess whose
 /// predecessor may have been replaced without a clean shutdown.
 pub async fn revoke_engine_tokens_named(db: &Db, name: &str) -> Result<u64> {
-    let res = sqlx::query("DELETE FROM api_tokens WHERE name = ? AND kind = 'engine'")
-        .bind(name)
-        .execute(db)
-        .await?;
+    let res = sqlx::query(
+        "DELETE FROM api_tokens WHERE name = ? AND kind IN ('engine', 'scoped_engine')",
+    )
+    .bind(name)
+    .execute(db)
+    .await?;
     Ok(res.rows_affected())
 }
 
@@ -2827,6 +2864,47 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn scoped_engine_tokens_preserve_grants_expire_and_revoke() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let grant = Grant::Session {
+            session_id: "s1".to_string(),
+            branch_id: "b1".to_string(),
+            capabilities: Some(vec!["loom/sessions/read@v1".to_string()]),
+        };
+        let token = create_scoped_engine_token(&db, "handoff s1", &grant, 180)
+            .await
+            .unwrap();
+        assert_eq!(
+            lookup_token(&db, &token.value)
+                .await
+                .unwrap()
+                .unwrap()
+                .grant,
+            grant
+        );
+        assert!(revoke_engine_token(&db, &token.id).await.unwrap());
+        assert!(lookup_token(&db, &token.value).await.unwrap().is_none());
+        let expired = create_scoped_engine_token(&db, "handoff s1", &grant, -1)
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &expired.value).await.unwrap().is_none());
+        let first = create_scoped_engine_token(&db, "handoff s1", &grant, 180)
+            .await
+            .unwrap();
+        let second = create_scoped_engine_token(&db, "handoff s1", &grant, 180)
+            .await
+            .unwrap();
+        assert_eq!(
+            revoke_engine_tokens_named(&db, "handoff s1").await.unwrap(),
+            2
+        );
+        for token in [first, second] {
+            assert!(lookup_token(&db, &token.value).await.unwrap().is_none());
+        }
     }
 
     async fn register_then_lookup(db: &Db) -> Principal {

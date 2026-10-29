@@ -521,6 +521,25 @@ impl HistoryKind {
     }
 }
 
+/// Author role in normalized session history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryRole {
+    User,
+    Assistant,
+    Context,
+}
+
+impl HistoryRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Context => "context",
+        }
+    }
+}
+
 /// One provider-neutral conversation record returned by the session history
 /// API. Optional fields are capability claims, not placeholders: `tool_input`
 /// is absent when the source protocol did not provide invocation arguments
@@ -561,15 +580,16 @@ pub struct HistoryLocationView {
 }
 
 /// One newest-tail page of normalized session history. Records are returned in
-/// chronological display order; pass `older_cursor` as `before` to continue
-/// backward. The same envelope is used by literal search.
+/// chronological display order. Offsets count matching records backward from
+/// the newest; pass `next_offset` to continue. Live history can grow between
+/// requests. The same envelope is used by literal search.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HistoryPageView {
     /// Normalizer/source label (`acp`, `claude`, `codex`, ...).
     pub source: String,
     pub records: Vec<HistoryRecordView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub older_cursor: Option<String>,
+    pub next_offset: Option<usize>,
 }
 
 /// Cumulative session cost optionally reported alongside ACP context usage.

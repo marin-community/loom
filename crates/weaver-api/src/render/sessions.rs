@@ -83,15 +83,11 @@ impl Render for sessions::status::set::Op {
 }
 
 impl Render for sessions::history::list::Op {
-    /// One line per record, oldest first — the reverse of the response order,
-    /// which is newest-first so a paging client can stop early. A terminal reads
-    /// a log downward, and `older_cursor` is echoed last because that is the
-    /// argument for the next page.
+    /// Display records chronologically, followed by the next paging offset.
     fn text(output: &HistoryPageView, _: &NoView) -> String {
         let mut lines: Vec<String> = output
             .records
             .iter()
-            .rev()
             .map(|record| {
                 let label = match record.kind.as_str() {
                     "tool_call" | "tool_result" => record
@@ -112,8 +108,8 @@ impl Render for sessions::history::list::Op {
         if lines.is_empty() {
             return format!("(no {} records)", output.source);
         }
-        if let Some(cursor) = &output.older_cursor {
-            lines.push(format!("\n-- older: --before {cursor}"));
+        if let Some(offset) = output.next_offset {
+            lines.push(format!("\n-- older: --offset {offset}"));
         }
         lines.join("\n")
     }
