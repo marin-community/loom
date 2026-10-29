@@ -62,21 +62,24 @@ capabilities in an older profile revision are ignored at launch.
 
 ## Handoff reconstruction
 
-Handoff works even when the source agent is unavailable. Before replacing its
-provider, Loom freezes the durable ACP journal. The incoming runtime's temporary
-summarizer receives the current goal, prior handoff digest, bounded recent
-records, and read-only `session_history` / `session_search` MCP tools over that
-snapshot. The tools use the same registered operation schemas, normalization,
-filters, offset paging, and search as the unified history API. They cannot select
-another session or invoke writes and carry no Loom or GitHub credential.
+Handoff works even when the source agent is unavailable. After pausing the
+source, Loom gives the incoming runtime's temporary summarizer the current goal,
+prior handoff digest, bounded recent records, and the existing `session_history`
+/ `session_search` MCP tools. These read the durable session journal through
+the ordinary REST API. There is no separate history server, copied transcript,
+or compactor-specific pagination.
+
+A short-lived scoped engine credential grants session reads without runtime
+write authority. It remains usable when recovering a failed source session,
+cannot be widened by the session's unrestricted runtime policy, and is revoked
+when summarization ends (or expires after 180 seconds if interrupted). The
+summarizer process receives the history MCP server with that credential;
+unrelated MCP servers and runtime write credentials are removed.
 
 The summarizer is instructed to page through human messages to recover old
 constraints, investigate decisions, inspect tool evidence selectively, and cite
-record cursors. It has 180 seconds, 32 retrieval calls, and 256 KiB of returned
-history, with at most 32 KiB per page. Oversized pages return fewer records and
-advance the offset by that actual count; a single oversized record produces an
-explicit tool error. The summary must report gaps rather than claim exhaustive
-coverage. Dropping the temporary transport revokes access, including on failure.
+record cursors. Normal history page limits apply. Within its 180-second deadline,
+it must return a summary and report gaps rather than claim exhaustive coverage.
 
 The replacement receives the digest and the bounded recent conversation; full
 history remains available through its normal session tools. Failure to generate

@@ -4578,7 +4578,7 @@ async fn handoff_replaces_provider_and_continues_the_journal() {
     assert_eq!(handoffs[0]["seq"], 0);
     assert_eq!(handoffs[0]["payload"]["from"], "fake-a");
     assert_eq!(handoffs[0]["payload"]["to"], "fake-b");
-    assert_eq!(handoffs[0]["payload"]["prompt_version"], 2);
+    assert_eq!(handoffs[0]["payload"]["prompt_version"], 3);
     assert_eq!(handoffs[0]["payload"]["summary_status"], "generated");
     assert_eq!(handoffs[0]["payload"]["summary_model"], "luna");
     assert_eq!(handoffs[0]["payload"]["summary"], summary);
@@ -5099,6 +5099,14 @@ async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
         })
     })
     .await;
+    let tokens: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_tokens WHERE kind = 'scoped_engine' AND name = ?",
+    )
+    .bind(format!("handoff {id}"))
+    .fetch_one(&ts.state.db)
+    .await
+    .unwrap();
+    assert_eq!(tokens, 0, "handoff reader credential is revoked");
     let blocks = chat["blocks"].as_array().unwrap();
     let boundary = blocks
         .iter()

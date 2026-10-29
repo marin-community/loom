@@ -46,70 +46,56 @@ impl From<anyhow::Error> for PageError {
     }
 }
 
-/// Immutable normalized history shared by live API reads and handoff retrieval.
-/// A handoff captures this once, before replacing the source provider.
-#[derive(Clone)]
-pub struct Snapshot {
-    source: String,
-    records: Vec<HistoryRecordView>,
-}
-
-impl Snapshot {
-    pub fn from_acp(blocks: &[crate::chat::ChatBlockView]) -> Self {
-        Self {
-            source: "acp".to_string(),
-            records: blocks.iter().map(acp_record).collect(),
-        }
+fn page_records(
+    source: &str,
+    records: &[HistoryRecordView],
+    options: PageOptions,
+) -> Result<HistoryPageView, PageError> {
+    let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
+    if !(1..=MAX_LIMIT).contains(&limit) {
+        return Err(PageError::bad_request(format!(
+            "limit must be between 1 and {MAX_LIMIT}"
+        )));
     }
-
-    pub fn page(&self, options: PageOptions) -> Result<HistoryPageView, PageError> {
-        let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
-        if !(1..=MAX_LIMIT).contains(&limit) {
+    let query = options
+        .query
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_lowercase);
+    if let Some(query) = &options.query {
+        if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES {
             return Err(PageError::bad_request(format!(
-                "limit must be between 1 and {MAX_LIMIT}"
+                "q must contain 1 to {MAX_QUERY_BYTES} bytes"
             )));
         }
-        let query = options
-            .query
-            .as_deref()
-            .map(str::trim)
-            .map(str::to_lowercase);
-        if let Some(query) = &options.query {
-            if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES {
-                return Err(PageError::bad_request(format!(
-                    "q must contain 1 to {MAX_QUERY_BYTES} bytes"
-                )));
-            }
-        }
-        let mut matching = self
-            .records
-            .iter()
-            .rev()
-            .filter(|record| {
-                (options.kinds.is_empty()
-                    || options
-                        .kinds
-                        .iter()
-                        .any(|kind| kind.as_str() == record.kind))
-                    && options
-                        .role
-                        .is_none_or(|role| record.role.as_deref() == Some(role.as_str()))
-                    && query.as_ref().is_none_or(|needle| {
-                        searchable_text(record).to_lowercase().contains(needle)
-                    })
-            })
-            .skip(options.offset);
-        let mut records: Vec<_> = matching.by_ref().take(limit).cloned().collect();
-        let next_offset = matching
-            .next()
-            .map(|_| options.offset.saturating_add(records.len()));
-        records.reverse();
-        Ok(HistoryPageView {
-            source: self.source.clone(),
-            records,
-            next_offset,
-        })
     }
+    let mut matching = records
+        .iter()
+        .rev()
+        .filter(|record| {
+            (options.kinds.is_empty()
+                || options
+                    .kinds
+                    .iter()
+                    .any(|kind| kind.as_str() == record.kind))
+                && options
+                    .role
+                    .is_none_or(|role| record.role.as_deref() == Some(role.as_str()))
+                && query
+                    .as_ref()
+                    .is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
+        })
+        .skip(options.offset);
+    let mut records: Vec<_> = matching.by_ref().take(limit).cloned().collect();
+    let next_offset = matching
+        .next()
+        .map(|_| options.offset.saturating_add(records.len()));
+    records.reverse();
+    Ok(HistoryPageView {
+        source: source.to_string(),
+        records,
+        next_offset,
+    })
 }
 
 /// Normalize the session's durable source, then apply the shared history query.
@@ -119,13 +105,19 @@ pub async fn page(
     branch: &Branch,
     options: PageOptions,
 ) -> Result<HistoryPageView, PageError> {
-    let snapshot = if session.protocol == "acp" {
-        Snapshot::from_acp(&crate::chat::list(db, &session.id).await?)
+    let (source, records) = if session.protocol == "acp" {
+        (
+            "acp".to_string(),
+            crate::chat::list(db, &session.id)
+                .await?
+                .iter()
+                .map(acp_record)
+                .collect(),
+        )
     } else {
-        let (source, records) = load_terminal(db, session, branch).await?;
-        Snapshot { source, records }
+        load_terminal(db, session, branch).await?
     };
-    snapshot.page(options)
+    page_records(&source, &records, options)
 }
 
 async fn load_terminal(
@@ -446,13 +438,12 @@ mod tests {
         )
         .await
         .unwrap();
-        let snapshot = Snapshot::from_acp(&crate::chat::list(&db, &session.id).await.unwrap());
         let options = || PageOptions {
             role: Some(weaver_api::HistoryRole::User),
             limit: Some(1),
             ..Default::default()
         };
-        let newest = snapshot.page(options()).unwrap();
+        let newest = page(&db, &session, &branch, options()).await.unwrap();
         assert_eq!(newest.records[0].content.as_deref(), Some("new request"));
         assert_eq!(newest.next_offset, Some(1));
         let older = page(
@@ -468,14 +459,19 @@ mod tests {
         .unwrap();
         assert_eq!(older.records[0].content.as_deref(), Some("old constraint"));
         assert!(older.next_offset.is_none());
-        assert!(snapshot
-            .page(PageOptions {
+        assert!(page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
                 offset: usize::MAX,
                 ..options()
-            })
-            .unwrap()
-            .records
-            .is_empty());
+            }
+        )
+        .await
+        .unwrap()
+        .records
+        .is_empty());
     }
 
     #[test]

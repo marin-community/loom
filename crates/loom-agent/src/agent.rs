@@ -1797,15 +1797,15 @@ impl<'a> AgentManager<'a> {
 
     /// Ask the incoming runtime's advertised Haiku/Luna-class model for a
     /// digest over a transient ACP session. The actual incoming launch is
-    /// cloned for adapter/config parity, then given only read-only snapshot
-    /// history tools, without session authority. Adapter, model-selection,
+    /// cloned for adapter/config parity, then given the existing history MCP
+    /// tools with a read-only scoped credential. Adapter, model-selection,
     /// timeout, and output failures degrade to the handoff fallback.
     pub async fn summarize_handoff(
         &self,
         runtime: &str,
         prompt: &str,
         incoming: &AcpLaunch,
-        history: crate::history::Snapshot,
+        history_token: &str,
         timeout: Duration,
     ) -> HandoffSummary {
         let metadata = match metadata_for(self.db, runtime).await {
@@ -1826,36 +1826,26 @@ impl<'a> AgentManager<'a> {
                 };
             }
         };
-        let history_server = match crate::handoff_history::HistoryServer::start(history).await {
-            Ok(server) => server,
-            Err(error) => {
-                tracing::warn!(%error, "handoff history transport unavailable");
-                return HandoffSummary {
-                    text: None,
-                    model: None,
-                    status: "unavailable",
-                };
-            }
-        };
-        let mut launch = transient_prompt_launch(incoming);
-        launch.mcp_servers.push(history_server.config.clone());
-        if let NewOrLoad::New {
-            meta: Some(meta), ..
-        } = &mut launch.new_or_load
-        {
-            if let Some(options) = meta
-                .pointer_mut("/claudeCode/options")
-                .and_then(Value::as_object_mut)
-            {
-                options.insert(
-                    "allowedTools".to_string(),
-                    json!([
-                        "mcp__handoff__session_history",
-                        "mcp__handoff__session_search"
-                    ]),
-                );
-            }
-        }
+        let allowed_tools = vec![
+            crate::mcp::builtin_permission_rule("session", "history"),
+            crate::mcp::builtin_permission_rule("session", "search"),
+        ];
+        let mut history_env = incoming.env.clone();
+        history_env.retain(|(name, _)| name != "LOOM_TOKEN");
+        history_env.push(("LOOM_TOKEN".to_string(), history_token.to_string()));
+        let mcp_servers =
+            match crate::mcp::acp_server_configs(&allowed_tools, None, &history_env).await {
+                Ok(servers) => servers,
+                Err(error) => {
+                    tracing::warn!(%error, "handoff history tools unavailable");
+                    return HandoffSummary {
+                        text: None,
+                        model: None,
+                        status: "unavailable",
+                    };
+                }
+            };
+        let launch = transient_prompt_launch(incoming, mcp_servers, &allowed_tools);
         match crate::acp::prompt_once(
             self.db,
             self.acp.transient_sessions(),
@@ -2086,7 +2076,7 @@ impl<'a> AgentManager<'a> {
         )
         .await
         {
-            Ok(launch) => transient_prompt_launch(&launch),
+            Ok(launch) => transient_prompt_launch(&launch, Vec::new(), &[]),
             Err(error) => {
                 tracing::warn!(runtime, %error, "failed to build one-shot ACP launch");
                 return None;
@@ -2138,7 +2128,13 @@ impl<'a> AgentManager<'a> {
     }
 }
 
-fn transient_prompt_launch(incoming: &AcpLaunch) -> AcpLaunch {
+/// Apply the common transient-session policy. MCP descriptors are standard ACP;
+/// Claude additionally requires its adapter-specific tool allowlist in metadata.
+fn transient_prompt_launch(
+    incoming: &AcpLaunch,
+    mcp_servers: Vec<Value>,
+    allowed_tools: &[String],
+) -> AcpLaunch {
     let mut launch = incoming.clone();
     let mut env = BTreeMap::new();
     if !launch.env_clear {
@@ -2163,7 +2159,7 @@ fn transient_prompt_launch(incoming: &AcpLaunch) -> AcpLaunch {
     });
     launch.env = env.into_iter().collect();
     launch.env_clear = true;
-    launch.mcp_servers.clear();
+    launch.mcp_servers = mcp_servers;
     launch.additional_directories.clear();
     launch.goal = None;
     launch.mode = Some("plan".to_string());
@@ -2181,7 +2177,7 @@ fn transient_prompt_launch(incoming: &AcpLaunch) -> AcpLaunch {
             options.remove("model");
             options.remove("appendSystemPrompt");
             options.insert("permissionMode".to_string(), json!("plan"));
-            options.insert("allowedTools".to_string(), json!([]));
+            options.insert("allowedTools".to_string(), json!(allowed_tools));
             options.insert("tools".to_string(), json!([]));
             options.insert("settingSources".to_string(), json!([]));
             options.insert("strictMcpConfig".to_string(), json!(true));
@@ -2614,7 +2610,7 @@ mod tests {
             setup_timeout: Duration::from_secs(30),
         };
 
-        let summary = transient_prompt_launch(&incoming);
+        let summary = transient_prompt_launch(&incoming, Vec::new(), &[]);
         assert_eq!(summary.adapter_cmd, incoming.adapter_cmd);
         assert!(summary.env_clear);
         let NewOrLoad::New { cwd, meta } = summary.new_or_load else {
@@ -2675,7 +2671,7 @@ mod tests {
             setup_timeout: Duration::from_secs(30),
         };
 
-        let transient = transient_prompt_launch(&incoming);
+        let transient = transient_prompt_launch(&incoming, Vec::new(), &[]);
         assert!(transient.env.iter().all(|(name, _)| !matches!(
             name.as_str(),
             "CODEX_CONFIG" | "INITIAL_AGENT_MODE" | "CLAUDECODE"
@@ -2696,6 +2692,18 @@ mod tests {
                 "strictMcpConfig": true
             })
         );
+        let tools = vec![crate::mcp::builtin_permission_rule("session", "history")];
+        let servers = vec![json!({"name":"loom", "command":"loom", "args":["mcp", "serve"]})];
+        let transient = transient_prompt_launch(&incoming, servers.clone(), &tools);
+        assert_eq!(transient.mcp_servers, servers);
+        let NewOrLoad::New {
+            meta: Some(meta), ..
+        } = transient.new_or_load
+        else {
+            panic!("expected Claude metadata");
+        };
+        assert_eq!(meta["claudeCode"]["options"]["allowedTools"], json!(tools));
+        assert_eq!(meta["claudeCode"]["options"]["tools"], json!([]));
     }
 
     #[test]

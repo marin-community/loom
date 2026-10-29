@@ -1163,7 +1163,12 @@ operator scratch shell — receive a `kind = 'engine'` `api_tokens` row as
 current role, never writes its plaintext to disk, and revokes it when the
 process ends (a watch spawn's token also expires shortly after the round
 budget). Because it is issued per process rather than persisted, it stays
-valid in shared mode, which the machine-local token does not.
+valid in shared mode, which the machine-local token does not. Subprocesses that
+need narrower authority use `kind = 'scoped_engine'` with an explicit serialized
+grant and an expiry. Handoff summarizers use a session read grant to call the
+ordinary history MCP tools, including when the source runtime is in error.
+Scoped engine grants are not widened to the owner's role or the runtime's
+unrestricted policy; the same engine-token cleanup revokes both kinds.
 
 **CLI contexts.** The `loom` CLI stores named server URLs in
 `$XDG_CONFIG_HOME/loom/config.toml` and their personal API tokens in a separate

@@ -3,7 +3,6 @@
 pub mod acp;
 pub mod agent;
 pub mod custom_agents;
-mod handoff_history;
 pub mod mcp;
 pub mod skills;
 
