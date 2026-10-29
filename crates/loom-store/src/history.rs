@@ -7,8 +7,6 @@
 //! into one record vocabulary without manufacturing data a provider did not
 //! supply.
 
-use std::collections::HashSet;
-
 use serde_json::Value;
 use weaver_api::{HistoryLocationView, HistoryPageView, HistoryRecordView};
 use weaver_core::branch::Branch;
@@ -23,7 +21,8 @@ pub use weaver_api::operations::sessions::history::{MAX_LIMIT, MAX_QUERY_BYTES};
 
 #[derive(Debug, Default)]
 pub struct PageOptions {
-    pub before: Option<String>,
+    pub offset: usize,
+    pub role: Option<weaver_api::HistoryRole>,
     pub limit: Option<usize>,
     pub kinds: Vec<weaver_api::HistoryKind>,
     pub query: Option<String>,
@@ -47,165 +46,88 @@ impl From<anyhow::Error> for PageError {
     }
 }
 
-/// Load the source appropriate to `session`, normalize it, filter it, and return
-/// a newest-tail page in chronological display order.
+/// Immutable normalized history shared by live API reads and handoff retrieval.
+/// A handoff captures this once, before replacing the source provider.
+#[derive(Clone)]
+pub struct Snapshot {
+    source: String,
+    records: Vec<HistoryRecordView>,
+}
+
+impl Snapshot {
+    pub fn from_acp(blocks: &[crate::chat::ChatBlockView]) -> Self {
+        Self {
+            source: "acp".to_string(),
+            records: blocks.iter().map(acp_record).collect(),
+        }
+    }
+
+    pub fn page(&self, options: PageOptions) -> Result<HistoryPageView, PageError> {
+        let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
+        if !(1..=MAX_LIMIT).contains(&limit) {
+            return Err(PageError::bad_request(format!(
+                "limit must be between 1 and {MAX_LIMIT}"
+            )));
+        }
+        let query = options
+            .query
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_lowercase);
+        if let Some(query) = &options.query {
+            if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES {
+                return Err(PageError::bad_request(format!(
+                    "q must contain 1 to {MAX_QUERY_BYTES} bytes"
+                )));
+            }
+        }
+        let mut matching = self
+            .records
+            .iter()
+            .rev()
+            .filter(|record| {
+                (options.kinds.is_empty()
+                    || options
+                        .kinds
+                        .iter()
+                        .any(|kind| kind.as_str() == record.kind))
+                    && options
+                        .role
+                        .is_none_or(|role| record.role.as_deref() == Some(role.as_str()))
+                    && query.as_ref().is_none_or(|needle| {
+                        searchable_text(record).to_lowercase().contains(needle)
+                    })
+            })
+            .skip(options.offset);
+        let mut records: Vec<_> = matching.by_ref().take(limit).cloned().collect();
+        let next_offset = matching
+            .next()
+            .map(|_| options.offset.saturating_add(records.len()));
+        records.reverse();
+        Ok(HistoryPageView {
+            source: self.source.clone(),
+            records,
+            next_offset,
+        })
+    }
+}
+
+/// Normalize the session's durable source, then apply the shared history query.
 pub async fn page(
     db: &Db,
     session: &Session,
     branch: &Branch,
     options: PageOptions,
 ) -> Result<HistoryPageView, PageError> {
-    let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
-    if !(1..=MAX_LIMIT).contains(&limit) {
-        return Err(PageError::bad_request(format!(
-            "limit must be between 1 and {MAX_LIMIT}"
-        )));
-    }
-    let kinds: HashSet<&str> = options
-        .kinds
-        .iter()
-        .copied()
-        .map(weaver_api::HistoryKind::as_str)
-        .collect();
-    let query = options
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .map(str::to_lowercase);
-    if options.query.is_some() && query.is_none() {
-        return Err(PageError::bad_request("q must not be empty"));
-    }
-    if options
-        .query
-        .as_ref()
-        .is_some_and(|query| query.len() > MAX_QUERY_BYTES)
-    {
-        return Err(PageError::bad_request(format!(
-            "q must be at most {MAX_QUERY_BYTES} bytes"
-        )));
-    }
-
-    if session.protocol == "acp" {
-        return acp_page(db, session, &options, limit, &kinds, query.as_deref()).await;
-    }
-
-    let (source, records) = load_terminal(db, session, branch).await?;
-    let end = match options.before.as_deref() {
-        Some(before) => records
-            .iter()
-            .position(|record| record.cursor == before)
-            .ok_or_else(unknown_cursor)?,
-        None => records.len(),
+    let snapshot = if session.protocol == "acp" {
+        Snapshot::from_acp(&crate::chat::list(db, &session.id).await?)
+    } else {
+        let (source, records) = load_terminal(db, session, branch).await?;
+        Snapshot { source, records }
     };
-    let matching = records[..end]
-        .iter()
-        .filter(|record| matches(record, &kinds, query.as_deref()))
-        .cloned()
-        .collect::<Vec<_>>();
-    Ok(tail_page(source, matching, limit))
+    snapshot.page(options)
 }
 
-/// The newest-tail page of an ACP session's journal.
-///
-/// The journal is read backwards a chunk at a time and stops as soon as the page
-/// is provably full, so an ordinary page costs one bounded query no matter how
-/// long the session has been running. Only a search that matches little has to
-/// walk the whole journal, and even then it holds one chunk at a time.
-async fn acp_page(
-    db: &Db,
-    session: &Session,
-    options: &PageOptions,
-    limit: usize,
-    kinds: &HashSet<&str>,
-    query: Option<&str>,
-) -> Result<HistoryPageView, PageError> {
-    let mut before = match options.before.as_deref() {
-        Some(cursor) => {
-            let (turn, seq) = parse_acp_cursor(cursor)?;
-            if !crate::chat::block_exists(db, &session.id, turn, seq).await? {
-                return Err(unknown_cursor());
-            }
-            Some((turn, seq))
-        }
-        None => None,
-    };
-    let chunk = limit.saturating_add(1).max(SCAN_CHUNK);
-    let mut matching: Vec<HistoryRecordView> = Vec::new();
-    loop {
-        let (blocks, has_older) = crate::chat::list_page(db, &session.id, before, chunk).await?;
-        let Some(oldest) = blocks.first() else { break };
-        before = Some((oldest.turn, oldest.seq));
-        let mut older: Vec<HistoryRecordView> = blocks
-            .iter()
-            .map(acp_record)
-            .filter(|record| matches(record, kinds, query))
-            .collect();
-        older.append(&mut matching);
-        matching = older;
-        // One record beyond the page is all it takes to know more remain.
-        if matching.len() > limit || !has_older {
-            break;
-        }
-    }
-    Ok(tail_page("acp".to_string(), matching, limit))
-}
-
-/// Blocks read per backwards step of [`acp_page`]. Large enough that an unfiltered
-/// page is a single query, small enough that a whole-journal search stays bounded
-/// in memory.
-const SCAN_CHUNK: usize = 512;
-
-/// Cut the newest `limit` records out of a chronological run of matching records,
-/// plus the cursor the caller pages further back with. `matching` holding more
-/// than `limit` is what proves older records remain.
-fn tail_page(
-    source: String,
-    mut matching: Vec<HistoryRecordView>,
-    limit: usize,
-) -> HistoryPageView {
-    let has_more = matching.len() > limit;
-    if has_more {
-        matching.drain(..matching.len() - limit);
-    }
-    let older_cursor = has_more.then(|| {
-        matching
-            .first()
-            .expect("a non-zero page limit retains a record")
-            .cursor
-            .clone()
-    });
-    HistoryPageView {
-        source,
-        records: matching,
-        older_cursor,
-    }
-}
-
-fn matches(record: &HistoryRecordView, kinds: &HashSet<&str>, query: Option<&str>) -> bool {
-    (kinds.is_empty() || kinds.contains(record.kind.as_str()))
-        && query.is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
-}
-
-/// The `(turn, seq)` an `acp:<turn>:<seq>` cursor addresses. A cursor this
-/// session never issued is a bad request, not an empty page.
-fn parse_acp_cursor(cursor: &str) -> Result<(i64, i64), PageError> {
-    let (turn, seq) = cursor
-        .strip_prefix("acp:")
-        .and_then(|rest| rest.split_once(':'))
-        .ok_or_else(unknown_cursor)?;
-    let turn = turn.parse().map_err(|_| unknown_cursor())?;
-    let seq = seq.parse().map_err(|_| unknown_cursor())?;
-    Ok((turn, seq))
-}
-
-fn unknown_cursor() -> PageError {
-    PageError::bad_request("before is not a cursor from this session history")
-}
-
-/// A terminal provider's transcript, normalized. Unlike the ACP journal this has
-/// no queryable form — it is a file the Iris normalizer reads whole — so paging
-/// happens after the load rather than inside it.
 async fn load_terminal(
     db: &Db,
     session: &Session,
@@ -446,12 +368,10 @@ mod tests {
         (session, branch)
     }
 
-    /// The journal is read backwards in bounded steps, so a page has to be
-    /// assembled correctly whether it falls inside the first step or beyond it.
     #[tokio::test]
-    async fn acp_paging_walks_back_past_one_scan_step() {
+    async fn acp_history_pages_and_searches_older_records() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        let total = SCAN_CHUNK + 40;
+        let total = 552;
         let (session, branch) = seed_acp_session(&db, total).await;
 
         let newest = page(
@@ -469,14 +389,9 @@ mod tests {
         assert_eq!(newest.records.len(), 2);
         assert_eq!(content(&newest, 0), format!("m{}", total - 2));
         assert_eq!(content(&newest, 1), format!("m{}", total - 1));
-        assert_eq!(
-            newest.older_cursor.as_deref(),
-            Some(format!("acp:0:{}", total - 2).as_str()),
-            "the oldest record of the page is where the next one resumes"
-        );
+        assert_eq!(newest.next_offset, Some(2));
 
-        // The only hit sits older than the first backwards step: the scan has to
-        // keep going rather than report an empty page.
+        // Search must include the oldest record, beyond the newest page.
         let found = page(
             &db,
             &session,
@@ -490,14 +405,14 @@ mod tests {
         .unwrap();
         assert_eq!(found.records.len(), 1);
         assert_eq!(content(&found, 0), "m0");
-        assert!(found.older_cursor.is_none(), "nothing older matches");
+        assert!(found.next_offset.is_none(), "nothing older matches");
 
         let older = page(
             &db,
             &session,
             &branch,
             PageOptions {
-                before: newest.older_cursor.clone(),
+                offset: newest.next_offset.unwrap(),
                 limit: Some(1),
                 ..Default::default()
             },
@@ -508,23 +423,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acp_rejects_a_cursor_this_session_never_issued() {
+    async fn history_filters_roles_before_applying_offsets() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let (session, branch) = seed_acp_session(&db, 3).await;
-        for cursor in ["iris:0:0", "acp:nope", "acp:0:99"] {
-            let error = page(
-                &db,
-                &session,
-                &branch,
-                PageOptions {
-                    before: Some(cursor.to_string()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect_err("an unknown cursor is a bad request");
-            assert!(matches!(error, PageError::BadRequest(_)), "{cursor}");
-        }
+        crate::chat::insert(
+            &db,
+            &session.id,
+            1,
+            0,
+            kind::USER_MESSAGE,
+            &json!({"text":"old constraint"}),
+        )
+        .await
+        .unwrap();
+        crate::chat::insert(
+            &db,
+            &session.id,
+            2,
+            0,
+            kind::USER_MESSAGE,
+            &json!({"text":"new request"}),
+        )
+        .await
+        .unwrap();
+        let snapshot = Snapshot::from_acp(&crate::chat::list(&db, &session.id).await.unwrap());
+        let options = || PageOptions {
+            role: Some(weaver_api::HistoryRole::User),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let newest = snapshot.page(options()).unwrap();
+        assert_eq!(newest.records[0].content.as_deref(), Some("new request"));
+        assert_eq!(newest.next_offset, Some(1));
+        let older = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                offset: 1,
+                ..options()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(older.records[0].content.as_deref(), Some("old constraint"));
+        assert!(older.next_offset.is_none());
+        assert!(snapshot
+            .page(PageOptions {
+                offset: usize::MAX,
+                ..options()
+            })
+            .unwrap()
+            .records
+            .is_empty());
     }
 
     #[test]

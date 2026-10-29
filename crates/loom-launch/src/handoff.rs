@@ -15,7 +15,7 @@ use weaver_api::operations::sessions;
 const HANDOFF_SUMMARY_CHARS: usize = 32 * 1024;
 const HANDOFF_RECENT_MESSAGES: usize = 8;
 const HANDOFF_RECENT_CHARS: usize = 16 * 1024;
-const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const HANDOFF_SUMMARY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 #[derive(Debug)]
 pub enum HandoffError {
@@ -729,6 +729,7 @@ async fn handoff_session_inner(
             &target,
             &context.summary_request,
             &launch,
+            crate::history::Snapshot::from_acp(&blocks),
             HANDOFF_SUMMARY_TIMEOUT,
         )
         .await;

@@ -7,12 +7,18 @@ POST /api/sessions/history/list    { session, ... }
 POST /api/sessions/history/search  { session, q, ... }
 ```
 
-Both routes accept `before=<opaque cursor>`, `limit=1..200` (default 100), and
-`kinds=<comma-separated kinds>`. A response is a newest-tail page whose
-`records` are in chronological display order. If `older_cursor` is present,
-pass it as the next request's exclusive `before` cursor. Search is
-case-insensitive literal matching over the same normalized records; it is not
-semantic or repository-wide search.
+Both routes accept `offset` (default 0), `limit=1..200` (default 100),
+`kinds` (an array of record kinds), and `role` (`user`, `assistant`, or `context`).
+Offsets count matching records backward from the newest, after filters and
+search. Each page's `records` are returned in chronological display order.
+Pass `next_offset`, when present, as `offset` with the same filters to continue.
+For example, `{ "session": "...", "kinds": ["message"], "role": "user",
+"limit": 20, "offset": 0 }` returns the latest 20 human messages without tools.
+Live history can grow between requests, shifting offsets. Record cursors remain
+stable references for citations, not pagination arguments.
+
+Search is case-insensitive literal matching over the same normalized records;
+it is not semantic or repository-wide search.
 
 The record kinds are `message`, `reasoning`, `tool_call`, `tool_result`,
 `context`, `event`, and `image`. Common prose is in `content`. Tool records can
@@ -53,3 +59,25 @@ and `session_search` tools. Their schemas have no session selector. The aggregat
 `LOOM_SESSION_ID`, uses the session-scoped `LOOM_TOKEN`, and calls the REST
 routes above. Profiles can select the `session` MCP group (or `all`); missing
 capabilities in an older profile revision are ignored at launch.
+
+## Handoff reconstruction
+
+Handoff works even when the source agent is unavailable. Before replacing its
+provider, Loom freezes the durable ACP journal. The incoming runtime's temporary
+summarizer receives the current goal, prior handoff digest, bounded recent
+records, and read-only `session_history` / `session_search` MCP tools over that
+snapshot. The tools use the same registered operation schemas, normalization,
+filters, offset paging, and search as the unified history API. They cannot select
+another session or invoke writes and carry no Loom or GitHub credential.
+
+The summarizer is instructed to page through human messages to recover old
+constraints, investigate decisions, inspect tool evidence selectively, and cite
+record cursors. It has 180 seconds, 32 retrieval calls, and 256 KiB of returned
+history, with at most 32 KiB per page. Oversized pages return fewer records and
+advance the offset by that actual count; a single oversized record produces an
+explicit tool error. The summary must report gaps rather than claim exhaustive
+coverage. Dropping the temporary transport revokes access, including on failure.
+
+The replacement receives the digest and the bounded recent conversation; full
+history remains available through its normal session tools. Failure to generate
+a summary retains the recent-conversation and history-lookup fallback.

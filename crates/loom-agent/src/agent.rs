@@ -1797,14 +1797,15 @@ impl<'a> AgentManager<'a> {
 
     /// Ask the incoming runtime's advertised Haiku/Luna-class model for a
     /// digest over a transient ACP session. The actual incoming launch is
-    /// cloned for adapter/config parity, then stripped of session authority and
-    /// MCP access. Any adapter, model-selection, timeout, or output failure
-    /// degrades to the handoff fallback.
+    /// cloned for adapter/config parity, then given only read-only snapshot
+    /// history tools, without session authority. Adapter, model-selection,
+    /// timeout, and output failures degrade to the handoff fallback.
     pub async fn summarize_handoff(
         &self,
         runtime: &str,
         prompt: &str,
         incoming: &AcpLaunch,
+        history: crate::history::Snapshot,
         timeout: Duration,
     ) -> HandoffSummary {
         let metadata = match metadata_for(self.db, runtime).await {
@@ -1825,7 +1826,36 @@ impl<'a> AgentManager<'a> {
                 };
             }
         };
-        let launch = transient_prompt_launch(incoming);
+        let history_server = match crate::handoff_history::HistoryServer::start(history).await {
+            Ok(server) => server,
+            Err(error) => {
+                tracing::warn!(%error, "handoff history transport unavailable");
+                return HandoffSummary {
+                    text: None,
+                    model: None,
+                    status: "unavailable",
+                };
+            }
+        };
+        let mut launch = transient_prompt_launch(incoming);
+        launch.mcp_servers.push(history_server.config.clone());
+        if let NewOrLoad::New {
+            meta: Some(meta), ..
+        } = &mut launch.new_or_load
+        {
+            if let Some(options) = meta
+                .pointer_mut("/claudeCode/options")
+                .and_then(Value::as_object_mut)
+            {
+                options.insert(
+                    "allowedTools".to_string(),
+                    json!([
+                        "mcp__handoff__session_history",
+                        "mcp__handoff__session_search"
+                    ]),
+                );
+            }
+        }
         match crate::acp::prompt_once(
             self.db,
             self.acp.transient_sessions(),

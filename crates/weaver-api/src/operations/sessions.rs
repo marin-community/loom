@@ -533,15 +533,17 @@ pub mod history {
     pub mod list {
         use super::prelude::*;
 
-        /// Page this session's normalized records, newest tail first; follow
-        /// `older_cursor` backward for the page before.
+        /// Page this session's normalized records, counting matching records
+        /// backward from the newest. Each page is returned chronologically.
         #[operation(id = "sessions.history.list", actor = SessionSelf, scope = Session, risk = Read,
                     grants = ["loom/sessions/read@v1"], cli = "sessions history",
                     render = custom)]
         pub struct Input {
-            /// Page backward from this cursor (exclusive). Omit for the newest tail.
-            #[schemars(length(min = 1))]
-            pub before: Option<String>,
+            /// Number of matching records to skip from the newest. Defaults to zero.
+            #[schemars(range(min = 0))]
+            pub offset: Option<usize>,
+            /// Restrict to records authored by this role.
+            pub role: Option<HistoryRole>,
             /// Maximum records to return.
             #[schemars(range(min = 1, max = 200))]
             pub limit: Option<i64>,
@@ -567,9 +569,11 @@ pub mod history {
             /// Case-insensitive literal search text.
             #[schemars(length(min = 1, max = 1024))]
             pub q: String,
-            /// Page backward from this cursor (exclusive). Omit for the newest tail.
-            #[schemars(length(min = 1))]
-            pub before: Option<String>,
+            /// Number of matching records to skip from the newest. Defaults to zero.
+            #[schemars(range(min = 0))]
+            pub offset: Option<usize>,
+            /// Restrict to records authored by this role.
+            pub role: Option<HistoryRole>,
             /// Maximum records to return.
             #[schemars(range(min = 1, max = 200))]
             pub limit: Option<i64>,

@@ -1594,7 +1594,8 @@ async fn op_history_list(
         &session,
         &branch,
         crate::history::PageOptions {
-            before: input.before,
+            offset: input.offset.unwrap_or_default(),
+            role: input.role,
             limit: input.limit.and_then(|n| usize::try_from(n).ok()),
             kinds: input.kinds,
             query: None,
@@ -1615,7 +1616,8 @@ async fn op_history_search(
         &session,
         &branch,
         crate::history::PageOptions {
-            before: input.before,
+            offset: input.offset.unwrap_or_default(),
+            role: input.role,
             limit: input.limit.and_then(|n| usize::try_from(n).ok()),
             kinds: input.kinds,
             query: Some(input.q),

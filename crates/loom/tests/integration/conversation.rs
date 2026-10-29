@@ -53,7 +53,7 @@ async fn conversation_endpoint_returns_the_iris_log() {
     assert_eq!(messages[1]["blocks"][0]["text"], "Working on it.");
 
     // The normalized history resource reads the same live terminal transcript,
-    // but gives agents a bounded, cursor-paged record contract.
+    // but gives agents a bounded, offset-paged record contract.
     let latest = client
         .post(
             "/api/sessions/history/list",
@@ -66,18 +66,18 @@ async fn conversation_endpoint_returns_the_iris_log() {
     assert_eq!(latest["records"][0]["kind"], "message");
     assert_eq!(latest["records"][0]["role"], "assistant");
     assert_eq!(latest["records"][0]["content"], "Working on it.");
-    let cursor = latest["older_cursor"].as_str().unwrap();
+    let offset = latest["next_offset"].as_u64().unwrap();
 
     let older = client
         .post(
             "/api/sessions/history/list",
-            json!({ "session": id, "limit": 1, "before": cursor }),
+            json!({ "session": id, "limit": 1, "offset": offset }),
         )
         .await
         .unwrap();
     assert_eq!(older["records"][0]["role"], "user");
     assert_eq!(older["records"][0]["content"], "do the work");
-    assert!(older.get("older_cursor").is_none());
+    assert!(older.get("next_offset").is_none());
 
     let search = client
         .post(

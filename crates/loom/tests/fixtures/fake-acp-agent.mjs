@@ -46,6 +46,7 @@ const JSONRPC = "2.0";
 let sessionId = null;
 let sessionCounter = 0;
 let additionalDirectories = [];
+let mcpServers = [];
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
 const agentName = process.env.FAKE_ACP_AGENT_NAME || "fake-acp-agent";
@@ -436,10 +437,31 @@ async function handlePrompt(id, params) {
   }
   if (summaryOutput !== undefined && text.startsWith("Summarize this coding session")) {
     await sleepCancellable(Number(process.env.FAKE_ACP_SUMMARY_DELAY || "0"));
-    if (summaryOutput.length > 0) {
+    let output = summaryOutput;
+    if (process.env.FAKE_ACP_SUMMARY_HISTORY_QUERY) {
+      const query = process.env.FAKE_ACP_SUMMARY_HISTORY_QUERY;
+      if (text.includes(query)) throw new Error("history evidence leaked into bounded bootstrap");
+      const server = mcpServers.find((server) => server.name === "handoff");
+      if (!server || mcpServers.length !== 1) throw new Error("expected only handoff history MCP");
+      if (process.env.LOOM_TOKEN || process.env.GITHUB_TOKEN || process.env.GH_TOKEN) {
+        throw new Error("summary inherited session credentials");
+      }
+      const response = await fetch(server.url, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+          name: "session_search", arguments: { q: query, role: "user", kinds: ["message"] }
+        } })
+      });
+      const rpc = await response.json();
+      if (rpc.result.isError) throw new Error(JSON.stringify(rpc));
+      const page = JSON.parse(rpc.result.content[0].text);
+      if (page.records.length !== 1) throw new Error("missing historical evidence");
+      output += " " + page.records[0].content;
+    }
+    if (output.length > 0) {
       notify({
         sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: summaryOutput },
+        content: { type: "text", text: output },
       });
     }
     if (id !== null) respond(id, { stopReason: "end_turn" });
@@ -511,7 +533,7 @@ function handleMessage(msg) {
     case "initialize":
       respond(msg.id, {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, promptCapabilities: {} },
+        agentCapabilities: { loadSession: true, promptCapabilities: {}, mcpCapabilities: { http: true } },
         agentInfo: { name: agentName, version: agentVersion },
         ...(steeringSupported ? { _meta: { steering: { supported: true } } } : {}),
       });
@@ -519,6 +541,7 @@ function handleMessage(msg) {
     case "session/new":
       sessionId = "fake-session-" + ++sessionCounter;
       additionalDirectories = msg.params.additionalDirectories || [];
+      mcpServers = msg.params.mcpServers || [];
       respond(msg.id, {
         sessionId,
         modes: { currentModeId: currentMode, availableModes: MODES },

@@ -5012,7 +5012,11 @@ async fn archive_and_delete_win_against_a_waiting_handoff_without_resurrection()
 async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
     let ts = TestServer::start().await;
     seed_acp_agent(&ts, "fake-dead").await;
-    seed_acp_agent(&ts, "fake-replacement").await;
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode("Recovered constraint:");
+    seed_acp_agent_with_launch(&ts, "fake-replacement", format!(
+        "FAKE_ACP_MODELS=luna FAKE_ACP_SUMMARY_OUTPUT_B64={encoded} FAKE_ACP_SUMMARY_HISTORY_QUERY='abandoned request' {}", agent_cmd()
+    )).await;
 
     let created = rest_create(&ts, "fake-dead", "usage:90:100|say:ready").await;
     let id = created["id"].as_str().unwrap().to_string();
@@ -5042,6 +5046,20 @@ async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
     )
     .await
     .unwrap();
+    // Push the old human requirement outside both automatic context windows.
+    // Recovery must query durable history after the source process is gone.
+    for seq in 1..=12 {
+        loom::chat::insert(
+            &ts.state.db,
+            &id,
+            1,
+            seq,
+            loom::chat::kind::AGENT_MESSAGE,
+            &json!({"text": "later discussion ".repeat(400)}),
+        )
+        .await
+        .unwrap();
+    }
     session_mod::set_inflight(
         &ts.state.db,
         &id,
@@ -5082,6 +5100,15 @@ async fn handoff_recovers_without_a_live_task_and_preserves_the_queue() {
     })
     .await;
     let blocks = chat["blocks"].as_array().unwrap();
+    let boundary = blocks
+        .iter()
+        .find(|block| block["kind"] == "handoff")
+        .unwrap();
+    assert_eq!(boundary["payload"]["summary_status"], "generated");
+    assert_eq!(
+        boundary["payload"]["summary"],
+        "Recovered constraint: abandoned request"
+    );
     assert!(blocks.iter().any(|block| {
         block["turn"] == 1
             && block["kind"] == "turn_end"
