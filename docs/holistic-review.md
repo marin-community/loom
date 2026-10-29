@@ -81,23 +81,26 @@ existing bot-authored follow-up marker for the same SHA before posting one.
 
 ## Deployment setup
 
-Set repository Actions variables `LOOM_URL` (without a trailing slash) and
-`LOOM_PR_HOLISTIC_REVIEW_PROFILE`. The latter must name a dedicated Loom profile
-that can read this repository and post PR comments but cannot write code or
-manage repository settings. Configure a GitHub App installation for the repo.
-Grant the workflow's OIDC identity access to only that profile, using the
-repository's numeric ID and exact workflow ref. For this repository:
+The workflow uses the same repository Actions variables as
+[`loom-issue.yml`](../.github/workflows/loom-issue.yml): `LOOM_URL` (without a
+trailing slash) and `LOOM_PROFILE` (default `github-actions`). The selected
+profile needs repository read and GitHub comment access. The stock restricted
+`github_comment` profile cannot run a holistic review because its fixed tools
+do not expose the PR diff, comment history, submitted reviews, or editing an
+existing overview comment. Configure a GitHub App installation for the repo.
+Grant this new workflow's OIDC identity access to the existing profile, using
+the repository's numeric ID and exact workflow ref. For this repository:
 
 ```sh
 loom federation add loom-holistic-review \
   --audience "$LOOM_URL" \
   --repository-id 1129401356 \
   --workflow-ref 'marin-community/loom/.github/workflows/holistic-review.yml@refs/heads/main' \
-  --profile "$LOOM_PR_HOLISTIC_REVIEW_PROFILE"
+  --profile "${LOOM_PROFILE:-github-actions}"
 ```
 
-The profile and federation are deployment policy, so merging a repository
-workflow does not create them. [Restricted GitHub sessions](restricted-sessions.md)
-explains OIDC federation and profile capability limits. Audit the resulting
-mapping with `loom federation ls` and request one review using a standalone
+The federation is deployment policy, so merging a repository workflow does
+not create its mapping. [Restricted GitHub sessions](restricted-sessions.md)
+explains OIDC federation and profile capability limits. Audit the mapping with
+`loom federation ls` and request one review using a standalone
 `/holistic-review` PR comment after setup.

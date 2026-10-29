@@ -88,7 +88,7 @@ jobs:
         uses: ./.github/actions/launch-loom-run
         with:
           loom-url: ${{ vars.LOOM_URL }}
-          profile: ${{ vars.LOOM_PR_HOLISTIC_REVIEW_PROFILE }}
+          profile: ${{ vars.LOOM_PROFILE || 'github-actions' }}
           channel: pr-holistic:${{ steps.target.outputs.number }}
           idempotency-key: ${{ steps.target.outputs.key }}
           title: "Holistic review for #${{ steps.target.outputs.number }}"
