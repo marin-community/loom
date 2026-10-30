@@ -21,13 +21,19 @@ domain = "loom.example.com"
 # also who may drive the `@loom` trigger — add more in Settings → Approved users.
 owner_github = "your-github-login"
 
-# The GitHub App loom acts through (webhook receiver, REST identity, and
-# "Sign in with GitHub"). `loom setup github-app` fills these four in for
-# you — hand-typing the private key PEM is impractical, so leave them unset
-# here and run the wizard instead unless you registered the App by hand.
+# Private repository App: webhooks and repository-scoped API tokens.
+# `loom setup github-app` fills these in without changing sign-in credentials.
 # github_app_id = ""
+# github_app_slug = ""
 # github_app_private_key = ""
 # github_webhook_secret = ""
+
+# Private authentication App: sign-in and renewable organization membership.
+# Create it under the admission organization with `loom setup github-auth-app`.
+# It needs Members read-only, no repository permissions, and no webhook.
+# github_auth_app_id = ""
+# github_auth_app_slug = ""
+# github_auth_app_private_key = ""
 # github_client_id = ""
 # github_client_secret = ""
 

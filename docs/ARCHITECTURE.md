@@ -1135,10 +1135,19 @@ organization id and expected immutable user id in the responses. Active
 membership in any configured organization wins. The same path revalidates an expired lease
 at the `@loom` webhook boundary. Only `state = active` renews the lease; inactive
 and indeterminate results expire it immediately and close the user's active
-sessions. Identity and session history remain stored. The App therefore needs
+sessions. Identity and session history remain stored. The authentication App therefore needs
 the **Members: Read-only** organization permission. Until an OAuth app is
 configured the GitHub button is hidden and `auth.me` reports
 `methods.github = false`.
+
+Repository access uses the private repository App's `LOOM_GITHUB_APP_ID` and
+`LOOM_GITHUB_APP_PRIVATE_KEY`. Human sign-in uses a separate private App:
+`LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` identify its OAuth client,
+and `LOOM_GITHUB_AUTH_APP_ID` / `LOOM_GITHUB_AUTH_APP_PRIVATE_KEY` sign its
+membership-check requests. The clients have separate installation-token caches.
+The authentication App needs Members read-only on its owning admission
+organization and no repository permissions or webhook. Repository setup never
+changes the OAuth client. A membership check never uses repository credentials.
 
 **The machine-local token.** On startup loom mints (and persists, 0600, at
 `$WEAVER_HOME/loom-token`) a `kind = 'local'` `api_tokens` row owned by the
@@ -1436,7 +1445,9 @@ builtins are stdlib-only and need neither).
 | `LOOM_TOKEN` | explicit bearer token for Loom CLI/MCP and automation; `loom` otherwise uses its selected context credential or a loopback-only machine token | — |
 | `LOOM_OWNER_GITHUB` | GitHub login seeded as the owner on a fresh database; unset seeds no owner at all | — |
 | `LOOM_OWNER_GITHUB_ID` | Immutable numeric GitHub id bound to the seeded owner | — |
-| `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | GitHub OAuth app credentials (override the settings-stored values) | — |
+| `LOOM_GITHUB_APP_ID` / `LOOM_GITHUB_APP_PRIVATE_KEY` | Repository App credentials | — |
+| `LOOM_GITHUB_AUTH_APP_ID` / `LOOM_GITHUB_AUTH_APP_PRIVATE_KEY` | Authentication App credentials for organization membership checks | — |
+| `LOOM_GITHUB_CLIENT_ID` / `LOOM_GITHUB_CLIENT_SECRET` | Authentication App OAuth client credentials (override the settings-stored values) | — |
 | `WEAVER_TAPESTRY_DIR` | directory holding tapestry's per-session control sockets | `$WEAVER_HOME/sock` |
 | `WEAVER_TAPESTRY_BIN` | the `tapestry` supervisor binary loom re-execs (else a sibling of `loom`); set by the tests | sibling of `loom` |
 | `RUST_LOG` / `EnvFilter` | tracing filter | `loom=info,weaver_core=info,tower_http=warn` |

@@ -48,13 +48,11 @@ onMounted(load);
 <template>
   <section class="space-y-2" data-testid="github-connection-panel">
     <div>
-      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">
-        Loom GitHub App
-      </h2>
+      <h2 class="text-2xs font-semibold uppercase tracking-wider text-muted mb-1.5">GitHub Apps</h2>
       <p class="text-xs text-faint">
-        Deployment-owned integration for GitHub sign-in, <code class="font-mono">@loom</code>
-        triggers, and short-lived repository credentials. Personal GitHub tokens remain under
-        <span class="font-medium">Account</span>.
+        Separate private Apps handle repository access and human authentication. The repository App
+        supplies <code class="font-mono">@loom</code> triggers and short-lived repository
+        credentials. Personal GitHub tokens remain under <span class="font-medium">Account</span>.
       </p>
     </div>
     <p v-if="error" class="text-sm text-block">{{ error }}</p>
@@ -71,7 +69,7 @@ onMounted(load);
             class="font-medium text-accent hover:underline"
             >{{ gh.app_slug }}</a
           >
-          <span v-else class="font-medium">GitHub App</span>
+          <span v-else class="font-medium">Repository App</span>
           <span class="text-faint"> · App ID {{ gh.app_id }}</span>
         </p>
         <p class="text-xs text-muted mt-0.5">
@@ -80,20 +78,19 @@ onMounted(load);
         </p>
       </div>
       <p v-else class="text-xs text-muted mb-2">
-        No GitHub App configured. Run
+        No repository App configured. Run
         <code class="font-mono">loom setup github-app --base-url &lt;your loom URL&gt;</code>
-        to register one for sign-in and the <code class="font-mono">@loom</code> trigger. You can
-        also paste sign-in credentials below.
+        to register the repository App for the <code class="font-mono">@loom</code> trigger.
       </p>
 
       <p class="text-2xs font-semibold uppercase tracking-wider text-muted mt-3 mb-1">
         Sign-in credentials
       </p>
       <p class="text-xs text-muted mb-2">
-        <template v-if="gh?.app_configured">The same App's</template>
-        <template v-else>The</template>
-        OAuth client, with callback <code class="font-mono">{{ gh?.callback_path }}</code
-        >. Powers "Continue with GitHub".
+        The authentication App's OAuth client, with callback
+        <code class="font-mono">{{ gh?.callback_path }}</code
+        >. Set it up with <code class="font-mono">loom setup github-auth-app</code>. It handles
+        "Continue with GitHub" and organization membership verification.
         <span :class="gh?.configured ? 'text-accent' : 'text-faint'">
           {{ gh?.configured ? 'Configured.' : 'Not configured.' }}
         </span>

@@ -222,7 +222,7 @@ for line in sys.stdin:
     await expect(page.locator('[data-rail="chat"]')).toHaveCount(0);
 
     await expect(page.getByText('Your GitHub token', { exact: true })).toBeVisible();
-    await expect(page.getByText('Loom GitHub App', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('GitHub Apps', { exact: true })).toHaveCount(0);
     const createToken = page.getByRole('link', { name: 'Create one' });
     await expect(createToken).toHaveAttribute('href', /contents=write/);
     await expect(createToken).toHaveAttribute('href', /issues=write/);
@@ -230,7 +230,7 @@ for line in sys.stdin:
 
     await page.getByRole('button', { name: 'Integrations', exact: true }).click();
     await expect(page.getByTestId('github-connection-panel')).toBeVisible();
-    await expect(page.getByText('Loom GitHub App', { exact: true })).toBeVisible();
+    await expect(page.getByText('GitHub Apps', { exact: true })).toBeVisible();
     await expect(page.getByText('Your GitHub token', { exact: true })).toHaveCount(0);
 
     await page.getByRole('button', { name: 'Agents & profiles', exact: true }).click();

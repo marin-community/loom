@@ -387,7 +387,10 @@ mod tests {
     #[tokio::test]
     async fn github_auth_mode_is_owned_by_the_resolved_session_policy() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        let app = crate::github_app::GithubApp::new(db.clone());
+        let app = crate::github_app::GithubApp::new(
+            db.clone(),
+            crate::github_app::GithubAppPurpose::Repository,
+        );
 
         let mut direct = vec![
             ("GH_TOKEN".to_string(), "loom-stored-user-token".to_string()),
@@ -563,7 +566,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let app = crate::github_app::GithubApp::new(db.clone());
+        let app = crate::github_app::GithubApp::new(
+            db.clone(),
+            crate::github_app::GithubAppPurpose::Repository,
+        );
         assert!(github_credential_available(&db, None, Some(&app), false)
             .await
             .unwrap());

@@ -83,7 +83,7 @@ deploy/standalone/run.py --local    # same, but LOOM_DOMAIN=localhost for a
 signs with its own internal CA — the browser warns, expected). Sign-in still
 goes through GitHub (loopback trust doesn't apply behind Caddy), so the App's
 OAuth callback list must include `https://localhost/api/auth/github/callback` —
-`loom setup github-app --base-url https://localhost` sets that up.
+`loom setup github-auth-app --base-url https://localhost` sets that up.
 
 To validate the config without starting anything:
 
@@ -107,13 +107,14 @@ and why; you don't hand-edit `.env` itself.
 | `LOOM_DOMAIN` | **yes** | Public domain Caddy serves and gets a cert for (e.g. `loom.team.dev`); `localhost` for local testing. Also seeded as `auth.base_url`. |
 | `LOOM_OWNER_GITHUB` | **yes** | GitHub login seeded as the first approved user on a fresh database — the only account that can sign in until it approves others. Approved users are also who may drive the `@loom` trigger; add more in **Settings → Approved users**. |
 | `LOOM_GITHUB_APP_ID` / `_PRIVATE_KEY` | **yes** | GitHub App identity Loom uses to mint repository-scoped installation tokens for clones, polling, replies, server-side GitHub tools, and profile-approved interactive sessions. |
+| `LOOM_GITHUB_AUTH_APP_ID` / `_PRIVATE_KEY` | for organization admission | Separate authentication App installed on the admission organization with Members read-only. Required explicitly; repository credentials are never used for membership renewal. |
 | `LOOM_GITHUB_WEBHOOK_SECRET` | for `@loom` | Shared secret for the inbound webhook; must match the secret on the GitHub webhook. Until set, the webhook rejects every delivery. |
 | `LOOM_SLACK_APP_TOKEN` / `LOOM_SLACK_BOT_TOKEN` | for `/marinbot` | App-level and bot OAuth tokens for the Slack Socket Mode trigger. Both unset (the default) leaves it off. See [docs/slack-trigger.md](../docs/slack-trigger.md). |
 | `ANTHROPIC_API_KEY` | for Claude | API key for the Claude agents. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `OPENAI_API_KEY` | for Codex | API key for the Codex agents; only needed if you launch the `codex` runtime. Alternatively log in interactively (see [first-run](#agent-authentication)). |
 | `LOOM_INSTALL_CMD` | no | Arbitrary shell the entrypoint runs on every boot after the runtime installs — the generic hook for optional tools (see [Optional tool installs](#optional-tool-installs)). Fail-soft: a failure warns and the daemon still starts. |
 | `LOOM_INSTALL_SKILLS` | no | Comma-separated `name=source` pairs; each source (a `SKILL.md` file or a skill directory) is copied into every installed harness's global skills dir (see [Optional tool installs](#optional-tool-installs)). |
-| `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | GitHub OAuth app — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
+| `LOOM_GITHUB_CLIENT_ID` / `_SECRET` | for login | OAuth client of the authentication App — the owner's only way to sign in on a fresh DB (see [first-run](#first-run-login)). Callback: `https://<LOOM_DOMAIN>/api/auth/github/callback`. |
 | `LOOM_TLS_EMAIL` | no | ACME contact for cert-expiry notices; only used if you uncomment the global block in the Caddyfile. |
 | `LOOM_TLS_CERT_FILE` / `_KEY_FILE` | no | Paths to a pre-generated certificate/key pair, in place of Caddy's automatic HTTPS. Both or neither. See [Bring your own certificate](#bring-your-own-certificate). |
 | `HOST_UID` / `HOST_GID` | no (1000) | uid:gid the image runs as — matters only if you bind-mount a host dir. |
@@ -259,14 +260,15 @@ out permanently.
 
 Running `loom setup` with no subcommand is the guided way through all of this:
 it interactively establishes the bootstrap operator (seeding it live and into
-`loom.toml`), then walks you through the GitHub App and the paste-once secrets.
+`loom.toml`), then walks you through the repository App, authentication App, and paste-once secrets.
 The individual steps below are what it calls, and can be run on their own.
 
-The fast path is `loom setup github-app` — it registers a GitHub App via
-GitHub's manifest flow and writes its client id/secret (along with the App id,
-private key, and webhook secret, for [the `@loom` trigger](#wire-the-loom-github-trigger))
-into `loom.toml`, live-applying them to loom's settings too when it can reach
-the running daemon's database — no restart needed for that part. It confirms
+Use `loom setup github-app` for repository access and
+`loom setup github-auth-app` for sign-in and membership checks. Each registers a
+private GitHub App through the manifest flow and writes only that purpose's
+credentials to `loom.toml` and the local settings database. The authentication
+App supplies the OAuth client and needs Members read-only; the repository App
+supplies the webhook and repository permissions. Setup confirms
 App creation through *your own browser*, though, so it needs a network path
 from your laptop to its local callback server — for this stack, that means a
 one-shot **published** port (`docker compose exec` runs inside the service's
@@ -281,7 +283,7 @@ container:
 ```sh
 # On the VM (a fixed port, since you're about to publish and tunnel it):
 docker compose run --rm -p 8765:8765 loom \
-  loom setup github-app --port 8765 --base-url https://<LOOM_DOMAIN> \
+  loom setup github-auth-app --port 8765 --base-url https://<LOOM_DOMAIN> \
   --config /home/app/loom.toml
 
 # From your laptop, in another terminal, while that's running:
@@ -300,12 +302,13 @@ Running locally (loom on your own machine, not in a container)? Simpler — CWD
 is already the repo root, so the defaults work:
 
 ```sh
-loom setup github-app --base-url http://localhost:7878   # opens a browser for you
+loom setup github-app --base-url http://localhost:7878
+loom setup github-auth-app --base-url http://localhost:7878
 loom setup secrets
 loom config render-env
 ```
 
-(`loom setup github-app --help` covers `--org` too.) Either way, once it's
+(Both App setup commands support `--org`.) Either way, once it's
 done, skip straight to step 2 below.
 
 `loom.toml` is a complete, self-sufficient handoff — every credential plus
@@ -321,10 +324,13 @@ version in Pulumi, and follows the
 
 To register by hand instead:
 
-1. Register a GitHub OAuth app with callback
-   `https://<LOOM_DOMAIN>/api/auth/github/callback`, and put its credentials in
-   `loom.toml` as `github_client_id` / `github_client_secret` (`loom config
-   render-env` then `docker compose up -d` to apply).
+1. Register a private authentication App under the admission organization with
+   Members read-only, no active webhook, and callback
+   `https://<LOOM_DOMAIN>/api/auth/github/callback`. Install it on that organization.
+   Put its App ID and private key in `github_auth_app_id` /
+   `github_auth_app_private_key` and its OAuth client in `github_client_id` /
+   `github_client_secret` in `loom.toml`. Run `loom config render-env` and then
+   `docker compose up -d` to apply. Repository App credentials are separate.
 2. Open `https://<LOOM_DOMAIN>` and **Continue with GitHub** as
    `LOOM_OWNER_GITHUB`.
 3. Once in, approve teammates, set a password for password-login, and mint

@@ -4,6 +4,7 @@
 //! into loom's sqlite settings, so no operation can stand in for them.
 
 use super::config::{default_config_path, ConfigPathOpts};
+use crate::github_app::GithubAppPurpose;
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 use std::io::IsTerminal;
@@ -12,8 +13,10 @@ use weaver_core::db::Db;
 /// Subcommands under `loom setup` — the guided credential wizards.
 #[derive(Subcommand)]
 pub enum SetupCmd {
-    /// Create the GitHub App loom uses, via GitHub's manifest flow.
+    /// Create the private App used for repository access and webhooks.
     GithubApp(GithubAppOpts),
+    /// Create the private App used for sign-in and organization membership checks.
+    GithubAuthApp(GithubAppOpts),
     /// Prompt for and store default-profile model-provider secrets.
     Secrets(SecretsOpts),
 }
@@ -71,7 +74,12 @@ pub struct SecretsOpts {
 pub async fn run_setup(cmd: Option<SetupCmd>) -> Result<()> {
     match cmd {
         None => cmd_setup_init().await,
-        Some(SetupCmd::GithubApp(opts)) => cmd_setup_github_app(opts).await,
+        Some(SetupCmd::GithubApp(opts)) => {
+            cmd_setup_github_app(opts, GithubAppPurpose::Repository).await
+        }
+        Some(SetupCmd::GithubAuthApp(opts)) => {
+            cmd_setup_github_app(opts, GithubAppPurpose::Authentication).await
+        }
         Some(SetupCmd::Secrets(opts)) => cmd_setup_secrets(opts).await,
     }
 }
@@ -175,44 +183,34 @@ pub(crate) async fn cmd_setup_init() -> Result<()> {
         .context("writing the domain into loom.toml")?;
     println!();
 
-    // Step 3 — GitHub App (optional; opens a browser). Delegates to the same
-    // wizard the subcommand uses, passing the operator so it stays consistent.
-    println!("Step 3/4 · GitHub App (recommended — opens your browser)");
-    // An App already on file turns this step into an update/re-install (the
-    // create-vs-update choice itself is offered inside `cmd_setup_github_app`).
-    let app_exists = existing_app(&db).await.is_some();
-    if app_exists {
-        println!("  A GitHub App is already configured — you can update or re-install it.");
-    } else {
-        println!("  Creates the App loom acts through (webhook, sign-in, per-repo tokens).");
-    }
-    let step3_prompt = if app_exists {
-        "Review / update the GitHub App now?"
-    } else {
-        "Set up the GitHub App now?"
-    };
-    if prompt_yes_no(step3_prompt, true)? {
-        let app_opts = GithubAppOpts {
-            base_url: base_url.clone(),
-            name: None,
-            org: None,
-            owner: Some(owner.clone()),
-            owner_id: Some(owner_id),
-            port: 0,
-            timeout: 300,
-            no_open: false,
-            config: ConfigPathOpts {
-                config: config_path.clone(),
-            },
-        };
-        if let Err(e) = cmd_setup_github_app(app_opts).await {
-            println!("  ! GitHub App setup didn't complete: {e}");
-            println!("  Retry later with `loom setup github-app --base-url {base_url}`.");
+    println!("Step 3/4 · GitHub Apps (recommended — opens your browser)");
+    for (purpose, label, command) in [
+        (GithubAppPurpose::Repository, "repository", "github-app"),
+        (
+            GithubAppPurpose::Authentication,
+            "authentication",
+            "github-auth-app",
+        ),
+    ] {
+        if prompt_yes_no(&format!("Set up or update the {label} App now?"), true)? {
+            let app_opts = GithubAppOpts {
+                base_url: base_url.clone(),
+                name: None,
+                org: None,
+                owner: Some(owner.clone()),
+                owner_id: Some(owner_id),
+                port: 0,
+                timeout: 300,
+                no_open: false,
+                config: ConfigPathOpts {
+                    config: config_path.clone(),
+                },
+            };
+            if let Err(e) = cmd_setup_github_app(app_opts, purpose).await {
+                println!("  ! {label} App setup didn't complete: {e}");
+                println!("  Retry later with `loom setup {command} --base-url {base_url}`.");
+            }
         }
-    } else if app_exists {
-        println!("  Left the existing App as-is.");
-    } else {
-        println!("  Skipped — set it up later with `loom setup github-app`.");
     }
     println!();
 
@@ -335,20 +333,24 @@ pub struct ExistingApp {
 
 /// Read the configured App from the settings table. `None` when no App id is
 /// stored on a fresh or incompletely configured instance.
-pub(crate) async fn existing_app(db: &Db) -> Option<ExistingApp> {
+pub(crate) async fn existing_app(db: &Db, purpose: GithubAppPurpose) -> Option<ExistingApp> {
+    let settings = purpose.settings();
     let nonempty = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let id = nonempty(weaver_core::config::get(db, crate::github_app::APP_ID_KEY).await)?;
+    let id = nonempty(weaver_core::config::get(db, settings.id).await)?;
     Some(ExistingApp {
         id,
-        slug: nonempty(weaver_core::config::get(db, crate::github_app::APP_SLUG_KEY).await),
-        org: nonempty(weaver_core::config::get(db, crate::github_app::APP_OWNER_KEY).await),
+        slug: nonempty(weaver_core::config::get(db, settings.slug).await),
+        org: nonempty(weaver_core::config::get(db, settings.owner).await),
     })
 }
 
 /// Present the update / re-install menu for an already-configured App. Returns
 /// `true` when the operator chose to create a brand-new App; `false` when the
 /// existing App was handled here (a page opened, or left untouched).
-pub(crate) async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
+pub(crate) async fn offer_existing_app(
+    app: &ExistingApp,
+    purpose: GithubAppPurpose,
+) -> Result<bool> {
     println!(
         "  A GitHub App is already configured (id {}{}).",
         app.id,
@@ -378,16 +380,18 @@ pub(crate) async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
                     &url,
                     "  Opening the App's settings. If nothing opens, visit:",
                 );
-                println!(
-                    "  Adjust Repository permissions as needed (e.g. Pull requests: Read & \
-                     write), Save, then accept the updated permissions on each installation."
-                );
-                println!(
-                    "  For sign-in outside the App owner's account, set Advanced → Public. \
-                     Under Permissions & events, grant Organization permissions → Members: \
-                     Read-only. Install the App on every organization in \
-                     auth.github_organizations and accept updated permissions on each installation."
-                );
+                if purpose == GithubAppPurpose::Repository {
+                    println!(
+                        "  Adjust Repository permissions as needed (e.g. Pull requests: Read & \
+                         write), Save, then accept the updated permissions on each installation."
+                    );
+                } else {
+                    println!(
+                        "  Grant Organization permissions → Members: Read-only and install this \
+                         private App on its owning admission organization. Repository permissions \
+                         and webhooks are not needed."
+                    );
+                }
             }
             None => println!(
                 "  This App's slug isn't on record (it predates slug capture). Open your App \
@@ -426,17 +430,20 @@ pub(crate) fn base_url_from_domain(domain: &str) -> Option<String> {
     }
 }
 
-/// `loom setup github-app` — the manifest-flow wizard. Talks to GitHub and to
+/// The repository/authentication App manifest-flow wizard. Talks to GitHub and to
 /// Loom's sqlite database directly; it does not need the loom daemon running.
-pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
+pub(crate) async fn cmd_setup_github_app(
+    opts: GithubAppOpts,
+    purpose: GithubAppPurpose,
+) -> Result<()> {
     let base_url = opts.base_url.trim_end_matches('/').to_string();
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
         bail!("--base-url must be a full URL, e.g. https://loom.team.dev (got '{base_url}')");
     }
-    let name = opts
-        .name
-        .clone()
-        .unwrap_or_else(|| default_app_name(&base_url));
+    let name = opts.name.clone().unwrap_or_else(|| match purpose {
+        GithubAppPurpose::Repository => default_app_name(&base_url),
+        GithubAppPurpose::Authentication => format!("{}-auth", default_app_name(&base_url)),
+    });
 
     let db = crate::db::connect(&weaver_core::db::default_db_path())
         .await
@@ -446,10 +453,10 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     // than silently registering a second one. Falls through to the manifest
     // create flow only if the operator chooses to replace it, or the run is
     // non-interactive (no prompt available, so it creates).
-    if let Some(app) = existing_app(&db).await {
+    if let Some(app) = existing_app(&db, purpose).await {
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
-            if !offer_existing_app(&app).await? {
+            if !offer_existing_app(&app, purpose).await? {
                 return Ok(());
             }
             println!();
@@ -528,6 +535,7 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
 
     let manifest = crate::github_manifest::manifest_json(&crate::github_manifest::ManifestInput {
         name: &name,
+        purpose,
         base_url: &base_url,
         redirect_url: &redirect_url,
     });
@@ -586,51 +594,17 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
     );
     println!("  {}", conv.html_url);
 
-    weaver_core::config::apply(
+    crate::github_manifest::store_app_credentials(
         &db,
-        &[
-            (
-                crate::github_app::APP_ID_KEY.to_string(),
-                Some(conv.id.to_string()),
-            ),
-            (
-                crate::github_app::APP_PRIVATE_KEY_KEY.to_string(),
-                Some(conv.pem.clone()),
-            ),
-            (
-                crate::github_trigger::WEBHOOK_SECRET_KEY.to_string(),
-                Some(conv.webhook_secret.clone()),
-            ),
-            (
-                crate::auth::GH_CLIENT_ID_KEY.to_string(),
-                Some(conv.client_id.clone()),
-            ),
-            (
-                crate::auth::GH_CLIENT_SECRET_KEY.to_string(),
-                Some(conv.client_secret.clone()),
-            ),
-            // Recorded (not runtime credentials) so a later `loom setup` can
-            // deep-link to this App's GitHub settings/install pages to update it.
-            (
-                crate::github_app::APP_SLUG_KEY.to_string(),
-                Some(conv.slug.clone()),
-            ),
-            (
-                crate::github_app::APP_OWNER_KEY.to_string(),
-                Some(org.clone().unwrap_or_default()),
-            ),
-        ],
+        &opts.config.config,
+        purpose,
+        &conv,
+        org.as_deref(),
     )
-    .await
-    .context("writing the App credentials into loom's settings")?;
-    println!();
-    println!(
-        "Stored the App id, private key, webhook secret, and OAuth client into loom's \
-         settings — live on the running daemon, no restart needed."
-    );
+    .await?;
+    println!("Stored the {purpose:?} App credentials in settings and loom.toml.");
 
     let domain = host_from_base_url(&base_url);
-    let app_id = conv.id.to_string();
     // The individual who can sign in first (`LOOM_OWNER_GITHUB`): for a personal
     // install the confirming account (`conv.owner.login`); for an org install
     // `org_owner` (the org itself can't sign in, so an individual is required).
@@ -662,12 +636,6 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
 
     let owner_id_string = owner_id.to_string();
     let updates: Vec<(&str, &str)> = vec![
-        ("LOOM_GITHUB_APP_ID", app_id.as_str()),
-        ("LOOM_GITHUB_APP_SLUG", conv.slug.as_str()),
-        ("LOOM_GITHUB_APP_PRIVATE_KEY", conv.pem.as_str()),
-        ("LOOM_GITHUB_WEBHOOK_SECRET", conv.webhook_secret.as_str()),
-        ("LOOM_GITHUB_CLIENT_ID", conv.client_id.as_str()),
-        ("LOOM_GITHUB_CLIENT_SECRET", conv.client_secret.as_str()),
         ("LOOM_DOMAIN", domain),
         ("LOOM_OWNER_GITHUB", owner_login),
         ("LOOM_OWNER_GITHUB_ID", owner_id_string.as_str()),
@@ -682,12 +650,22 @@ pub(crate) async fn cmd_setup_github_app(opts: GithubAppOpts) -> Result<()> {
 
     println!();
     println!("Next steps:");
-    println!("  1. Install the App on the repos loom should act on:");
+    match purpose {
+        GithubAppPurpose::Repository => {
+            println!("  1. Install the App on the repositories Loom should access:")
+        }
+        GithubAppPurpose::Authentication => {
+            println!("  1. Install the App on its owning admission organization:")
+        }
+    }
     println!(
         "       https://github.com/apps/{}/installations/new",
         conv.slug
     );
-    println!("  2. Sign in at {base_url} with GitHub — the App's OAuth client now handles login.");
+    match purpose {
+        GithubAppPurpose::Repository => println!("  2. Run `loom setup github-auth-app --base-url {base_url}` for sign-in."),
+        GithubAppPurpose::Authentication => println!("  2. Sign in at {base_url}; configure auth.github_organizations for membership admission."),
+    }
     Ok(())
 }
 

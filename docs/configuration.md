@@ -57,18 +57,35 @@ requires an active membership in one configured organization and grants the
 `user` role for one hour. The default is empty, which keeps authorization
 manual.
 
-The GitHub App must be installed on every admission organization with its
-**Members** organization permission set to **Read-only**. If an admission
-organization differs from the App owner, the App must be **Public**. GitHub
-allows only the owning organization's members to authorize a private App,
-returning 404 to other users before they reach Loom's callback. Public visibility
-allows GitHub authorization; Loom still enforces its admission policy.
+Human authentication and repository access use separate private GitHub Apps.
+The repository App uses `LOOM_GITHUB_APP_ID` and
+`LOOM_GITHUB_APP_PRIVATE_KEY` for repository operations and webhooks. It does
+not supply membership credentials.
 
-For an existing App, the owner must change **Advanced → Public**, set
-**Permissions & events → Organization permissions → Members** to **Read-only**,
-and approve those permissions on each admission organization's installation.
-Updating Loom or its registration manifest does not modify an existing App's
-settings. The existing OAuth credentials remain valid.
+The authentication App uses `LOOM_GITHUB_AUTH_APP_ID` and
+`LOOM_GITHUB_AUTH_APP_PRIVATE_KEY`. Its OAuth client supplies
+`LOOM_GITHUB_CLIENT_ID` and `LOOM_GITHUB_CLIENT_SECRET`. Create it under the
+organization whose members should sign in:
+
+```sh
+loom setup github-auth-app --base-url https://loom.team.dev --org acme \
+  --owner your-login --owner-id YOUR_NUMERIC_GITHUB_ID
+```
+
+The wizard creates a private App with only **Organization permissions →
+Members: Read-only**, the login callback, and no active webhook. Install it on
+its owning organization and approve that permission. A private App can only be
+authorized by members of its owning organization. All intended sign-in users,
+including manually approved operators, must be able to authorize that App.
+Creating or updating the repository App never replaces authentication credentials.
+
+Organization admission requires explicit authentication-App credentials; there
+is no fallback to the repository App. Existing single-App deployments must add
+those credentials and point the OAuth client at the authentication App before
+rolling out this version. Both Apps can stay private when repository access
+and admission belong to different organizations. Configured organizations are
+still checked by immutable ID; authorizing or installing either App does not
+grant Loom access.
 
 The callback checks membership with the user's OAuth token. Before the one-hour
 authorization expires, the server resolves the user's current login from their

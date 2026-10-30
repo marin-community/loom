@@ -226,6 +226,14 @@ impl TestServer {
         // Never let the outer loom session's scoped bearer leak into this
         // isolated server or CLI subprocesses spawned by a test.
         std::env::remove_var("LOOM_TOKEN");
+        for name in [
+            "LOOM_GITHUB_APP_ID",
+            "LOOM_GITHUB_APP_PRIVATE_KEY",
+            "LOOM_GITHUB_AUTH_APP_ID",
+            "LOOM_GITHUB_AUTH_APP_PRIVATE_KEY",
+        ] {
+            std::env::remove_var(name);
+        }
         // Tests exercise the local ProcessRunner: their worktrees live in
         // temp dirs the ContainerRunner would refuse (any cwd outside
         // /home/app), and a docker-runner deployment exports LOOM_RUNNER
@@ -250,11 +258,17 @@ impl TestServer {
                 loom::github_trigger::GithubTrigger::with_gateway_and_app(
                     gh,
                     std::sync::Arc::new(app),
+                    None,
                 )
             }
             GithubFixture::ConfiguredApp => {
                 let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
-                loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app))
+                let auth_app =
+                    loom::github_app::tests::configured_test_auth_app(pool.clone()).await;
+                loom::github_trigger::GithubTrigger::with_app(
+                    std::sync::Arc::new(app),
+                    Some(std::sync::Arc::new(auth_app)),
+                )
             }
             GithubFixture::Production => {
                 loom::github_trigger::GithubTrigger::production(pool.clone())
