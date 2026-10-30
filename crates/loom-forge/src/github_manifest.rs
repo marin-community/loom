@@ -89,7 +89,8 @@ pub fn manifest_json(input: &ManifestInput) -> Value {
         "hook_attributes": { "url": format!("{base}/api/github/webhook") },
         "redirect_url": input.redirect_url,
         "callback_urls": [format!("{base}/api/auth/github/callback")],
-        "public": false,
+        // Private Apps reject sign-in outside the owning organization.
+        "public": true,
         "default_events": ["issue_comment", "issues", "pull_request_review"],
         "default_permissions": {
             "actions": "write",
@@ -356,7 +357,7 @@ mod tests {
             m["callback_urls"][0],
             "https://loom.acme.dev/api/auth/github/callback"
         );
-        assert_eq!(m["public"], false);
+        assert_eq!(m["public"], true);
         assert_eq!(
             m["default_events"],
             serde_json::json!(["issue_comment", "issues", "pull_request_review"])

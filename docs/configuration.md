@@ -57,13 +57,24 @@ requires an active membership in one configured organization and grants the
 `user` role for one hour. The default is empty, which keeps authorization
 manual.
 
-The GitHub App must be installed on the organization with its **Members**
-organization permission set to **Read-only**. The callback checks membership
-with the user's OAuth token. Before the one-hour authorization expires, the
-server resolves the user's current login from their immutable numeric id and
-checks every configured organization with a short-lived GitHub App installation
-token. An active result from any organization wins. It also revalidates an
-expired authorization when that identity sends `@loom`.
+The GitHub App must be installed on every admission organization with its
+**Members** organization permission set to **Read-only**. If an admission
+organization differs from the App owner, the App must be **Public**. GitHub
+allows only the owning organization's members to authorize a private App,
+returning 404 to other users before they reach Loom's callback. Public visibility
+allows GitHub authorization; Loom still enforces its admission policy.
+
+For an existing App, the owner must change **Advanced → Public**, set
+**Permissions & events → Organization permissions → Members** to **Read-only**,
+and approve those permissions on each admission organization's installation.
+Updating Loom or its registration manifest does not modify an existing App's
+settings. The existing OAuth credentials remain valid.
+
+The callback checks membership with the user's OAuth token. Before the one-hour
+authorization expires, the server resolves the user's current login from their
+immutable numeric id and checks every configured organization with a short-lived
+GitHub App installation token. An active result from any organization wins. It
+also revalidates an expired authorization when that identity sends `@loom`.
 
 Only an active membership renews authorization. A missing permission, timeout,
 GitHub outage, malformed response, pending membership, or absent membership

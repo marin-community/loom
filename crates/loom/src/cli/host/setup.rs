@@ -382,6 +382,12 @@ pub(crate) async fn offer_existing_app(app: &ExistingApp) -> Result<bool> {
                     "  Adjust Repository permissions as needed (e.g. Pull requests: Read & \
                      write), Save, then accept the updated permissions on each installation."
                 );
+                println!(
+                    "  For sign-in outside the App owner's account, set Advanced → Public. \
+                     Under Permissions & events, grant Organization permissions → Members: \
+                     Read-only. Install the App on every organization in \
+                     auth.github_organizations and accept updated permissions on each installation."
+                );
             }
             None => println!(
                 "  This App's slug isn't on record (it predates slug capture). Open your App \

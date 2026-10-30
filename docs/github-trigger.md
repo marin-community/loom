@@ -260,7 +260,10 @@ database — live-applies them too, no restart needed for that part. The App's
 `callback_urls` are set to loom's GitHub login callback too, so the same App's
 OAuth client also covers "Sign in with GitHub" (see
 [deploy/README.md "First-run login"](../deploy/README.md#first-run-login)) —
-one registration, not two.
+one registration, not two. The wizard creates a public App so users outside
+its owning account can authorize GitHub sign-in and other organizations can
+install it. Loom still requires manual approval or active membership in a
+configured admission organization.
 
 Run it again on an instance that already has an App and it offers to **update**
 it instead of creating a second one: it opens the App's GitHub settings page to
@@ -293,6 +296,10 @@ Apps → New GitHub App**:
     `auth.github_organizations` is set).
 - **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
   review**.
+- **Where can this GitHub App be installed?** — **Any account**. A private App
+  allows authorization only by members of its owning organization, which blocks
+  sign-in when an admission organization differs from the App owner. For an
+  existing App, change its visibility to **Public** under **Advanced**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.
 
@@ -300,7 +307,10 @@ Apps created before submitted-review triggers were supported must add **Pull
 request review** to their subscribed events once.
 
 Then **install** the App on each repo (or org) loom should act on — the
-installation is what authorizes a repo to trigger.
+installation is what authorizes a repo to trigger. Also install it on every
+organization in `auth.github_organizations` and approve **Members: Read-only**
+there, even if Loom's repositories are owned by another organization. See
+[organization admission](configuration.md#github-organization-admission).
 
 ### Configure loom
 
