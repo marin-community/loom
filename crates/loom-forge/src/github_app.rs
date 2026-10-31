@@ -680,9 +680,7 @@ impl GithubApp {
         })
     }
 
-    /// Return a token constrained to `owner/name`, shared by the REST gateway
-    /// and managed clone/fetch. Organization membership checks use the separate
-    /// installation-scoped credential.
+    /// Return a write token constrained to `owner/name`.
     pub async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
         self.token_for_repositories(&[format!("{owner}/{name}")])
             .await
