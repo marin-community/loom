@@ -523,10 +523,12 @@ TLS-terminating reverse proxy. Access is then gated three ways:
   See
   [Restricted sessions](docs/restricted-sessions.md).
 
-To configure **GitHub sign-in**: register an OAuth app on GitHub with the
-callback `https://loom.example.com/api/auth/github/callback`, then paste its
-client id and secret into Settings → Integrations (or set `LOOM_GITHUB_CLIENT_ID` /
-`LOOM_GITHUB_CLIENT_SECRET`).
+To configure **GitHub sign-in**, run `loom setup github-auth-app --base-url
+https://loom.example.com --org YOUR_ADMISSION_ORG --owner YOUR_LOGIN --owner-id
+YOUR_NUMERIC_ID`. This creates a private authentication App with Members
+read-only and the login callback. Install it on its owning admission organization;
+see [organization admission](docs/configuration.md#github-organization-admission).
+Repository access uses a separate App configured by `loom setup github-app`.
 
 Behind a **same-host reverse proxy** the proxy's forwarded requests appear to
 come from loopback, so set `auth.trust_loopback false` and `auth.cookie_secure

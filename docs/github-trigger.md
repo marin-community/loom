@@ -251,16 +251,17 @@ flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-a
 loom setup github-app --base-url https://loom.team.dev
 ```
 
-It opens a local page that auto-submits the App configuration to GitHub, waits
-for your one confirmation click, exchanges the redirect for the full credential
-set (App id, private key, webhook secret, OAuth client id/secret), writes them
-into the typed `loom.toml` (along with `LOOM_DOMAIN` and, unless `--org` is
-set, `LOOM_OWNER_GITHUB`), and — when it can reach the running daemon's
-database — live-applies them too, no restart needed for that part. The App's
-`callback_urls` are set to loom's GitHub login callback too, so the same App's
-OAuth client also covers "Sign in with GitHub" (see
-[deploy/README.md "First-run login"](../deploy/README.md#first-run-login)) —
-one registration, not two.
+It opens a local page that auto-submits the repository App configuration to
+GitHub, waits for confirmation, exchanges the redirect for credentials, and
+writes them into `loom.toml` and the local settings database. The App is private
+and handles repository operations and webhooks. Its setup does not change
+GitHub sign-in credentials.
+
+Create the separate private authentication App with
+`loom setup github-auth-app`; see
+[organization admission](configuration.md#github-organization-admission).
+That App can belong to the admission organization while the repository App
+belongs to the organization hosting the code.
 
 Run it again on an instance that already has an App and it offers to **update**
 it instead of creating a second one: it opens the App's GitHub settings page to
@@ -288,19 +289,20 @@ Apps → New GitHub App**:
   - **Metadata** — Read-only (mandatory; granted automatically).
   - **Pull requests** — Read & write (open and update pull requests).
   - **Workflows** — Read & write (push changes under `.github/workflows`).
-- **Organization permissions:**
-  - **Members** — Read-only (verify active membership when
-    `auth.github_organizations` is set).
+- **Organization permissions** — none. Membership checks use the separate
+  authentication App.
 - **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
   review**.
+- **Where can this GitHub App be installed?** — **Only on this account**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.
 
 Apps created before submitted-review triggers were supported must add **Pull
 request review** to their subscribed events once.
 
-Then **install** the App on each repo (or org) loom should act on — the
-installation is what authorizes a repo to trigger.
+Then **install** the repository App on the repositories Loom should access.
+The authentication App is installed separately on its owning admission
+organization with **Members: Read-only**.
 
 ### Configure loom
 

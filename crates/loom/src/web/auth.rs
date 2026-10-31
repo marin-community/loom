@@ -646,7 +646,8 @@ async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
     // Both the OAuth client id and the App identity are resolved env-or-settings
     // (via `auth`/`github_app`), so an env-configured deploy reports its live
     // values even when the settings table is empty.
-    let app_id = crate::github_app::app_id(&st.db)
+    let purpose = crate::github_app::GithubAppPurpose::Repository;
+    let app_id = crate::github_app::app_id(&st.db, purpose)
         .await
         .map(|id| id.to_string())
         .unwrap_or_default();
@@ -654,9 +655,9 @@ async fn github_config_view(st: &AppState) -> ApiResult<GithubConfigView> {
         configured: auth::github_oauth(&st.db).await.is_some(),
         client_id: auth::oauth_client_id(&st.db).await,
         callback_path: GITHUB_CALLBACK_PATH.to_string(),
-        app_configured: crate::github_app::is_configured(&st.db).await,
+        app_configured: crate::github_app::is_configured(&st.db, purpose).await,
         app_id,
-        app_slug: crate::github_app::app_slug(&st.db)
+        app_slug: crate::github_app::app_slug(&st.db, purpose)
             .await
             .unwrap_or_default(),
     })

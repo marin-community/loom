@@ -570,7 +570,10 @@ mod tests {
         .await
         .unwrap();
 
-        let app = crate::github_app::GithubApp::new(db.clone());
+        let app = crate::github_app::GithubApp::new(
+            db.clone(),
+            crate::github_app::GithubAppPurpose::Repository,
+        );
         let error = resolve_clone(&db, "acme/gizmos", Some(&app))
             .await
             .unwrap_err();
