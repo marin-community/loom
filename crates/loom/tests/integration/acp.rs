@@ -6033,14 +6033,9 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
 async fn scheduled_watch_dispatches_agent_through_automation_launch() {
     let _adapter = EnvVarSet::set("WEAVER_CLAUDE_ACP_CMD", &agent_cmd());
     let ts = TestServer::start_with_app().await;
-    loom::repo::register(
-        &ts.state.db,
-        "org/repo",
-        "https://github.com/org/repo.git",
-        &ts.cwd(),
-    )
-    .await
-    .unwrap();
+    loom::repo::register(&ts.state.db, "org/repo", &ts.cwd(), &ts.cwd())
+        .await
+        .unwrap();
     ts.client.post("/api/profiles/create", json!({
         "name":"scheduled-test", "agent_kind":"claude", "model":"fake-fast", "protocol":"acp", "mode":"default",
         "class":"automation", "strict":true, "env_clear":true, "prelude":"none", "turn_budget":1, "github_repositories":["org/repo"]
