@@ -1261,6 +1261,29 @@ the helper must be available before a target repository exists. Session
 selection and credentials remain Loom-owned policy; the image registration
 only teaches stock `git` and `gh` how to ask for them.
 
+Managed clone/fetch also uses a repository-scoped App token. The controller
+fetches only the registered URL, with a URL-scoped authorization header and
+redirects disabled. Refresh runs in a temporary bare repository with cleared
+process environment and Git configuration; it seeds existing refs for fetch
+negotiation and writes downloaded objects into the managed clone's object
+store. A separate credential-free process updates origin refs and tags. Agent
+edits to a checkout's origin, additional remotes, URL rewrites, credential
+helpers, or hooks therefore cannot route the controller's fetch credential.
+Only small refs/config files enter the temporary directory, which is removed
+afterward; repository objects stay in their established storage.
+
+These mechanisms do not make upstream credentials non-exportable. Interactive
+Account PATs still enter runtime environments, `github-token` returns an
+installation token, and native remote MCP descriptors carry their configured
+bearer headers. A copied upstream token remains usable until its provider
+expires or revokes it; Loom's per-call session/repository checks govern later
+broker requests, not a token already returned. Browser logout removes that
+browser cookie and does not revoke a launched runtime's session token. GitHub
+access changes are recorded as session events, while token use has a last-used
+timestamp rather than a complete operation audit. Host root or same-user code
+that can read the controller's memory/process environment, database, or Docker
+socket remains inside the credential trust boundary.
+
 **MCP/profile control plane.** A profile stores `mcp_access` as `none`, `all`,
 or an explicit group list. Saving resolves the trusted builtin registry,
 enabled validated custom definitions, and enabled remote definitions, then pins
