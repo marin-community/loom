@@ -64,7 +64,10 @@ pub fn manifest_json(input: &ManifestInput) -> Value {
             });
         }
         GithubAppPurpose::Authentication => {
-            manifest["hook_attributes"] = json!({ "active": false });
+            // GitHub's manifest schema requires a URL even for an inactive webhook.
+            manifest["hook_attributes"] = json!({
+                "url": format!("{base}/api/github/webhook"), "active": false
+            });
             manifest["callback_urls"] = json!([format!("{base}/api/auth/github/callback")]);
             manifest["default_permissions"] = json!({ "members": "read" });
         }
@@ -408,7 +411,10 @@ mod tests {
         i.purpose = GithubAppPurpose::Authentication;
         let m = manifest_json(&i);
         assert_eq!(m["public"], false);
-        assert_eq!(m["hook_attributes"], json!({ "active": false }));
+        assert_eq!(
+            m["hook_attributes"],
+            json!({ "url": "https://loom.acme.dev/api/github/webhook", "active": false })
+        );
         assert_eq!(
             m["callback_urls"],
             json!(["https://loom.acme.dev/api/auth/github/callback"])
