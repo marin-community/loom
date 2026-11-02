@@ -453,7 +453,7 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub fn initialize_params(harness: &str) -> Value {
     serde_json::json!({
         "protocolVersion": PROTOCOL_VERSION,
-        "clientCapabilities": crate::catalog::client_capabilities(harness),
+        "clientCapabilities": super::probe::client_capabilities(harness),
     })
 }
 

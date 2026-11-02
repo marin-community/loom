@@ -11,8 +11,8 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::probe::ProbeSession;
 use super::store::{self, CatalogRow};
+use crate::acp::probe::ProbeSession;
 use crate::db::Db;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,21 +32,10 @@ pub enum Trigger {
     Credential,
 }
 
-const DEFAULT_REFRESH_DAYS: i64 = 7;
+/// How old a stored option set may get before the next pass refetches it.
+const REFRESH_AGE: chrono::Duration = chrono::Duration::days(7);
 const BOOTSTRAP_INITIAL: Duration = Duration::from_secs(2);
 const BOOTSTRAP_CAP: Duration = Duration::from_secs(15 * 60);
-
-pub async fn refresh_days(db: &Db) -> i64 {
-    if let Ok(raw) = std::env::var("LOOM_CATALOG_REFRESH_DAYS") {
-        if let Ok(days) = raw.trim().parse::<i64>() {
-            return days.max(0);
-        }
-    }
-    weaver_core::config::get(db, "catalog.refresh_days")
-        .await
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_REFRESH_DAYS)
-}
 
 pub fn scope_for(rows: &[CatalogRow], version: &str, fingerprint: &str, stale: bool) -> Scope {
     let fetched: Vec<_> = rows
@@ -80,18 +69,14 @@ fn version_forces_full(stored: &str, handshake: &str) -> bool {
     !stored.is_empty() && stored != "live" && stored != handshake
 }
 
-pub fn rows_are_stale(rows: &[CatalogRow], days: i64, now: DateTime<Utc>) -> bool {
-    if days == 0 {
-        return rows.iter().any(|row| row.fetched_at.is_some());
-    }
-    let max_age = chrono::Duration::days(days);
+pub fn rows_are_stale(rows: &[CatalogRow], now: DateTime<Utc>) -> bool {
     rows.iter()
         .filter_map(|row| row.fetched_at.as_deref())
         .any(|stamp| {
             DateTime::parse_from_rfc3339(stamp)
                 .or_else(|_| DateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%S%.fZ"))
                 .ok()
-                .is_some_and(|then| now.signed_duration_since(then) > max_age)
+                .is_some_and(|then| now.signed_duration_since(then) > REFRESH_AGE)
         })
 }
 
@@ -139,12 +124,13 @@ pub async fn reconcile_open<S: ProbeSession>(
                 &label,
                 &handshake.default_options,
                 &handshake.version,
+                Some(fingerprint),
             )
             .await?;
         }
     }
 
-    let pending = models_to_fetch(&handshake, &existing, scope);
+    let pending = models_to_fetch(&handshake, &existing, scope, fingerprint);
     for model_id in pending {
         match session.fetch_model(&model_id).await {
             Ok(options) if !options.is_empty() => {
@@ -154,8 +140,16 @@ pub async fn reconcile_open<S: ProbeSession>(
                     .find(|model| model.id == model_id)
                     .map(|model| model.label.clone())
                     .unwrap_or_else(|| model_id.clone());
-                store::write_options(db, harness, &model_id, &label, &options, &handshake.version)
-                    .await?;
+                store::write_options(
+                    db,
+                    harness,
+                    &model_id,
+                    &label,
+                    &options,
+                    &handshake.version,
+                    Some(fingerprint),
+                )
+                .await?;
             }
             Ok(_) => {
                 tracing::warn!(
@@ -169,19 +163,14 @@ pub async fn reconcile_open<S: ProbeSession>(
             }
         }
     }
-    store::stamp_fingerprint(db, harness, fingerprint).await?;
-    // Incremental passes can see a partial advertised list. Only a full pass
-    // rewrites saved profile models onto a newer id in the same family.
-    if scope == Scope::Full {
-        super::succession::upgrade_profiles(db, harness, &keep).await?;
-    }
     Ok(())
 }
 
 fn models_to_fetch(
-    handshake: &super::probe::Handshake,
+    handshake: &crate::acp::probe::Handshake,
     existing: &[CatalogRow],
     scope: Scope,
+    fingerprint: &str,
 ) -> Vec<String> {
     handshake
         .models
@@ -189,9 +178,11 @@ fn models_to_fetch(
         .filter(|model| handshake.default_model.as_deref() != Some(model.id.as_str()))
         .filter(|model| match scope {
             Scope::Full => true,
-            Scope::Incremental => !existing
-                .iter()
-                .any(|row| row.model_id == model.id && row.options_json.is_some()),
+            Scope::Incremental => !existing.iter().any(|row| {
+                row.model_id == model.id
+                    && row.options_json.is_some()
+                    && row.credential_fingerprint == fingerprint
+            }),
         })
         .map(|model| model.id.clone())
         .collect()
@@ -230,16 +221,58 @@ fn file_secret(harness: &str, key: &str) -> String {
     let Some(home) = std::env::var_os("HOME") else {
         return String::new();
     };
-    let path = match key {
-        "OPENCODE_AUTH_JSON" => {
-            std::path::PathBuf::from(home).join(".local/share/opencode/auth.json")
-        }
-        "OPENCODE_CONFIG_JSON" => {
-            std::path::PathBuf::from(home).join(".config/opencode/opencode.json")
-        }
-        _ => return String::new(),
+    let Some(path) = opencode_secret_path(std::path::Path::new(&home), key) else {
+        return String::new();
     };
     std::fs::read_to_string(path).unwrap_or_default()
+}
+
+/// Write or remove the file Opencode reads for one credential.
+///
+/// `OPENCODE_AUTH_JSON` and `OPENCODE_CONFIG_JSON` have no environment-variable
+/// equivalent. `None` removes the file. A missing home is a no-op.
+pub fn materialize_opencode_secret(name: &str, contents: Option<&str>) -> std::io::Result<()> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(());
+    };
+    materialize_opencode_secret_at(std::path::Path::new(&home), name, contents)
+}
+
+fn opencode_secret_path(home: &std::path::Path, key: &str) -> Option<std::path::PathBuf> {
+    match key {
+        "OPENCODE_AUTH_JSON" => Some(home.join(".local/share/opencode/auth.json")),
+        "OPENCODE_CONFIG_JSON" => Some(home.join(".config/opencode/opencode.json")),
+        _ => None,
+    }
+}
+
+fn materialize_opencode_secret_at(
+    home: &std::path::Path,
+    name: &str,
+    contents: Option<&str>,
+) -> std::io::Result<()> {
+    let Some(path) = opencode_secret_path(home, name) else {
+        return Ok(());
+    };
+    match contents {
+        Some(contents) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, contents)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+            }
+            Ok(())
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        },
+    }
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -322,8 +355,7 @@ pub async fn reconcile_harness(
     };
     let fingerprint = credential_fingerprint(db, harness).await;
     let rows = store::list(db, harness).await?;
-    let days = refresh_days(db).await;
-    let stale = rows_are_stale(&rows, days, Utc::now());
+    let stale = rows_are_stale(&rows, Utc::now());
     let had_rows = !rows.is_empty();
     let preliminary = forced.unwrap_or_else(|| {
         // Version is known only after the handshake; a credential or age
@@ -344,7 +376,7 @@ pub async fn reconcile_harness(
     });
 
     let env = probe_env(db).await;
-    let opened = super::probe::LiveSession::open(&command, harness, &env).await;
+    let opened = crate::acp::probe::LiveSession::open(&command, harness, &env).await;
     let mut session = match opened {
         Ok(session) => session,
         Err(error) => {
@@ -420,7 +452,26 @@ pub async fn write_through(db: &Db, harness: &str, model_id: &str, options: &[Va
                 .find(|version| !version.is_empty() && *version != "live")
         })
         .unwrap_or("");
-    if let Err(error) = store::write_options(db, harness, model_id, &label, options, version).await
+    // A launch is not a credential refresh. Keep the fingerprint the probe
+    // stored, including a sibling's when this model is new to the catalogue.
+    let fingerprint = existing
+        .map(|row| row.credential_fingerprint.clone())
+        .filter(|fingerprint| !fingerprint.is_empty())
+        .or_else(|| {
+            rows.iter()
+                .find(|row| !row.credential_fingerprint.is_empty())
+                .map(|row| row.credential_fingerprint.clone())
+        });
+    if let Err(error) = store::write_options(
+        db,
+        harness,
+        model_id,
+        &label,
+        options,
+        version,
+        fingerprint.as_deref(),
+    )
+    .await
     {
         tracing::warn!(harness, model = %model_id, %error, "catalogue write-through failed");
     }
@@ -429,7 +480,7 @@ pub async fn write_through(db: &Db, harness: &str, model_id: &str, options: &[Va
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::probe::{Handshake, ListedModel, ScriptedSession};
+    use crate::acp::probe::{Handshake, ListedModel, ScriptedSession};
     use serde_json::json;
     use std::collections::HashMap;
 
@@ -554,16 +605,16 @@ mod tests {
             fetched_at: Some(Utc::now().to_rfc3339()),
         };
         let now = Utc::now();
-        assert!(!rows_are_stale(std::slice::from_ref(&fresh), 7, now));
+        assert!(!rows_are_stale(std::slice::from_ref(&fresh), now));
         let old = CatalogRow {
             fetched_at: Some("2020-01-01T00:00:00.000Z".into()),
             ..fresh
         };
-        assert!(rows_are_stale(&[old], 7, now));
+        assert!(rows_are_stale(&[old], now));
     }
 
     #[tokio::test]
-    async fn a_full_refresh_moves_a_dropped_profile_model_to_its_family() {
+    async fn a_full_refresh_does_not_rewrite_a_saved_profile_model() {
         let db = crate::db::connect_in_memory().await.unwrap();
         sqlx::query(
             "UPDATE profiles SET agent_kind = 'cursor-agent', model = 'claude-opus-4-8', revision = 3 WHERE name = 'default'",
@@ -592,8 +643,108 @@ mod tests {
                 .fetch_one(&db)
                 .await
                 .unwrap();
-        assert_eq!(model, "claude-opus-5-5");
-        assert_eq!(revision, 4);
+        assert_eq!(model, "claude-opus-4-8");
+        assert_eq!(revision, 3);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_keeps_the_previous_credential_fingerprint() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let mut first = ScriptedSession {
+            handshake: handshake(json!([{
+                "id": "model", "category": "model", "currentValue": "alpha"
+            }])),
+            fetched: HashMap::from([
+                ("beta".into(), Ok(options_for("beta"))),
+                ("gamma".into(), Ok(options_for("gamma"))),
+            ]),
+        };
+        reconcile_open(&db, "claude", Scope::Full, "old", &mut first)
+            .await
+            .unwrap();
+        let before = store::list(&db, "claude").await.unwrap();
+        let gamma_before = before
+            .iter()
+            .find(|row| row.model_id == "gamma")
+            .unwrap()
+            .options_json
+            .clone();
+
+        let mut rotated = ScriptedSession {
+            handshake: handshake(json!([{
+                "id": "model", "category": "model", "currentValue": "alpha"
+            }])),
+            fetched: HashMap::from([
+                ("beta".into(), Ok(options_for("beta-new"))),
+                (
+                    "gamma".into(),
+                    Err("provider rejected the new credential".into()),
+                ),
+            ]),
+        };
+        reconcile_open(&db, "claude", Scope::Full, "new", &mut rotated)
+            .await
+            .unwrap();
+        let rows = store::list(&db, "claude").await.unwrap();
+        let gamma = rows.iter().find(|row| row.model_id == "gamma").unwrap();
+        let beta = rows.iter().find(|row| row.model_id == "beta").unwrap();
+        assert_eq!(gamma.credential_fingerprint, "old");
+        assert_eq!(gamma.options_json, gamma_before);
+        assert_eq!(beta.credential_fingerprint, "new");
+        assert_eq!(
+            scope_for(&rows, "1", "new", false),
+            Scope::Full,
+            "the stale fingerprint has to force another pass"
+        );
+
+        let mut retry = ScriptedSession {
+            handshake: handshake(json!([{
+                "id": "model", "category": "model", "currentValue": "alpha"
+            }])),
+            fetched: HashMap::from([("gamma".into(), Ok(options_for("gamma-new")))]),
+        };
+        reconcile_open(&db, "claude", Scope::Incremental, "new", &mut retry)
+            .await
+            .unwrap();
+        let rows = store::list(&db, "claude").await.unwrap();
+        let gamma = rows.iter().find(|row| row.model_id == "gamma").unwrap();
+        assert_eq!(gamma.credential_fingerprint, "new");
+        assert!(gamma.options_json.as_deref().unwrap().contains("gamma-new"));
+        assert!(rows
+            .iter()
+            .find(|row| row.model_id == "beta")
+            .unwrap()
+            .options_json
+            .as_deref()
+            .unwrap()
+            .contains("beta-new"));
+    }
+
+    #[test]
+    fn opencode_secret_materialize_writes_and_removes_the_file_opencode_reads() {
+        let home = tempfile::tempdir().unwrap();
+        materialize_opencode_secret_at(
+            home.path(),
+            "OPENCODE_AUTH_JSON",
+            Some(r#"{"anthropic":{"type":"api","key":"sk-test"}}"#),
+        )
+        .unwrap();
+        let path = home.path().join(".local/share/opencode/auth.json");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"anthropic":{"type":"api","key":"sk-test"}}"#
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        materialize_opencode_secret_at(home.path(), "OPENCODE_AUTH_JSON", None).unwrap();
+        assert!(!path.exists());
+        materialize_opencode_secret_at(home.path(), "OPENCODE_AUTH_JSON", None).unwrap();
     }
 
     #[tokio::test]

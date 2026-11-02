@@ -62,6 +62,10 @@ pub async fn note_listed(db: &Db, harness: &str, model_id: &str, label: &str) ->
 }
 
 /// Persist one model's raw option set as soon as its fetch lands.
+///
+/// `fingerprint` is the credential set this fetch ran under. `None` leaves a
+/// fingerprint already stored on the row (a live write-through is not a
+/// credential refresh).
 pub async fn write_options(
     db: &Db,
     harness: &str,
@@ -69,24 +73,32 @@ pub async fn write_options(
     label: &str,
     options: &[Value],
     adapter_version: &str,
+    fingerprint: Option<&str>,
 ) -> Result<()> {
     let options_json = serde_json::to_string(options)?;
     sqlx::query(
         "INSERT INTO harness_model_catalog
-            (harness, model_id, label, options_json, adapter_version, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+            (harness, model_id, label, options_json, adapter_version,
+             credential_fingerprint, fetched_at)
+         VALUES (?, ?, ?, ?, ?, COALESCE(?, ''), ?)
          ON CONFLICT(harness, model_id) DO UPDATE SET
             label = excluded.label,
             options_json = excluded.options_json,
             adapter_version = excluded.adapter_version,
-            fetched_at = excluded.fetched_at",
+            fetched_at = excluded.fetched_at,
+            credential_fingerprint = CASE
+                WHEN ? IS NULL THEN harness_model_catalog.credential_fingerprint
+                ELSE excluded.credential_fingerprint
+            END",
     )
     .bind(harness)
     .bind(model_id)
     .bind(label)
     .bind(options_json)
     .bind(adapter_version)
+    .bind(fingerprint)
     .bind(now_iso())
+    .bind(fingerprint)
     .execute(db)
     .await?;
     Ok(())
@@ -103,15 +115,6 @@ pub async fn prune(db: &Db, harness: &str, keep: &[String]) -> Result<()> {
                 .await?;
         }
     }
-    Ok(())
-}
-
-pub async fn stamp_fingerprint(db: &Db, harness: &str, fingerprint: &str) -> Result<()> {
-    sqlx::query("UPDATE harness_model_catalog SET credential_fingerprint = ? WHERE harness = ?")
-        .bind(fingerprint)
-        .bind(harness)
-        .execute(db)
-        .await?;
     Ok(())
 }
 

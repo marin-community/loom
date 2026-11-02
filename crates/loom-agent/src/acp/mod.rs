@@ -47,6 +47,7 @@
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 
 mod images;
+pub(crate) mod probe;
 mod wire;
 
 use std::collections::{HashMap, HashSet};
