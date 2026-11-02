@@ -735,61 +735,42 @@ pub(crate) async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
         .collect();
 
     println!("Paste-once secrets for the default profile (leave blank to skip).");
-    let anthropic = prompt_secret(
-        "ANTHROPIC_API_KEY",
-        existing_names.contains("ANTHROPIC_API_KEY"),
-    )?;
-    let claude_oauth = prompt_secret(
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        existing_names.contains("CLAUDE_CODE_OAUTH_TOKEN"),
-    )?;
-    let openai = prompt_secret("OPENAI_API_KEY", existing_names.contains("OPENAI_API_KEY"))?;
-    let cursor = prompt_secret("CURSOR_API_KEY", existing_names.contains("CURSOR_API_KEY"))?;
-    let cursor_auth_token = prompt_secret(
-        "CURSOR_AUTH_TOKEN",
-        existing_names.contains("CURSOR_AUTH_TOKEN"),
-    )?;
-    let opencode_auth = prompt_secret(
-        "OPENCODE_AUTH_JSON (paste as one line)",
-        existing_names.contains("OPENCODE_AUTH_JSON"),
-    )?;
-    let opencode_config = prompt_secret(
-        "OPENCODE_CONFIG_JSON (paste as one line)",
-        existing_names.contains("OPENCODE_CONFIG_JSON"),
-    )?;
-
-    if anthropic.is_none()
-        && claude_oauth.is_none()
-        && openai.is_none()
-        && cursor.is_none()
-        && cursor_auth_token.is_none()
-        && opencode_auth.is_none()
-        && opencode_config.is_none()
-    {
+    // Opencode reads the last two only as files written from loom.toml at boot,
+    // so they are not exported into the profile environment.
+    let secrets: &[(&str, &str, bool)] = &[
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", true),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", true),
+        ("OPENAI_API_KEY", "OPENAI_API_KEY", true),
+        ("CURSOR_API_KEY", "CURSOR_API_KEY", true),
+        ("CURSOR_AUTH_TOKEN", "CURSOR_AUTH_TOKEN", true),
+        (
+            "OPENCODE_AUTH_JSON",
+            "OPENCODE_AUTH_JSON (paste as one line)",
+            false,
+        ),
+        (
+            "OPENCODE_CONFIG_JSON",
+            "OPENCODE_CONFIG_JSON (paste as one line)",
+            false,
+        ),
+    ];
+    let mut entered: Vec<(&str, String, bool)> = Vec::new();
+    for (name, prompt, profile_env) in secrets {
+        if let Some(value) = prompt_secret(prompt, existing_names.contains(*name))? {
+            entered.push((*name, value, *profile_env));
+        }
+    }
+    if entered.is_empty() {
         println!("nothing entered — existing values kept unchanged");
         return Ok(());
     }
 
     let mut stored = Vec::new();
-    if let Some(v) = &anthropic {
-        crate::agent_env::set(&db, "ANTHROPIC_API_KEY", v).await?;
-        stored.push("ANTHROPIC_API_KEY");
-    }
-    if let Some(v) = &claude_oauth {
-        crate::agent_env::set(&db, "CLAUDE_CODE_OAUTH_TOKEN", v).await?;
-        stored.push("CLAUDE_CODE_OAUTH_TOKEN");
-    }
-    if let Some(v) = &openai {
-        crate::agent_env::set(&db, "OPENAI_API_KEY", v).await?;
-        stored.push("OPENAI_API_KEY");
-    }
-    if let Some(v) = &cursor {
-        crate::agent_env::set(&db, "CURSOR_API_KEY", v).await?;
-        stored.push("CURSOR_API_KEY");
-    }
-    if let Some(v) = &cursor_auth_token {
-        crate::agent_env::set(&db, "CURSOR_AUTH_TOKEN", v).await?;
-        stored.push("CURSOR_AUTH_TOKEN");
+    for (name, value, profile_env) in &entered {
+        if *profile_env {
+            crate::agent_env::set(&db, name, value).await?;
+            stored.push(*name);
+        }
     }
     if !stored.is_empty() {
         println!();
@@ -799,28 +780,10 @@ pub(crate) async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
             stored.join(", ")
         );
     }
-    let mut updates: Vec<(&str, &str)> = Vec::new();
-    if let Some(v) = &anthropic {
-        updates.push(("ANTHROPIC_API_KEY", v.as_str()));
-    }
-    if let Some(v) = &claude_oauth {
-        updates.push(("CLAUDE_CODE_OAUTH_TOKEN", v.as_str()));
-    }
-    if let Some(v) = &openai {
-        updates.push(("OPENAI_API_KEY", v.as_str()));
-    }
-    if let Some(v) = &cursor {
-        updates.push(("CURSOR_API_KEY", v.as_str()));
-    }
-    if let Some(v) = &cursor_auth_token {
-        updates.push(("CURSOR_AUTH_TOKEN", v.as_str()));
-    }
-    if let Some(v) = &opencode_auth {
-        updates.push(("OPENCODE_AUTH_JSON", v.as_str()));
-    }
-    if let Some(v) = &opencode_config {
-        updates.push(("OPENCODE_CONFIG_JSON", v.as_str()));
-    }
+    let updates: Vec<(&str, &str)> = entered
+        .iter()
+        .map(|(name, value, _)| (*name, value.as_str()))
+        .collect();
     crate::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the paste-once secrets into loom.toml")?;
     println!(

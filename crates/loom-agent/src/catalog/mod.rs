@@ -1,14 +1,11 @@
 //! The uniform ACP model catalogue: one store, one probe, one reconcile.
 
-mod probe;
 mod reconcile;
 pub mod selectors;
 mod store;
 mod succession;
 
-pub(crate) use probe::client_capabilities;
-pub use probe::LiveSession;
-pub use reconcile::{spawn_refresh, write_through, Trigger};
+pub use reconcile::{materialize_opencode_secret, spawn_refresh, write_through, Trigger};
 pub use selectors::{normalize, NormalizedSelectors};
 pub(crate) use succession::successor;
 

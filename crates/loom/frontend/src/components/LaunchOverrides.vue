@@ -31,8 +31,6 @@ const effectiveAgent = computed(
   () =>
     props.modelValue.agent ?? settings.value?.agent ?? availableAgents(props.agents)[0]?.kind ?? '',
 );
-// The effective agent is always an option, marked when its harness is missing,
-// so the control can never display a different agent than the one in effect.
 const agentOptions = computed(() => agentOptionsWithCurrent(props.agents, effectiveAgent.value));
 const agentChoices = computed(() =>
   agentOptions.value.map((agent) => ({

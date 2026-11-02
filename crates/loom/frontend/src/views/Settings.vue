@@ -57,7 +57,6 @@ const categories: CategoryItem[] = [
   {
     id: 'diagnostics',
     label: 'Diagnostics',
-    groups: ['Diagnostics'],
     summary: 'Background tasks, server logs, and build status for debugging this deployment.',
     scope: 'user',
   },

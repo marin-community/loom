@@ -67,11 +67,8 @@ pub struct LoomConfig {
     pub cursor_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor_auth_token: Option<String>,
-    /// Stored inline, not as a host file path like `tls_cert_file`: the
-    /// destination already lives inside the `loom_home` volume mount, so a
-    /// conditional bind-mount would have to nest inside another mount rather
-    /// than stand alone — matches `github_app_private_key`, the other
-    /// multi-line secret this struct carries inline.
+    /// Opencode `auth.json` body, stored inline like `github_app_private_key`.
+    /// The entrypoint writes it under the loom home; this field is not a path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_auth_json: Option<String>,
     /// Opencode's own `opencode.json`, verbatim — written to

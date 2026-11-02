@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::time::timeout;
 
-use super::selectors::{self, current_model, model_choices, model_option_id};
+use crate::catalog::selectors::{self, current_model, model_choices, model_option_id};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 

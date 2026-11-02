@@ -3,10 +3,6 @@
 //! removed. Words after the version (`flash`, `mini`, `luna`) stay attached,
 //! so a line does not jump class.
 
-use anyhow::Result;
-
-use crate::db::{now_iso, Db};
-
 /// The listed id that should replace `saved`, or `None` when `saved` is still
 /// listed, has no newer sibling, or cannot be placed in a family.
 pub(crate) fn successor(saved: &str, listed: &[&str]) -> Option<String> {
@@ -41,46 +37,6 @@ pub(crate) fn successor(saved: &str, listed: &[&str]) -> Option<String> {
         }
     }
     best.map(|(id, _)| id.to_string()).filter(|id| id != saved)
-}
-
-/// Point profiles at a newer listed id after a reconcile drops the one they saved.
-pub(crate) async fn upgrade_profiles(db: &Db, harness: &str, listed: &[String]) -> Result<()> {
-    if listed.is_empty() {
-        return Ok(());
-    }
-    let listed_refs: Vec<&str> = listed.iter().map(String::as_str).collect();
-    let rows = sqlx::query_as::<_, (String, String)>(
-        "SELECT name, model FROM profiles WHERE agent_kind = ? AND retired = 0 AND model != ''",
-    )
-    .bind(harness)
-    .fetch_all(db)
-    .await?;
-    let now = now_iso();
-    for (name, model) in rows {
-        let Some(next) = successor(&model, &listed_refs) else {
-            continue;
-        };
-        let updated = sqlx::query(
-            "UPDATE profiles SET model = ?, revision = revision + 1, updated_at = ?
-             WHERE name = ? AND model = ?",
-        )
-        .bind(&next)
-        .bind(&now)
-        .bind(&name)
-        .bind(&model)
-        .execute(db)
-        .await?;
-        if updated.rows_affected() > 0 {
-            tracing::info!(
-                profile = %name,
-                harness,
-                from = %model,
-                to = %next,
-                "profile model followed a newer id in the same family"
-            );
-        }
-    }
-    Ok(())
 }
 
 struct Identity {

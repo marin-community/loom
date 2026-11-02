@@ -58,6 +58,7 @@ pub(super) async fn set_settings_env_operation(
         .acquire_profile(profile::DEFAULT_PROFILE)
         .await;
     profile::env_set(&st.db, profile::DEFAULT_PROFILE, &input.name, &input.value).await?;
+    sync_opencode_file(&input.name, Some(&input.value))?;
     invalidate_cursor_catalog_if_credential(&st.db, &input.name);
     env_vars(&st.db).await
 }
@@ -74,6 +75,24 @@ pub(super) async fn delete_settings_env_operation(
         .acquire_profile(profile::DEFAULT_PROFILE)
         .await;
     profile::env_remove(&st.db, profile::DEFAULT_PROFILE, &input.name).await?;
+    // The profile override is gone. Put the deployment value back into the
+    // file when the process still has one; otherwise remove the file so a
+    // deleted credential is not what the next probe reads.
+    let restored = std::env::var(&input.name).ok();
+    sync_opencode_file(&input.name, restored.as_deref())?;
     invalidate_cursor_catalog_if_credential(&st.db, &input.name);
     env_vars(&st.db).await
+}
+
+/// Opencode reads `auth.json` and `opencode.json`, not these environment
+/// variables. A settings change has to land in those files before the
+/// catalogue probe starts.
+fn sync_opencode_file(name: &str, contents: Option<&str>) -> ApiResult<()> {
+    if !matches!(name, "OPENCODE_AUTH_JSON" | "OPENCODE_CONFIG_JSON") {
+        return Ok(());
+    }
+    crate::catalog::materialize_opencode_secret(name, contents).map_err(|error| {
+        AppError::internal("could not write the Opencode credential file", error)
+    })?;
+    Ok(())
 }

@@ -22,10 +22,6 @@ pub enum BuiltinAgentKind {
 }
 
 impl BuiltinAgentKind {
-    /// Every builtin kind, in picker order. The single list a new harness is
-    /// added to; downstream registries (`builtin_metadata`, the custom-agent
-    /// reserved names, …) derive from it, and the per-kind `match`es are
-    /// exhaustive so the compiler flags any that a new variant misses.
     pub const ALL: [BuiltinAgentKind; 4] =
         [Self::Claude, Self::Codex, Self::OpenCode, Self::CursorAgent];
 
