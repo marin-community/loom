@@ -42,7 +42,7 @@ pub struct SharedGrantClaims {
 
 impl SharedGrantClaims {
     pub fn allows(&self, action: &str, resource: &str) -> bool {
-        canonical_resource(resource, false)
+        canonical_resource(resource)
             && self.permissions.iter().any(|permission| {
                 permission.service == AUDIENCE
                     && permission.actions.iter().any(|allowed| allowed == action)
@@ -51,7 +51,11 @@ impl SharedGrantClaims {
     }
 }
 
-fn canonical_resource(resource: &str, prefix: bool) -> bool {
+fn canonical_prefix(resource: &str) -> bool {
+    resource.ends_with('/') && canonical_resource(resource)
+}
+
+fn canonical_resource(resource: &str) -> bool {
     let path = if resource.starts_with('/') {
         resource
     } else if let Some(remainder) = resource.strip_prefix("s3://") {
@@ -77,7 +81,6 @@ fn canonical_resource(resource: &str, prefix: bool) -> bool {
             character <= '\u{20}' || matches!(character, '%' | '\\' | '*' | '?' | '#')
         })
         && !path.split('/').any(|segment| matches!(segment, "." | ".."))
-        && (!prefix || resource.ends_with('/'))
 }
 
 /// Holds public keys only. The configured issuer never comes from a token URL.
@@ -87,12 +90,24 @@ pub struct SharedGrantVerifier {
 }
 
 #[derive(Deserialize)]
-struct LiveDecision {
+pub struct LiveGrantDecision {
     grant_id: String,
     owner: String,
     actor: String,
     expires_at: f64,
     policy_revision: String,
+}
+
+impl LiveGrantDecision {
+    pub fn matches_claims(&self, claims: &SharedGrantClaims) -> bool {
+        self.grant_id == claims.grant_id
+            && self.owner == claims.owner
+            && self.actor == claims.sub
+            && self.policy_revision == claims.policy_revision
+            && self.expires_at.is_finite()
+            && self.expires_at >= claims.exp as f64
+            && self.expires_at > chrono::Utc::now().timestamp() as f64
+    }
 }
 
 impl SharedGrantVerifier {
@@ -145,7 +160,7 @@ impl SharedGrantVerifier {
                         .actions
                         .iter()
                         .any(|action| action.is_empty() || action.contains('*'))
-                    || !canonical_resource(&permission.resource, true)
+                    || !canonical_prefix(&permission.resource)
             })
         {
             bail!("shared grant identity or permission bounds are invalid");
@@ -162,27 +177,13 @@ impl SharedGrantVerifier {
         action: &str,
         resource: &str,
     ) -> Result<SharedGrantClaims> {
-        let url =
-            reqwest::Url::parse(authorize_url).context("invalid shared grant authority URL")?;
-        let loopback = matches!(
-            url.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        );
-        if (url.scheme() != "https" && !(url.scheme() == "http" && loopback))
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            bail!("shared grant authority requires HTTPS outside loopback");
-        }
+        crate::auth::validate_shared_url(authorize_url)?;
         let claims = self.verify(token)?;
         if !claims.allows(action, resource) {
             bail!("operation exceeds shared grant bounds");
         }
         let response = client
-            .post(url)
+            .post(authorize_url)
             .timeout(Duration::from_secs(10))
             .bearer_auth(token)
             .json(
@@ -190,22 +191,36 @@ impl SharedGrantVerifier {
             )
             .send()
             .await
+            .inspect_err(|_| {
+                tracing::warn!(
+                    stage = "authorize_transport",
+                    "shared grant authority request failed"
+                )
+            })
             .context("shared grant authority unavailable")?;
         if response.status() != reqwest::StatusCode::OK {
+            tracing::warn!(
+                stage = "authorize_status",
+                status = response.status().as_u16(),
+                "shared grant authority request failed"
+            );
             bail!("shared grant authority denied this operation");
         }
         let live = response
-            .json::<LiveDecision>()
+            .json::<LiveGrantDecision>()
             .await
+            .inspect_err(|_| {
+                tracing::warn!(
+                    stage = "authorize_reply",
+                    "shared grant authority returned an invalid reply"
+                )
+            })
             .context("invalid shared grant authority decision")?;
-        if live.grant_id != claims.grant_id
-            || live.owner != claims.owner
-            || live.actor != claims.sub
-            || live.policy_revision != claims.policy_revision
-            || !live.expires_at.is_finite()
-            || live.expires_at < claims.exp as f64
-            || live.expires_at <= chrono::Utc::now().timestamp() as f64
-        {
+        if !live.matches_claims(&claims) {
+            tracing::warn!(
+                stage = "authorize_identity",
+                "shared grant authority returned an invalid reply"
+            );
             bail!("shared grant authority decision does not match the token");
         }
         Ok(claims)

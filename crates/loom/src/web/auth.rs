@@ -159,13 +159,9 @@ pub(super) fn operation_grant_allows(
     principal: &Principal,
     operation: &weaver_api::OperationSpec,
 ) -> bool {
-    if matches!(principal.grant, Grant::Shared { .. }) {
-        return operation.id == "runs.create";
-    }
-    if operation.actor == weaver_api::ActorPolicy::Anonymous {
-        return true;
-    }
     match &principal.grant {
+        Grant::Shared { .. } => operation.id == weaver_api::operations::runs::create::SPEC.id,
+        _ if operation.actor == weaver_api::ActorPolicy::Anonymous => true,
         Grant::Anonymous => false,
         Grant::Admin => operation.actor != weaver_api::ActorPolicy::SessionOnly,
         Grant::User => matches!(
@@ -173,7 +169,6 @@ pub(super) fn operation_grant_allows(
             weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == weaver_api::ActorPolicy::Internal,
-        Grant::Shared { .. } => operation.id == "runs.create",
         Grant::Session { capabilities, .. } => {
             matches!(
                 operation.actor,
@@ -231,7 +226,10 @@ async fn resolve_principal(
     }
     // Local-runner agents share the server's loopback interface. Enabling the
     // shared authority requires explicit credentials even for host reconciliation.
-    if auth::shared_grant_config(&st.db).await.ok()?.is_some() {
+    if auth::shared_grant_authorization_enabled(&st.db)
+        .await
+        .ok()?
+    {
         return None;
     }
     // The host runs reconciliation inside the Loom container. Caddy marks

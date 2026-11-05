@@ -205,12 +205,14 @@ pub fn validate_shared_url(value: &str) -> Result<()> {
 }
 
 pub async fn shared_grant_config(db: &Db) -> Result<Option<SharedGrantConfig>> {
-    let Some(value) = crate::config::try_get(db, "auth.shared_grants").await? else {
+    let Some(value) = crate::config::try_get(db, weaver_core::config::SHARED_GRANTS_KEY).await?
+    else {
         return Ok(None);
     };
     if value.trim().is_empty() {
         return Ok(None);
     }
+    crate::config::latch_shared_grant_mode(db).await?;
     let config: SharedGrantConfig = serde_json::from_str(&value)?;
     validate_shared_url(&config.authorize_url)?;
     validate_shared_url(&config.credentials_url)?;
@@ -230,6 +232,22 @@ pub async fn shared_grant_config(db: &Db) -> Result<Option<SharedGrantConfig>> {
     }
     crate::shared_grants::SharedGrantVerifier::new(&config.issuer, &config.public_keys)?;
     Ok(Some(config))
+}
+
+/// Whether shared grant configuration permanently disabled implicit local authority.
+pub async fn shared_grant_authorization_enabled(db: &Db) -> Result<bool> {
+    if crate::config::try_get(db, weaver_core::config::SHARED_GRANT_MODE_LATCH_KEY)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let configured = crate::config::try_get(db, weaver_core::config::SHARED_GRANTS_KEY).await?;
+    if configured.is_some_and(|value| !value.trim().is_empty()) {
+        crate::config::latch_shared_grant_mode(db).await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// An authenticated caller: identity, proof mechanism, and explicit grant.
@@ -953,7 +971,9 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
 
 /// Build the loopback [`Principal`] — the primary user, marked [`AuthVia::Loopback`].
 pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
-    if github_organization_authorization_enabled(db).await? {
+    if github_organization_authorization_enabled(db).await?
+        || shared_grant_authorization_enabled(db).await?
+    {
         return Ok(None);
     }
     let Some(username) = primary_user(db).await? else {
@@ -1180,7 +1200,12 @@ pub async fn lookup_connector_token(db: &Db, token: &str) -> Result<Option<Princ
 
 async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Option<Principal>> {
     if !token.starts_with(TOKEN_PREFIX) {
-        if let Some(config) = shared_grant_config(db).await? {
+        if let Some(config) = shared_grant_config(db).await.inspect_err(|_| {
+            tracing::warn!(
+                stage = "configuration",
+                "shared grant authentication configuration is invalid"
+            )
+        })? {
             let verifier = crate::shared_grants::SharedGrantVerifier::new(
                 &config.issuer,
                 &config.public_keys,
@@ -1238,7 +1263,10 @@ async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Optio
     if kind == TokenKind::OAuth.as_str() && !accept_oauth {
         return Ok(None);
     }
-    if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
+    if kind == TokenKind::Local.as_str()
+        && (github_organization_authorization_enabled(db).await?
+            || shared_grant_authorization_enabled(db).await?)
+    {
         return Ok(None);
     }
     let role_backed = [TokenKind::Pat, TokenKind::Local, TokenKind::Engine]
@@ -2954,6 +2982,40 @@ mod tests {
         // each ensures a working bearer for the same owner.
         let first = register_then_lookup(&db).await;
         assert_eq!(first.username, "rjpower");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shared_grant_withdrawal_keeps_local_authority_disabled() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let (local, _) =
+            create_token_kind(&db, "rjpower", LOCAL_TOKEN_NAME, None, TokenKind::Local)
+                .await
+                .unwrap();
+        let (operator, _) = create_token(&db, "rjpower", "operator", None)
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &local).await.unwrap().is_some());
+        // An imported deployment may predate the latch. Even malformed policy must latch before removal.
+        sqlx::query("INSERT INTO deployment_settings (key,value) VALUES (?, ?)")
+            .bind(weaver_core::config::SHARED_GRANTS_KEY)
+            .bind("invalid-json")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(shared_grant_config(&db).await.is_err());
+        assert!(lookup_token(&db, &local).await.unwrap().is_none());
+        crate::config::reconcile_deployment(&db, &[], true)
+            .await
+            .unwrap();
+        assert!(shared_grant_authorization_enabled(&db).await.unwrap());
+        assert!(loopback_principal(&db).await.unwrap().is_none());
+        assert!(lookup_token(&db, &local).await.unwrap().is_none());
+        assert!(lookup_token(&db, &operator)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_admin());
     }
 
     #[tokio::test]

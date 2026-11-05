@@ -24,6 +24,14 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
         &crate::fixtures::fake_acp_agent_cmd(),
     );
     let mut ts = TestServer::start().await;
+    let local = loom::auth::ensure_local_token(&ts.state.db).await.unwrap();
+    let owner = loom::auth::primary_user(&ts.state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    let (operator, _) = loom::auth::create_token(&ts.state.db, &owner, "shared operator", Some(1))
+        .await
+        .unwrap();
     let corpus: serde_json::Value = serde_json::from_str(include_str!(
         "../../../loom-policy/tests/fixtures/shared_grants.json"
     ))
@@ -86,7 +94,6 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
         .execute(&ts.state.db)
         .await
         .unwrap();
-    let operator = loom::auth::ensure_local_token(&ts.state.db).await.unwrap();
     ts.client = ts.client.clone().with_token(Some(operator));
     let client = reqwest::Client::new();
     let bare_deployment = client
@@ -208,6 +215,35 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
             .len(),
         1
     );
+    ts.client
+        .post(
+            "/api/settings/patch",
+            json!({"changes":{
+                "auth.shared_grants":null, "auth.trust_loopback":false
+            }}),
+        )
+        .await
+        .unwrap();
+    let bare = client
+        .post(format!("http://{}/api/deployment/reconcile", ts.addr))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bare.status(), StatusCode::UNAUTHORIZED);
+    let stale = client
+        .post(format!("http://{}/api/deployment/reconcile", ts.addr))
+        .bearer_auth(local)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    assert!(ts
+        .client
+        .post("/api/deployment/reconcile", json!({}))
+        .await
+        .is_ok());
     server.abort();
 }
 

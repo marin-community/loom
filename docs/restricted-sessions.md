@@ -128,9 +128,11 @@ Obtain the profile revision and resolver fingerprint from
 the trust policy. The configured `cwd` is an absolute server-side repository
 root. Authority endpoints require HTTPS, except for isolated loopback tests.
 Requests never follow redirects with a bearer credential.
-Enabling this setting disables implicit loopback administration, including
-deployment reconciliation. Local operators must present the machine or an
-operator token; browser users can still sign in normally.
+Enabling this setting permanently disables implicit loopback administration
+and local machine tokens for this database, including deployment reconciliation.
+Clearing or pruning the setting does not restore that authority. Provision an
+operator PAT before enabling shared mode; server-issued engine credentials and
+ordinary browser sign-in remain available.
 
 The JWT must have protected header `typ=at+jwt`, algorithm `EdDSA`, exact
 audience `loom`, a matching subject and acting principal, and a grant ID,

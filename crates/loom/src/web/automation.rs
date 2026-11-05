@@ -541,11 +541,8 @@ pub(super) async fn create_run_core(
 
 #[derive(Deserialize)]
 struct BrokerCredentials {
-    grant_id: String,
-    actor: String,
-    owner: String,
-    expires_at: f64,
-    policy_revision: String,
+    #[serde(flatten)]
+    decision: loom_policy::shared_grants::LiveGrantDecision,
     auth_url: String,
     storage_token: Option<String>,
 }
@@ -566,6 +563,12 @@ async fn shared_launch_credentials(
     };
     let config = crate::auth::shared_grant_config(&st.db)
         .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "configuration",
+                "shared grant launch configuration is invalid"
+            )
+        })
         .map_err(|_| denied())?
         .ok_or_else(denied)?;
     let approved = config.profiles.get(&request.profile).ok_or_else(denied)?;
@@ -624,7 +627,15 @@ async fn shared_launch_credentials(
     let verifier =
         loom_policy::shared_grants::SharedGrantVerifier::new(&config.issuer, &config.public_keys)
             .map_err(|_| denied())?;
-    let client = config.client().map_err(|_| denied())?;
+    let client = config
+        .client()
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "client_configuration",
+                "shared grant broker client configuration is invalid"
+            )
+        })
+        .map_err(|_| denied())?;
     verifier
         .authorize(
             &client,
@@ -641,20 +652,46 @@ async fn shared_launch_credentials(
         .json(&serde_json::json!({"resource": resource}))
         .send()
         .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_transport",
+                "shared grant broker request failed"
+            )
+        })
         .map_err(|_| denied())?;
     if response.status() != StatusCode::OK {
+        tracing::warn!(
+            stage = "credentials_status",
+            status = response.status().as_u16(),
+            "shared grant broker request failed"
+        );
         return Err(denied());
     }
-    let credentials: BrokerCredentials = response.json().await.map_err(|_| denied())?;
-    if credentials.grant_id != claims.grant_id
-        || credentials.actor != claims.sub
-        || credentials.owner != claims.owner
-        || credentials.policy_revision != claims.policy_revision
-        || credentials.expires_at < claims.exp as f64
-    {
+    let credentials: BrokerCredentials = response
+        .json()
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_reply",
+                "shared grant broker returned an invalid reply"
+            )
+        })
+        .map_err(|_| denied())?;
+    if !credentials.decision.matches_claims(claims) {
+        tracing::warn!(
+            stage = "credentials_identity",
+            "shared grant broker returned an invalid reply"
+        );
         return Err(denied());
     }
-    crate::auth::validate_shared_url(&credentials.auth_url).map_err(|_| denied())?;
+    crate::auth::validate_shared_url(&credentials.auth_url)
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_endpoint",
+                "shared grant broker returned an invalid reply"
+            )
+        })
+        .map_err(|_| denied())?;
     request.session.cwd = approved.cwd.clone();
     request.session.expected_profile_revision = Some(approved.revision);
     request.session.expected_resolver_revision = Some(approved.resolver_revision.clone());

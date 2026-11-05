@@ -176,10 +176,9 @@ pub struct Actor(ActorKind);
 impl Actor {
     /// The actor a credential launches as, or `None` if it cannot launch at all.
     ///
-    /// `None` is currently only an anonymous caller. `authorize()` refuses
-    /// anonymous grants on every operation without `actor = Anonymous`, so
-    /// this is unreachable in practice. It returns an `Option` so provisioning
-    /// fails closed if that invariant ever breaks.
+    /// Anonymous callers cannot launch. Shared grants use the run handler's
+    /// live authorization and broker credential path, so they cannot enter
+    /// generic provisioning through this constructor.
     pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
         Some(match &principal.grant {
             Grant::Anonymous | Grant::Shared { .. } => return None,
