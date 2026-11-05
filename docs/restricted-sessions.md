@@ -106,7 +106,66 @@ Automation requests carry the task prompt and are stored for audit and
 idempotency. Loom resolves the short-lived, repository-scoped App credential
 while executing a fixed GitHub tool.
 
-## Deployment checklist
+## Shared grant authority
+
+Loom can accept a shared authority's Ed25519 access JWT directly for
+`runs.create`. This is a separate authentication mode from browser login and
+Loom's own automation tokens. Configure the `auth.shared_grants` setting as a
+JSON document with these fields:
+
+| Field | Value |
+| --- | --- |
+| `issuer` | Exact trusted JWT issuer |
+| `public_keys` | Array of trusted Ed25519 public keys in PEM form |
+| `authorize_url` | Authority endpoint for the live operation decision |
+| `credentials_url` | Authority endpoint for the same grant's runtime credentials |
+| `ca_file` | Optional PEM CA bundle for a private authority; omission uses the client's public trust roots |
+| `profiles` | Map of reviewed profile names to `{cwd, revision, resolver_revision}` |
+
+Every configured profile must be strict, restricted, and environment-cleared.
+Obtain the profile revision and resolver fingerprint from
+`sessions.launches.resolve`; changing either requires reviewing and updating
+the trust policy. The configured `cwd` is an absolute server-side repository
+root. Authority endpoints require HTTPS, except for isolated loopback tests.
+Requests never follow redirects with a bearer credential.
+Enabling this setting disables implicit loopback administration, including
+deployment reconciliation. Local operators must present the machine or an
+operator token; browser users can still sign in normally.
+
+The JWT must have protected header `typ=at+jwt`, algorithm `EdDSA`, exact
+audience `loom`, a matching subject and acting principal, and a grant ID,
+owner, policy revision, expiry, and service permissions. Launching profile
+`review` requires action `session.create` beneath `/review/`. Loom checks the
+signature and token bounds, then posts the original bearer to `authorize_url`
+with `{"audience":"loom","action":"session.create","resource":"/review/"}`.
+An unavailable authority or a revoked grant denies the launch.
+
+The caller supplies the profile, title, and goal. It cannot
+choose a repository path, launch overrides, scratch uploads, a channel, or a
+Slack route. Loom selects the configured repository and pinned profile. A
+shared grant reaches no other API operation, including profile changes and
+automation-token minting. Run metadata records `shared_grant_id`; idempotency
+keys are fixed by that grant, so one grant owns exactly one run. Retries with
+different task content are rejected.
+
+Loom posts `{"resource":"/review/"}` and the same bearer to
+`credentials_url`. The broker returns the matching grant identity,
+`auth_url`, and an optional `storage_token`. These credentials enter only the
+new session's runtime environment as `MARIN_AUTH_URL` and
+`MARIN_GRANT_TOKEN`, after the ordinary environment clearing. They never enter
+the stored launch request or profile environment. The broker must derive
+storage authority from the same grant and recheck live state before issuing it.
+
+Runtime credentials remain in memory. A stopped shared-grant session needs a
+fresh authorized launch; wake and recovery refuse to respawn it without its
+credential context. The authority's lifecycle observer revokes the recorded
+grant when the actual run ends, which stops future credential refresh.
+
+Restricted Loom currently has no built-in CoreWeave storage tool. Injecting a
+storage grant establishes runtime identity but does not add a shell or an
+unreviewed MCP to the restricted tool set.
+
+## GitHub deployment checklist
 
 1. Configure and install the production GitHub App on each target repository.
 2. Add one `githubFederations` entry per approved caller workflow, constrained

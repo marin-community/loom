@@ -171,6 +171,9 @@ async fn authorize(
 
 fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
     use crate::auth::Grant;
+    if matches!(principal.grant, Grant::Shared { .. }) {
+        return operation.id == "runs.create";
+    }
     // An operation that needs no credential is reachable by everyone, including
     // a caller that has one. `Grant::Anonymous` reaches nothing else: forgetting
     // to authenticate a route cannot widen it, since reachability is controlled
@@ -188,6 +191,7 @@ fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
             ActorPolicy::SessionSelf | ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == ActorPolicy::Internal,
+        Grant::Shared { .. } => operation.id == "runs.create",
         Grant::Session { .. } => matches!(
             operation.actor,
             ActorPolicy::SessionSelf | ActorPolicy::SessionOnly

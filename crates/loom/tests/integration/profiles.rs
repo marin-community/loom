@@ -4,12 +4,211 @@ use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::fixtures::TestServer;
 
 struct EnvVarGuard {
     name: &'static str,
     previous: Option<std::ffi::OsString>,
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
+    let _adapter = EnvVarGuard::set(
+        "WEAVER_CLAUDE_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+    let mut ts = TestServer::start().await;
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../loom-policy/tests/fixtures/shared_grants.json"
+    ))
+    .unwrap();
+    let token = corpus["vectors"][0]["token"].as_str().unwrap().to_string();
+    let revoked = Arc::new(AtomicBool::new(false));
+    let decision = json!({"grant_id":"grant-one", "actor":"loom:run-one", "owner":"user:power",
+        "expires_at":4102444800_u64, "policy_revision":"revision-one"});
+    let auth_revoked = revoked.clone();
+    let auth_decision = decision.clone();
+    let app = axum::Router::new()
+        .route("/authorize", axum::routing::post(move |axum::Json(input): axum::Json<serde_json::Value>| {
+            let revoked = auth_revoked.clone();
+            let decision = auth_decision.clone();
+            async move {
+                if revoked.load(Ordering::SeqCst) || input != json!({"audience":"loom", "action":"session.create", "resource":"/power/"}) {
+                    (StatusCode::FORBIDDEN, axum::Json(json!({})))
+                } else { (StatusCode::OK, axum::Json(decision)) }
+            }
+        }))
+        .route("/credentials", axum::routing::post(move || {
+            let mut response = decision.clone();
+            async move {
+                response["auth_url"] = json!("https://auth.example.test");
+                response["storage_token"] = json!("runtime-secret-never-persisted");
+                axum::Json(response)
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authority = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut profile = ts
+        .client
+        .post("/api/profiles/get", json!({"name":"github_comment"}))
+        .await
+        .unwrap();
+    for field in ["env", "revision", "lifetime", "created_at", "updated_at"] {
+        profile.as_object_mut().unwrap().remove(field);
+    }
+    profile["name"] = json!("power");
+    profile["model"] = json!("fake-fast");
+    profile["mcp_access"] = json!({"mode":"none","groups":[]});
+    ts.client
+        .post("/api/profiles/create", profile)
+        .await
+        .unwrap();
+    let preview = ts
+        .client
+        .post(
+            "/api/sessions/launches/resolve",
+            json!({"selection":{"profile":"power","overrides":{}}}),
+        )
+        .await
+        .unwrap();
+    let config = json!({"issuer":corpus["issuer"],"public_keys":corpus["public_keys"],
+        "authorize_url":format!("{authority}/authorize"),"credentials_url":format!("{authority}/credentials"),
+        "profiles":{"power":{"cwd":ts.cwd(),"revision":preview["profile_revision"],"resolver_revision":preview["resolver_revision"]}}});
+    sqlx::query("INSERT INTO settings (key,value) VALUES ('auth.shared_grants', ?)")
+        .bind(config.to_string())
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let operator = loom::auth::ensure_local_token(&ts.state.db).await.unwrap();
+    ts.client = ts.client.clone().with_token(Some(operator));
+    let client = reqwest::Client::new();
+    let bare_deployment = client
+        .post(format!("http://{}/api/deployment/reconcile", ts.addr))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bare_deployment.status(), StatusCode::UNAUTHORIZED);
+    assert!(ts
+        .client
+        .post("/api/deployment/reconcile", json!({}))
+        .await
+        .is_ok());
+    for route in [
+        "auth/automation_token",
+        "profiles/create",
+        "sessions/launch",
+    ] {
+        let response = client
+            .post(format!("http://{}/api/{route}", ts.addr))
+            .bearer_auth(&token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{route}");
+    }
+    let mut request = json!({"profile":"power","idempotency_key":"proof","source":"ops",
+        "session":{"title":"Native shared grant", "goal":"say:authorized"}});
+    request["session"]["cwd"] = json!("/etc");
+    let response = client
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    request["session"].as_object_mut().unwrap().remove("cwd");
+    let response = client
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    let runs = ts.client.post("/api/runs/list", json!({})).await.unwrap();
+    let run = &runs[0];
+    assert_eq!(run["shared_grant_id"], "grant-one");
+    assert_eq!(run["actor_subject"], "loom:run-one");
+    request["idempotency_key"] = json!("another-key-same-grant");
+    let retry = client
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(
+        retry.json::<serde_json::Value>().await.unwrap()["id"],
+        run["id"]
+    );
+    request["session"]["goal"] = json!("say:different task");
+    let changed = client
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(changed.status(), StatusCode::CONFLICT);
+    request["session"]["goal"] = json!("say:authorized");
+    let persisted = loom::runs::get(&ts.state.db, run["id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!persisted
+        .request_json
+        .contains("runtime-secret-never-persisted"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&persisted.request_json).unwrap()["session"]
+            ["cwd"],
+        ts.cwd()
+    );
+    let session = loom::session::get(&ts.state.db, run["session_id"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        loom::lifecycle::rotate_session_token(&ts.state.db, &session, &mut Vec::new())
+            .await
+            .is_err()
+    );
+    revoked.store(true, Ordering::SeqCst);
+    request["idempotency_key"] = json!("after-revocation");
+    let response = client
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        ts.client
+            .post("/api/runs/list", json!({}))
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    server.abort();
 }
 
 impl EnvVarGuard {

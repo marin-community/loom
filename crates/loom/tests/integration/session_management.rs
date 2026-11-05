@@ -14,6 +14,7 @@ async fn reserve(ts: &TestServer, key: &str) -> runs::Run {
     match runs::reserve(
         &ts.state.db,
         NewRun {
+            shared_grant_id: None,
             subject: "automation:test",
             source: "grafana",
             service_tag: "grafana",

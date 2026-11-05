@@ -383,6 +383,15 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "auth.shared_grants",
+        label: "Shared grant authority",
+        description: "JSON trust policy with issuer, public_keys (Ed25519 PEM), authorize_url, credentials_url, optional ca_file (PEM CA bundle), and profiles mapping approved restricted profile names to {cwd, revision, resolver_revision}. Empty disables shared grant authentication.",
+        kind: SettingKind::Text,
+        default: "",
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
         key: "auth.trust_loopback",
         label: "Trust loopback requests",
         description: "When enabled, requests from 127.0.0.1/::1 are trusted as \

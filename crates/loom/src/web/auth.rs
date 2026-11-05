@@ -128,7 +128,7 @@ pub(super) async fn grant_allows(
         Grant::User => discovery || super::is_ide_proxy_path(path),
         // An automation credential exists to report runs (`runs.create`,
         // `actor = Internal`); it reaches no raw path at all.
-        Grant::Automation { .. } => false,
+        Grant::Automation { .. } | Grant::Shared { .. } => false,
         Grant::Session { session_id, .. } => {
             if discovery {
                 return true;
@@ -159,6 +159,9 @@ pub(super) fn operation_grant_allows(
     principal: &Principal,
     operation: &weaver_api::OperationSpec,
 ) -> bool {
+    if matches!(principal.grant, Grant::Shared { .. }) {
+        return operation.id == "runs.create";
+    }
     if operation.actor == weaver_api::ActorPolicy::Anonymous {
         return true;
     }
@@ -170,6 +173,7 @@ pub(super) fn operation_grant_allows(
             weaver_api::ActorPolicy::SessionSelf | weaver_api::ActorPolicy::User
         ),
         Grant::Automation { .. } => operation.actor == weaver_api::ActorPolicy::Internal,
+        Grant::Shared { .. } => operation.id == "runs.create",
         Grant::Session { capabilities, .. } => {
             matches!(
                 operation.actor,
@@ -224,6 +228,11 @@ async fn resolve_principal(
         if let Ok(Some(p)) = auth::lookup_session(&st.db, &cookie).await {
             return Some(p);
         }
+    }
+    // Local-runner agents share the server's loopback interface. Enabling the
+    // shared authority requires explicit credentials even for host reconciliation.
+    if auth::shared_grant_config(&st.db).await.ok()?.is_some() {
+        return None;
     }
     // The host runs reconciliation inside the Loom container. Caddy marks
     // forwarded requests, and session containers have a non-loopback peer.

@@ -98,8 +98,9 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
             json!({"repo": agent.repo, "goal": prompt, "title": format!("Watch {}", watch.name)}),
         )?,
     };
-    let launch =
-        super::automation::create_run_core(state, &principal, request, subject, profiles, true);
+    let launch = super::automation::create_run_core(
+        state, &principal, request, subject, profiles, true, None,
+    );
     tokio::pin!(launch);
     let remaining = (chrono::DateTime::parse_from_rfc3339(&occurrence.deadline_at)?
         .with_timezone(&Utc)
@@ -598,6 +599,7 @@ mod tests {
             "external".into(),
             vec!["watch".into()],
             false,
+            None,
         )
         .await
         .err()

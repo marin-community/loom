@@ -139,12 +139,35 @@ enum ActorKind {
         profiles: Vec<String>,
         run_id: Option<String>,
         session_id: Option<String>,
+        runtime_credentials: Option<RuntimeCredentials>,
     },
     Session {
         username: String,
         session_id: String,
         branch_id: String,
     },
+}
+
+/// Credentials returned by the configured broker, kept only in launch memory.
+#[derive(Clone)]
+pub struct RuntimeCredentials {
+    auth_url: String,
+    storage_token: Option<String>,
+}
+
+impl RuntimeCredentials {
+    pub fn new(auth_url: String, storage_token: Option<String>) -> Self {
+        Self {
+            auth_url,
+            storage_token,
+        }
+    }
+}
+
+impl std::fmt::Debug for RuntimeCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RuntimeCredentials([redacted])")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +182,7 @@ impl Actor {
     /// fails closed if that invariant ever breaks.
     pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
         Some(match &principal.grant {
-            Grant::Anonymous => return None,
+            Grant::Anonymous | Grant::Shared { .. } => return None,
             Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,
@@ -170,6 +193,7 @@ impl Actor {
                 profiles: profiles.clone(),
                 run_id: None,
                 session_id: None,
+                runtime_credentials: None,
             }),
             Grant::Session {
                 session_id,
@@ -207,7 +231,20 @@ impl Actor {
             profiles,
             run_id: Some(run_id.into()),
             session_id: Some(session_id.into()),
+            runtime_credentials: None,
         })
+    }
+
+    pub fn with_runtime_credentials(mut self, credentials: RuntimeCredentials) -> Self {
+        let ActorKind::Automation {
+            runtime_credentials,
+            ..
+        } = &mut self.0
+        else {
+            unreachable!("runtime broker credentials belong to automation launches")
+        };
+        *runtime_credentials = Some(credentials);
+        self
     }
 
     fn origin(&self) -> &str {
@@ -579,6 +616,22 @@ async fn create_inner(
             .ambient_names()
             .map_err(|e| ProvisionError::invalid(e.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
+    }
+    if let ActorKind::Automation {
+        runtime_credentials: Some(credentials),
+        ..
+    } = &actor.0
+    {
+        extra_env
+            .retain(|(name, _)| !matches!(name.as_str(), "MARIN_AUTH_URL" | "MARIN_GRANT_TOKEN"));
+        set_env(
+            &mut extra_env,
+            "MARIN_AUTH_URL",
+            credentials.auth_url.clone(),
+        );
+        if let Some(token) = &credentials.storage_token {
+            set_env(&mut extra_env, "MARIN_GRANT_TOKEN", token.clone());
+        }
     }
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     let github_app = if crate::runtime::scopes_an_app_token(&session_github_repositories)

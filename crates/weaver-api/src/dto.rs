@@ -1334,6 +1334,7 @@ pub struct RunView {
     pub profile: String,
     pub idempotency_key: String,
     pub channel: Option<String>,
+    pub shared_grant_id: Option<String>,
     pub session_id: String,
     pub status: String,
     pub outcome: Option<String>,
