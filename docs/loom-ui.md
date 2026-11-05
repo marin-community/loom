@@ -107,11 +107,12 @@ text; red marks the failed action, without changing the session's attention stat
 The composer starts at two lines and grows with the draft. **Settings** groups
 agent-owned model, effort, permissions, and other runtime controls. The current
 model, full-access permissions, and pending permission changes remain visible
-on the toolbar where space permits. Drafts, attachments, queueing, and interruption
-controls remain available while settings change. The optional **Context** rail
-links to images and failed actions in the turn being read, alongside turns and
-the plan. On phones, following one of these links closes the rail and focuses
-the selected action or thumbnail.
+on the toolbar where space permits. Attachments can be added with **Attach** or
+by dropping files anywhere on the composer. Drafts, attachments, queueing, and
+interruption controls remain available while settings change. The optional
+**Context** rail links to images and failed actions in the turn being read,
+alongside turns and the plan. On phones, following one of these links closes the
+rail and focuses the selected action or thumbnail.
 
 ACP tool images stay visible as small, labelled thumbnails beneath their activity
 run, including when the tools are collapsed. Clicking, tapping, or activating a

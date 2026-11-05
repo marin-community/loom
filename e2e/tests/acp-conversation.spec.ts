@@ -1194,6 +1194,35 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-attachment-pill')).toHaveCount(0);
   });
 
+  test('composer accepts dropped files as ACP resource pills', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-drop-resource',
+    });
+    const composer = page.getByTestId('acp-composer');
+    // DataTransfer.types may omit Files; the drop payload is the authority.
+    const dataTransfer = await page.evaluateHandle(() => {
+      const dt = new DataTransfer();
+      dt.items.add(
+        new File(['dropped notes'], 'dropped-notes.txt', {
+          type: 'text/plain',
+        }),
+      );
+      Object.defineProperty(dt, 'types', { value: [] });
+      return dt;
+    });
+
+    await composer.dispatchEvent('dragenter', { dataTransfer });
+    await expect(composer).toHaveClass(/acp-composer--drop/);
+    await composer.dispatchEvent('drop', { dataTransfer });
+
+    await expect(composer).not.toHaveClass(/acp-composer--drop/);
+    await expect(page.getByTestId('acp-attachment-pill')).toContainText(
+      'scratch/dropped-notes.txt',
+    );
+    await expect(page.getByTestId('scratch-panel')).toContainText('dropped-notes.txt');
+  });
+
   test('discovers slash commands from the agent and forwards them', async ({ page, weaver }) => {
     await openAcp(page, weaver, { goal: 'say:ready' });
     const input = page.getByTestId('acp-composer-input');
