@@ -142,6 +142,14 @@ signature and token bounds, then posts the original bearer to `authorize_url`
 with `{"audience":"loom","action":"session.create","resource":"/review/"}`.
 An unavailable authority or a revoked grant denies the launch.
 
+The Marin authority uses OpenFGA for current standing permissions and transitive
+group membership, and its grant ledger for scope, delegation, expiry, and
+revocation. Loom does not load OpenFGA models or evaluate group membership
+locally. Removing standing access can therefore deny a previously issued JWT;
+the live decision is required even when its signature and expiry are valid.
+The authority's model, store and credentials are operator configuration, never
+fields selected by the launch caller. OpenBao supplies identity and signing.
+
 The caller supplies the profile, title, and goal. It cannot
 choose a repository path, launch overrides, scratch uploads, a channel, or a
 Slack route. Loom selects the configured repository and pinned profile. A
