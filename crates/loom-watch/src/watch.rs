@@ -2181,7 +2181,10 @@ child.wait()
             "error"
         );
         let pid = std::fs::read_to_string(pid_file).unwrap();
-        let alive = weaver_core::process_identity::running(pid.trim().parse().unwrap()).unwrap();
+        // A script that the deadline killed while it wrote the pid leaves the file
+        // empty, and there is then no pid to check.
+        let alive = !pid.trim().is_empty()
+            && weaver_core::process_identity::running(pid.trim().parse().unwrap()).unwrap();
         assert!(!alive, "background child survived deadline");
         assert!(weaver_core::occurrence::active(&state.db)
             .await
