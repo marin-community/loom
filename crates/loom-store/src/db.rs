@@ -191,6 +191,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "profile-doc-artifact",
         include_str!("../migrations/0037_profile_doc_artifact.sql"),
     ),
+    (
+        38,
+        "conversation-inbox-coalesce-key",
+        include_str!("../migrations/0038_conversation_inbox_coalesce_key.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

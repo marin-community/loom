@@ -212,33 +212,33 @@ pub async fn enqueue_doc_edit(
     artifact: &str,
     rev: i64,
 ) -> Result<String> {
-    let prefix = format!("doc-edit:{session}:");
+    let coalesce_key = format!("doc-edit:{artifact}");
     let payload = doc_edit_text(artifact, rev);
     let mut tx = weaver_core::db::begin_immediate(db).await?;
     let waiting: Option<String> = sqlx::query_scalar(
         "UPDATE conversation_inbox SET payload = ?
-         WHERE preferred_session_id = ? AND state = 'queued'
-           AND substr(delivery_key, 1, length(?)) = ?
+         WHERE preferred_session_id = ? AND coalesce_key = ? AND state = 'queued'
          RETURNING delivery_key",
     )
     .bind(&payload)
     .bind(session)
-    .bind(&prefix)
-    .bind(&prefix)
+    .bind(&coalesce_key)
     .fetch_optional(&mut *tx)
     .await?;
     if let Some(key) = waiting {
         tx.commit().await?;
         return Ok(key);
     }
-    let key = format!("{prefix}{rev}");
+    let key = format!("doc-edit:{session}:{rev}");
     let inserted = sqlx::query(
-        "INSERT INTO conversation_inbox (delivery_key, branch_id, preferred_session_id, payload)
-         SELECT ?, branch_id, id, ? FROM sessions WHERE id = ? AND status != 'archived'
+        "INSERT INTO conversation_inbox
+            (delivery_key, branch_id, preferred_session_id, payload, coalesce_key)
+         SELECT ?, branch_id, id, ?, ? FROM sessions WHERE id = ? AND status != 'archived'
          ON CONFLICT(delivery_key) DO NOTHING",
     )
     .bind(&key)
     .bind(&payload)
+    .bind(&coalesce_key)
     .bind(session)
     .execute(&mut *tx)
     .await?;
