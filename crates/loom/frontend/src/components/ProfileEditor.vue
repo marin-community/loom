@@ -226,8 +226,8 @@ watch(
         class="min-w-0 rounded bg-input px-2 py-1.5 font-mono text-xs"
       />
       <p class="text-xs text-muted">
-        The artifact that is the session's doc. Sessions open on it in a Doc tab once the agent
-        writes it, and a person's saved edit of it is sent to the agent. Leave empty for none.
+        The artifact that is the session's doc. Sessions show it in a Doc tab once the agent writes
+        it, and a person's saved edit of it is sent to an ACP session's agent. Leave empty for none.
       </p>
     </div>
 

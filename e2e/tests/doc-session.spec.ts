@@ -52,7 +52,7 @@ async function launchDocSession(baseUrl: string, repoPath: string): Promise<Sess
   return (await launched.json()) as Session;
 }
 
-test('a doc session gets a Doc tab that shows only its doc once the agent writes it', async ({
+test('a doc session gets a Doc tab that shows only its doc, and opens on it once written', async ({
   page,
   weaver,
 }) => {
@@ -67,6 +67,11 @@ test('a doc session gets a Doc tab that shows only its doc once the agent writes
   await weaver.writeArtifact(session, DOC_ARTIFACT, '## Objective\n\nShip the Doc tab.\n', {
     title: 'Doc',
   });
+  // A doc written while the person is on the page adds the tab without moving them.
+  await expect(tabs.locator('[data-tab="document"]')).toBeVisible();
+  await expect(tabs.locator('[data-tab="terminal"]')).toHaveAttribute('aria-selected', 'true');
+
+  await page.reload();
   await expect(tabs.locator('[data-tab="document"]')).toHaveAttribute('aria-selected', 'true');
   await expect(page).toHaveURL(sessionUrl);
   await expect(page.locator('.markdown-body h2')).toContainText('Objective');

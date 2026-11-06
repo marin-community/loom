@@ -14,7 +14,6 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vu
 import {
   clearSessionTag,
   getArtifacts,
-  getProfile,
   getSession,
   ideInfo,
   invokeOperation,
@@ -66,29 +65,31 @@ const error = ref('');
 // (the live agent's TUI); an ACP session is headless, so it leads with
 // Conversation and demotes the worktree shells to a slim Shells tab. `defaultTab`
 // resolves whichever leads when the user hasn't picked one. A session whose
-// profile names a doc artifact (`doc_artifact`) gets a leading Doc tab that shows
-// it once the agent writes it, and then opens on it.
+// profile names a doc artifact (`doc_artifact`) gets a leading Doc tab once the
+// agent writes it. The page opens on Doc when the doc exists as it loads; a doc
+// written while the person is on the page only adds the tab, so nobody is moved
+// away from what they are reading or typing.
 type LocalTab = 'document' | 'terminal' | 'conversation' | 'shells';
 type WorkTab = LocalTab | 'review';
 const isAcp = computed(() => ws.value?.protocol === 'acp');
-const docArtifact = ref('');
+const docArtifact = computed(() => ws.value?.doc_artifact ?? '');
 const hasDocument = ref(false);
-async function loadDocArtifact(profile: string) {
-  const name = (await getProfile(profile)).doc_artifact;
-  docArtifact.value = name;
-  if (name && (await getArtifacts(props.id)).some((artifact) => artifact.name === name)) {
+const opensOnDocument = ref(false);
+async function checkDocArtifact(name: string) {
+  if ((await getArtifacts(props.id)).some((artifact) => artifact.name === name)) {
     hasDocument.value = true;
+    opensOnDocument.value = true;
   }
 }
 watch(
-  () => ws.value?.profile,
-  (profile) => {
-    if (profile) loadDocArtifact(profile).catch(() => {});
+  docArtifact,
+  (name) => {
+    if (name) checkDocArtifact(name).catch(() => {});
   },
   { immediate: true },
 );
 const defaultTab = computed<LocalTab>(() => {
-  if (hasDocument.value) return 'document';
+  if (opensOnDocument.value) return 'document';
   return isAcp.value ? 'conversation' : 'terminal';
 });
 

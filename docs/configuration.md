@@ -175,8 +175,8 @@ The origin profiles are opt-in so an upgrade does not silently change the
 environment or runtime used by existing triggers.
 
 Profiles may set `doc_artifact` to the name of a branch artifact that is the
-session's doc. The session then opens on a **Doc** tab that shows it, and a
-person's saved revision of it reaches the agent as a message; see
+session's doc. The session then gets a **Doc** tab that shows it, and a
+person's saved revision of it reaches an ACP session's agent as a message; see
 [the session doc](artifacts.md#the-session-doc).
 
 Profiles may declare `github_repositories` to define the GitHub App broker's

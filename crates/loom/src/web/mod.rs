@@ -386,6 +386,10 @@ pub(crate) async fn session_view(
     } else {
         None
     };
+    let doc_artifact = crate::profile::get_including_retired(db, &session.profile)
+        .await?
+        .map(|profile| profile.doc_artifact)
+        .unwrap_or_default();
     // The latest usage block is a cheap indexed query; `None` for a terminal
     // session (or an ACP session before the agent reports usage).
     let usage = if session.protocol == "acp" {
@@ -456,6 +460,7 @@ pub(crate) async fn session_view(
         profile: session.profile.clone(),
         profile_revision: session.profile_revision,
         profile_lifetime: session.profile_lifetime,
+        doc_artifact,
         policy_strict: session.policy_strict,
         mutation_revision: session.mutation_revision,
         launch_mode: session.launch_mode.clone(),

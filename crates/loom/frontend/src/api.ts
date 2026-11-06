@@ -828,7 +828,6 @@ import type {
 } from './types';
 
 export const listProfiles = () => invokeOperation('profiles.list', {});
-export const getProfile = (name: string) => invokeOperation('profiles.get', { name });
 export const resolveSessionLaunch = (selection: LaunchSelection) =>
   invokeOperation('sessions.launches.resolve', { selection });
 export const getMcpRegistry = () => invokeOperation('mcps.get', {});

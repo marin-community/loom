@@ -86,10 +86,11 @@ Artifacts stays one tap away; Agent, Changes, and ACP Shells remain available
 from More without occupying primary navigation.
 
 A session whose profile names a doc artifact (`doc_artifact`) gets a leading
-**Doc** tab on desktop once its agent writes that artifact, and opens on it
-unless the person already chose a tab. The tab shows only that artifact, with
-its revisions, source editing, and comments; the artifact stays in **Review →
-Artifacts** too. See [the session doc](artifacts.md#the-session-doc).
+**Doc** tab on desktop once its agent writes that artifact. The page opens on
+Doc when the doc exists as it loads, unless the person already chose a tab; a
+doc written during a visit only adds the tab. The tab shows only that artifact,
+with its revisions, source editing, and comments; the artifact stays in
+**Review → Artifacts** too. See [the session doc](artifacts.md#the-session-doc).
 
 Conversation is the durable operator/agent exchange. Mid-turn composer feedback
 stops the current turn and starts as the next turn, so it cannot sit behind work
