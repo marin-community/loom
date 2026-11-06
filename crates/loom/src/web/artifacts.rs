@@ -344,10 +344,47 @@ async fn write_operation(
     )
     .await
     .ok();
+    if author == "user" && a.branch_id.as_deref() == Some(branch.id.as_str()) {
+        // The revision is saved; a failed message must not fail the write.
+        if let Err(error) = tell_agent_of_doc_edit(&st, &branch.id, &a).await {
+            tracing::warn!(artifact = %a.name, rev = a.rev, %error, "doc edit message failed");
+        }
+    }
     // A wired thread's status card links the session's documents — refresh it so
     // a new doc appears there without waiting for a status write.
     crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
     artifact_view(&st.db, &branch.repo_root, &a, None).await
+}
+
+/// A person's revision of a session's doc (the artifact its profile names as
+/// `doc_artifact`) goes to the agent as a message that it takes when it next
+/// waits. The agent's own revisions never do.
+async fn tell_agent_of_doc_edit(
+    st: &AppState,
+    branch_id: &str,
+    a: &Artifact,
+) -> anyhow::Result<()> {
+    let Some(session) = crate::session::active_for_branch(&st.db, branch_id).await? else {
+        return Ok(());
+    };
+    // Only an ACP session has an inbox that holds the message until it waits.
+    if session.protocol != "acp" {
+        return Ok(());
+    }
+    let Some(profile) = crate::profile::get_including_retired(&st.db, &session.profile).await?
+    else {
+        return Ok(());
+    };
+    if profile.doc_artifact.is_empty() || profile.doc_artifact != a.name {
+        return Ok(());
+    }
+    crate::conversation_inbox::enqueue_doc_edit(&st.db, &session.id, &a.name, a.rev).await?;
+    if let Some(handle) = st.acp.get(&session.id) {
+        if let Err(error) = handle.notify_queue().await {
+            tracing::debug!(session = %session.id, %error, "doc edit queued; wake deferred");
+        }
+    }
+    Ok(())
 }
 
 async fn delete_operation(

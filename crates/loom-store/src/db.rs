@@ -186,6 +186,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "deployment-oauth-clients",
         include_str!("../migrations/0036_deployment_oauth_clients.sql"),
     ),
+    (
+        37,
+        "profile-doc-artifact",
+        include_str!("../migrations/0037_profile_doc_artifact.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -482,6 +487,9 @@ mod tests {
         assert!(profile_columns
             .iter()
             .any(|column| column == "instructions"));
+        assert!(profile_columns
+            .iter()
+            .any(|column| column == "doc_artifact"));
         assert!(!table_columns(&db, "session_spaces")
             .await
             .unwrap()

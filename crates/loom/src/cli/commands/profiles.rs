@@ -116,6 +116,9 @@ pub struct ProfileAddOpts {
     /// Markdown instructions appended to the opening prompt.
     #[arg(long)]
     instructions_file: Option<String>,
+    /// The branch artifact that is a session's doc (e.g. `doc`).
+    #[arg(long, default_value = "")]
+    doc_artifact: String,
     /// Apply Loom's restricted automation security posture.
     #[arg(long)]
     restricted: bool,
@@ -176,6 +179,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     turn_budget: opts.turn_budget,
                     prelude: opts.prelude.clone(),
                     instructions: instructions.clone(),
+                    doc_artifact: opts.doc_artifact.clone(),
                     restricted: opts.restricted,
                     github_repositories: (Vec::new()).clone(),
                     runtime_permissions: opts.runtime_permission.clone(),

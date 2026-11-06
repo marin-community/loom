@@ -661,6 +661,11 @@ pub struct ProfileView {
     /// prompt for every launch origin.
     #[serde(default)]
     pub instructions: String,
+    /// The branch artifact that is a session's doc, or empty for none. Loom
+    /// shows it in the session's Doc tab and tells the agent when a person
+    /// saves a revision of it.
+    #[serde(default)]
+    pub doc_artifact: String,
     #[serde(default)]
     pub restricted: bool,
     #[serde(default)]
