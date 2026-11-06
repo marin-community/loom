@@ -660,6 +660,58 @@ async function createPendingComment() {
   }
 }
 
+// With no review in progress, a comment can go to the agent at once, as a
+// review of its own. Once a review is in progress, new comments join it and go
+// with Submit review. The comment is anchored to the revision the person reads,
+// and the agent's message names that revision, so a newer revision written
+// while it is sent does not hold it back.
+async function sendPendingComment() {
+  const text = pendingDraft.value.trim();
+  if (!pending.value || !text || savingComment.value || draft.value) return;
+  const pendingComment = pending.value;
+  savingComment.value = true;
+  composerError.value = '';
+  try {
+    const submitted = await draftController.freeze(async (current) => {
+      if (current) throw new Error('a review is in progress; add the comment to it');
+      const review = await createReview(props.id, {
+        subject_kind: 'artifact',
+        subject_key: props.artifactName,
+        subject_version: pendingComment.subjectVersion,
+      });
+      const commented = await addReviewComment(review.id, {
+        expected_revision: review.draft_revision,
+        subject_version: pendingComment.subjectVersion,
+        anchor_kind: 'text',
+        anchor: pendingComment.anchor,
+        body: text,
+      });
+      const result = await submitReview(commented.id, {
+        expected_revision: commented.draft_revision,
+        acknowledge_outdated: true,
+      });
+      replaceReview(result);
+      return { draft: null, result };
+    });
+    activeId.value = submitted.comments.at(-1)?.id ?? null;
+    pending.value = null;
+    pendingRange = null;
+    pendingDraft.value = '';
+    reviewNotice.value =
+      submitted.delivery_state === 'delivered'
+        ? 'Comment sent to the conversation.'
+        : 'Comment sent and queued for the conversation.';
+    await nextTick();
+    locateCycle();
+  } catch (e) {
+    composerError.value = mutationMessage(e);
+    // A failed submit leaves the comment in a draft; show it in the tray.
+    await loadReviews();
+  } finally {
+    savingComment.value = false;
+  }
+}
+
 function cancelPendingComment() {
   pending.value = null;
   pendingRange = null;
@@ -976,6 +1028,44 @@ function renderCard(entry: ReviewEntry): VNode {
 }
 
 function renderComposer(): VNode {
+  const reviewing = draft.value !== null;
+  const actions = reviewing
+    ? [
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-primary px-2 py-1 text-2xs',
+            disabled: savingComment.value,
+            onClick: stop(() => void createPendingComment()),
+          },
+          savingComment.value ? 'Saving…' : 'Add to review',
+        ),
+      ]
+    : [
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-primary px-2 py-1 text-2xs',
+            title: 'Send this comment to the agent now',
+            disabled: savingComment.value,
+            onClick: stop(() => void sendPendingComment()),
+          },
+          savingComment.value ? 'Sending…' : 'Comment',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-secondary px-2 py-1 text-2xs',
+            title: 'Keep this comment pending, and send it with the review',
+            disabled: savingComment.value,
+            onClick: stop(() => void createPendingComment()),
+          },
+          'Start a review',
+        ),
+      ];
   return h(
     'div',
     {
@@ -989,7 +1079,7 @@ function renderComposer(): VNode {
       h(
         'div',
         { class: 'mb-1 text-2xs font-semibold uppercase tracking-wide text-accent' },
-        'Pending review comment',
+        reviewing ? 'Pending review comment' : 'Comment',
       ),
       h('textarea', {
         value: pendingDraft.value,
@@ -1007,23 +1097,14 @@ function renderComposer(): VNode {
           }
           if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
             event.preventDefault();
-            void createPendingComment();
+            void (reviewing ? createPendingComment() : sendPendingComment());
           }
         },
         onClick: (event: Event) => event.stopPropagation(),
         onMousedown: (event: Event) => event.stopPropagation(),
       }),
       h('div', { class: 'mt-1.5 flex items-center gap-1.5' }, [
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'btn-primary px-2 py-1 text-2xs',
-            disabled: savingComment.value,
-            onClick: stop(() => void createPendingComment()),
-          },
-          savingComment.value ? 'Saving…' : 'Add pending comment',
-        ),
+        ...actions,
         h(
           'button',
           {

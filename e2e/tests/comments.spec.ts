@@ -49,6 +49,47 @@ function deferred() {
 }
 
 test.describe('staged artifact reviews', () => {
+  test('sends a comment at once until a review is in progress', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({ goal: 'send a comment', name: 'send-comment' });
+    await weaver.writeArtifact(session, 'design', DOC, { title: 'Design notes' });
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
+    await expect(page.locator('.markdown-body h1')).toContainText('Design notes');
+
+    await selectPhrase(page, 'collaborative editing');
+    await page.getByTestId('review-selection-button').click();
+    const composer = page.getByTestId('review-comment-composer');
+    await composer.locator('textarea').fill('Name the editor.');
+    const submitted = page.waitForResponse(
+      (response) =>
+        response.request().method() === 'POST' &&
+        new URL(response.url()).pathname === '/api/reviews/submit',
+    );
+    await composer.getByRole('button', { name: 'Comment', exact: true }).click();
+    expect((await submitted).ok()).toBe(true);
+    await expect(composer).toHaveCount(0);
+
+    const listed = await page.request.post(`${weaver.baseUrl}/api/reviews/list`, {
+      data: { subject_kind: 'artifact', subject_key: 'design', session: session.id },
+    });
+    const reviews = (await listed.json()) as Array<{
+      status: string;
+      comments: Array<{ body: string }>;
+    }>;
+    expect(reviews.map((review) => review.status)).toEqual(['submitted']);
+    expect(reviews[0].comments.map((comment) => comment.body)).toEqual(['Name the editor.']);
+
+    await selectPhrase(page, 'How do anchors survive');
+    await page.getByTestId('review-selection-button').click();
+    await composer.locator('textarea').fill('Keep this pending.');
+    await composer.getByRole('button', { name: 'Start a review' }).click();
+    await expect(page.getByTestId('submit-review')).toBeVisible();
+
+    await selectPhrase(page, 'markdown representation');
+    await page.getByTestId('review-selection-button').click();
+    await expect(composer.getByRole('button', { name: 'Comment', exact: true })).toHaveCount(0);
+    await expect(composer.getByRole('button', { name: 'Add to review' })).toBeVisible();
+  });
+
   test('drafts, conflicts, re-anchors, and submits one coherent review', async ({
     page,
     weaver,
@@ -122,7 +163,7 @@ test.describe('staged artifact reviews', () => {
         response.request().method() === 'POST' &&
         new URL(response.url()).pathname === '/api/reviews/comments/create',
     );
-    await composer.getByRole('button', { name: 'Add pending comment' }).click();
+    await composer.getByRole('button', { name: 'Start a review' }).click();
     await firstComment;
     const initialReviews = await page.request.post(`${weaver.baseUrl}/api/reviews/list`, {
       data: {
@@ -390,7 +431,8 @@ test.describe('staged artifact reviews', () => {
     await selectPhrase(page, 'Final review target at the end.');
     await page.getByTestId('review-selection-button').click();
     await pendingComposer.locator('textarea').fill('Saved comment body.');
-    await pendingComposer.getByRole('button', { name: 'Add pending comment' }).click();
+    // The overall note above started a review, so the comment joins it.
+    await pendingComposer.getByRole('button', { name: 'Add to review' }).click();
     const commentCard = page.locator('[data-review-card]').first();
     await commentCard.getByRole('button', { name: 'Edit', exact: true }).click();
     const commentEdit = commentCard.getByTestId('review-comment-edit');
