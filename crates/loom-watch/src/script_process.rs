@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, Instant};
 use weaver_core::{db::Db, occurrence::Occurrence};
 
-use weaver_core::process_identity::ProcessIdentity as Identity;
+use weaver_core::process_identity::{boot_id, group_alive, ProcessIdentity as Identity};
 
 #[derive(Serialize, Deserialize)]
 struct Lease {
@@ -91,37 +91,15 @@ fn kill_group(pid: u32) -> Result<()> {
     // recorded child PID is their process group ID.
     if unsafe { libc::kill(-(pid as i32), libc::SIGKILL) } == -1 {
         let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error.into());
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => {}
+            // macOS refuses to signal a group whose members have all exited but
+            // are not yet reaped, where Linux treats the signal as delivered.
+            Some(libc::EPERM) if !group_alive(pid)? => {}
+            _ => return Err(error.into()),
         }
     }
     Ok(())
-}
-
-fn group_alive(pid: u32) -> Result<bool> {
-    for entry in std::fs::read_dir("/proc")? {
-        let entry = entry?;
-        if entry.file_name().to_string_lossy().parse::<u32>().is_err() {
-            continue;
-        }
-        let stat = match std::fs::read_to_string(entry.path().join("stat")) {
-            Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let Some((_, fields)) = stat.rsplit_once(") ") else {
-            continue;
-        };
-        let fields: Vec<_> = fields.split_whitespace().collect();
-        if fields.first().copied() != Some("Z")
-            && fields
-                .get(2)
-                .is_some_and(|group| group.parse::<u32>() == Ok(pid))
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Stop and confirm the whole subprocess group before releasing overlap.
@@ -141,9 +119,9 @@ pub(crate) async fn stop(db: &Db, id: &str) -> Result<()> {
     let Some(child) = lease.child else {
         return Ok(());
     };
-    // A recycled PID belongs to a new group. Never signal it. Linux retains a
-    // group ID while its original members still exist, even after the leader exits.
-    if child.boot != std::fs::read_to_string("/proc/sys/kernel/random/boot_id")? {
+    // A recycled PID belongs to a new group. Never signal it. A group keeps its
+    // ID while its original members still exist, even after the leader exits.
+    if child.boot != boot_id()? {
         return Ok(());
     }
     match Identity::read(child.pid) {
@@ -225,4 +203,32 @@ pub(crate) async fn complete(
     }
     tx.commit().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    #[test]
+    fn killing_a_group_whose_members_exited_but_are_not_reaped_succeeds() {
+        // Regression: macOS answers EPERM for a group of unreaped zombies, which
+        // failed stop() after a script's deadline had already killed its group.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        child.kill().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while group_alive(child.id()).unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a killed group stayed alive"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        kill_group(child.id()).unwrap();
+        child.wait().unwrap();
+    }
 }
