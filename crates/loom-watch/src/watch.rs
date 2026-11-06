@@ -2001,9 +2001,7 @@ rnd.finish('mechanical check complete')
         );
         assert!(after.wake_at.is_some());
         let pid = std::fs::read_to_string(pid_file).unwrap();
-        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            stat.rsplit_once(") ").unwrap().1.split_whitespace().next() != Some("Z")
-        });
+        let alive = weaver_core::process_identity::running(pid.trim().parse().unwrap()).unwrap();
         assert!(!alive, "background child survived successful execution");
         assert!(weaver_core::occurrence::active(&state.db)
             .await
@@ -2183,9 +2181,7 @@ child.wait()
             "error"
         );
         let pid = std::fs::read_to_string(pid_file).unwrap();
-        let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
-            stat.rsplit_once(") ").unwrap().1.split_whitespace().next() != Some("Z")
-        });
+        let alive = weaver_core::process_identity::running(pid.trim().parse().unwrap()).unwrap();
         assert!(!alive, "background child survived deadline");
         assert!(weaver_core::occurrence::active(&state.db)
             .await

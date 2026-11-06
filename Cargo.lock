@@ -3842,6 +3842,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
+ "libc",
  "rand 0.9.4",
  "schemars",
  "serde",
