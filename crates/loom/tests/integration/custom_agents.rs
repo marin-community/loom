@@ -39,6 +39,24 @@ async fn agents_list_merges_builtins_and_custom() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_refresh_reports_whether_it_started() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // The fixture disables catalogue probing, so a valid request is accepted and
+    // reports that no probe was started rather than claiming one runs.
+    let res = client
+        .post(
+            "/api/agents/catalog/refresh",
+            json!({ "harness": "cursor-agent" }),
+        )
+        .await
+        .expect("catalog refresh");
+    assert_eq!(res["started"], false);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_agent_crud_and_validation() {
     let ts = TestServer::start().await;
     let client = &ts.client;

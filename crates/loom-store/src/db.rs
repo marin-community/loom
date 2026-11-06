@@ -186,6 +186,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "deployment-oauth-clients",
         include_str!("../migrations/0036_deployment_oauth_clients.sql"),
     ),
+    (
+        37,
+        "harness-model-catalog",
+        include_str!("../migrations/0037_harness_model_catalog.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

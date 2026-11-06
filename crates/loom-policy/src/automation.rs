@@ -647,6 +647,7 @@ mod tests {
                 agent_kind: "codex".to_string(),
                 model: String::new(),
                 effort: String::new(),
+                fast: String::new(),
                 protocol: "acp".to_string(),
                 mode: "auto".to_string(),
                 class: "automation".to_string(),

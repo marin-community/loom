@@ -2,6 +2,7 @@
 
 pub mod acp;
 pub mod agent;
+pub mod catalog;
 pub mod custom_agents;
 pub mod mcp;
 pub mod skills;

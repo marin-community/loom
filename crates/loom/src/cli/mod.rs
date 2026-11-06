@@ -26,6 +26,7 @@ pub fn bindings() -> Vec<CliBinding> {
         bind::<agents::custom::delete::Op>(),
         bind::<agents::custom::update::Op>(),
         bind::<agents::list::Op>(),
+        bind::<agents::catalog_refresh::Op>(),
         bind::<artifacts::delete::Op>(),
         bind::<artifacts::get::Op>(),
         bind::<artifacts::history::Op>(),

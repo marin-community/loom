@@ -33,10 +33,26 @@ owner_github = "your-github-login"
 
 # Paste-once agent secrets — `loom setup secrets` prompts for these (hidden
 # input) instead of you typing them in cleartext here. anthropic_api_key feeds
-# the Claude runtime, openai_api_key the Codex runtime; set only the ones you
-# use (either can also be an interactive `claude` / `codex login` instead).
+# the Claude runtime, openai_api_key the Codex runtime, cursor_api_key the
+# cursor-agent runtime; set only the ones you use (each can also be an
+# interactive `claude` / `codex login` / `cursor-agent login` instead).
+# claude_code_oauth_token is the long-lived token from `claude setup-token`.
+# Claude uses anthropic_api_key when both are set, and does not refresh the token.
 # anthropic_api_key = ""
+# claude_code_oauth_token = ""
 # openai_api_key = ""
+# cursor_api_key = ""
+# cursor_auth_token = ""  # long-lived Cursor session token, as an alternative to cursor_api_key
+
+# Opencode's own credential store, verbatim — written to
+# ~/.local/share/opencode/auth.json in standalone mode. Only relevant if
+# opencode is in `agents` below; leave unset for an interactive
+# `opencode auth login` instead.
+# opencode_auth_json = '{"anthropic":{"type":"api","key":"sk-ant-your-key"}}'
+
+# Opencode's own opencode.json, verbatim — written to
+# ~/.config/opencode/opencode.json in standalone mode.
+# opencode_config_json = '{"model":"anthropic/claude-sonnet-4"}'
 
 # Slack Socket Mode integration (the `/marinbot` / `@marinbot` trigger) —
 # optional; unset leaves it off. Both are secrets: an app-level token
@@ -56,6 +72,7 @@ owner_github = "your-github-login"
 # host_uid = "1000"                    # HOST_UID: uid the image runs as
 # host_gid = "1000"                    # HOST_GID: gid the image runs as
 # image = "loom:latest"                # LOOM_IMAGE: override the image tag
+# agents = "claude,codex"              # LOOM_AGENTS: which runtimes to install (default shown); add opencode, cursor-agent to enable them
 
 # Optional tool installs the entrypoint runs on every server boot, after the
 # pinned Claude/Codex runtime installs — fail-soft, unset by default. The

@@ -7,7 +7,7 @@ use weaver_api::{
 use crate::profile::{self, Profile, ProfileInput};
 
 use super::operations::{register, Bound, OperationContext};
-use super::{ApiResult, AppError, AppState};
+use super::{env, ApiResult, AppError, AppState};
 
 pub(super) fn input(req: profiles_operations::update::Input, name: String) -> ProfileInput {
     ProfileInput {
@@ -16,6 +16,7 @@ pub(super) fn input(req: profiles_operations::update::Input, name: String) -> Pr
         agent_kind: req.agent_kind,
         model: req.model,
         effort: req.effort,
+        fast: req.fast,
         protocol: req.protocol,
         mode: req.mode,
         class: req.class,
@@ -45,6 +46,7 @@ fn profile_input_from_create(
         agent_kind: input.agent_kind,
         model: input.model,
         effort: input.effort,
+        fast: input.fast,
         protocol: input.protocol,
         mode: input.mode,
         class: input.class,
@@ -74,6 +76,7 @@ fn profile_input_from_update(
         agent_kind: input.agent_kind,
         model: input.model,
         effort: input.effort,
+        fast: input.fast,
         protocol: input.protocol,
         mode: input.mode,
         class: input.class,
@@ -121,6 +124,7 @@ pub(super) async fn view(st: &AppState, profile: Profile) -> ApiResult<ProfileVi
         agent_kind: profile.agent_kind,
         model: profile.model,
         effort: profile.effort,
+        fast: profile.fast,
         protocol: profile.protocol,
         mode: profile.mode,
         class: profile.class,
@@ -441,6 +445,9 @@ pub(super) async fn set_profile_env_operation(
         )),
     }
     .map_err(|e| AppError::bad_request(e.to_string()))?;
+    if profile_name == profile::DEFAULT_PROFILE {
+        env::invalidate_cursor_catalog_if_credential(&st.db, &name);
+    }
     let item = profile::get(&st.db, &profile_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
@@ -459,6 +466,9 @@ pub(super) async fn delete_profile_env_operation(
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;
     profile::env_remove(&st.db, &profile_name, &name).await?;
+    if profile_name == profile::DEFAULT_PROFILE {
+        env::invalidate_cursor_catalog_if_credential(&st.db, &name);
+    }
     let item = profile::get(&st.db, &profile_name)
         .await?
         .ok_or_else(|| AppError::not_found("profile"))?;

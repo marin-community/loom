@@ -564,6 +564,16 @@ oauth_clients:
 See [Remote MCP connector](docs/configuration.md#remote-mcp-connector) for the
 claude.ai and Claude Code steps and token lifetimes.
 
+## Model catalogue
+
+Claude, Codex, Opencode, and Cursor advertise their models over ACP. Loom asks
+each installed harness and caches the list in its database. Settings and launch
+read that cache, so starting a session does not wait on a probe.
+
+The first boot after this change finds an empty cache and fetches the full
+list. Later boots refresh it incrementally. A periodic pass refreshes the cache
+again. A failed probe leaves the last stored list in place.
+
 ## Configuration
 
 General settings and named launch profiles have separate ownership. Settings

@@ -236,6 +236,9 @@ impl TestServer {
         // resolve to.
         std::env::set_var("LOOM_OWNER_GITHUB", "rjpower");
 
+        // The suites drive the catalogue directly and must not probe the host's
+        // real harnesses (which would also consult the developer's credentials).
+        std::env::set_var("LOOM_CATALOG_DISABLED", "1");
         let repo = tempfile::tempdir().unwrap();
         if initialize_repo {
             init_repo(repo.path());

@@ -134,6 +134,7 @@ fn has_override(overrides: &LaunchOverrides) -> bool {
         &overrides.agent,
         &overrides.model,
         &overrides.effort,
+        &overrides.fast,
         &overrides.protocol,
         &overrides.mode,
         &overrides.class,
@@ -154,6 +155,7 @@ fn normalized_selection(selection: &LaunchSelection) -> LaunchSelection {
             agent: nonempty(&selection.overrides.agent),
             model: trim(&selection.overrides.model),
             effort: trim(&selection.overrides.effort),
+            fast: trim(&selection.overrides.fast),
             protocol: trim(&selection.overrides.protocol),
             mode: trim(&selection.overrides.mode),
             class: trim(&selection.overrides.class),
@@ -263,14 +265,25 @@ pub async fn resolve(
         }
         None => (profile.model.clone(), "profile"),
     };
+    let model = if model_source == "profile" && crate::agent::builtin_agent_type(&agent).is_some() {
+        crate::agent::model_successor(db, &agent, &model).await
+    } else {
+        model
+    };
     let (effort, effort_source) = match selected(&overrides.effort) {
         Some(value) => (value.to_string(), "launch_override"),
         None if agent_overridden => (String::new(), "agent_default"),
         None if profile.effort.is_empty() => (String::new(), "agent_default"),
         None => (profile.effort.clone(), "profile"),
     };
+    let (fast, fast_source) = match selected(&overrides.fast) {
+        Some(value) => (value.to_string(), "launch_override"),
+        None if agent_overridden => (String::new(), "agent_default"),
+        None if profile.fast.is_empty() => (String::new(), "agent_default"),
+        None => (profile.fast.clone(), "profile"),
+    };
     crate::agent::validate_model(&metadata, &model).map_err(|error| anyhow!(error))?;
-    crate::agent::validate_effort(&metadata, &effort).map_err(|error| anyhow!(error))?;
+    crate::agent::validate_effort(&metadata, &model, &effort).map_err(|error| anyhow!(error))?;
 
     let protocol_requested = selected(&overrides.protocol).or_else(|| {
         (!agent_overridden && !profile.protocol.trim().is_empty())
@@ -352,10 +365,12 @@ pub async fn resolve(
     let turn_budget = profile.turn_budget.unwrap_or(defaults.1);
     let resolver_revision = resolver_revision(db, &metadata, &custom_agents, defaults).await?;
     let locked_fields = if profile.strict {
-        ["agent", "model", "effort", "protocol", "mode", "class"]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        [
+            "agent", "model", "effort", "fast", "protocol", "mode", "class",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     } else {
         Vec::new()
     };
@@ -370,6 +385,7 @@ pub async fn resolve(
         agent,
         model,
         effort,
+        fast,
         protocol,
         mode,
         class,
@@ -382,6 +398,7 @@ pub async fn resolve(
             },
             model: model_source.to_string(),
             effort: effort_source.to_string(),
+            fast: fast_source.to_string(),
             protocol: protocol_source.to_string(),
             mode: mode_source.to_string(),
             class: class_source.to_string(),
@@ -494,6 +511,52 @@ mod tests {
         .unwrap();
         assert_eq!(agent_override.view.model, "claude-opus-5-5");
         assert_eq!(agent_override.view.provenance.model, "agent_default");
+    }
+
+    #[tokio::test]
+    async fn a_launch_follows_a_dropped_model_without_rewriting_the_profile() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        sqlx::query(
+            "UPDATE profiles SET agent_kind = 'cursor-agent', model = 'claude-opus-4-8' WHERE name = 'default'",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO harness_model_catalog (harness, model_id, label) VALUES
+             ('cursor-agent', 'claude-opus-5-5', 'Opus 5.5'),
+             ('cursor-agent', 'claude-sonnet-5-5', 'Sonnet 5.5')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let resolved = resolve(&db, &LaunchSelection::default(), &ResolveOptions::default())
+            .await
+            .unwrap();
+        assert_eq!(resolved.view.model, "claude-opus-5-5");
+        assert_eq!(resolved.view.provenance.model, "profile");
+        let stored: String =
+            sqlx::query_scalar("SELECT model FROM profiles WHERE name = 'default'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(stored, "claude-opus-4-8");
+
+        let explicit = resolve(
+            &db,
+            &LaunchSelection {
+                overrides: LaunchOverrides {
+                    model: Some("claude-opus-4-8".to_string()),
+                    ..Default::default()
+                },
+                ..LaunchSelection::default()
+            },
+            &ResolveOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(explicit.view.model, "claude-opus-4-8");
+        assert_eq!(explicit.view.provenance.model, "launch_override");
     }
 
     #[tokio::test]
