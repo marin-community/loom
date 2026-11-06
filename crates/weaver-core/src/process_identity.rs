@@ -61,15 +61,18 @@ fn is_not_found(error: &anyhow::Error) -> bool {
 mod platform {
     use anyhow::Result;
 
+    /// The fields of a `/proc/<pid>/stat` line after the command name, which is
+    /// in parentheses and may itself hold spaces: the state first, then the
+    /// parent pid and the process group.
+    fn stat_fields(stat: &str) -> Option<Vec<&str>> {
+        stat.rsplit_once(") ")
+            .map(|(_, fields)| fields.split_whitespace().collect())
+    }
+
     /// The process's start time in clock ticks since boot.
     pub(super) fn start_time(pid: u32) -> Result<String> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let fields: Vec<_> = stat
-            .rsplit_once(") ")
-            .ok_or_else(|| anyhow::anyhow!("invalid process stat"))?
-            .1
-            .split_whitespace()
-            .collect();
+        let fields = stat_fields(&stat).ok_or_else(|| anyhow::anyhow!("invalid process stat"))?;
         Ok(fields
             .get(19)
             .ok_or_else(|| anyhow::anyhow!("missing process start time"))?
@@ -82,10 +85,7 @@ mod platform {
 
     pub(super) fn running(pid: u32) -> Result<bool> {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
-        let state = stat
-            .rsplit_once(") ")
-            .and_then(|(_, fields)| fields.split_whitespace().next());
-        Ok(state != Some("Z"))
+        Ok(stat_fields(&stat).and_then(|fields| fields.first().copied()) != Some("Z"))
     }
 
     pub(super) fn group_alive(pgid: u32) -> Result<bool> {
@@ -99,10 +99,9 @@ mod platform {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error.into()),
             };
-            let Some((_, fields)) = stat.rsplit_once(") ") else {
+            let Some(fields) = stat_fields(&stat) else {
                 continue;
             };
-            let fields: Vec<_> = fields.split_whitespace().collect();
             if fields.first().copied() != Some("Z")
                 && fields
                     .get(2)
