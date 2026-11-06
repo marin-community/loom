@@ -646,9 +646,7 @@ async function createPendingComment() {
       });
     });
     activeId.value = updated.comments.at(-1)?.id ?? null;
-    pending.value = null;
-    pendingRange = null;
-    pendingDraft.value = '';
+    closeComposer();
     trayOpen.value = true;
     reviewNotice.value = 'Pending comment saved. Submit the review when your feedback is complete.';
     await nextTick();
@@ -694,9 +692,7 @@ async function sendPendingComment() {
       return { draft: null, result };
     });
     activeId.value = submitted.comments.at(-1)?.id ?? null;
-    pending.value = null;
-    pendingRange = null;
-    pendingDraft.value = '';
+    closeComposer();
     reviewNotice.value =
       submitted.delivery_state === 'delivered'
         ? 'Comment sent to the conversation.'
@@ -712,10 +708,14 @@ async function sendPendingComment() {
   }
 }
 
-function cancelPendingComment() {
+function closeComposer() {
   pending.value = null;
   pendingRange = null;
   pendingDraft.value = '';
+}
+
+function cancelPendingComment() {
+  closeComposer();
   locateCycle();
   void nextTick(() => reviewTrayRef.value?.focusToggle());
 }
