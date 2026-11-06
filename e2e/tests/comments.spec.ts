@@ -59,13 +59,13 @@ test.describe('staged artifact reviews', () => {
     await page.getByTestId('review-selection-button').click();
     const composer = page.getByTestId('review-comment-composer');
     await composer.locator('textarea').fill('Name the editor.');
-    const submitted = page.waitForResponse(
+    const sent = page.waitForResponse(
       (response) =>
         response.request().method() === 'POST' &&
-        new URL(response.url()).pathname === '/api/reviews/submit',
+        new URL(response.url()).pathname === '/api/reviews/send',
     );
     await composer.getByRole('button', { name: 'Comment', exact: true }).click();
-    expect((await submitted).ok()).toBe(true);
+    expect((await sent).ok()).toBe(true);
     await expect(composer).toHaveCount(0);
 
     const listed = await page.request.post(`${weaver.baseUrl}/api/reviews/list`, {

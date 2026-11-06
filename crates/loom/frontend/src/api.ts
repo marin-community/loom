@@ -658,6 +658,13 @@ export const deleteReviewComment = (
 export const discardReview = (reviewId: number, expectedRevision: number) =>
   invokeOperation('reviews.discard', { id: reviewId, expected_revision: expectedRevision });
 
+/** Send one anchored comment on an artifact to the agent at once, as a review
+ *  of its own. Refused (409) while the caller has a review of it in progress. */
+export const sendReviewComment = (
+  id: string,
+  body: Omit<OperationInput<'reviews.send'>, 'session'>,
+) => invokeOperation('reviews.send', { session: id, ...body });
+
 export const submitReview = (
   reviewId: number,
   body: { expected_revision: number; acknowledge_outdated: boolean },

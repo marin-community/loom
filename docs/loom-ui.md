@@ -146,7 +146,8 @@ workflow:
    agent conversation.
 
 On an artifact with no review in progress, **Comment** sends a single comment
-to the agent at once, as a review of its own, and **Start a review** keeps it
+to the agent at once, as a review of its own (`reviews.send`, which creates,
+fills, and submits it in one transaction), and **Start a review** keeps it
 pending instead. Once a review is in progress, new comments join it.
 
 Draft text that has not yet been saved stays local to its editor. Navigation or

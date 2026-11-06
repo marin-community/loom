@@ -23,6 +23,7 @@ import {
   retryReviewDelivery,
   retargetReviewToCurrent,
   resolveThread,
+  sendReviewComment,
   setReviewCommentResolution,
   submitReview,
   updateReview,
@@ -660,9 +661,7 @@ async function createPendingComment() {
 
 // With no review in progress, a comment can go to the agent at once, as a
 // review of its own. Once a review is in progress, new comments join it and go
-// with Submit review. The comment is anchored to the revision the person reads,
-// and the agent's message names that revision, so a newer revision written
-// while it is sent does not hold it back.
+// with Submit review.
 async function sendPendingComment() {
   const text = pendingDraft.value.trim();
   if (!pending.value || !text || savingComment.value || draft.value) return;
@@ -672,21 +671,11 @@ async function sendPendingComment() {
   try {
     const submitted = await draftController.freeze(async (current) => {
       if (current) throw new Error('a review is in progress; add the comment to it');
-      const review = await createReview(props.id, {
-        subject_kind: 'artifact',
+      const result = await sendReviewComment(props.id, {
         subject_key: props.artifactName,
         subject_version: pendingComment.subjectVersion,
-      });
-      const commented = await addReviewComment(review.id, {
-        expected_revision: review.draft_revision,
-        subject_version: pendingComment.subjectVersion,
-        anchor_kind: 'text',
         anchor: pendingComment.anchor,
         body: text,
-      });
-      const result = await submitReview(commented.id, {
-        expected_revision: commented.draft_revision,
-        acknowledge_outdated: true,
       });
       replaceReview(result);
       return { draft: null, result };
@@ -701,7 +690,7 @@ async function sendPendingComment() {
     locateCycle();
   } catch (e) {
     composerError.value = mutationMessage(e);
-    // A failed submit leaves the comment in a draft; show it in the tray.
+    // Another tab may have started a review; show it in the tray.
     await loadReviews();
   } finally {
     savingComment.value = false;
