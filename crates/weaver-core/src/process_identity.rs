@@ -1,7 +1,10 @@
 //! Verify process ownership across daemon restart and PID reuse.
 //!
 //! Linux reads these facts from `/proc`; macOS, which has no `/proc`, asks the
-//! kernel through libproc and sysctl.
+//! kernel through libproc and sysctl. `sysinfo`, which `loom-ctx` uses for host
+//! statistics, does not fit: its start times are whole seconds, too coarse to
+//! tell a reused PID from the original, and it cannot list a process group's
+//! members.
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
