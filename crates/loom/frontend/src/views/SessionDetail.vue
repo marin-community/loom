@@ -11,7 +11,15 @@ import {
   nextTick,
 } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
-import { clearSessionTag, getSession, ideInfo, invokeOperation, markChannelRead } from '../api';
+import {
+  clearSessionTag,
+  getArtifacts,
+  getProfile,
+  getSession,
+  ideInfo,
+  invokeOperation,
+  markChannelRead,
+} from '../api';
 import type { Session, WeaverEvent } from '../types';
 import SessionTerminals from '../components/SessionTerminals.vue';
 import IdeFrame from '../components/IdeFrame.vue';
@@ -57,13 +65,34 @@ const error = ref('');
 // The set + order depend on the backend: a terminal session leads with Terminal
 // (the live agent's TUI); an ACP session is headless, so it leads with
 // Conversation and demotes the worktree shells to a slim Shells tab. `defaultTab`
-// resolves whichever leads when the user hasn't picked one.
-type LocalTab = 'terminal' | 'conversation' | 'shells';
+// resolves whichever leads when the user hasn't picked one. A session whose
+// profile names a doc artifact (`doc_artifact`) gets a leading Doc tab that shows
+// it once the agent writes it, and then opens on it.
+type LocalTab = 'document' | 'terminal' | 'conversation' | 'shells';
 type WorkTab = LocalTab | 'review';
 const isAcp = computed(() => ws.value?.protocol === 'acp');
-const defaultTab = computed<LocalTab>(() => (isAcp.value ? 'conversation' : 'terminal'));
+const docArtifact = ref('');
+const hasDocument = ref(false);
+async function loadDocArtifact(profile: string) {
+  const name = (await getProfile(profile)).doc_artifact;
+  docArtifact.value = name;
+  if (name && (await getArtifacts(props.id)).some((artifact) => artifact.name === name)) {
+    hasDocument.value = true;
+  }
+}
+watch(
+  () => ws.value?.profile,
+  (profile) => {
+    if (profile) loadDocArtifact(profile).catch(() => {});
+  },
+  { immediate: true },
+);
+const defaultTab = computed<LocalTab>(() => {
+  if (hasDocument.value) return 'document';
+  return isAcp.value ? 'conversation' : 'terminal';
+});
 
-const VALID_LOCAL = ['terminal', 'conversation', 'shells'];
+const VALID_LOCAL = ['document', 'terminal', 'conversation', 'shells'];
 const initialTab = route.query.tab;
 // `null` means "follow the backend's default tab"; a real value is an explicit
 // pick (from the URL or a click) that sticks.
@@ -105,6 +134,7 @@ const workTab = computed<WorkTab>(() => (reviewDocked.value ? 'review' : effecti
 // an ACP artifact deep-link is docked over its default Conversation tab and must
 // not fetch/render a potentially huge chat behind the requested document.
 const mounted = reactive({
+  document: false,
   conversation: false,
   shells: false,
   artifacts: artifactsActive.value,
@@ -113,7 +143,7 @@ const mounted = reactive({
 watch(
   workTab,
   (t) => {
-    if (t === 'conversation' || t === 'shells') mounted[t] = true;
+    if (t === 'document' || t === 'conversation' || t === 'shells') mounted[t] = true;
   },
   { immediate: true },
 );
@@ -156,7 +186,7 @@ async function selectTab(t: WorkTab) {
     });
     return;
   }
-  if (t === 'conversation' || t === 'shells') mounted[t] = true;
+  if (t === 'document' || t === 'conversation' || t === 'shells') mounted[t] = true;
   localTab.value = t;
   // Leaving a docked artifacts surface for a local tab closes it (back to the
   // plain session URL); when it's popped out the rail stays and we just swap the
@@ -176,7 +206,8 @@ let pageActive = false;
 function activeMobileSurface(): MobileSessionSurface {
   if (changesActive.value) return 'changes';
   if (artifactsActive.value) return 'artifacts';
-  return effectiveLocalTab.value;
+  // Phones have no Doc surface yet; they open on Chat (defaultToMobileConversation).
+  return effectiveLocalTab.value === 'document' ? 'conversation' : effectiveLocalTab.value;
 }
 async function selectMobileSurface(surface: MobileSessionSurface) {
   if (surface === 'artifacts' || surface === 'changes') {
@@ -214,19 +245,21 @@ function defaultToMobileConversation() {
   }
 }
 
-const workTabs = computed<{ key: WorkTab; label: string }[]>(() =>
-  isAcp.value
-    ? [
-        { key: 'conversation', label: 'Conversation' },
-        { key: 'shells', label: 'Shells' },
-        { key: 'review', label: 'Review' },
-      ]
-    : [
-        { key: 'terminal', label: 'Agent' },
-        { key: 'conversation', label: 'Conversation' },
-        { key: 'review', label: 'Review' },
-      ],
-);
+type WorkTabEntry = { key: WorkTab; label: string };
+const ACP_WORK_TABS: WorkTabEntry[] = [
+  { key: 'conversation', label: 'Conversation' },
+  { key: 'shells', label: 'Shells' },
+  { key: 'review', label: 'Review' },
+];
+const TERMINAL_WORK_TABS: WorkTabEntry[] = [
+  { key: 'terminal', label: 'Agent' },
+  { key: 'conversation', label: 'Conversation' },
+  { key: 'review', label: 'Review' },
+];
+const workTabs = computed<WorkTabEntry[]>(() => {
+  const backend = isAcp.value ? ACP_WORK_TABS : TERMINAL_WORK_TABS;
+  return hasDocument.value ? [{ key: 'document', label: 'Doc' }, ...backend] : backend;
+});
 async function moveWorkTab(direction: -1 | 1) {
   const tabs = workTabs.value;
   const current = tabs.findIndex((tab) => tab.key === workTab.value);
@@ -461,6 +494,10 @@ function openStream() {
   for (const kind of ['issue_added', 'issue_closed', 'issue_reopened']) {
     source.on(kind, () => loadSession().catch(() => {}));
   }
+  source.on('artifact_written', (ev) => {
+    const written = (ev.data as { name?: string }).name;
+    if (written && written === docArtifact.value) hasDocument.value = true;
+  });
 }
 
 onMounted(() => {
@@ -567,6 +604,7 @@ onUnmounted(() => {
         :tab="workTab"
         :artifacts-popped="railOpen"
         :protocol="ws.protocol"
+        :document="hasDocument"
         @select="selectTab"
       >
         <!-- Scratch attachments ride the tab row's spare right side (drop a file
@@ -592,6 +630,12 @@ onUnmounted(() => {
              then kept (v-show) so re-selecting is instant. -->
         <div v-if="isAcp && mounted.shells" v-show="workTab === 'shells'" class="h-full">
           <SessionTerminals ref="acpShellsRef" :id="props.id" shells-only />
+        </div>
+
+        <!-- Doc — the profile's doc artifact alone. Lazily mounted, then kept
+             (v-show) so flipping back keeps the reader's place. -->
+        <div v-if="hasDocument && mounted.document" v-show="workTab === 'document'" class="h-full">
+          <ArtifactsPanel :id="props.id" :pinned="docArtifact" :active="workTab === 'document'" />
         </div>
 
         <!-- Conversation — the agent's chat with the model. Lazily mounted, then

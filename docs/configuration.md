@@ -174,6 +174,11 @@ starter text lives under `crates/loom-policy/profiles/<name>/instructions.md`.
 The origin profiles are opt-in so an upgrade does not silently change the
 environment or runtime used by existing triggers.
 
+Profiles may set `doc_artifact` to the name of a branch artifact that is the
+session's doc. The session then opens on a **Doc** tab that shows it, and a
+person's saved revision of it reaches the agent as a message; see
+[the session doc](artifacts.md#the-session-doc).
+
 Profiles may declare `github_repositories` to define the GitHub App broker's
 scope. Ordinary interactive sessions select the launching user's Account PAT
 first and use this broker when the App path is selected. An interactive session

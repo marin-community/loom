@@ -10,8 +10,9 @@ import { computed } from 'vue';
 // The set depends on the execution backend. A terminal session leads with its
 // live Agent surface; an ACP session leads with Conversation. Artifacts remains
 // route-backed and deep-linkable. Overview was a duplicate of these operational
-// surfaces and is deliberately absent.
-type Tab = 'terminal' | 'conversation' | 'review' | 'shells';
+// surfaces and is deliberately absent. A session whose profile names a doc
+// artifact gets a leading Doc tab once the agent writes it.
+type Tab = 'document' | 'terminal' | 'conversation' | 'review' | 'shells';
 
 const props = defineProps<{
   tab: Tab;
@@ -19,6 +20,8 @@ const props = defineProps<{
   artifactsPopped?: boolean;
   /** Execution backend — selects the tab set + order. */
   protocol?: string;
+  /** The session has a doc, shown in a leading Doc tab. */
+  document?: boolean;
 }>();
 defineEmits<{ select: [Tab] }>();
 
@@ -32,7 +35,11 @@ const ACP_TABS: { key: Tab; label: string }[] = [
   { key: 'shells', label: 'Shells' },
   { key: 'review', label: 'Review' },
 ];
-const tabs = computed(() => (props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS));
+const DOCUMENT_TAB: { key: Tab; label: string } = { key: 'document', label: 'Doc' };
+const tabs = computed(() => {
+  const backend = props.protocol === 'acp' ? ACP_TABS : TERMINAL_TABS;
+  return props.document ? [DOCUMENT_TAB, ...backend] : backend;
+});
 </script>
 
 <template>
