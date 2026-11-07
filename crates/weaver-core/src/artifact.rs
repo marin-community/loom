@@ -14,6 +14,10 @@
 //! Lookup resolves **branch-scoped first, then repo-shared**: a session's own
 //! `plan` shadows the repo's shared `plan` of the same name. See
 //! `docs/artifacts.md`.
+//!
+//! An archived artifact (`archived_at` set) is hidden from the listing queries
+//! but still resolves by name and id, so links, embeds, reviews, and review
+//! threads keep working. See [`set_archived`].
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -35,6 +39,7 @@ pub struct Artifact {
     /// The latest revision number (joined from `artifact_versions`); 0 when the
     /// artifact somehow has no version (never, post-[`write`]).
     pub rev: i64,
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -53,7 +58,7 @@ pub struct ArtifactVersion {
 /// every read so the projected `rev` is computed one way.
 const SELECT_WITH_REV: &str = "SELECT a.id, a.repo_root, a.branch_id, a.name, a.kind, a.title, \
      COALESCE((SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = a.id), 0) AS rev, \
-     a.created_at, a.updated_at \
+     a.archived_at, a.created_at, a.updated_at \
      FROM artifacts a";
 
 /// One revision to append, plus the scope/identity that targets (or creates) its
@@ -268,8 +273,23 @@ pub async fn history(db: &Db, artifact_id: i64) -> Result<Vec<ArtifactVersion>> 
 /// ones, latest rev each. A branch-scoped artifact **shadows** a shared one of
 /// the same name (the resolution [`get`] uses), so the listing shows the scoped
 /// row and drops the duplicate shared name.
-pub async fn list_for_session(db: &Db, repo_root: &str, branch_id: &str) -> Result<Vec<Artifact>> {
-    let mut scoped = sqlx::query_as::<_, Artifact>(&format!(
+///
+/// Archived artifacts are omitted unless `include_archived` is set.
+pub async fn list_for_session(
+    db: &Db,
+    repo_root: &str,
+    branch_id: &str,
+    include_archived: bool,
+) -> Result<Vec<Artifact>> {
+    let live = if include_archived {
+        ""
+    } else {
+        " AND a.archived_at IS NULL"
+    };
+    // Fetch this branch's rows unfiltered: an archived copy still shadows a
+    // shared document of its name (the resolution `get` uses), so visibility is
+    // decided below rather than in SQL.
+    let scoped_rows = sqlx::query_as::<_, Artifact>(&format!(
         "{SELECT_WITH_REV} WHERE a.repo_root = ? AND a.branch_id = ? ORDER BY a.name ASC"
     ))
     .bind(repo_root)
@@ -277,34 +297,68 @@ pub async fn list_for_session(db: &Db, repo_root: &str, branch_id: &str) -> Resu
     .fetch_all(db)
     .await?;
 
+    let scoped_names: std::collections::HashSet<String> =
+        scoped_rows.iter().map(|a| a.name.clone()).collect();
+    let mut listed: Vec<Artifact> = scoped_rows
+        .into_iter()
+        .filter(|a| include_archived || a.archived_at.is_none())
+        .collect();
+
     let shared = sqlx::query_as::<_, Artifact>(&format!(
-        "{SELECT_WITH_REV} WHERE a.repo_root = ? AND a.branch_id IS NULL ORDER BY a.name ASC"
+        "{SELECT_WITH_REV} WHERE a.repo_root = ? AND a.branch_id IS NULL{live} ORDER BY a.name ASC"
     ))
     .bind(repo_root)
     .fetch_all(db)
     .await?;
 
-    let scoped_names: std::collections::HashSet<String> =
-        scoped.iter().map(|a| a.name.clone()).collect();
     for s in shared {
         if !scoped_names.contains(&s.name) {
-            scoped.push(s);
+            listed.push(s);
         }
     }
-    scoped.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(scoped)
+    listed.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(listed)
 }
 
 /// Every artifact in a repo, regardless of scope (`artifact ls --repo`), latest
-/// rev each. Branch-scoped rows sort after shared ones by name.
-pub async fn list_for_repo(db: &Db, repo_root: &str) -> Result<Vec<Artifact>> {
+/// rev each. Branch-scoped rows sort after shared ones by name. Archived
+/// artifacts are omitted unless `include_archived` is set.
+pub async fn list_for_repo(
+    db: &Db,
+    repo_root: &str,
+    include_archived: bool,
+) -> Result<Vec<Artifact>> {
+    let live = if include_archived {
+        ""
+    } else {
+        " AND a.archived_at IS NULL"
+    };
     let rows = sqlx::query_as::<_, Artifact>(&format!(
-        "{SELECT_WITH_REV} WHERE a.repo_root = ? ORDER BY a.name ASC, a.branch_id IS NOT NULL"
+        "{SELECT_WITH_REV} WHERE a.repo_root = ?{live} \
+         ORDER BY a.name ASC, a.branch_id IS NOT NULL"
     ))
     .bind(repo_root)
     .fetch_all(db)
     .await?;
     Ok(rows)
+}
+
+/// Set or clear an artifact's archived flag, by envelope id. Archiving hides the
+/// document from listings without touching its revisions, reviews, or review
+/// threads — the envelope stays resolvable by name and id, so restoring it is
+/// lossless. Returns the updated envelope, or `None` when no such artifact
+/// exists.
+pub async fn set_archived(db: &Db, id: i64, archived: bool) -> Result<Option<Artifact>> {
+    let now = now_iso();
+    let mut tx = crate::db::begin_immediate(db).await?;
+    sqlx::query("UPDATE artifacts SET archived_at = ?, updated_at = ? WHERE id = ?")
+        .bind(if archived { Some(now.as_str()) } else { None })
+        .bind(&now)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    get_by_id(db, id).await
 }
 
 /// Delete an artifact and its entire revision history, by envelope id. Removing
@@ -437,7 +491,7 @@ mod tests {
         wr(&db, Some("b1"), "plan", "My plan", "x", "agent").await;
         wr(&db, Some("b1"), "design", "My design", "x", "agent").await;
 
-        let listed = list_for_session(&db, "/r", "b1").await.unwrap();
+        let listed = list_for_session(&db, "/r", "b1", false).await.unwrap();
         // plan (scoped, shadows shared), report (shared), design (scoped).
         let names: Vec<&str> = listed.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["design", "plan", "report"]);
@@ -466,11 +520,69 @@ mod tests {
         )
         .await
         .unwrap();
-        let all = list_for_repo(&db, "/r").await.unwrap();
+        let all = list_for_repo(&db, "/r", false).await.unwrap();
         assert_eq!(
             all.len(),
             2,
             "two `plan` rows in /r (shared + b1), none from /other"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_hides_from_listings_and_restore_is_lossless() {
+        let db = db().await;
+        let shared = wr(&db, None, "brief", "Brief", "v1", "agent").await;
+        wr(&db, Some("b1"), "design", "Design", "x", "agent").await;
+
+        let archived = set_archived(&db, shared.id, true).await.unwrap().unwrap();
+        assert!(archived.archived_at.is_some());
+
+        // Hidden from both listings by default; `include_archived` reveals it.
+        let visible_rows = list_for_session(&db, "/r", "b1", false).await.unwrap();
+        let visible: Vec<&str> = visible_rows.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(visible, vec!["design"]);
+        let all_rows = list_for_session(&db, "/r", "b1", true).await.unwrap();
+        let all: Vec<&str> = all_rows.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(all, vec!["brief", "design"]);
+        assert_eq!(list_for_repo(&db, "/r", false).await.unwrap().len(), 1);
+        assert_eq!(list_for_repo(&db, "/r", true).await.unwrap().len(), 2);
+
+        // Still resolvable by name and id, with its revision intact.
+        let got = get_shared(&db, "/r", "brief").await.unwrap().unwrap();
+        assert_eq!(got.id, shared.id);
+        assert_eq!(got.rev, 1);
+        assert!(latest_version(&db, got.id).await.unwrap().is_some());
+
+        // Restoring is lossless: same envelope, same revision, no new history.
+        let restored = set_archived(&db, shared.id, false).await.unwrap().unwrap();
+        assert!(restored.archived_at.is_none());
+        assert_eq!(restored.id, shared.id);
+        assert_eq!(restored.rev, 1);
+        assert_eq!(history(&db, shared.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn archived_branch_copy_still_shadows_the_shared_name() {
+        let db = db().await;
+        wr(&db, None, "plan", "Shared", "s", "agent").await;
+        let scoped = wr(&db, Some("b1"), "plan", "Mine", "m", "agent").await;
+        set_archived(&db, scoped.id, true).await.unwrap();
+
+        // The hidden copy keeps the name: the session lists no `plan` at all,
+        // matching what `get` resolves (the archived branch row), rather than
+        // falling through to the shared one.
+        assert!(list_for_session(&db, "/r", "b1", false)
+            .await
+            .unwrap()
+            .iter()
+            .all(|a| a.name != "plan"));
+        let all = list_for_session(&db, "/r", "b1", true).await.unwrap();
+        let plan = all.iter().find(|a| a.name == "plan").unwrap();
+        assert_eq!(plan.branch_id.as_deref(), Some("b1"));
+        assert!(plan.archived_at.is_some());
+        assert_eq!(
+            get(&db, "/r", "b1", "plan").await.unwrap().unwrap().id,
+            scoped.id
         );
     }
 

@@ -1617,6 +1617,7 @@ pub struct ArtifactMeta {
     pub branch_id: Option<String>,
     /// The latest revision number.
     pub rev: i64,
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -190,6 +190,51 @@ test.describe('artifacts surface', () => {
     });
   });
 
+  test('archiving retires a document without deleting it, and restore brings it back', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: 'archive me',
+      name: 'artifacts-archive',
+    });
+    await weaver.writeArtifact(session, 'stale-brief', '# Stale brief\n\nRetired later.\n', {
+      title: 'Stale brief',
+      repo: true,
+    });
+    await weaver.writeArtifact(session, 'keep', '# Keep\n\nStill live.\n', {
+      title: 'Keep',
+    });
+
+    await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/stale-brief`);
+    await expect(page.locator('[data-artifact="stale-brief"]')).toBeVisible();
+    await expect(page.locator('.markdown-body h1')).toContainText('Stale brief');
+
+    // Archive from the toolbar: it leaves the list, the rest stays.
+    await page.getByTestId('artifact-archive').click();
+    await expect(page.locator('[data-artifact="stale-brief"]')).toHaveCount(0);
+    await expect(page.locator('[data-artifact="keep"]')).toBeVisible();
+
+    // The goal is the session charter: it offers no Archive affordance.
+    await page.locator('[data-artifact="goal"]').click();
+    await expect(page.getByTestId('artifact-archive')).toHaveCount(0);
+
+    // "Archived" reveals it again, marked, and it is still readable.
+    await page.getByTestId('artifact-show-archived').click();
+    const row = page.locator('[data-artifact="stale-brief"]');
+    await expect(row).toBeVisible();
+    await expect(row).toContainText('archived');
+    await row.click();
+    await expect(page.locator('.markdown-body h1')).toContainText('Stale brief');
+    await expect(page.getByTestId('artifact-restore')).toBeVisible();
+
+    // Restore flips the toolbar back and returns it to the live list.
+    await page.getByTestId('artifact-restore').click();
+    await expect(page.getByTestId('artifact-archive')).toBeVisible();
+    await page.getByTestId('artifact-show-archived').click();
+    await expect(page.locator('[data-artifact="stale-brief"]')).toBeVisible();
+  });
+
   test('the toolbar downloads the open artifact', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: 'download me',

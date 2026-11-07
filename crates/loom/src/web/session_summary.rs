@@ -41,7 +41,7 @@ async fn build_session_catchup(
         .map(|tag| tag.value)
         .unwrap_or_else(|| "ok".to_string());
     let channel = crate::channels::get(&st.db, &session.id, &principal_subject(principal)).await?;
-    let artifacts = artifact::list_for_session(&st.db, &branch.repo_root, &branch.id)
+    let artifacts = artifact::list_for_session(&st.db, &branch.repo_root, &branch.id, false)
         .await?
         .iter()
         .map(artifact_meta)

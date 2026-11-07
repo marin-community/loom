@@ -6,7 +6,9 @@ use axum::{
 };
 use base64::Engine as _;
 use serde_json::json;
-use weaver_api::operations::artifacts::{delete, get, history, list, raw, threads, url, write};
+use weaver_api::operations::artifacts::{
+    archive, delete, get, history, list, raw, restore, threads, url, write,
+};
 use weaver_api::{
     AnchorDto, ArtifactMeta, ArtifactRefs, ArtifactVersion, ArtifactView, CommentDto,
     IssueRefStatus, SessionUrlView, ThreadDto,
@@ -32,6 +34,11 @@ use super::{ApiResult, AppError, AppState};
 // ---------------------------------------------------------------------------
 
 const MAX_ARTIFACT_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// The branch-scoped artifact that carries the session goal. It is the session's
+/// charter — restart, handoff, and summary read it — so it is never a document a
+/// session may retire.
+const GOAL_ARTIFACT: &str = "goal";
 
 /// Pull a standalone image data URI out of artifact content: the explicit
 /// `image` kind stores it directly, the markdown fallback covers artifacts
@@ -87,6 +94,7 @@ pub(super) fn artifact_meta(a: &Artifact) -> ArtifactMeta {
         title: a.title.clone(),
         branch_id: a.branch_id.clone(),
         rev: a.rev,
+        archived_at: a.archived_at.clone(),
         created_at: a.created_at.clone(),
         updated_at: a.updated_at.clone(),
     }
@@ -225,6 +233,8 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<list::Op, _, _>(list_operation),
         register::<get::Op, _, _>(get_operation),
         register::<write::Op, _, _>(write_operation),
+        register::<archive::Op, _, _>(archive_operation),
+        register::<restore::Op, _, _>(restore_operation),
         register::<delete::Op, _, _>(delete_operation),
         register::<history::Op, _, _>(history_operation),
         register::<threads::list::Op, _, _>(threads_list_operation),
@@ -238,9 +248,9 @@ async fn list_operation(context: OperationContext, input: list::Input) -> ApiRes
     let st = context.state;
     let branch = require_branch(&st.db, &input.branch).await?;
     let artifacts = if input.repo {
-        artifact::list_for_repo(&st.db, &branch.repo_root).await?
+        artifact::list_for_repo(&st.db, &branch.repo_root, input.all).await?
     } else {
-        artifact::list_for_session(&st.db, &branch.repo_root, &branch.id).await?
+        artifact::list_for_session(&st.db, &branch.repo_root, &branch.id, input.all).await?
     };
     Ok(artifacts.iter().map(artifact_meta).collect())
 }
@@ -275,6 +285,16 @@ async fn write_operation(
     } else {
         artifact::get(&st.db, &branch.repo_root, &branch.id, &input.name).await?
     };
+    // Archive is a state, not a filter: writing to a retired document has to go
+    // through `artifacts.restore` first, so a stray write cannot quietly put it
+    // back in front of every session in the repo.
+    if let Some(a) = existing.as_ref().filter(|a| a.archived_at.is_some()) {
+        return Err(AppError::conflict(format!(
+            "artifact '{}' is archived — restore it with `loom artifacts restore {}`",
+            a.name, a.name
+        ))
+        .with_fields(json!({ "artifact": a.id, "rev": a.rev })));
+    }
     // Optimistic-concurrency guard: this checks business state (a concurrent write),
     // which authorize() has no way to express.
     if let Some(base_rev) = input.base_rev {
@@ -381,6 +401,69 @@ async fn delete_operation(
         deleted: true,
         name: a.name,
     })
+}
+
+/// Shared body for `artifacts.archive` / `artifacts.restore`: resolve the row
+/// (branch-scoped first, then shared, as `get` does), flip its archive flag, and
+/// project the refreshed view.
+async fn set_archived_operation(
+    st: AppState,
+    branch: &Branch,
+    name: &str,
+    repo: bool,
+    archived: bool,
+) -> ApiResult<ArtifactView> {
+    if name == GOAL_ARTIFACT {
+        return Err(AppError::bad_request(
+            "the goal artifact cannot be archived — it is this session's charter",
+        ));
+    }
+    let a = if repo {
+        artifact::get_shared(&st.db, &branch.repo_root, name).await?
+    } else {
+        artifact::get(&st.db, &branch.repo_root, &branch.id, name).await?
+    }
+    .ok_or_else(|| AppError::not_found("artifact"))?;
+    let a = artifact::set_archived(&st.db, a.id, archived)
+        .await?
+        .ok_or_else(|| AppError::not_found("artifact"))?;
+    let kind = if archived {
+        "artifact_archived"
+    } else {
+        "artifact_restored"
+    };
+    tracing::info!(artifact = %a.name, archived, "artifact archive state changed");
+    events::record(
+        &st.db,
+        &st.bus,
+        &branch.id,
+        kind,
+        json!({ "name": a.name, "branch_id": a.branch_id }),
+    )
+    .await
+    .ok();
+    // A wired thread's status card lists the session's documents — refresh it so
+    // a retired doc drops off and a restored one comes back.
+    crate::slack::spawn_status_mirrors(st.clone(), branch.id.clone());
+    artifact_view(&st.db, &branch.repo_root, &a, None).await
+}
+
+async fn archive_operation(
+    context: OperationContext,
+    input: archive::Input,
+) -> ApiResult<archive::Output> {
+    let st = context.state;
+    let branch = require_branch(&st.db, &input.branch).await?;
+    set_archived_operation(st, &branch, &input.name, input.repo, true).await
+}
+
+async fn restore_operation(
+    context: OperationContext,
+    input: restore::Input,
+) -> ApiResult<restore::Output> {
+    let st = context.state;
+    let branch = require_branch(&st.db, &input.branch).await?;
+    set_archived_operation(st, &branch, &input.name, input.repo, false).await
 }
 
 /// `artifacts.history` — standalone version list query for a caller that wants

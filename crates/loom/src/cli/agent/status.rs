@@ -147,6 +147,7 @@ pub(super) async fn render_summary(client: &Client, b: &BranchView) -> Result<St
     let artifacts = client
         .invoke::<artifacts::list::Op>(&artifacts::list::Input {
             repo: false,
+            all: false,
             branch: b.id.to_string(),
         })
         .await
