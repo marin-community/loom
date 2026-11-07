@@ -527,8 +527,10 @@ export const clearIssueTag = (id: number, key: string) =>
 // --- Artifacts -------------------------------------------------------------
 
 /** A session's artifacts: its branch-scoped documents plus the repo-shared ones
- *  (a branch-scoped name shadows a shared one). */
-export const getArtifacts = (id: string) => invokeOperation('artifacts.list', { branch: id });
+ *  (a branch-scoped name shadows a shared one). Archived documents are hidden
+ *  unless `all` is set. */
+export const getArtifacts = (id: string, all = false) =>
+  invokeOperation('artifacts.list', { branch: id, all });
 
 /** One artifact — content plus the projected ref map. `rev` selects a revision;
  *  omit it for the latest. */
@@ -547,6 +549,16 @@ export const putArtifact = (
  *  for that name (its branch-scoped one, else the repo-shared). */
 export const deleteArtifact = (id: string, name: string) =>
   invokeOperation('artifacts.delete', { name, branch: id });
+
+/** Hide an artifact from listings without removing it. `repo` targets the
+ *  repo-shared row when a branch copy shadows it. */
+export const archiveArtifact = (id: string, name: string, repo = false) =>
+  invokeOperation('artifacts.archive', { name, repo, branch: id });
+
+/** Put an archived artifact back in the listings. Lossless: its revisions and
+ *  reviews were never removed. */
+export const restoreArtifact = (id: string, name: string, repo = false) =>
+  invokeOperation('artifacts.restore', { name, repo, branch: id });
 
 /** Availability of the session's embedded editor (code-server). This is
  *  host-level configuration, not session state — `sessions.ide_info` takes no
