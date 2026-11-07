@@ -209,6 +209,11 @@ profiles:
     env: []
 ```
 
+Environment-cleared profiles preserve `UV_CACHE_DIR` and
+`UV_PYTHON_INSTALL_DIR` when set on the server, so agents share the deployment's
+uv cache and managed Python installations. Explicit profile environment values
+override these inherited paths.
+
 Apply it through the authenticated local CLI:
 
 ```sh
