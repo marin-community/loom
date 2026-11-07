@@ -2,6 +2,7 @@ import { ref } from 'vue';
 import {
   archiveSession,
   clearSessionTag,
+  fetchArchiveChildrenDefault,
   invokeOperation,
   recoverSession,
   regenerateSessionTitle,
@@ -16,7 +17,7 @@ import {
   AUTO_ARCHIVE_DISABLED_VALUE,
   AUTO_ARCHIVE_KEY,
   childSessionsPhrase,
-  sessionDescendants,
+  hasChildSessions,
   type LifecycleVerb,
 } from './sessionState';
 
@@ -143,40 +144,31 @@ export function useSessionActions(
       await reload();
     });
 
-  const archive = () => {
+  const archive = async () => {
     const id = getId();
-    const children = sessionDescendants(
-      useFleet().sessions.value.filter((session) => session.status !== 'archived'),
-      id,
-    );
+    const hasChildren = hasChildSessions(useFleet().sessions.value, id);
+    const checked = hasChildren ? await fetchArchiveChildrenDefault() : false;
+    // A second click while the dialog is open just no-ops.
     return confirmAction({
       title: 'Archive this session?',
       description:
         'Its terminal and worktree will be removed. The branch, conversation, placement, and Loom history remain recoverable in History.',
       confirmLabel: 'Archive session',
       danger: true,
-      option: children.length
-        ? { label: `Also archive ${childSessionsPhrase(children.length)}` }
-        : undefined,
+      option: hasChildren ? { label: 'Also archive child sessions', checked } : undefined,
       action: async ({ optionChecked }) => {
         error.value = '';
         notice.value = '';
-        const res = (await archiveSession(id)) as { branch: string };
-        if (!optionChecked) {
-          notice.value = `Archived ${res.branch}.`;
-        } else {
-          const results = await Promise.allSettled(
-            children.map((child) => archiveSession(child.id)),
-          );
-          const failed = results.filter((result) => result.status === 'rejected').length;
-          const scope = childSessionsPhrase(children.length);
-          notice.value = failed
-            ? `Archived ${res.branch}; ${failed} of ${scope} failed to archive.`
-            : `Archived ${res.branch} and ${scope}.`;
-        }
+        const res = await archiveSession(id, optionChecked);
+        const base = res.children_archived
+          ? `Archived ${res.branch} and ${childSessionsPhrase(res.children_archived)}.`
+          : `Archived ${res.branch}.`;
+        notice.value = res.warnings.length
+          ? `${base} with warnings — ${res.warnings.join(' ')}`
+          : base;
         await reload();
       },
-    });
+    }).catch(() => {});
   };
 
   const recover = () =>
@@ -209,6 +201,7 @@ export function useSessionActions(
     });
 
   const remove = () =>
+    // A second click while the dialog is open just no-ops.
     confirmAction({
       title: 'Permanently remove this session?',
       description:
@@ -222,7 +215,7 @@ export function useSessionActions(
         if (removed) removed();
         else await reload();
       },
-    });
+    }).catch(() => {});
 
   // The lifecycle verbs are only ever reached by name — a caller renders a
   // list of `LifecycleAction`s and invokes whichever one was clicked — so `run`

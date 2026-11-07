@@ -811,6 +811,68 @@ pub async fn list_managed(db: &Db) -> Result<Vec<Session>> {
     Ok(rows)
 }
 
+/// The live descendants of `root_id` in the delegation tree, in tree order.
+pub async fn live_descendant_ids(db: &Db, root_id: &str) -> Result<Vec<String>> {
+    Ok(live_descendant_ids_of(&list(db).await?, root_id))
+}
+
+fn live_descendant_ids_of(sessions: &[Session], root_id: &str) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_id: HashMap<&str, &Session> = HashMap::new();
+    let mut by_branch: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for session in sessions {
+        by_id.insert(session.id.as_str(), session);
+        // Archived rows no longer occupy a branch, so the legacy fallback
+        // counts only live holders when deciding the link is unambiguous.
+        if session.status != "archived" {
+            by_branch
+                .entry(session.branch_id.as_str())
+                .or_default()
+                .push(session);
+        }
+    }
+    let mut children: HashMap<&str, Vec<&Session>> = HashMap::new();
+    for session in sessions {
+        let parent = match session.parent_session_id.as_deref() {
+            Some(parent_id) => by_id.get(parent_id).copied(),
+            None => session
+                .parent_branch_id
+                .as_deref()
+                .and_then(|branch| by_branch.get(branch))
+                .filter(|same_branch| same_branch.len() == 1)
+                .map(|same_branch| same_branch[0]),
+        };
+        if let Some(parent) = parent.filter(|parent| parent.id != session.id) {
+            children
+                .entry(parent.id.as_str())
+                .or_default()
+                .push(session);
+        }
+    }
+
+    fn walk<'a>(
+        id: &'a str,
+        children: &HashMap<&'a str, Vec<&'a Session>>,
+        seen: &mut HashSet<&'a str>,
+        out: &mut Vec<String>,
+    ) {
+        for child in children.get(id).into_iter().flatten() {
+            // The visited set cuts cycles corrupt legacy ancestry can contain.
+            if child.status == "archived" || !seen.insert(child.id.as_str()) {
+                continue;
+            }
+            out.push(child.id.clone());
+            walk(&child.id, children, seen, out);
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::from([root_id]);
+    walk(root_id, &children, &mut seen, &mut out);
+    out
+}
+
 /// The owned (warm) session for a watch, if one exists and is not
 /// terminal. Lets the engine reuse the same warm session across rounds.
 pub async fn active_managed_by(db: &Db, watch_id: &str) -> Result<Option<Session>> {
@@ -2555,5 +2617,138 @@ mod tests {
 
         // Clearing is always allowed: settle paths clean up regardless.
         assert!(set_inflight(&db, "turn-fence", None).await.unwrap());
+    }
+
+    /// Seed a delegated child row with its parent link — test helper, never
+    /// shipped code.
+    async fn insert_delegated(db: &Db, id: &str, branch: &str, parent_session_id: &str) {
+        let branch = branch_id(db, branch).await;
+        let mut session = new_session(id, &branch, None);
+        session.origin = "agent".to_string();
+        let mut policy = SessionLaunchPolicy::compatible(&session);
+        policy.parent_session_id = Some(parent_session_id.to_string());
+        insert_with_policy(db, &session, &policy).await.unwrap();
+    }
+
+    /// The delegation-tree walk behind `sessions.archive`'s `children` operand.
+    #[tokio::test]
+    async fn live_descendant_ids_follow_the_delegation_tree() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let parent_branch = branch_id(&db, "weaver/parent").await;
+        insert(&db, &new_session("parent", &parent_branch, None))
+            .await
+            .unwrap();
+        insert_delegated(&db, "child-a", "weaver/child-a", "parent").await;
+        insert_delegated(&db, "grandchild", "weaver/grandchild", "child-a").await;
+
+        assert_eq!(
+            live_descendant_ids(&db, "parent").await.unwrap(),
+            ["child-a".to_string(), "grandchild".to_string()],
+            "tree order: the child precedes its own subtree"
+        );
+        assert_eq!(
+            live_descendant_ids(&db, "child-a").await.unwrap(),
+            ["grandchild".to_string()]
+        );
+        assert!(live_descendant_ids(&db, "grandchild")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_descendant_ids_skip_archived_rows_entirely() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let parent_branch = branch_id(&db, "weaver/parent").await;
+        insert(&db, &new_session("parent", &parent_branch, None))
+            .await
+            .unwrap();
+        insert_delegated(&db, "child-a", "weaver/child-a", "parent").await;
+        insert_delegated(&db, "grandchild", "weaver/grandchild", "child-a").await;
+
+        sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = 'child-a'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert!(
+            live_descendant_ids(&db, "parent").await.unwrap().is_empty(),
+            "an archived child is neither returned nor traversed through to its own child"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_descendant_ids_fall_back_to_legacy_branch_parentage() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let parent_branch = branch_id(&db, "weaver/parent").await;
+        insert(&db, &new_session("parent", &parent_branch, None))
+            .await
+            .unwrap();
+
+        // A legacy row names its parent by branch id alone.
+        let legacy_branch = branch_id(&db, "weaver/legacy-child").await;
+        let mut legacy = new_session("legacy-child", &legacy_branch, None);
+        legacy.origin = "agent".to_string();
+        legacy.parent_branch_id = Some(parent_branch.clone());
+        insert(&db, &legacy).await.unwrap();
+        assert_eq!(
+            live_descendant_ids(&db, "parent").await.unwrap(),
+            ["legacy-child".to_string()]
+        );
+
+        // A branch holding one live and one archived row names its live
+        // holder — archived rows do not count toward the legacy link's
+        // uniqueness.
+        let shared_branch = branch_id(&db, "weaver/shared").await;
+        insert(&db, &new_session("shared-old", &shared_branch, None))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET status = 'archived' WHERE id = 'shared-old'")
+            .execute(&db)
+            .await
+            .unwrap();
+        insert(&db, &new_session("shared-new", &shared_branch, None))
+            .await
+            .unwrap();
+        let ambiguous_branch = branch_id(&db, "weaver/ambiguous").await;
+        let mut ambiguous = new_session("ambiguous", &ambiguous_branch, None);
+        ambiguous.origin = "agent".to_string();
+        ambiguous.parent_branch_id = Some(shared_branch);
+        insert(&db, &ambiguous).await.unwrap();
+        assert_eq!(
+            live_descendant_ids(&db, "shared-new").await.unwrap(),
+            ["ambiguous".to_string()],
+            "the live holder of the branch is the parent"
+        );
+        assert!(
+            live_descendant_ids(&db, "shared-old")
+                .await
+                .unwrap()
+                .is_empty(),
+            "the archived holder is not"
+        );
+    }
+
+    /// A corrupt ancestry cycle must terminate the walk, not recurse forever.
+    #[tokio::test]
+    async fn live_descendant_ids_survive_an_ancestry_cycle() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        for (id, branch) in [("a", "weaver/a"), ("c", "weaver/c")] {
+            let branch = branch_id(&db, branch).await;
+            insert(&db, &new_session(id, &branch, None)).await.unwrap();
+        }
+        sqlx::query("UPDATE sessions SET parent_session_id = 'c' WHERE id = 'a'")
+            .execute(&db)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET parent_session_id = 'a' WHERE id = 'c'")
+            .execute(&db)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            live_descendant_ids(&db, "a").await.unwrap(),
+            ["c".to_string()]
+        );
     }
 }

@@ -23,6 +23,7 @@ import {
   createSessionSpace,
   deleteSessionGroup,
   deleteSessionSpace,
+  fetchArchiveChildrenDefault,
   getPreferences,
   getSession,
   listSessionSummaries,
@@ -35,12 +36,7 @@ import {
   updateSessionSpace,
 } from '../api';
 import { unmatchedAutomationRuns, unmatchedRunProjection } from '../lib/automationSessions';
-import {
-  childSessionsPhrase,
-  effectiveAttention,
-  sessionAncestry,
-  sessionDescendants,
-} from '../lib/sessionState';
+import { childSessionsPhrase, effectiveAttention, sessionAncestry } from '../lib/sessionState';
 import { sessionPathSegments } from '../lib/sessionTitle';
 import { useLayoutCommands } from '../lib/layoutCommands';
 import { confirmAction } from '../lib/confirmation';
@@ -1046,54 +1042,58 @@ function moveGroupToSpace(group: SessionGroup) {
 const archiveResult = ref('');
 // The one archive confirmation the app has (lib/confirmation, rendered by the
 // shell) also carries the optional add-on: children of the selected parents
-// that the selection itself doesn't cover can ride along, checked per dialog.
-function unselectedDescendants(ids: string[]): string[] {
+// can ride along, checked per dialog.
+function selectionHasChildren(ids: string[]): boolean {
   const live = sessions.value.filter((session) => session.status !== 'archived');
-  const seen = new Set(ids);
-  const extra: string[] = [];
-  for (const id of ids) {
-    for (const child of sessionDescendants(live, id)) {
-      if (seen.has(child.id)) continue;
-      seen.add(child.id);
-      extra.push(child.id);
-    }
-  }
-  return extra;
+  const ancestry = sessionAncestry(live);
+  const selection = new Set(ids);
+  return ids.some((id) => ancestry.childrenOf(id).some((child) => !selection.has(child.id)));
 }
-function requestBulkArchive() {
+async function requestBulkArchive() {
   const ids = [...selected.value];
   if (!ids.length) return;
-  const extraChildren = unselectedDescendants(ids);
+  const hasChildren = selectionHasChildren(ids);
+  const checked = hasChildren ? await fetchArchiveChildrenDefault() : false;
   void confirmAction({
     title: `Archive ${ids.length} selected session${ids.length === 1 ? '' : 's'}?`,
     description:
       'Their terminals and worktrees will be removed. Branches, conversations, placement, and Loom history remain recoverable in History. Failures remain selected so they can be retried.',
     confirmLabel: 'Archive selected',
     danger: true,
-    option: extraChildren.length
-      ? { label: `Also archive ${childSessionsPhrase(extraChildren.length)}` }
-      : undefined,
+    option: hasChildren ? { label: 'Also archive child sessions', checked } : undefined,
     // The batch outlives the dialog: the server serializes teardowns behind
     // its lifecycle lock, so a large selection must not pin a modal. Confirm
     // resolves immediately and the archive-result banner reports the outcome.
     action: async ({ optionChecked }) => {
-      const targets = [...ids, ...(optionChecked ? extraChildren : [])];
-      void archiveBatch(targets);
+      void archiveBatch(ids, optionChecked);
     },
-  });
+  }).catch(() => {});
 }
 
-async function archiveBatch(targets: string[]) {
+async function archiveBatch(targets: string[], children = false) {
   error.value = '';
-  const results = await Promise.allSettled(targets.map((target) => archiveSession(target)));
+  const results = await Promise.allSettled(
+    targets.map((target) => archiveSession(target, children)),
+  );
   const failed = targets.filter((_, index) => results[index].status === 'rejected');
   const archived = targets.length - failed.length;
+  const riding = results.reduce(
+    (total, result) => total + (result.status === 'fulfilled' ? result.value.children_archived : 0),
+    0,
+  );
+  const warnings = results.flatMap((result) =>
+    result.status === 'fulfilled' ? result.value.warnings : [],
+  );
   selected.value = new Set(failed);
   announcement.value = `Archived ${archived} session${archived === 1 ? '' : 's'}${
-    failed.length ? `; ${failed.length} failed and remain selected` : ''
+    riding ? ` and ${childSessionsPhrase(riding)}` : ''
+  }${failed.length ? `; ${failed.length} failed and remain selected` : ''}${
+    warnings.length
+      ? `; ${warnings.length} warning${warnings.length === 1 ? '' : 's'} — ${warnings.join(' ')}`
+      : ''
   }`;
   archiveResult.value = announcement.value;
-  if (failed.length) error.value = announcement.value;
+  if (failed.length || warnings.length) error.value = announcement.value;
   await refresh();
 }
 

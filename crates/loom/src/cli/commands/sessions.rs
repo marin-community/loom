@@ -218,7 +218,14 @@ pub enum SessionCmd {
     ///
     /// An unmatched automation launch is addressed by its reserved session id,
     /// the same id shown in the Interventions section/API.
-    Archive { session: String },
+    Archive {
+        session: String,
+        /// Also archive the session's live descendants.
+        /// `--children=false` archives the root alone; omitted follows the
+        /// `session.archive_children` setting.
+        #[arg(long, num_args(0..=1), default_missing_value = "true", require_equals = true)]
+        children: Option<bool>,
+    },
     /// Recreate the terminal session for an orphaned session.
     Adopt { session: String },
     /// Recover a session: restart a failed ACP runtime, or rebuild an archive.
@@ -413,7 +420,7 @@ pub async fn run_session(cmd: SessionCmd) -> Result<()> {
         } => cmd_session_cue(session, ensure || force, force).await,
         SessionCmd::Show { session } => cmd_show(session).await,
         SessionCmd::Attach { session } => cmd_attach(session).await,
-        SessionCmd::Archive { session } => cmd_archive(session).await,
+        SessionCmd::Archive { session, children } => cmd_archive(session, children).await,
         SessionCmd::Adopt { session } => cmd_adopt(session).await,
         SessionCmd::Recover { session } => cmd_recover(session).await,
         SessionCmd::Suspend { session } => cmd_suspend(session).await,
@@ -1238,15 +1245,23 @@ pub async fn cmd_attach(key: String) -> Result<()> {
     Err(anyhow!("failed to exec terminal attach: {err}"))
 }
 
-pub(crate) async fn cmd_archive(key: String) -> Result<()> {
+pub(crate) async fn cmd_archive(key: String, children: Option<bool>) -> Result<()> {
     let client = client::default()?;
     let res = client
         .invoke::<sessions::archive::Op>(&sessions::archive::Input {
             session: key.clone(),
+            children,
         })
         .await?;
     if res.kind == "launch_attempt" {
         println!("archived launch attempt {key} (reserved runtime removed; history kept)");
+    } else if res.children_archived > 0 {
+        println!(
+            "archived {} and {} child session{} (terminal + worktree removed; branch and history kept)",
+            res.branch,
+            res.children_archived,
+            if res.children_archived == 1 { "" } else { "s" }
+        );
     } else {
         println!(
             "archived {} (terminal + worktree removed; branch and history kept)",

@@ -92,7 +92,16 @@ liveness: `creating`, `waiting`, `delivering`, `running`, `failed`,
   the authority.
 - **Recover** recreates an archived worktree and resumes its agent.
 - **Archive** tears down terminal, debug shells, editor, credentials, and
-  worktree while keeping the session/attempt and branch history.
+  worktree while keeping the session/attempt and branch history. With
+  `children: true` (CLI `--children`) it also archives the session's live
+  descendants — the subtree the dashboard's session tree shows under it
+  (the walk does not pass through rows archived earlier, whose children read
+  as top-level) — each best-effort: a descendant that cannot be archived
+  becomes a warning on the result, and the count that did ride along is
+  reported as `children_archived`. Omitted, the `session.archive_children`
+  setting decides (default off): it pre-ticks the dialogs' checkbox and
+  drives every automatic archive path, where each swept child's own
+  `auto-archive: disabled` tag opts it — and its subtree — out.
 - **Remove** performs the same teardown and deletes the durable record. A
   session remove also deletes its branch unless `keep_branch=true`.
 
@@ -106,10 +115,10 @@ Both actions use the same operation for full sessions and unmatched launch
 attempts:
 
 ```text
-POST /api/sessions/archive   { session }
+POST /api/sessions/archive   { session, children? }
 POST /api/sessions/delete    { session }
 
-loom sessions archive <session-or-reserved-id>
+loom sessions archive <session-or-reserved-id> [--children[=false]]
 loom sessions rm <session-or-reserved-id>
 ```
 

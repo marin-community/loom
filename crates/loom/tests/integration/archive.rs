@@ -361,3 +361,498 @@ async fn branch_key_still_reads_its_archived_session() {
         "attention"
     );
 }
+
+/// The `session.archive_children` setting decides for callers that stay
+/// silent; an explicit operand overrides it in both directions (explicit
+/// true with the setting off is covered above).
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_archive_children_setting_defaults_a_silent_request() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    client
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "session.archive_children": true } }),
+        )
+        .await
+        .unwrap();
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate silently", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "ride along by default",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": parent_id }))
+        .await
+        .unwrap();
+    assert_eq!(
+        res["children_archived"], 1,
+        "a silent request follows the setting"
+    );
+    let view = client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "archived");
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate alone", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "stay behind an explicit false",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let res = client
+        .post(
+            "/api/sessions/archive",
+            json!({ "session": parent_id, "children": false }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        res["children_archived"], 0,
+        "an explicit false wins over the setting"
+    );
+    let view = client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "running");
+}
+
+/// Automatic archives follow the setting through `auto_archive`, and a swept
+/// child's own `auto-archive: disabled` opt-out skips it together with its
+/// subtree — the tag exists to stop automatic archival of that session.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_archive_follows_the_setting_and_child_opt_outs() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+    client
+        .post(
+            "/api/settings/patch",
+            json!({ "changes": { "session.archive_children": true } }),
+        )
+        .await
+        .unwrap();
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate for the reaper", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "opt out of automatic archival",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let grandchild = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "survive inside the opted-out subtree",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": child["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let grandchild_id = grandchild["id"].as_str().unwrap().to_string();
+    client
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "auto-archive", "value": "disabled", "by": "manual", "session": child_id }),
+        )
+        .await
+        .unwrap();
+
+    let (session, branch) = loom::session::with_branch(&ts.state.db, &parent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome = loom::lifecycle::auto_archive(&ts.state, &session, &branch)
+        .await
+        .unwrap()
+        .expect("the root carries no opt-out");
+    assert_eq!(
+        outcome.children_archived, 0,
+        "the opted-out child takes its subtree with it"
+    );
+    for id in [&child_id, &grandchild_id] {
+        let view = client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
+        assert_eq!(view["status"], "running", "{id} keeps working");
+    }
+
+    // Without the tag the same sweep takes the child along.
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate once more", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "ride along with the reaper",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let (session, branch) = loom::session::with_branch(&ts.state.db, &parent_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let outcome = loom::lifecycle::auto_archive(&ts.state, &session, &branch)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome.children_archived, 1);
+    let view = client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "archived");
+}
+
+/// `children: true` takes the whole delegation tree down with the root, and
+/// the result reports how many descendants rode along.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_with_children_takes_the_delegation_tree_along() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate the work", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "do the delegated work",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let child_work_dir = child["work_dir"].as_str().unwrap().to_string();
+    let grandchild = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "grandchild work",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": child["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let grandchild_id = grandchild["id"].as_str().unwrap().to_string();
+    let bystander = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "unrelated work", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let bystander_id = bystander["id"].as_str().unwrap().to_string();
+
+    let res = client
+        .post(
+            "/api/sessions/archive",
+            json!({ "session": parent_id, "children": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+    assert_eq!(
+        res["children_archived"], 2,
+        "the child and the grandchild ride along"
+    );
+    assert!(
+        res["warnings"].as_array().unwrap().is_empty(),
+        "a clean subtree archives without warnings: {res}"
+    );
+
+    for id in [&parent_id, &child_id, &grandchild_id] {
+        let view = client
+            .post("/api/sessions/get", json!({ "session": id }))
+            .await
+            .unwrap();
+        assert_eq!(view["status"], "archived", "{id} should be archived");
+    }
+    assert!(
+        !Path::new(&child_work_dir).exists(),
+        "a riding child's worktree is torn down with it"
+    );
+    let view = client
+        .post("/api/sessions/get", json!({ "session": bystander_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "running", "an unrelated session stays put");
+}
+
+/// Absent `children` follows the `session.archive_children` setting — off by
+/// default, so descendants survive the root's archive.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archive_without_children_leaves_the_delegation_tree_standing() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate only myself", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "survive the parent archive",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": parent_id }))
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+    assert_eq!(res["children_archived"], 0);
+
+    let view = client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "running", "the child keeps working");
+}
+
+/// A legacy child — linked only by its parent's branch id, the shape a launch
+/// produces while the parent is already `done` — still rides along: the
+/// subtree is snapshotted before the root archives, while the root still
+/// holds its branch.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_done_parents_legacy_child_still_rides_along() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "delegate after finishing", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE sessions SET status = 'done' WHERE id = ?")
+        .bind(&parent_id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "legacy-linked child",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+    let row = loom::session::get(&ts.state.db, &child_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.parent_session_id, None,
+        "the launch stamps only the branch-id link"
+    );
+    assert!(row.parent_branch_id.is_some());
+
+    let res = client
+        .post(
+            "/api/sessions/archive",
+            json!({ "session": parent_id, "children": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["children_archived"], 1, "the legacy child is swept");
+    let view = client
+        .post("/api/sessions/get", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "archived");
+}
+
+/// Archiving an already-archived row is the idempotent success a fleet batch
+/// needs: one call's `children` pass can take a row down before another reaches it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn archiving_an_archived_row_is_a_no_op_success() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let parent = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "batch parent", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+    let child = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "batch child",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": parent["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
+    let res = client
+        .post(
+            "/api/sessions/archive",
+            json!({ "session": parent_id, "children": true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["children_archived"], 1);
+
+    // The duplicate: the child's own call, arriving after the parent's pass
+    // already archived it.
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": child_id }))
+        .await
+        .unwrap();
+    assert_eq!(
+        res["archived"], true,
+        "the no-op is the success the caller wanted"
+    );
+    assert_eq!(res["children_archived"], 0);
+    assert!(
+        res["warnings"].as_array().unwrap().is_empty(),
+        "nothing is torn down a second time: {res}"
+    );
+}
+
+/// Re-archiving an archived row re-runs teardown only when leftovers survive:
+/// a worktree that outlived its archive is removed by the retry, while a
+/// cleanly archived row is the silent no-op the batch dedup needs.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rearchiving_an_archived_row_cleans_surviving_leftovers() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let created = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "leave leftovers", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let work_dir = created["work_dir"].as_str().unwrap().to_string();
+
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+    assert!(!Path::new(&work_dir).exists());
+
+    std::fs::create_dir_all(&work_dir).unwrap();
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": id }))
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+    assert!(
+        !Path::new(&work_dir).exists(),
+        "the rerun tears down the surviving worktree"
+    );
+}

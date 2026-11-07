@@ -2,6 +2,8 @@ import { reactive } from 'vue';
 
 export interface ConfirmationOption {
   label: string;
+  /** Whether the checkbox starts ticked (the archive-children default). */
+  checked?: boolean;
 }
 
 export interface ConfirmationOptions {
@@ -51,7 +53,7 @@ export function confirmAction(options: ConfirmationOptions): Promise<boolean> {
   confirmation.busy = false;
   confirmation.error = '';
   confirmation.optionLabel = options.option?.label ?? '';
-  confirmation.optionChecked = false;
+  confirmation.optionChecked = options.option?.checked ?? false;
   confirmation.open = true;
   action = options.action;
   return new Promise((resolve) => {

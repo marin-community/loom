@@ -201,7 +201,33 @@ export const decidePermissionRequest = (
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session. */
 export const listRuns = () => invokeOperation('runs.list', {});
-export const archiveSession = (id: string) => invokeOperation('sessions.archive', { session: id });
+/** Archive a session (tear down runtime, keep history). `children` also
+ * archives its live descendants; omitted follows the setting. */
+export const archiveSession = (id: string, children?: boolean) =>
+  invokeOperation('sessions.archive', { children, session: id });
+/** The server's default for archiving children alongside a session
+ * (`session.archive_children`), fetched once and cached. */
+let archiveChildrenDefault: boolean | null = null;
+let archiveChildrenInflight: Promise<boolean> | null = null;
+export async function fetchArchiveChildrenDefault(): Promise<boolean> {
+  if (archiveChildrenDefault !== null) return archiveChildrenDefault;
+  if (!archiveChildrenInflight) {
+    archiveChildrenInflight = (async () => {
+      try {
+        const settings = await invokeOperation('settings.get', {});
+        const value = settings.settings.find((s) => s.key === 'session.archive_children')?.value;
+        archiveChildrenDefault = value === 'true';
+      } catch {
+        // A failed read is not cached: untick this dialog, retry on the next.
+        return false;
+      }
+      return archiveChildrenDefault;
+    })().finally(() => {
+      archiveChildrenInflight = null;
+    });
+  }
+  return archiveChildrenInflight;
+}
 /** Suspend a session: stop its runtime to free memory, keeping the session,
  *  worktree, and branch in place. */
 export const suspendSession = (id: string) => invokeOperation('sessions.suspend', { session: id });
