@@ -92,6 +92,11 @@ pub mod create {
         /// prompt for every launch origin.
         #[operand(default = String::new())]
         pub instructions: String,
+        /// The branch artifact that is a session's doc, or empty for none. Loom
+        /// shows it in the session's Doc tab and tells the agent when a person
+        /// saves a revision of it.
+        #[operand(default = String::new())]
+        pub doc_artifact: String,
         #[operand(default = false)]
         pub restricted: bool,
         /// Repositories for which Loom may broker a short-lived GitHub App
@@ -259,6 +264,11 @@ pub mod update {
         /// prompt for every launch origin.
         #[operand(default = String::new())]
         pub instructions: String,
+        /// The branch artifact that is a session's doc, or empty for none. Loom
+        /// shows it in the session's Doc tab and tells the agent when a person
+        /// saves a revision of it.
+        #[operand(default = String::new())]
+        pub doc_artifact: String,
         #[operand(default = false)]
         pub restricted: bool,
         /// Repositories for which Loom may broker a short-lived GitHub App

@@ -540,6 +540,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<weaver_api::operations::reviews::comments::resolve::Op, _, _>(
             comments_resolve_operation,
         ),
+        register::<weaver_api::operations::reviews::send::Op, _, _>(send_operation),
         register::<weaver_api::operations::reviews::submit::Op, _, _>(submit_operation),
         register::<weaver_api::operations::reviews::retry_delivery::Op, _, _>(
             retry_delivery_operation,
@@ -838,6 +839,63 @@ async fn comments_create_operation(
         Err(error) => return Err(draft_mutation_error(&st, &item, error).await),
     };
     durable_review_dto(&st, &updated).await
+}
+
+async fn send_operation(
+    context: OperationContext,
+    input: weaver_api::operations::reviews::send::Input,
+) -> ApiResult<weaver_api::operations::reviews::send::Output> {
+    let st = context.state;
+    let principal = context.principal;
+    require_operator(&principal)?;
+    let (session, branch) = require_session(&st.db, &input.session).await?;
+    let (artifact, subject_version) =
+        artifact_subject(&st, &branch, &input.subject_key, &input.subject_version).await?;
+    let subject_id = artifact.id.to_string();
+    let anchor = review::ReviewAnchor::Text(review::ArtifactTextAnchor {
+        quote: input.anchor.quote,
+        prefix: input.anchor.prefix,
+        suffix: input.anchor.suffix,
+        block_index: input.anchor.block_index,
+    });
+    let submission = review::send_comment(
+        &st.db,
+        &review::NewReview {
+            repo_root: &branch.repo_root,
+            branch_id: &branch.id,
+            session_id: &session.id,
+            subject_kind: "artifact",
+            subject_id: &subject_id,
+            subject_key: &artifact.name,
+            subject_label: &artifact.name,
+            subject_version: &subject_version,
+            created_by: &principal.username,
+        },
+        &review::NewComment {
+            subject_version: &subject_version,
+            anchor: &anchor,
+            body: &input.body,
+        },
+    )
+    .await
+    .map_err(|error| {
+        if error.downcast_ref::<review::ReviewInProgress>().is_some() {
+            AppError::conflict(error.to_string())
+        } else {
+            AppError::bad_request(error.to_string())
+        }
+    })?;
+    if let Some(event) = submission.event {
+        st.bus.publish(event);
+    }
+    let id = submission.review.id;
+    if let Err(error) = crate::review_delivery::deliver_review(&st, id).await {
+        tracing::warn!(review = id, %error, "initial review delivery attempt failed");
+    }
+    let refreshed = review::get(&st.db, id)
+        .await?
+        .ok_or_else(|| AppError::not_found("review"))?;
+    durable_review_dto(&st, &refreshed).await
 }
 
 async fn submit_operation(

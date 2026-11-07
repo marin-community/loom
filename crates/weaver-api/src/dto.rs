@@ -322,6 +322,10 @@ pub struct SessionView {
     /// an upgraded row whose same-name relationship could not be proven.
     #[serde(default)]
     pub profile_lifetime: i64,
+    /// The branch artifact that the profile names as the session's doc
+    /// (`doc_artifact`), or empty for none. Read from the current profile.
+    #[serde(default)]
+    pub doc_artifact: String,
     /// Immutable environment precedence accepted at launch.
     #[serde(default)]
     pub policy_strict: bool,
@@ -661,6 +665,11 @@ pub struct ProfileView {
     /// prompt for every launch origin.
     #[serde(default)]
     pub instructions: String,
+    /// The branch artifact that is a session's doc, or empty for none. Loom
+    /// shows it in the session's Doc tab and tells the agent when a person
+    /// saves a revision of it.
+    #[serde(default)]
+    pub doc_artifact: String,
     #[serde(default)]
     pub restricted: bool,
     #[serde(default)]

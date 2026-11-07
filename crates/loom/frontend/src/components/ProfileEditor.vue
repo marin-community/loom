@@ -215,6 +215,22 @@ watch(
       </p>
     </div>
 
+    <div class="grid min-w-0 gap-1 sm:col-span-2">
+      <label class="text-xs" :for="`${uid}-doc-artifact`">Doc artifact</label>
+      <input
+        :id="`${uid}-doc-artifact`"
+        v-model="draft.doc_artifact"
+        data-testid="profile-doc-artifact"
+        :disabled="disabled"
+        placeholder="doc"
+        class="min-w-0 rounded bg-input px-2 py-1.5 font-mono text-xs"
+      />
+      <p class="text-xs text-muted">
+        The artifact that is the session's doc. Sessions show it in a Doc tab once the agent writes
+        it, and a person's saved edit of it is sent to an ACP session's agent. Leave empty for none.
+      </p>
+    </div>
+
     <div class="grid min-w-0 gap-1">
       <label class="text-xs" :for="`${uid}-model`">Model</label>
       <ModelCombobox

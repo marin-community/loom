@@ -85,6 +85,13 @@ session on Chat and replace the top tab strip with the contextual bottom bar.
 Artifacts stays one tap away; Agent, Changes, and ACP Shells remain available
 from More without occupying primary navigation.
 
+A session whose profile names a doc artifact (`doc_artifact`) gets a leading
+**Doc** tab on desktop once its agent writes that artifact. The page opens on
+Doc when the doc exists as it loads, unless the person already chose a tab; a
+doc written during a visit only adds the tab. The tab shows only that artifact,
+with its revisions, source editing, and comments; the artifact stays in
+**Review → Artifacts** too. See [the session doc](artifacts.md#the-session-doc).
+
 Conversation is the durable operator/agent exchange. Mid-turn composer feedback
 stops the current turn and starts as the next turn, so it cannot sit behind work
 the model selected concurrently. Unseen queued text can still be retracted into
@@ -138,6 +145,11 @@ workflow:
    available for retry, and stale mutations reload the authoritative draft.
 3. Submit once to freeze the payload and deliver one coherent review into the
    agent conversation.
+
+On an artifact with no review in progress, **Comment** sends a single comment
+to the agent at once, as a review of its own (`reviews.send`, which creates,
+fills, and submits it in one transaction), and **Start a review** keeps it
+pending instead. Once a review is in progress, new comments join it.
 
 Draft text that has not yet been saved stays local to its editor. Navigation or
 layout changes that would discard it are stopped with a focused save-or-cancel

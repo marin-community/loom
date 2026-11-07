@@ -88,6 +88,7 @@ function add() {
     turn_budget: null,
     prelude: 'weaver',
     instructions: '',
+    doc_artifact: '',
     restricted: false,
     github_repositories: [],
     runtime_permissions: [],

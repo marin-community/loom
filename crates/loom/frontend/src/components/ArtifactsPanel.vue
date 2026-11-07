@@ -45,6 +45,9 @@ const props = defineProps<{
    *  defers a live refresh until it is shown again. Absent ⇒ treated as active
    *  (standalone use). */
   active?: boolean;
+  /** Show only this artifact, as a session's Doc tab: no list, Delete, or
+   *  Split, and the route is left alone. It opens once the agent writes it. */
+  pinned?: string;
 }>();
 const emit = defineEmits<{ togglePop: []; close: [] }>();
 
@@ -76,9 +79,13 @@ type LoadedArtifact = {
 };
 const loaded = ref<LoadedArtifact | null>(null);
 const selected = computed(() => loaded.value?.name ?? '');
+// The artifact a live write refreshes: the open one, or the pinned one that
+// the agent has not written yet.
+const watched = computed(() => selected.value || props.pinned || '');
 const view = computed(() => loaded.value?.view ?? null);
 const viewRev = computed(() => loaded.value?.requestedRevision ?? null); // null = latest
-const loading = ref(false);
+// A pinned panel loads its artifact on mount; say so rather than "not written".
+const loading = ref(!!props.pinned);
 const viewError = ref('');
 const editing = ref(false);
 const saving = ref(false);
@@ -193,7 +200,8 @@ async function openArtifact(name: string, rev?: number, opts?: { keepMode?: bool
   // only while we're the surface on screen, so a hidden panel (the user moved
   // back to the terminal) never yanks the route back to artifacts.
   const target = `/s/${props.id}/artifacts/${encodeURIComponent(name)}`;
-  if (isActive.value && router.currentRoute.value.path !== target) router.replace(target);
+  if (isActive.value && !props.pinned && router.currentRoute.value.path !== target)
+    router.replace(target);
   try {
     const nextView = await getArtifact(props.id, name, rev);
     if (epoch !== openEpoch) return;
@@ -406,14 +414,14 @@ function openStream() {
     // If the artifact that just changed is the one we're viewing (and we're not
     // mid-edit), refresh the viewer to its new latest — but only while visible;
     // hidden, we defer the re-render until the panel is shown again.
-    if (d?.name && d.name === selected.value && !editing.value) {
+    if (d?.name && d.name === watched.value && !editing.value) {
       // Ignore a replayed/own event we already reflect (the stream replays
       // recent writes on connect): re-opening would needlessly reset the view —
       // and snap a reader out of Source back to Preview. Only a genuinely newer
       // revision refreshes, and it keeps the current preview/source choice.
       if (d.rev != null && onLatest.value && view.value && d.rev <= view.value.meta.rev) return;
       if (isActive.value)
-        openArtifact(selected.value, undefined, { keepMode: true }).catch(() => {});
+        openArtifact(watched.value, undefined, { keepMode: true }).catch(() => {});
       else pendingRefresh.value = true;
     }
   });
@@ -460,11 +468,11 @@ watch(
 // On becoming the visible surface again: restore the URL to the open artifact
 // (so it stays deep-linkable) and apply any refresh that landed while hidden.
 watch(isActive, (now) => {
-  if (!now || !selected.value) return;
+  if (!now || !watched.value) return;
   if (pendingRefresh.value) {
     pendingRefresh.value = false;
-    openArtifact(selected.value, viewRev.value ?? undefined, { keepMode: true }).catch(() => {});
-  } else {
+    openArtifact(watched.value, viewRev.value ?? undefined, { keepMode: true }).catch(() => {});
+  } else if (!props.pinned) {
     const target = `/s/${props.id}/artifacts/${encodeURIComponent(selected.value)}`;
     if (router.currentRoute.value.path !== target) router.replace(target);
   }
@@ -473,6 +481,11 @@ watch(isActive, (now) => {
 onMounted(async () => {
   await loadList();
   openStream();
+  if (props.pinned) {
+    if (list.value.some((a) => a.name === props.pinned)) openArtifact(props.pinned);
+    else loading.value = false;
+    return;
+  }
   // Open the deep-linked artifact, else the well-known `plan`, else the first.
   const want =
     props.name || (list.value.some((a) => a.name === 'plan') ? 'plan' : list.value[0]?.name);
@@ -503,7 +516,10 @@ onUnmounted(() => {
     <div class="flex min-h-0 flex-1 max-md:flex-col" :class="compact ? 'flex-col' : ''">
       <!-- List — a sidebar at desktop width. Phones use the same compact
            selector as a narrow rail so the document keeps the full viewport. -->
-      <div v-if="!compact" class="hidden w-72 shrink-0 flex-col border-r border-line md:flex">
+      <div
+        v-if="!compact && !pinned"
+        class="hidden w-72 shrink-0 flex-col border-r border-line md:flex"
+      >
         <div
           class="border-b border-line px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint"
         >
@@ -541,7 +557,7 @@ onUnmounted(() => {
 
       <!-- Phone list: one bounded selector above the full-width viewer. -->
       <div
-        v-if="!compact"
+        v-if="!compact && !pinned"
         class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs md:hidden"
       >
         <span class="text-faint">Artifact</span>
@@ -559,7 +575,10 @@ onUnmounted(() => {
       </div>
 
       <!-- Compact list: a dropdown header for the desktop split rail. -->
-      <div v-else class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs">
+      <div
+        v-else-if="!pinned"
+        class="flex shrink-0 items-center gap-2 border-b border-line px-2 py-1.5 text-xs"
+      >
         <span class="text-faint">Artifact</span>
         <select
           class="min-w-0 flex-1 rounded border border-line bg-surface px-1.5 py-0.5 text-xs text-fg"
@@ -634,6 +653,7 @@ onUnmounted(() => {
                   Edit
                 </button>
                 <button
+                  v-if="!pinned"
                   class="btn-danger px-2.5 py-1 text-xs"
                   data-testid="artifact-delete"
                   :disabled="removing"
@@ -659,6 +679,7 @@ onUnmounted(() => {
             <!-- Open beside the work area on wide screens or below it on narrow
                  screens, then dock back into the tab. -->
             <button
+              v-if="!pinned"
               class="hidden rounded border border-line px-1.5 py-1 text-muted hover:bg-subtle hover:text-fg md:block"
               data-testid="artifact-pop"
               :title="popped ? 'Dock back into the tab' : 'Open in the split panel'"
@@ -744,7 +765,14 @@ onUnmounted(() => {
               <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
               <path d="M14 2v4a2 2 0 0 0 2 2h4" />
             </svg>
-            <p>{{ viewError || 'Pick an artifact from the list.' }}</p>
+            <p>
+              {{
+                viewError ||
+                (pinned
+                  ? `The agent has not written ${pinned} yet.`
+                  : 'Pick an artifact from the list.')
+              }}
+            </p>
           </div>
 
           <div

@@ -198,6 +198,57 @@ pub async fn enqueue_session_update(
     Ok(key)
 }
 
+pub fn doc_edit_text(artifact: &str, rev: i64) -> String {
+    format!("A person edited the doc: revision {rev} of the artifact `{artifact}`. Read it with artifact_get.")
+}
+
+/// Tell a session that a person saved revision `rev` of its doc artifact. The
+/// message never interrupts a turn: the session takes it when it next waits.
+/// One message waits at a time, so a newer edit made before the session takes
+/// it names the newer revision instead of adding a second message.
+pub async fn enqueue_doc_edit(
+    db: &crate::db::Db,
+    session: &str,
+    artifact: &str,
+    rev: i64,
+) -> Result<String> {
+    let coalesce_key = format!("doc-edit:{artifact}");
+    let payload = doc_edit_text(artifact, rev);
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let waiting: Option<String> = sqlx::query_scalar(
+        "UPDATE conversation_inbox SET payload = ?
+         WHERE preferred_session_id = ? AND coalesce_key = ? AND state = 'queued'
+         RETURNING delivery_key",
+    )
+    .bind(&payload)
+    .bind(session)
+    .bind(&coalesce_key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(key) = waiting {
+        tx.commit().await?;
+        return Ok(key);
+    }
+    let key = format!("doc-edit:{session}:{rev}");
+    let inserted = sqlx::query(
+        "INSERT INTO conversation_inbox
+            (delivery_key, branch_id, preferred_session_id, payload, coalesce_key)
+         SELECT ?, branch_id, id, ?, ? FROM sessions WHERE id = ? AND status != 'archived'
+         ON CONFLICT(delivery_key) DO NOTHING",
+    )
+    .bind(&key)
+    .bind(&payload)
+    .bind(&coalesce_key)
+    .bind(session)
+    .execute(&mut *tx)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        anyhow::bail!("session is missing or archived, or already has this edit");
+    }
+    tx.commit().await?;
+    Ok(key)
+}
+
 /// The durable state of one inbox delivery, if the entry exists — `queued`
 /// means the protected entry has never been drained by a runtime.
 pub async fn delivery_state(db: &crate::db::Db, delivery_key: &str) -> Result<Option<String>> {
@@ -952,6 +1003,45 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(text, "send after stop");
+    }
+
+    #[tokio::test]
+    async fn doc_edits_wait_as_one_message_that_never_interrupts() {
+        let (db, review) = claimed_inbox().await;
+        consume_conversation_inbox(&db, &review.delivery_key, &review.claim_token, "acp-review")
+            .await
+            .unwrap();
+        let first = enqueue_doc_edit(&db, "acp-review", "doc", 2).await.unwrap();
+        let second = enqueue_doc_edit(&db, "acp-review", "doc", 3).await.unwrap();
+        assert_eq!(
+            first, second,
+            "a waiting edit message takes the newer revision"
+        );
+        let pending = pending_inputs(&db, "acp-review").await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].text, doc_edit_text("doc", 3));
+        assert_eq!(pending[0].interrupt_at, None);
+        assert!(!has_due_input(&db, "acp-review", None).await.unwrap());
+
+        let branch: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        let claimed = claim_input(&db, &branch, "acp-review", None, |_, _| false, false, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.delivery_key, first);
+        let later = enqueue_doc_edit(&db, "acp-review", "doc", 4).await.unwrap();
+        assert_ne!(
+            later, first,
+            "an edit after the session took the message is a new one"
+        );
+        assert_eq!(
+            pending_inputs(&db, "acp-review").await.unwrap()[0].text,
+            doc_edit_text("doc", 4)
+        );
     }
 
     #[tokio::test]

@@ -2002,6 +2002,96 @@ async fn debug_update_waits_for_a_natural_boundary() {
         .all(|block| block["payload"]["stop_reason"] == "end_turn"));
 }
 
+/// A person's revision of the doc that the session's profile names reaches the
+/// agent when its turn ends, as one message for edits made while it works. The
+/// agent's own revisions and a person's revision of another artifact do not.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_person_doc_edit_waits_for_the_turn_and_names_the_newest_revision() {
+    let ts = TestServer::start().await;
+    let id = "doc-edit";
+    start_new(&ts, id, None, None).await;
+    let profile = ts
+        .client
+        .post(
+            "/api/profiles/create",
+            json!({ "name": "docs", "agent_kind": "codex", "protocol": "acp", "doc_artifact": "doc" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(profile["doc_artifact"], "doc");
+    sqlx::query("UPDATE sessions SET profile = 'docs' WHERE id = ?")
+        .bind(id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let session = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+    let token =
+        loom::auth::create_session_token(&ts.state.db, Some("rjpower"), id, &session.branch_id)
+            .await
+            .unwrap();
+    let http = reqwest::Client::new();
+    let agent_write = http
+        .post(format!("http://{}/api/artifacts/write", ts.addr))
+        .bearer_auth(&token)
+        .json(&json!({ "branch": session.branch_id, "name": "doc", "content": "## Objective\n" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(agent_write.status(), reqwest::StatusCode::OK);
+
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:2000|say:work-completed" }),
+        )
+        .await
+        .unwrap();
+    for (name, content) in [
+        ("doc", "## Objective\n\nShip it.\n"),
+        ("doc", "## Objective\n\nShip it soon.\n"),
+        ("progress", "# Progress\n"),
+    ] {
+        ts.client
+            .post(
+                "/api/artifacts/write",
+                json!({ "branch": session.branch_id, "name": name, "content": content }),
+            )
+            .await
+            .unwrap();
+    }
+    let waiting = ts
+        .client
+        .post("/api/sessions/chat", json!({ "session": id }))
+        .await
+        .unwrap();
+    let pending = waiting["pending_inputs"].as_array().unwrap();
+    let edit = loom::conversation_inbox::doc_edit_text("doc", 3);
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0]["text"], edit.as_str());
+    assert!(pending[0]["interrupt_at"].is_null());
+
+    let chat = poll_chat(&ts, id, Duration::from_secs(8), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    let edits: Vec<_> = blocks
+        .iter()
+        .filter(|block| block["kind"] == "user_message")
+        .filter_map(|block| block["payload"]["text"].as_str())
+        .filter(|text| text.starts_with("A person edited the doc"))
+        .collect();
+    assert_eq!(edits, vec![edit.as_str()]);
+    assert!(blocks.iter().any(|block| {
+        block["kind"] == "agent_message" && block["payload"]["text"] == "work-completed"
+    }));
+    assert!(blocks
+        .iter()
+        .filter(|block| block["kind"] == "turn_end")
+        .all(|block| block["payload"]["stop_reason"] == "end_turn"));
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn urgent_updates_wait_for_compaction_and_protected_turns() {
