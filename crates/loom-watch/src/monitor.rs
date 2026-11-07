@@ -13,7 +13,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
-use crate::session::{self as session_mod, Session};
+use crate::session::{self as session_mod, Session, SessionLiveness};
 use crate::AppState;
 use crate::{backend, events};
 use weaver_core::branch as branch_mod;
@@ -90,7 +90,7 @@ async fn run_inner(state: AppState) {
         }
 
         // 2. Walk every session, check terminal liveness, do stillness detection.
-        let sessions = match session_mod::list(&state.db).await {
+        let sessions = match session_mod::list_liveness(&state.db).await {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("monitor: listing sessions failed: {e}");
@@ -139,7 +139,7 @@ async fn run_inner(state: AppState) {
                 )
                 .await;
             }
-            if runtime_starting(session, now) {
+            if runtime_starting(&session.created_at, now) {
                 continue;
             }
             if !backend::has_session(&session.term_session).await {
@@ -219,6 +219,15 @@ async fn run_inner(state: AppState) {
             // also runs at startup; on this cadence a session stops needing a
             // server restart to be archivable again.
             crate::lifecycle::reconcile_interrupted_transitions(&state).await;
+            // Retention needs the launch policy; keep those full-row reads on
+            // the maintenance cadence rather than every liveness tick.
+            let sessions = match session_mod::list(&state.db).await {
+                Ok(sessions) => sessions,
+                Err(error) => {
+                    tracing::warn!(%error, "monitor: listing sessions for retention failed");
+                    continue;
+                }
+            };
             let slack_idle_archive_secs = core_config::get(&state.db, "slack.idle_archive_secs")
                 .await
                 .and_then(|value| value.trim().parse::<i64>().ok())
@@ -249,7 +258,11 @@ fn suspend_decision(session: &Session, idle_suspend_secs: i64, now: DateTime<Utc
         && session.managed_by.is_none()
         && session.lifecycle_transition.is_none()
         && session.acp_inflight.is_none()
-        && idle_secs(session, now) >= idle_suspend_secs.max(REAP_GRACE_SECS)
+        && idle_secs(
+            session.last_activity_at.as_deref(),
+            &session.created_at,
+            now,
+        ) >= idle_suspend_secs.max(REAP_GRACE_SECS)
 }
 
 /// One suspend pass: stop the runtime of every session [`suspend_decision`]
@@ -296,7 +309,7 @@ async fn suspend_sessions(
             }
         };
         tracing::info!(id = %session.id, branch = %branch.branch,
-            idle_secs = idle_secs(session, now),
+            idle_secs = idle_secs(session.last_activity_at.as_deref(), &session.created_at, now),
             "suspending idle session");
         match crate::lifecycle::auto_suspend(state, session, &branch, |fresh| {
             suspend_decision(fresh, idle_suspend_secs, now)
@@ -371,7 +384,11 @@ fn reap_decision(
     if !reap_candidate(session) || session.acp_inflight.is_some() {
         return None;
     }
-    let idle = idle_secs(session, now);
+    let idle = idle_secs(
+        session.last_activity_at.as_deref(),
+        &session.created_at,
+        now,
+    );
     if session.origin == "watch" {
         return (matches!(session.status.as_str(), "done" | "error")
             && idle >= weaver_core::schedule::ARCHIVE_DELAY_SECS)
@@ -464,12 +481,8 @@ async fn reap_sessions(
 /// The time a session was last active: its `last_activity_at`, or its
 /// `created_at` for a session that has never been touched. `None` when neither
 /// timestamp parses (a corrupt row treated as "no anchor" rather than panicking).
-fn activity_anchor(session: &Session) -> Option<DateTime<Utc>> {
-    session
-        .last_activity_at
-        .as_deref()
-        .or(Some(session.created_at.as_str()))
-        .and_then(parse_iso)
+fn activity_anchor(last_activity_at: Option<&str>, created_at: &str) -> Option<DateTime<Utc>> {
+    last_activity_at.or(Some(created_at)).and_then(parse_iso)
 }
 
 /// Whether `session` has been idle for at least `after` seconds as of `now`.
@@ -478,8 +491,9 @@ fn activity_anchor(session: &Session) -> Option<DateTime<Utc>> {
 /// deliberate operator setting. A session with no recorded `last_activity_at`
 /// (never touched) falls back to its `created_at`, so a session that was created
 /// and never moved still goes stale.
-pub fn is_stale(session: &Session, after: i64, now: DateTime<Utc>) -> bool {
-    let Some(anchor) = activity_anchor(session) else {
+pub fn is_stale(session: &SessionLiveness, after: i64, now: DateTime<Utc>) -> bool {
+    let Some(anchor) = activity_anchor(session.last_activity_at.as_deref(), &session.created_at)
+    else {
         return false;
     };
     (now - anchor).num_seconds() >= after
@@ -497,7 +511,7 @@ pub fn is_stale(session: &Session, after: i64, now: DateTime<Utc>) -> bool {
 /// branch so the dispatcher (`event_repo`) can repo-filter it.
 pub async fn detect_stale(
     state: &AppState,
-    session: &Session,
+    session: &SessionLiveness,
     after: i64,
     now: DateTime<Utc>,
     seen: &mut HashSet<String>,
@@ -505,7 +519,11 @@ pub async fn detect_stale(
 ) -> i64 {
     if is_stale(session, after, now) {
         if seen.insert(session.id.clone()) {
-            let idle_secs = idle_secs(session, now);
+            let idle_secs = idle_secs(
+                session.last_activity_at.as_deref(),
+                &session.created_at,
+                now,
+            );
             tracing::info!(id = %session.id, idle_secs, "session marked stale");
             if events::record(
                 &state.db,
@@ -530,8 +548,8 @@ pub async fn detect_stale(
 }
 
 /// Seconds since the session's last activity (or creation), clamped at 0.
-fn idle_secs(session: &Session, now: DateTime<Utc>) -> i64 {
-    activity_anchor(session)
+fn idle_secs(last_activity_at: Option<&str>, created_at: &str, now: DateTime<Utc>) -> i64 {
+    activity_anchor(last_activity_at, created_at)
         .map(|t| (now - t).num_seconds().max(0))
         .unwrap_or(0)
 }
@@ -543,8 +561,8 @@ fn parse_iso(ts: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-fn runtime_starting(session: &Session, now: DateTime<Utc>) -> bool {
-    parse_iso(&session.created_at)
+fn runtime_starting(created_at: &str, now: DateTime<Utc>) -> bool {
+    parse_iso(created_at)
         .is_some_and(|created_at| (now - created_at).num_seconds() < RUNTIME_START_GRACE_SECS)
 }
 
@@ -618,7 +636,7 @@ fn normalize_screen(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_stale, normalize_screen, runtime_starting, Session};
+    use super::{is_stale, normalize_screen, runtime_starting, Session, SessionLiveness};
     use chrono::{Duration, Utc};
     use weaver_core::tags;
 
@@ -687,22 +705,22 @@ mod tests {
 
         // Active 10 minutes ago, threshold 30 minutes → not stale.
         let recent = session_with_activity(Some(&iso(now - Duration::minutes(10))), &iso(now));
-        assert!(!is_stale(&recent, 1800, now));
+        assert!(!is_stale(&SessionLiveness::from(&recent), 1800, now));
 
         // Active 40 minutes ago, threshold 30 minutes → stale.
         let old = session_with_activity(Some(&iso(now - Duration::minutes(40))), &iso(now));
-        assert!(is_stale(&old, 1800, now));
+        assert!(is_stale(&SessionLiveness::from(&old), 1800, now));
 
         // No recorded activity falls back to created_at.
         let never = session_with_activity(None, &iso(now - Duration::minutes(40)));
-        assert!(is_stale(&never, 1800, now));
+        assert!(is_stale(&SessionLiveness::from(&never), 1800, now));
 
         // A zero threshold means "stale immediately" (the test/operator knob).
-        assert!(is_stale(&recent, 0, now));
+        assert!(is_stale(&SessionLiveness::from(&recent), 0, now));
 
         // An unparseable timestamp is treated as not stale rather than panicking.
         let bad = session_with_activity(Some("not-a-time"), "also-bad");
-        assert!(!is_stale(&bad, 0, now));
+        assert!(!is_stale(&SessionLiveness::from(&bad), 0, now));
     }
 
     #[test]
@@ -711,10 +729,10 @@ mod tests {
         let iso = |time: chrono::DateTime<Utc>| time.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
         let starting = session_with_activity(None, &iso(now - Duration::seconds(2)));
-        assert!(runtime_starting(&starting, now));
+        assert!(runtime_starting(&starting.created_at, now));
 
         let missing = session_with_activity(None, &iso(now - Duration::seconds(11)));
-        assert!(!runtime_starting(&missing, now));
+        assert!(!runtime_starting(&missing.created_at, now));
     }
 
     #[test]

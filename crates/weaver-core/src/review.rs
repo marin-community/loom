@@ -86,6 +86,19 @@ pub struct DraftRevisionConflict {
     pub actual: i64,
 }
 
+/// A comment cannot go to the agent on its own while its creator has a review
+/// of the subject in progress: new comments join that draft instead.
+#[derive(Debug)]
+pub struct ReviewInProgress;
+
+impl fmt::Display for ReviewInProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "a review is in progress; add the comment to it")
+    }
+}
+
+impl std::error::Error for ReviewInProgress {}
+
 impl fmt::Display for DraftRevisionConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -830,14 +843,41 @@ async fn submit_inner(
     provided_current_version: Option<&str>,
 ) -> Result<Submission> {
     let mut tx = crate::db::begin_immediate(db).await?;
+    let event = submit_in(
+        &mut tx,
+        review_id,
+        creator,
+        expected_revision,
+        acknowledge_outdated,
+        provided_current_version,
+    )
+    .await?;
+    tx.commit().await?;
+    let review = get(db, review_id)
+        .await?
+        .ok_or_else(|| anyhow!("submitted review vanished"))?;
+    Ok(Submission { review, event })
+}
+
+/// Submit inside the caller's transaction. Returns the `review_submitted`
+/// event, or `None` when the review was already submitted: a retried
+/// submission is a read.
+async fn submit_in(
+    tx: &mut crate::db::DbTransaction<'_>,
+    review_id: i64,
+    creator: &str,
+    expected_revision: i64,
+    acknowledge_outdated: bool,
+    provided_current_version: Option<&str>,
+) -> Result<Option<Event>> {
     let mut review =
         sqlx::query_as::<_, Review>(&format!("{SELECT_REVIEW} WHERE id = ? AND created_by = ?"))
             .bind(review_id)
             .bind(creator)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or_else(|| anyhow!("review not found"))?;
-    let comments = comments_for(&mut *tx, review_id).await?;
+    let comments = comments_for(&mut **tx, review_id).await?;
 
     if review.draft_revision != expected_revision {
         return Err(anyhow!(DraftRevisionConflict {
@@ -847,12 +887,7 @@ async fn submit_inner(
     }
     // A retried submission is a read: never insert another event or outbox row.
     if review.status == "submitted" {
-        review.comments = comments;
-        tx.commit().await?;
-        return Ok(Submission {
-            review,
-            event: None,
-        });
+        return Ok(None);
     }
     if review.status != "draft" {
         bail!("review is not editable");
@@ -871,7 +906,7 @@ async fn submit_inner(
                 "SELECT MAX(rev) FROM artifact_versions WHERE artifact_id = ?",
             )
             .bind(artifact_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?
             .ok_or_else(|| anyhow!("artifact review subject not found"))?
             .to_string()
@@ -899,11 +934,11 @@ async fn submit_inner(
     .bind(&now)
     .bind(review_id)
     .bind(expected_revision)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await?;
     sqlx::query("UPDATE review_comments SET status = 'submitted' WHERE review_id = ?")
         .bind(review_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
     let comment_payload: Vec<Value> = comments
@@ -944,7 +979,7 @@ async fn submit_inner(
     )
     .bind(&review.branch_id)
     .bind(event_data.to_string())
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
     let event = Event {
         id: event_row.get("id"),
@@ -962,17 +997,87 @@ async fn submit_inner(
     .bind(review_id)
     .bind(&review.delivery_key)
     .bind(&now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(Some(event))
+}
+
+/// Create, fill, and submit an artifact review of one comment in one transaction, for a
+/// comment that goes to the agent at once. Fails with [`ReviewInProgress`]
+/// when the creator already has a draft of this subject.
+pub async fn send_comment(
+    db: &Db,
+    new: &NewReview<'_>,
+    comment: &NewComment<'_>,
+) -> Result<Submission> {
+    validate_comment(comment.body, comment.anchor)?;
+    let anchor_json = comment.anchor.json()?;
+    let now = now_iso();
+    let mut tx = crate::db::begin_immediate(db).await?;
+    let in_progress: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM reviews
+         WHERE created_by = ? AND session_id = ? AND subject_kind = ? AND subject_id = ?
+           AND status = 'draft')",
+    )
+    .bind(new.created_by)
+    .bind(new.session_id)
+    .bind(new.subject_kind)
+    .bind(new.subject_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if in_progress {
+        return Err(anyhow!(ReviewInProgress));
+    }
+    let (review_id, draft_revision): (i64, i64) = sqlx::query_as(
+        "INSERT INTO reviews
+            (repo_root, branch_id, session_id, subject_kind, subject_id, subject_key, subject_label,
+             subject_version, created_by, delivery_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'review:' || lower(hex(randomblob(16))), ?, ?)
+         RETURNING id, draft_revision",
+    )
+    .bind(new.repo_root)
+    .bind(new.branch_id)
+    .bind(new.session_id)
+    .bind(new.subject_kind)
+    .bind(new.subject_id)
+    .bind(new.subject_key)
+    .bind(new.subject_label)
+    .bind(new.subject_version)
+    .bind(new.created_by)
+    .bind(&now)
+    .bind(&now)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO review_comments
+            (review_id, subject_version, anchor_kind, anchor_json, body, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(review_id)
+    .bind(comment.subject_version)
+    .bind(comment.anchor.kind())
+    .bind(anchor_json)
+    .bind(comment.body.trim())
+    .bind(&now)
+    .bind(&now)
     .execute(&mut *tx)
     .await?;
+    // The comment is anchored to the revision the person read, and the message
+    // names that revision, so a newer revision does not hold the comment back.
+    let event = submit_in(
+        &mut tx,
+        review_id,
+        new.created_by,
+        draft_revision,
+        true,
+        None,
+    )
+    .await?;
     tx.commit().await?;
-
     let review = get(db, review_id)
         .await?
         .ok_or_else(|| anyhow!("submitted review vanished"))?;
-    Ok(Submission {
-        review,
-        event: Some(event),
-    })
+    Ok(Submission { review, event })
 }
 
 pub async fn ready_outbox(db: &Db, limit: i64) -> Result<Vec<OutboxItem>> {
@@ -1282,6 +1387,59 @@ mod tests {
             anchor,
             body,
         }
+    }
+
+    #[tokio::test]
+    async fn a_sent_comment_is_one_submitted_review_unless_a_review_is_in_progress() {
+        let (db, artifact) = seeded().await;
+        let subject_id = artifact.id.to_string();
+        let new = NewReview {
+            repo_root: &artifact.repo_root,
+            branch_id: artifact.branch_id.as_deref().unwrap(),
+            session_id: "session-1",
+            subject_kind: "artifact",
+            subject_id: &subject_id,
+            subject_key: &artifact.name,
+            subject_label: &artifact.name,
+            subject_version: "1",
+            created_by: "alice",
+        };
+        let quoted = anchor("beta");
+        artifact::write(
+            &db,
+            &NewRevision {
+                repo_root: "/repo",
+                branch_id: artifact.branch_id.as_deref(),
+                name: "design",
+                kind: "markdown",
+                title: "Design",
+                content: "Alpha beta gamma delta",
+                author: "agent",
+            },
+        )
+        .await
+        .unwrap();
+        let sent = send_comment(&db, &new, &comment("Name it.", &quoted))
+            .await
+            .unwrap();
+        assert!(sent.event.is_some());
+        assert_eq!(sent.review.status, "submitted");
+        assert_eq!(sent.review.comments.len(), 1);
+        assert!(
+            sent.review.acknowledged_outdated,
+            "a comment on the revision the person read goes after a newer revision"
+        );
+
+        let in_progress = draft(&db, &artifact, "alice").await;
+        let refused = send_comment(&db, &new, &comment("And this.", &quoted))
+            .await
+            .unwrap_err();
+        assert!(refused.downcast_ref::<ReviewInProgress>().is_some());
+        let unchanged = get(&db, in_progress.id).await.unwrap().unwrap();
+        assert!(
+            unchanged.comments.is_empty(),
+            "a refused comment does not join the draft"
+        );
     }
 
     #[tokio::test]

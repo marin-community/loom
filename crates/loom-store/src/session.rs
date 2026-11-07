@@ -131,6 +131,35 @@ pub struct Session {
     pub mutation_revision: i64,
 }
 
+/// The fields needed on each liveness tick. Launch snapshots and policy text
+/// can be large; polling runtime activity must not load them for every session.
+#[derive(Debug, FromRow)]
+pub struct SessionLiveness {
+    pub id: String,
+    pub branch_id: String,
+    pub term_session: String,
+    pub status: String,
+    pub lifecycle_transition: Option<String>,
+    pub last_activity_at: Option<String>,
+    pub created_at: String,
+    pub protocol: String,
+}
+
+impl From<&Session> for SessionLiveness {
+    fn from(session: &Session) -> Self {
+        Self {
+            id: session.id.clone(),
+            branch_id: session.branch_id.clone(),
+            term_session: session.term_session.clone(),
+            status: session.status.clone(),
+            lifecycle_transition: session.lifecycle_transition.clone(),
+            last_activity_at: session.last_activity_at.clone(),
+            created_at: session.created_at.clone(),
+            protocol: session.protocol.clone(),
+        }
+    }
+}
+
 fn default_protocol() -> String {
     "terminal".to_string()
 }
@@ -731,6 +760,17 @@ pub async fn list(db: &Db) -> Result<Vec<Session>> {
     let query = select_sessions("ORDER BY created_at DESC");
     let rows = sqlx::query_as::<_, Session>(&query).fetch_all(db).await?;
     Ok(rows)
+}
+
+/// Liveness for the entire fleet, including managed and historical sessions,
+/// so the monitor can retain its per-session activity and stale-event state.
+pub async fn list_liveness(db: &Db) -> Result<Vec<SessionLiveness>> {
+    Ok(sqlx::query_as(
+        "SELECT id, branch_id, term_session, status, lifecycle_transition,
+                last_activity_at, created_at, protocol FROM sessions",
+    )
+    .fetch_all(db)
+    .await?)
 }
 
 /// The **fleet** sessions only — ordinary work, with engine-managed (warm) watch
@@ -1644,6 +1684,59 @@ mod tests {
             "weaver/restart"
         );
         assert_eq!(get(&db, "rolling").await.unwrap().unwrap().id, "rolling");
+    }
+
+    #[tokio::test]
+    async fn liveness_keeps_managed_and_historical_sessions_and_runtime_state() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let statuses = [
+            "created",
+            "running",
+            "orphaned",
+            "suspended",
+            "done",
+            "error",
+            "archived",
+        ];
+        for status in statuses {
+            let branch = branch_id(&db, &format!("weaver/{status}")).await;
+            let mut new = new_session(status, &branch, (status == "running").then_some("watch-1"));
+            new.status = status.to_string();
+            if status == "running" {
+                new.protocol = "acp".to_string();
+            }
+            insert(&db, &new).await.unwrap();
+        }
+        sqlx::query(
+            "UPDATE sessions SET lifecycle_transition = 'suspending',
+                last_activity_at = '2026-11-06T10:00:00Z',
+                policy_prelude = ?, launch_snapshot = ? WHERE id = 'running'",
+        )
+        .bind("instructions".repeat(1024))
+        .bind("snapshot".repeat(1024))
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let liveness = list_liveness(&db).await.unwrap();
+        assert_eq!(liveness.len(), statuses.len());
+        for status in statuses {
+            let row = liveness.iter().find(|row| row.id == status).unwrap();
+            let session = get(&db, status).await.unwrap().unwrap();
+            assert_eq!(row.branch_id, session.branch_id);
+            assert_eq!(row.term_session, session.term_session);
+            assert_eq!(row.status, status);
+            assert_eq!(row.protocol, session.protocol);
+            assert_eq!(row.created_at, session.created_at);
+            assert_eq!(row.last_activity_at, session.last_activity_at);
+            assert_eq!(row.lifecycle_transition, session.lifecycle_transition);
+        }
+        let running = liveness.iter().find(|row| row.id == "running").unwrap();
+        assert_eq!(running.lifecycle_transition.as_deref(), Some("suspending"));
+        assert_eq!(
+            running.last_activity_at.as_deref(),
+            Some("2026-11-06T10:00:00Z")
+        );
     }
 
     /// `managed_by` round-trips and partitions the listings: `list` is the whole

@@ -51,6 +51,31 @@ assistance. `branches.goal` is a synchronized cache for list and search paths,
 not a second independently editable owner. Historical rows without a goal
 artifact retain the cache as a compatibility fallback.
 
+### The session doc
+
+A profile may name a branch artifact as its sessions' doc with `doc_artifact`
+(for example `doc`). It is the record of the work that people read and edit in
+the session, and the agent keeps it current. Once the agent writes it, the
+session gets a **Doc** tab that shows only that artifact, with its revisions,
+source editing, and comments. It also stays in **Review → Artifacts**. The
+session page opens on Doc when the doc exists as the page loads. A doc that the
+agent writes while a person is on the page only adds the tab, so the person
+stays where they are.
+
+When a person saves a revision of the doc, Loom puts this message in the ACP
+session's conversation inbox:
+
+```text
+A person edited the doc: revision 4 of the artifact `doc`. Read it with artifact_get.
+```
+
+The message never interrupts a turn: the session takes it when it next waits.
+One message waits at a time, so edits made while the agent works arrive as one
+message that names the newest revision. The agent's own revisions send nothing.
+The profile's instructions say what the agent does with the message. A terminal
+session gets no message: it has no inbox that holds one until the agent waits,
+and text pasted into its terminal would mix with the agent's own work.
+
 ### CLI and UI
 
 Artifact syntax, actor policy, risk, REST paths, and MCP projections come from

@@ -23,6 +23,7 @@ import {
   retryReviewDelivery,
   retargetReviewToCurrent,
   resolveThread,
+  sendReviewComment,
   setReviewCommentResolution,
   submitReview,
   updateReview,
@@ -646,9 +647,7 @@ async function createPendingComment() {
       });
     });
     activeId.value = updated.comments.at(-1)?.id ?? null;
-    pending.value = null;
-    pendingRange = null;
-    pendingDraft.value = '';
+    closeComposer();
     trayOpen.value = true;
     reviewNotice.value = 'Pending comment saved. Submit the review when your feedback is complete.';
     await nextTick();
@@ -660,10 +659,52 @@ async function createPendingComment() {
   }
 }
 
-function cancelPendingComment() {
+// With no review in progress, a comment can go to the agent at once, as a
+// review of its own. Once a review is in progress, new comments join it and go
+// with Submit review.
+async function sendPendingComment() {
+  const text = pendingDraft.value.trim();
+  if (!pending.value || !text || savingComment.value || draft.value) return;
+  const pendingComment = pending.value;
+  savingComment.value = true;
+  composerError.value = '';
+  try {
+    const submitted = await draftController.freeze(async (current) => {
+      if (current) throw new Error('a review is in progress; add the comment to it');
+      const result = await sendReviewComment(props.id, {
+        subject_key: props.artifactName,
+        subject_version: pendingComment.subjectVersion,
+        anchor: pendingComment.anchor,
+        body: text,
+      });
+      replaceReview(result);
+      return { draft: null, result };
+    });
+    activeId.value = submitted.comments.at(-1)?.id ?? null;
+    closeComposer();
+    reviewNotice.value =
+      submitted.delivery_state === 'delivered'
+        ? 'Comment sent to the conversation.'
+        : 'Comment sent and queued for the conversation.';
+    await nextTick();
+    locateCycle();
+  } catch (e) {
+    composerError.value = mutationMessage(e);
+    // Another tab may have started a review; show it in the tray.
+    await loadReviews();
+  } finally {
+    savingComment.value = false;
+  }
+}
+
+function closeComposer() {
   pending.value = null;
   pendingRange = null;
   pendingDraft.value = '';
+}
+
+function cancelPendingComment() {
+  closeComposer();
   locateCycle();
   void nextTick(() => reviewTrayRef.value?.focusToggle());
 }
@@ -976,6 +1017,44 @@ function renderCard(entry: ReviewEntry): VNode {
 }
 
 function renderComposer(): VNode {
+  const reviewing = draft.value !== null;
+  const actions = reviewing
+    ? [
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-primary px-2 py-1 text-2xs',
+            disabled: savingComment.value,
+            onClick: stop(() => void createPendingComment()),
+          },
+          savingComment.value ? 'Saving…' : 'Add to review',
+        ),
+      ]
+    : [
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-primary px-2 py-1 text-2xs',
+            title: 'Send this comment to the agent now',
+            disabled: savingComment.value,
+            onClick: stop(() => void sendPendingComment()),
+          },
+          savingComment.value ? 'Sending…' : 'Comment',
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            class: 'btn-secondary px-2 py-1 text-2xs',
+            title: 'Keep this comment pending, and send it with the review',
+            disabled: savingComment.value,
+            onClick: stop(() => void createPendingComment()),
+          },
+          'Start a review',
+        ),
+      ];
   return h(
     'div',
     {
@@ -989,7 +1068,7 @@ function renderComposer(): VNode {
       h(
         'div',
         { class: 'mb-1 text-2xs font-semibold uppercase tracking-wide text-accent' },
-        'Pending review comment',
+        reviewing ? 'Pending review comment' : 'Comment',
       ),
       h('textarea', {
         value: pendingDraft.value,
@@ -1007,23 +1086,14 @@ function renderComposer(): VNode {
           }
           if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
             event.preventDefault();
-            void createPendingComment();
+            void (reviewing ? createPendingComment() : sendPendingComment());
           }
         },
         onClick: (event: Event) => event.stopPropagation(),
         onMousedown: (event: Event) => event.stopPropagation(),
       }),
       h('div', { class: 'mt-1.5 flex items-center gap-1.5' }, [
-        h(
-          'button',
-          {
-            type: 'button',
-            class: 'btn-primary px-2 py-1 text-2xs',
-            disabled: savingComment.value,
-            onClick: stop(() => void createPendingComment()),
-          },
-          savingComment.value ? 'Saving…' : 'Add pending comment',
-        ),
+        ...actions,
         h(
           'button',
           {

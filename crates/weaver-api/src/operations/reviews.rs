@@ -281,6 +281,51 @@ pub mod retry_delivery {
     pub type Output = ReviewDto;
 }
 
+pub mod send {
+    use super::prelude::*;
+
+    /// Send one anchored comment on an artifact to the session's agent at
+    /// once, as a review of its own.
+    ///
+    /// Creates, fills, and submits the review in one step. Refused while the
+    /// caller has a review of the artifact in progress: new comments join that
+    /// draft and go with `reviews.submit`.
+    #[operation(id = "reviews.send", actor = User, scope = Session, risk = Write,
+                default = custom)]
+    pub struct Input {
+        /// The session whose artifact the comment is on.
+        #[operand(positional)]
+        pub session: String,
+        /// The artifact's name.
+        pub subject_key: String,
+        /// The artifact revision the person read, which the anchor was taken
+        /// against.
+        pub subject_version: String,
+        #[operand(json)]
+        pub anchor: ArtifactTextAnchorDto,
+        pub body: String,
+    }
+
+    impl Default for Input {
+        fn default() -> Self {
+            Self {
+                session: String::new(),
+                subject_key: String::new(),
+                subject_version: String::new(),
+                anchor: ArtifactTextAnchorDto {
+                    quote: String::new(),
+                    prefix: String::new(),
+                    suffix: String::new(),
+                    block_index: None,
+                },
+                body: String::new(),
+            }
+        }
+    }
+
+    pub type Output = ReviewDto;
+}
+
 pub mod submit {
     use super::prelude::*;
 
@@ -337,6 +382,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     comments::update::SPEC,
     comments::delete::SPEC,
     comments::resolve::SPEC,
+    send::SPEC,
     submit::SPEC,
     retry_delivery::SPEC,
 ];

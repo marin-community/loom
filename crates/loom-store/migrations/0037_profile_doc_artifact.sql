@@ -1,0 +1,1 @@
+ALTER TABLE profiles ADD COLUMN doc_artifact TEXT NOT NULL DEFAULT '';

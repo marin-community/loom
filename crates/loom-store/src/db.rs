@@ -188,8 +188,18 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
     ),
     (
         37,
+        "profile-doc-artifact",
+        include_str!("../migrations/0037_profile_doc_artifact.sql"),
+    ),
+    (
+        38,
+        "conversation-inbox-coalesce-key",
+        include_str!("../migrations/0038_conversation_inbox_coalesce_key.sql"),
+    ),
+    (
+        39,
         "shared-grant-runs",
-        include_str!("../migrations/0037_shared_grant_runs.sql"),
+        include_str!("../migrations/0039_shared_grant_runs.sql"),
     ),
 ];
 
@@ -487,6 +497,9 @@ mod tests {
         assert!(profile_columns
             .iter()
             .any(|column| column == "instructions"));
+        assert!(profile_columns
+            .iter()
+            .any(|column| column == "doc_artifact"));
         assert!(!table_columns(&db, "session_spaces")
             .await
             .unwrap()

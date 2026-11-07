@@ -28,6 +28,8 @@ pub struct Profile {
     pub prelude: String,
     /// Organization-owned instructions appended to the opening prompt.
     pub instructions: String,
+    /// The branch artifact that is a session's doc, or empty for none.
+    pub doc_artifact: String,
     pub restricted: bool,
     /// JSON array in storage; parsed through [`Profile::github_repositories`].
     pub github_repositories: String,
@@ -91,6 +93,7 @@ impl Profile {
             turn_budget: self.turn_budget,
             prelude: self.prelude.clone(),
             instructions: self.instructions.clone(),
+            doc_artifact: self.doc_artifact.clone(),
             restricted: self.restricted,
             github_repositories: self.github_repositories()?,
             allowed_tools: self.allowed_tool_rules()?,
@@ -131,6 +134,8 @@ pub struct ProfileInput {
     pub prelude: String,
     #[serde(default)]
     pub instructions: String,
+    #[serde(default)]
+    pub doc_artifact: String,
     #[serde(default)]
     pub restricted: bool,
     #[serde(default)]

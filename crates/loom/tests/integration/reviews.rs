@@ -635,6 +635,54 @@ async fn api_and_cli_share_the_private_optimistic_review_contract() {
     };
     assert_eq!(anchor.path, readme.path);
     assert_eq!(submitted.delivery_state, "queued");
+
+    // A comment sent at once is a submitted review of its own, refused while a
+    // review of the artifact is in progress.
+    ts.client
+        .invoke::<artifacts::write::Op>(&artifacts::write::Input {
+            name: "notes".to_string(),
+            content: "# Notes\n\nAlpha beta gamma.\n".to_string(),
+            title: None,
+            kind: None,
+            base_rev: None,
+            repo: false,
+            branch: session.branch.id.to_string(),
+        })
+        .await
+        .unwrap();
+    let send = |body: &str| reviews::send::Input {
+        session: session.id.to_string(),
+        subject_key: "notes".to_string(),
+        subject_version: "1".to_string(),
+        anchor: ArtifactTextAnchorDto {
+            quote: "beta".to_string(),
+            prefix: "Alpha ".to_string(),
+            suffix: " gamma".to_string(),
+            block_index: Some(1),
+        },
+        body: body.to_string(),
+    };
+    let sent = ts
+        .client
+        .invoke::<reviews::send::Op>(&send("Name the editor."))
+        .await
+        .unwrap();
+    assert_eq!(sent.status, "submitted");
+    assert_eq!(sent.comments.len(), 1);
+    ts.client
+        .invoke::<reviews::create::Op>(&reviews::create::Input {
+            subject_key: "notes".to_string(),
+            ..new_review(&session.id, "1")
+        })
+        .await
+        .unwrap();
+    let refused = reqwest::Client::new()
+        .post(format!("http://{}/api/reviews/send", ts.addr))
+        .json(&send("And this."))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
 }
 
 async fn poll_review_turn(ts: &TestServer, session_id: &str, payload: &str) -> Value {

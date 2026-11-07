@@ -23,6 +23,10 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync"] }
 tracing = "0.1"
 
+# libproc and sysctl, which stand in for Linux's /proc in process_identity.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync", "rt-multi-thread"] }

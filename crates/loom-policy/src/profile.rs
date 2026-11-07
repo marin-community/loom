@@ -50,6 +50,8 @@ const DEFAULT_PROFILE_INSTRUCTIONS: &str = include_str!("../profiles/default/ins
 
 const MAX_PROFILE_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 const MAX_GITHUB_REPOSITORIES: usize = 64;
+// Artifact names have no format of their own; a doc artifact is a short name such as `doc`.
+const MAX_DOC_ARTIFACT_BYTES: usize = 128;
 
 /// An allowlist entry: a concrete `owner/name`, or an `owner/*` pattern that
 /// lets a session expand into that owner without a human decision.
@@ -144,6 +146,14 @@ async fn validate_input(
             "profile instructions must be at most {} bytes",
             MAX_PROFILE_INSTRUCTIONS_BYTES
         );
+    }
+    let doc_artifact = input.doc_artifact.trim();
+    if doc_artifact.len() > MAX_DOC_ARTIFACT_BYTES
+        || doc_artifact
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control())
+    {
+        bail!("profile doc artifact must be an artifact name of at most {MAX_DOC_ARTIFACT_BYTES} bytes without spaces");
     }
     if input.github_repositories.len() > MAX_GITHUB_REPOSITORIES
         || input
@@ -361,6 +371,7 @@ async fn normalized_input(
         turn_budget: input.turn_budget,
         prelude: input.prelude.trim().to_string(),
         instructions: input.instructions.trim().to_string(),
+        doc_artifact: input.doc_artifact.trim().to_string(),
         restricted: input.restricted,
         github_repositories,
         allowed_tools: input.allowed_tools.clone(),
@@ -402,7 +413,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, doc_artifact = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -422,6 +433,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(normalized.turn_budget)
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
+        .bind(&normalized.doc_artifact)
         .bind(normalized.restricted)
         .bind(&github_repositories)
         .bind(&allowed_tools)
@@ -442,9 +454,9 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
             "INSERT INTO profiles
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-              turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
+              turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(&normalized.description)
@@ -464,6 +476,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
         .bind(&now)
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
+        .bind(&normalized.doc_artifact)
         .bind(normalized.restricted)
         .bind(&github_repositories)
         .bind(&allowed_tools)
@@ -505,9 +518,9 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
         "INSERT INTO profiles
          (name, description, agent_kind, model, effort, protocol, mode, class,
           strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-          turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
+          turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
           github_repositories, allowed_tools, mcp_access, mcp_policy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
           description=excluded.description, agent_kind=excluded.agent_kind,
           model=excluded.model, effort=excluded.effort, protocol=excluded.protocol,
@@ -516,6 +529,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           idle_archive_secs=excluded.idle_archive_secs,
           max_concurrent=excluded.max_concurrent, turn_budget=excluded.turn_budget,
           prelude=excluded.prelude, instructions=excluded.instructions,
+          doc_artifact=excluded.doc_artifact,
           restricted=excluded.restricted,
           github_repositories=excluded.github_repositories,
           allowed_tools=excluded.allowed_tools, mcp_access=excluded.mcp_access,
@@ -544,6 +558,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
     .bind(&now)
     .bind(&normalized.prelude)
     .bind(&normalized.instructions)
+    .bind(&normalized.doc_artifact)
     .bind(normalized.restricted)
     .bind(github_repositories)
     .bind(allowed_tools)
@@ -614,7 +629,7 @@ pub async fn update_expected(
          description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
          mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
          idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-         instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+         instructions = ?, doc_artifact = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
          retired = 0, revision = revision + 1, updated_at = ?
          WHERE name = ? AND revision = ?",
     )
@@ -633,6 +648,7 @@ pub async fn update_expected(
     .bind(normalized.turn_budget)
     .bind(&normalized.prelude)
     .bind(&normalized.instructions)
+    .bind(&normalized.doc_artifact)
     .bind(normalized.restricted)
     .bind(github_repositories)
     .bind(allowed_tools)
@@ -758,7 +774,7 @@ pub async fn create_clone_prepared(
              description = ?, agent_kind = ?, model = ?, effort = ?, protocol = ?,
              mode = ?, class = ?, strict = ?, env_clear = ?, ambient_allowlist = ?,
              idle_archive_secs = ?, max_concurrent = ?, turn_budget = ?, prelude = ?,
-             instructions = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
+             instructions = ?, doc_artifact = ?, restricted = ?, github_repositories = ?, allowed_tools = ?, mcp_access = ?, mcp_policy = ?,
              retired = 0, lifetime = lifetime + 1,
              revision = revision + 1, updated_at = ?
              WHERE name = ? AND retired = 1",
@@ -778,6 +794,7 @@ pub async fn create_clone_prepared(
         .bind(normalized.turn_budget)
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
+        .bind(&normalized.doc_artifact)
         .bind(normalized.restricted)
         .bind(&github_repositories)
         .bind(&allowed_tools)
@@ -796,9 +813,9 @@ pub async fn create_clone_prepared(
             "INSERT INTO profiles
              (name, description, agent_kind, model, effort, protocol, mode, class,
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
-              turn_budget, revision, created_at, updated_at, prelude, instructions, restricted,
+              turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target_name)
         .bind(&normalized.description)
@@ -818,6 +835,7 @@ pub async fn create_clone_prepared(
         .bind(&now)
         .bind(&normalized.prelude)
         .bind(&normalized.instructions)
+        .bind(&normalized.doc_artifact)
         .bind(normalized.restricted)
         .bind(github_repositories)
         .bind(allowed_tools)
@@ -1130,6 +1148,7 @@ pub async fn normalize_default(db: &Db) -> Result<()> {
         turn_budget: current.turn_budget,
         prelude: current.prelude.clone(),
         instructions: current.instructions.clone(),
+        doc_artifact: current.doc_artifact.clone(),
         restricted: current.restricted,
         github_repositories: current.github_repositories().unwrap_or_default(),
         allowed_tools: current.allowed_tool_rules().unwrap_or_default(),
