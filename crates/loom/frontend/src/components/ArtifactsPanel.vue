@@ -30,7 +30,8 @@ import DocumentPreview from './DocumentPreview.vue';
 // when popped out, in a resizable rail beside the live terminal — `compact`
 // collapses the list into a dropdown so the viewer keeps its width in the rail.
 // Deep-linkable at `/s/:id/artifacts/:name`; `artifact_written` over SSE
-// refreshes the list and the open viewer.
+// refreshes the list and the open viewer, and a stream (re)connect re-snapshots
+// both — the live-only stream can drop a write across a reconnect gap.
 const props = defineProps<{
   id: string;
   /** Deep-linked artifact name to open (from the route). */
@@ -400,6 +401,35 @@ function closeStream() {
 function openStream() {
   closeStream();
   source = openSessionEvents(props.id);
+  // The stream is live-only: writes landing during a reconnect gap are gone,
+  // so re-snapshot on every (re)connect. Reconnects also fire on plain window
+  // focus, so compare the list's rev first and re-open only when it moved.
+  source.onOpen(() => {
+    loadList()
+      .then(() => {
+        const current = loaded.value;
+        if (!current || editing.value || listError.value) return;
+        if (openingName && openingName !== current.name) return;
+        const meta = list.value.find((a) => a.name === current.name);
+        // The open artifact is gone from a freshly loaded list — a delete
+        // landed in the gap. Mirror `artifact_deleted`, not a ghost viewer.
+        if (!meta) {
+          loaded.value = null;
+          draftContent.value = '';
+          return;
+        }
+        if (meta.id === current.view.meta.id && meta.rev === current.view.meta.rev) return;
+        if (!isActive.value) {
+          pendingRefresh.value = true;
+          return;
+        }
+        if (openingName || loaded.value !== current) return;
+        openArtifact(current.name, current.requestedRevision ?? undefined, {
+          keepMode: true,
+        }).catch(() => {});
+      })
+      .catch(() => {});
+  });
   source.on('artifact_written', (ev) => {
     const d = ev.data as { name?: string; rev?: number };
     loadList().catch(() => {});
@@ -407,10 +437,14 @@ function openStream() {
     // mid-edit), refresh the viewer to its new latest — but only while visible;
     // hidden, we defer the re-render until the panel is shown again.
     if (d?.name && d.name === selected.value && !editing.value) {
-      // Ignore a replayed/own event we already reflect (the stream replays
-      // recent writes on connect): re-opening would needlessly reset the view —
-      // and snap a reader out of Source back to Preview. Only a genuinely newer
-      // revision refreshes, and it keeps the current preview/source choice.
+      // An open of a different artifact owns the viewer — its fetch must not
+      // be superseded by refreshing the previously open one. A same-name open
+      // falls through, so a genuinely newer write still re-fetches past it.
+      if (openingName && openingName !== selected.value) return;
+      // Skip a write we already reflect — chiefly our own save, whose put
+      // response installs the new rev before its `artifact_written` echo
+      // arrives. Only a genuinely newer revision refreshes, and it keeps the
+      // current preview/source choice (no snap out of Source back to Preview).
       if (d.rev != null && onLatest.value && view.value && d.rev <= view.value.meta.rev) return;
       if (isActive.value)
         openArtifact(selected.value, undefined, { keepMode: true }).catch(() => {});
@@ -453,7 +487,15 @@ watch(
   (name) => {
     // A local open updates the route before its response atomically installs
     // the new identity. Do not turn that route echo into a duplicate request.
-    if (name && name !== selected.value && name !== openingName) openArtifact(name);
+    if (!name || name === openingName) return;
+    if (name !== selected.value) {
+      openArtifact(name);
+      return;
+    }
+    // An outside navigation to the already-open artifact asks to see it now;
+    // its write event may have been missed, so re-fetch.
+    if (editing.value) return;
+    openArtifact(name, viewRev.value ?? undefined, { keepMode: true }).catch(() => {});
   },
 );
 
@@ -461,6 +503,13 @@ watch(
 // (so it stays deep-linkable) and apply any refresh that landed while hidden.
 watch(isActive, (now) => {
   if (!now || !selected.value) return;
+  // A deep link landing in the same flush (the name watch above) already owns
+  // the viewer and its fetch; a deferred refresh of the previously open
+  // artifact must not supersede it.
+  if (openingName) {
+    pendingRefresh.value = false;
+    return;
+  }
   if (pendingRefresh.value) {
     pendingRefresh.value = false;
     openArtifact(selected.value, viewRev.value ?? undefined, { keepMode: true }).catch(() => {});

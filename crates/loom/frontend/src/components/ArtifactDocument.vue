@@ -174,6 +174,10 @@ const discarding = ref(false);
 const layoutBusy = ref(false);
 let releaseLayoutBarrier: (() => void) | null = null;
 let layoutReturnFocus: HTMLElement | null = null;
+// Live swap requests: the host freezes the surface around a route navigation
+// while the panel freezes it again for the content swap inside, so a busy
+// surface is nested under — not refused by — a second request.
+let layoutDepth = 0;
 const reanchorCommentId = ref<number | null>(null);
 
 const draft = computed(() => reviews.value.find((review) => review.status === 'draft') ?? null);
@@ -875,8 +879,12 @@ async function focusUnsavedComment(action: string): Promise<boolean> {
 }
 
 async function prepareLayoutSwap(): Promise<boolean> {
-  if (layoutBusy.value) return false;
-  if (!(await focusUnsavedComment('changing the layout'))) return false;
+  layoutDepth += 1;
+  if (layoutDepth > 1) return true; // nested under a swap already in charge
+  if (!(await focusUnsavedComment('changing the layout'))) {
+    layoutDepth -= 1;
+    return false;
+  }
   const active = document.activeElement;
   layoutReturnFocus =
     active instanceof HTMLElement && containerEl.value?.contains(active) ? active : null;
@@ -895,6 +903,7 @@ async function prepareLayoutSwap(): Promise<boolean> {
     return true;
   } catch (error) {
     trayError.value = mutationMessage(error);
+    layoutDepth -= 1;
     layoutBusy.value = false;
     const restore = layoutReturnFocus;
     layoutReturnFocus = null;
@@ -905,6 +914,9 @@ async function prepareLayoutSwap(): Promise<boolean> {
 }
 
 function finishLayoutSwap() {
+  if (layoutDepth === 0) return;
+  layoutDepth -= 1;
+  if (layoutDepth > 0) return; // an outer swap still owns the freeze
   releaseLayoutBarrier?.();
   releaseLayoutBarrier = null;
   layoutBusy.value = false;
