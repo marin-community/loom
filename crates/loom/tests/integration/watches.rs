@@ -277,6 +277,7 @@ async fn stale_session_emits_one_event_and_wakes_a_reactive_watch() {
     let now = Utc::now();
 
     // Two passes: the edge fires on the first, the second is a no-op.
+    let session = session_mod::SessionLiveness::from(&session);
     monitor::detect_stale(&state, &session, 0, now, &mut seen, watermark).await;
     monitor::detect_stale(&state, &session, 0, now, &mut seen, watermark).await;
 
