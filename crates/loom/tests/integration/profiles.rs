@@ -42,6 +42,10 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
         "expires_at":4102444800_u64, "policy_revision":"revision-one"});
     let auth_revoked = revoked.clone();
     let auth_decision = decision.clone();
+    let callback_directory = tempfile::tempdir().unwrap();
+    let callback_token_file = callback_directory.path().join("callback.token");
+    std::fs::write(&callback_token_file, "independent-loom-service-credential").unwrap();
+    let callback_db = ts.state.db.clone();
     let app = axum::Router::new()
         .route("/authorize", axum::routing::post(move |axum::Json(input): axum::Json<serde_json::Value>| {
             let revoked = auth_revoked.clone();
@@ -52,11 +56,21 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
                 } else { (StatusCode::OK, axum::Json(decision)) }
             }
         }))
-        .route("/credentials", axum::routing::post(move || {
+        .route("/credentials", axum::routing::post(move |headers: axum::http::HeaderMap, axum::Json(input): axum::Json<serde_json::Value>| {
             let mut response = decision.clone();
+            let db = callback_db.clone();
             async move {
+                assert_eq!(headers.get("x-marin-loom-callback").unwrap(), "independent-loom-service-credential");
+                let run = loom::runs::get(&db, input["run_id"].as_str().unwrap()).await.unwrap().unwrap();
+                assert_eq!(run.status, "creating");
+                assert_eq!(input["session_id"], run.session_id);
+                assert!(!run.session_id.is_empty());
+                assert_eq!(run.shared_grant_id.as_deref(), Some("grant-one"));
+                assert_eq!(run.actor_subject, "loom:run-one");
+                assert_eq!(run.profile, "power");
                 response["auth_url"] = json!("https://auth.example.test");
                 response["storage_token"] = json!("runtime-secret-never-persisted");
+                response["iris_token"] = json!("iris-runtime-secret-never-persisted");
                 axum::Json(response)
             }
         }));
@@ -88,6 +102,7 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
         .unwrap();
     let config = json!({"issuer":corpus["issuer"],"public_keys":corpus["public_keys"],
         "authorize_url":format!("{authority}/authorize"),"credentials_url":format!("{authority}/credentials"),
+        "callback_token_file":callback_token_file,
         "profiles":{"power":{"cwd":ts.cwd(),"revision":preview["profile_revision"],"resolver_revision":preview["resolver_revision"]}}});
     sqlx::query("INSERT INTO settings (key,value) VALUES ('auth.shared_grants', ?)")
         .bind(config.to_string())
@@ -181,6 +196,9 @@ async fn shared_grant_launch_uses_fixed_root_and_live_authority() {
     assert!(!persisted
         .request_json
         .contains("runtime-secret-never-persisted"));
+    assert!(!persisted
+        .request_json
+        .contains("iris-runtime-secret-never-persisted"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&persisted.request_json).unwrap()["session"]
             ["cwd"],

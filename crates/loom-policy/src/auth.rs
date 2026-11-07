@@ -148,6 +148,7 @@ pub struct SharedGrantConfig {
     pub public_keys: Vec<String>,
     pub authorize_url: String,
     pub credentials_url: String,
+    pub callback_token_file: std::path::PathBuf,
     pub ca_file: Option<std::path::PathBuf>,
     pub profiles: HashMap<String, SharedGrantProfile>,
 }

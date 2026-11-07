@@ -388,7 +388,7 @@ pub const REGISTRY: &[SettingSpec] = &[
     SettingSpec {
         key: SHARED_GRANTS_KEY,
         label: "Shared grant authority",
-        description: "JSON trust policy with issuer, public_keys (Ed25519 PEM), authorize_url, credentials_url, optional ca_file (PEM CA bundle), and profiles mapping approved restricted profile names to {cwd, revision, resolver_revision}. Empty disables shared tokens. Enabling permanently disables implicit local admin and machine tokens, even after the setting is removed.",
+        description: "JSON trust policy with issuer, public_keys (Ed25519 PEM), authorize_url, credentials_url, callback_token_file (private Loom service credential), optional ca_file (PEM CA bundle), and profiles mapping approved restricted profile names to {cwd, revision, resolver_revision}. Empty disables shared tokens. Enabling permanently disables implicit local admin and machine tokens, even after the setting is removed.",
         kind: SettingKind::Text,
         default: "",
         group: "Authentication",

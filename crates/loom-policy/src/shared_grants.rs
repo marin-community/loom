@@ -388,6 +388,7 @@ server.listen(0,'127.0.0.1',()=>process.stdout.write(String(server.address().por
             public_keys: corpus.public_keys,
             authorize_url: format!("{base}/authorize"),
             credentials_url: format!("{base}/credentials"),
+            callback_token_file: "/private/callback.token".into(),
             ca_file: None,
             profiles: Default::default(),
         };

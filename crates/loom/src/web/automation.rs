@@ -527,6 +527,18 @@ pub(super) async fn create_run_core(
         }
         crate::runs::Reservation::Created(run) => run,
     };
+    let credentials = if matches!(principal.grant, Grant::Shared { .. }) {
+        match shared_runtime_credentials(st, principal, &run).await {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                crate::runs::failed(&st.db, &run.id, "Shared grant credential issuance failed")
+                    .await?;
+                return Err(error);
+            }
+        }
+    } else {
+        credentials
+    };
     launch_run(
         st,
         req,
@@ -545,15 +557,16 @@ struct BrokerCredentials {
     decision: loom_policy::shared_grants::LiveGrantDecision,
     auth_url: String,
     storage_token: Option<String>,
+    iris_token: Option<String>,
 }
 
-async fn shared_launch_credentials(
+async fn prepare_shared_launch(
     st: &AppState,
     principal: &Principal,
     request: &mut run_operations::create::Input,
-) -> ApiResult<Option<crate::provision::RuntimeCredentials>> {
+) -> ApiResult<()> {
     let Grant::Shared { claims, bearer } = &principal.grant else {
-        return Ok(None);
+        return Ok(());
     };
     let denied = || {
         AppError::new(
@@ -646,10 +659,49 @@ async fn shared_launch_credentials(
         )
         .await
         .map_err(|_| denied())?;
+    request.session.cwd = approved.cwd.clone();
+    request.session.expected_profile_revision = Some(approved.revision);
+    request.session.expected_resolver_revision = Some(approved.resolver_revision.clone());
+    request.idempotency_key = format!("shared:{}", claims.grant_id);
+    request.source = "ops".to_string();
+    Ok(())
+}
+
+async fn shared_runtime_credentials(
+    st: &AppState,
+    principal: &Principal,
+    run: &crate::runs::Run,
+) -> ApiResult<Option<crate::provision::RuntimeCredentials>> {
+    let Grant::Shared { claims, bearer } = &principal.grant else {
+        return Ok(None);
+    };
+    let denied = || {
+        AppError::new(
+            StatusCode::FORBIDDEN,
+            "shared grant cannot launch this request",
+        )
+    };
+    let config = crate::auth::shared_grant_config(&st.db)
+        .await
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let client = config.client().map_err(|_| denied())?;
+    let callback = tokio::fs::read_to_string(&config.callback_token_file)
+        .await
+        .map_err(|_| denied())?;
+    if callback.trim().is_empty() {
+        return Err(denied());
+    }
+    let mut callback =
+        reqwest::header::HeaderValue::from_str(callback.trim()).map_err(|_| denied())?;
+    callback.set_sensitive(true);
+    let bearer = bearer.as_ref().ok_or_else(denied)?.as_str();
+    let resource = format!("/{}/", run.profile);
     let response = client
         .post(&config.credentials_url)
         .bearer_auth(bearer)
-        .json(&serde_json::json!({"resource": resource}))
+        .header("X-Marin-Loom-Callback", callback)
+        .json(&serde_json::json!({"resource": resource, "run_id": run.id, "session_id": run.session_id}))
         .send()
         .await
         .inspect_err(|_| {
@@ -692,14 +744,10 @@ async fn shared_launch_credentials(
             )
         })
         .map_err(|_| denied())?;
-    request.session.cwd = approved.cwd.clone();
-    request.session.expected_profile_revision = Some(approved.revision);
-    request.session.expected_resolver_revision = Some(approved.resolver_revision.clone());
-    request.idempotency_key = format!("shared:{}", claims.grant_id);
-    request.source = "ops".to_string();
     Ok(Some(crate::provision::RuntimeCredentials::new(
         credentials.auth_url,
         credentials.storage_token,
+        credentials.iris_token,
     )))
 }
 
@@ -716,8 +764,7 @@ pub(super) async fn create_run(
     context: OperationContext,
     mut input: run_operations::create::Input,
 ) -> ApiResult<RunView> {
-    let credentials =
-        shared_launch_credentials(&context.state, &context.principal, &mut input).await?;
+    prepare_shared_launch(&context.state, &context.principal, &mut input).await?;
     let profile = input.profile.trim().to_string();
     let (subject, profiles) = run_identity(&context.principal, &profile)?;
     create_run_core(
@@ -727,7 +774,7 @@ pub(super) async fn create_run(
         subject,
         profiles,
         false,
-        credentials,
+        None,
     )
     .await
 }

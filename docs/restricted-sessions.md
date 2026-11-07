@@ -119,6 +119,7 @@ JSON document with these fields:
 | `public_keys` | Array of trusted Ed25519 public keys in PEM form |
 | `authorize_url` | Authority endpoint for the live operation decision |
 | `credentials_url` | Authority endpoint for the same grant's runtime credentials |
+| `callback_token_file` | Private Loom service credential shared with the broker, separate from launch bearers |
 | `ca_file` | Optional PEM CA bundle for a private authority; omission uses the client's public trust roots |
 | `profiles` | Map of reviewed profile names to `{cwd, revision, resolver_revision}` |
 
@@ -158,13 +159,21 @@ automation-token minting. Run metadata records `shared_grant_id`; idempotency
 keys are fixed by that grant, so one grant owns exactly one run. Retries with
 different task content are rejected.
 
-Loom posts `{"resource":"/review/"}` and the same bearer to
-`credentials_url`. The broker returns the matching grant identity,
-`auth_url`, and an optional `storage_token`. These credentials enter only the
-new session's runtime environment as `MARIN_AUTH_URL` and
-`MARIN_GRANT_TOKEN`, after the ordinary environment clearing. They never enter
-the stored launch request or profile environment. The broker must derive
-storage authority from the same grant and recheck live state before issuing it.
+After reserving the native run, Loom posts `{"resource":"/review/","run_id":"...","session_id":"..."}`
+and the launch bearer to `credentials_url`. It authenticates separately with
+`X-Marin-Loom-Callback`, read from `callback_token_file`; this header is marked
+sensitive and the secret never enters the agent environment. The broker must
+verify that exact creating run, reserved session, actor, grant and profile through its trusted
+observer before returning credentials. A launch bearer alone cannot exchange
+runtime authority.
+
+The response contains matching launch identity, `auth_url`, optional
+`storage_token` and optional `iris_token`. Runtime tokens enter only the new
+session environment as `MARIN_GRANT_TOKEN` and `MARIN_IRIS_TOKEN`, with
+`MARIN_AUTH_URL`, after environment clearing. Profile values cannot supply
+these reserved credentials. Tokens never enter the stored launch request or
+profile. The broker derives their bounds from a narrowed child of the launch
+grant and rechecks live authority before delivery.
 
 Runtime credentials remain in memory. A stopped shared-grant session needs a
 fresh authorized launch; wake and recovery refuse to respawn it without its
