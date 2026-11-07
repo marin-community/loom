@@ -93,6 +93,44 @@ function longLog() {
   return { ...base, messages: [...base.messages, ...notes] };
 }
 
+/** A long transcript with an artifact link partway down and plenty of prose
+ *  after it, so opening the link leaves real content below the reader. */
+function linkedLog(sessionId: string) {
+  const paragraph = (i: number) => ({
+    role: 'assistant',
+    timestamp: `2026-06-21T11:${String(i).padStart(2, '0')}:00.000Z`,
+    blocks: [
+      {
+        kind: 'text',
+        text: `Filler paragraph ${i + 1}: enough prose to keep the transcript scrolling.`,
+      },
+    ],
+  });
+  return {
+    source: 'claude',
+    model: 'claude-opus-4-8',
+    messages: [
+      {
+        role: 'user',
+        timestamp: '2026-06-21T10:00:00.000Z',
+        blocks: [{ kind: 'text', text: 'Review the plan while you work.' }],
+      },
+      ...Array.from({ length: 12 }, (_, i) => paragraph(i)),
+      {
+        role: 'user',
+        timestamp: '2026-06-21T10:30:00.000Z',
+        blocks: [
+          {
+            kind: 'text',
+            text: `Details are in the [plan](/s/${sessionId}/artifacts/plan).`,
+          },
+        ],
+      },
+      ...Array.from({ length: 30 }, (_, i) => paragraph(i + 12)),
+    ],
+  };
+}
+
 async function openConversation(
   page: Page,
   weaver: WeaverFixture,
@@ -113,6 +151,29 @@ async function openConversation(
 /** px between the scroll position and the transcript's foot. */
 function footDistance(conv: ReturnType<Page['getByTestId']>) {
   return conv.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
+/** Emulate the display-toggle reset some browsers (notably Safari) apply to a
+ *  scroll container hidden by `v-show`. The real hidden ancestor is the work-area
+ *  wrapper, not the scroller's direct parent: lay that pane out invisibly, zero
+ *  the offset so the browser's saved position is genuinely lost, let the scroll
+ *  event dispatch while the app still treats the pane as inactive, then hide it
+ *  again. The return path must restore the reader's place itself. */
+async function dropHiddenScrollOffset(conv: ReturnType<Page['getByTestId']>) {
+  await conv.evaluate(async (el) => {
+    let pane = el.parentElement as HTMLElement | null;
+    while (pane && getComputedStyle(pane).display !== 'none') pane = pane.parentElement;
+    if (!pane) throw new Error('conversation pane is not hidden');
+    const previousDisplay = pane.style.display;
+    pane.style.display = 'block';
+    pane.style.visibility = 'hidden';
+    el.scrollTop = 0;
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    pane.style.visibility = '';
+    pane.style.display = previousDisplay;
+  });
 }
 
 test.describe('conversation view', () => {
@@ -450,5 +511,41 @@ test.describe('conversation view', () => {
     await expect(page.getByText('A fresh reply just landed.')).toBeVisible({
       timeout: 15_000,
     });
+  });
+
+  // Following a link into an artifact then pressing Back must return the reader
+  // to the exchange they were reading, not the transcript's top.
+  test('returning from an artifact link keeps the conversation place', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await weaver.seedSession({ goal: 'demo', name: 'conv-back' });
+    await weaver.writeArtifact(s, 'plan', '# The plan\n\nShip it.\n', { title: 'The plan' });
+    await weaver.seedConversation(s, linkedLog(s.id));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${weaver.baseUrl}/s/${s.id}`);
+    await page.locator('[data-tab="conversation"]').click();
+
+    const conv = page.getByTestId('conversation');
+    const link = conv.getByRole('link', { name: 'plan' });
+    await expect(link).toBeVisible({ timeout: 30_000 });
+    await link.scrollIntoViewIfNeeded();
+    // The link sits below the fold, so the reader is off the foot and the pin
+    // has released — the state the return must preserve.
+    await expect.poll(() => footDistance(conv)).toBeGreaterThan(120);
+    const before = await conv.evaluate((el) => el.scrollTop);
+
+    await link.click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}/artifacts/plan`);
+    await expect(page.getByRole('heading', { name: 'The plan' })).toBeVisible();
+    await dropHiddenScrollOffset(conv);
+
+    await page.goBack();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    const returned = page.getByTestId('conversation');
+    await expect(returned).toBeVisible();
+    await expect
+      .poll(() => returned.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .toBeGreaterThan(before * 0.6);
   });
 });

@@ -33,7 +33,7 @@ import TransitionProgressStrip from './TransitionProgressStrip.vue';
 // a reviewer jump straight to any user turn. A composer at the foot sends a new
 // prompt straight to the agent's terminal, and the log auto-refreshes on the
 // agent's lifecycle edges so a reply lands without a manual reload.
-const props = defineProps<{ session: Session }>();
+const props = defineProps<{ session: Session; active?: boolean }>();
 const id = computed(() => props.session.id);
 
 // ── Live agent state ─────────────────────────────────────────────────────────
@@ -424,7 +424,12 @@ function toggleAll() {
 // ── Follow-the-foot scroll (lib/followFoot.ts): pinned-at-the-newest-exchange. ──
 const convScroll = ref<HTMLElement | null>(null);
 const convBody = ref<HTMLElement | null>(null);
-const { pinned, scrollToBottom, scrollToEnd, trackPin } = useFollowFoot(convScroll, convBody);
+const paneActive = computed(() => props.active !== false);
+const { pinned, scrollToBottom, scrollToEnd, trackPin } = useFollowFoot(
+  convScroll,
+  convBody,
+  paneActive,
+);
 function onScroll() {
   trackPin();
   updateActive();
