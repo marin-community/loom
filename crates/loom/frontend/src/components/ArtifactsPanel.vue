@@ -10,7 +10,14 @@ import {
   nextTick,
 } from 'vue';
 import { useRouter } from 'vue-router';
-import { getArtifacts, getArtifact, putArtifact, deleteArtifact } from '../api';
+import {
+  getArtifacts,
+  getArtifact,
+  putArtifact,
+  deleteArtifact,
+  archiveArtifact,
+  restoreArtifact,
+} from '../api';
 import type { ArtifactMeta, ArtifactView } from '../types';
 import { confirmAction } from '../lib/confirmation';
 import { openSessionEvents, type SessionEventsHandle } from '../lib/sessionEvents';
@@ -52,6 +59,7 @@ const router = useRouter();
 
 const list = ref<ArtifactMeta[]>([]);
 const listError = ref('');
+const showArchived = ref(false);
 
 // True once we're the visible surface. Default-on so the panel works standalone.
 const isActive = computed(() => props.active !== false);
@@ -60,11 +68,16 @@ const pendingRefresh = ref(false);
 
 async function loadList() {
   try {
-    list.value = await getArtifacts(props.id);
+    list.value = await getArtifacts(props.id, showArchived.value);
     listError.value = '';
   } catch (e) {
     listError.value = (e as Error).message;
   }
+}
+
+async function toggleArchived() {
+  showArchived.value = !showArchived.value;
+  await loadList();
 }
 
 // --- Viewer ----------------------------------------------------------------
@@ -347,6 +360,20 @@ function download() {
   if (blobUrl) URL.revokeObjectURL(blobUrl);
 }
 
+// After the open document leaves the list (deleted, or archived while archived
+// rows are hidden), fall back to the first remaining one, or the empty state.
+async function advanceAfterRemoval() {
+  loaded.value = null;
+  draftContent.value = '';
+  await loadList();
+  const next = list.value[0]?.name;
+  if (next) {
+    await openArtifact(next);
+  } else {
+    await router.replace(`/s/${props.id}/artifacts`);
+  }
+}
+
 // --- Delete ----------------------------------------------------------------
 
 // Remove the open artifact (every revision). After it's gone, fall back to the
@@ -366,20 +393,57 @@ async function remove() {
       viewError.value = '';
       try {
         await deleteArtifact(props.id, name);
-        loaded.value = null;
-        draftContent.value = '';
-        await loadList();
-        const next = list.value[0]?.name;
-        if (next) {
-          await openArtifact(next);
-        } else {
-          await router.replace(`/s/${props.id}/artifacts`);
-        }
+        await advanceAfterRemoval();
       } finally {
         removing.value = false;
       }
     },
   });
+}
+
+// --- Archive / restore ------------------------------------------------------
+
+const archiving = ref(false);
+const restoring = ref(false);
+
+async function archive() {
+  const identity = loaded.value;
+  if (!identity || archiving.value) return;
+  const name = identity.name;
+  archiving.value = true;
+  viewError.value = '';
+  try {
+    await archiveArtifact(props.id, name);
+    // Keep it on screen while archived rows are visible, so the toolbar
+    // flips to Restore in place; otherwise fall back like a delete.
+    if (showArchived.value) {
+      await loadList();
+      await openArtifact(name, undefined, { keepMode: true });
+    } else {
+      await advanceAfterRemoval();
+    }
+  } catch (e) {
+    viewError.value = (e as Error).message;
+  } finally {
+    archiving.value = false;
+  }
+}
+
+async function restore() {
+  const identity = loaded.value;
+  if (!identity || restoring.value) return;
+  const name = identity.name;
+  restoring.value = true;
+  viewError.value = '';
+  try {
+    await restoreArtifact(props.id, name);
+    await loadList();
+    await openArtifact(name, undefined, { keepMode: true });
+  } catch (e) {
+    viewError.value = (e as Error).message;
+  } finally {
+    restoring.value = false;
+  }
 }
 
 // --- Scope badge -----------------------------------------------------------
@@ -425,6 +489,25 @@ function openStream() {
     if (d?.name && d.name === selected.value) {
       loaded.value = null;
       draftContent.value = '';
+    }
+  });
+  // Retired elsewhere (CLI, or another tab). The list always changes; the open
+  // viewer only has to fall back when its document just left a list that hides
+  // archived rows.
+  source.on('artifact_archived', (ev) => {
+    const d = ev.data as { name?: string };
+    loadList().catch(() => {});
+    if (d?.name && d.name === selected.value && !showArchived.value) {
+      loaded.value = null;
+      draftContent.value = '';
+    }
+  });
+  // Restored elsewhere: it is visible again, so refresh the open view's toolbar.
+  source.on('artifact_restored', (ev) => {
+    const d = ev.data as { name?: string };
+    loadList().catch(() => {});
+    if (d?.name && d.name === selected.value) {
+      openArtifact(d.name, undefined, { keepMode: true }).catch(() => {});
     }
   });
   // Inline comments: forward to ArtifactDocument rather than subscribing twice.
@@ -505,9 +588,21 @@ onUnmounted(() => {
            selector as a narrow rail so the document keeps the full viewport. -->
       <div v-if="!compact" class="hidden w-72 shrink-0 flex-col border-r border-line md:flex">
         <div
-          class="border-b border-line px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint"
+          class="flex items-center justify-between gap-2 border-b border-line px-2 py-1.5 text-[11px] font-medium uppercase tracking-wide text-faint"
         >
-          Artifacts <span class="text-faint">({{ list.length }})</span>
+          <span
+            >Artifacts <span class="text-faint">({{ list.length }})</span></span
+          >
+          <button
+            type="button"
+            class="rounded px-1 py-0.5 normal-case tracking-normal hover:bg-subtle"
+            :class="showArchived ? 'text-fg' : 'text-faint'"
+            data-testid="artifact-show-archived"
+            :title="showArchived ? 'Hide archived artifacts' : 'Show archived artifacts'"
+            @click="toggleArchived"
+          >
+            {{ showArchived ? 'Hide archived' : 'Show archived' }}
+          </button>
         </div>
         <div class="min-h-0 flex-1 overflow-auto py-1 text-sm">
           <button
@@ -515,7 +610,7 @@ onUnmounted(() => {
             :key="a.id"
             type="button"
             class="flex w-full flex-col gap-0.5 px-3 py-1.5 text-left hover:bg-subtle/60"
-            :class="selected === a.name ? 'bg-subtle' : ''"
+            :class="[selected === a.name ? 'bg-subtle' : '', a.archived_at ? 'opacity-60' : '']"
             :data-artifact="a.name"
             @click="openArtifact(a.name)"
           >
@@ -526,9 +621,13 @@ onUnmounted(() => {
               >
                 {{ a.name }}
               </span>
-              <span class="pill ml-auto shrink-0" :title="scopeBadge(a).title">{{
-                scopeBadge(a).label
-              }}</span>
+              <span
+                class="pill ml-auto shrink-0"
+                :title="
+                  a.archived_at ? 'Archived — hidden from the default list' : scopeBadge(a).title
+                "
+                >{{ a.archived_at ? 'archived' : scopeBadge(a).label }}</span
+              >
               <span class="shrink-0 font-mono text-2xs text-faint">v{{ a.rev }}</span>
             </span>
             <span v-if="a.title" class="truncate text-xs text-faint">{{ a.title }}</span>
@@ -553,9 +652,20 @@ onUnmounted(() => {
         >
           <option v-if="!list.length" value="">No artifacts yet</option>
           <option v-for="a in list" :key="a.id" :value="a.name">
-            {{ a.name }}{{ a.branch_id == null ? ' · shared' : '' }} · v{{ a.rev }}
+            {{ a.name }}{{ a.branch_id == null ? ' · shared' : ''
+            }}{{ a.archived_at ? ' · archived' : '' }} · v{{ a.rev }}
           </option>
         </select>
+        <button
+          type="button"
+          class="shrink-0 rounded border border-line px-1.5 py-0.5 text-xs"
+          :class="showArchived ? 'text-fg' : 'text-muted'"
+          data-testid="artifact-show-archived-mobile"
+          :title="showArchived ? 'Hide archived artifacts' : 'Show archived artifacts'"
+          @click="toggleArchived"
+        >
+          {{ showArchived ? 'Hide archived' : 'Show archived' }}
+        </button>
       </div>
 
       <!-- Compact list: a dropdown header for the desktop split rail. -->
@@ -568,9 +678,20 @@ onUnmounted(() => {
         >
           <option v-if="!list.length" value="">No artifacts yet</option>
           <option v-for="a in list" :key="a.id" :value="a.name">
-            {{ a.name }}{{ a.branch_id == null ? ' · shared' : '' }} · v{{ a.rev }}
+            {{ a.name }}{{ a.branch_id == null ? ' · shared' : ''
+            }}{{ a.archived_at ? ' · archived' : '' }} · v{{ a.rev }}
           </option>
         </select>
+        <button
+          type="button"
+          class="shrink-0 rounded border border-line px-1.5 py-0.5 text-xs"
+          :class="showArchived ? 'text-fg' : 'text-muted'"
+          data-testid="artifact-show-archived-compact"
+          :title="showArchived ? 'Hide archived artifacts' : 'Show archived artifacts'"
+          @click="toggleArchived"
+        >
+          {{ showArchived ? 'Hide archived' : 'Show archived' }}
+        </button>
       </div>
 
       <!-- Viewer -->
@@ -628,10 +749,28 @@ onUnmounted(() => {
                 </button>
                 <button
                   class="btn-secondary px-2.5 py-1 text-xs"
-                  :disabled="!onLatest"
+                  :disabled="!onLatest || !!view.meta.archived_at"
                   @click="edit"
                 >
                   Edit
+                </button>
+                <button
+                  v-if="view.meta.archived_at"
+                  class="btn-secondary px-2.5 py-1 text-xs"
+                  data-testid="artifact-restore"
+                  :disabled="restoring"
+                  @click="restore"
+                >
+                  {{ restoring ? 'Restoring…' : 'Restore' }}
+                </button>
+                <button
+                  v-else-if="view.meta.name !== 'goal'"
+                  class="btn-secondary px-2.5 py-1 text-xs"
+                  data-testid="artifact-archive"
+                  :disabled="archiving"
+                  @click="archive"
+                >
+                  {{ archiving ? 'Archiving…' : 'Archive' }}
                 </button>
                 <button
                   class="btn-danger px-2.5 py-1 text-xs"

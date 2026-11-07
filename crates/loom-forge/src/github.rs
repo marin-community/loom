@@ -279,7 +279,7 @@ async fn sync_status_comment_once_inner(state: &AppState, branch_id: &str) -> bo
     // deliberate `gh` comment, posting one is the "please read this" act.
     let artifacts: Vec<String> = match branch_mod::get(&state.db, branch_id).await {
         Ok(Some(branch)) => {
-            weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id)
+            weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id, false)
                 .await
                 .unwrap_or_default()
                 .into_iter()

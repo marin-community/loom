@@ -31,6 +31,8 @@ fn exports() -> &'static [Export] {
             export::<artifacts::list::Op>("list"),
             export::<artifacts::get::Op>("get"),
             export::<artifacts::write::Op>("write"),
+            export::<artifacts::archive::Op>("archive"),
+            export::<artifacts::restore::Op>("restore"),
             export::<artifacts::delete::Op>("delete"),
             export::<artifacts::history::Op>("history"),
             export::<artifacts::threads::list::Op>("threads"),
@@ -63,7 +65,9 @@ fn capability_sets() -> &'static [CapabilitySet] {
 fn describe_capability(grant: &str) -> &'static str {
     match grant {
         "loom/artifacts/read@v1" => "List and read versioned artifacts and their discussions.",
-        "loom/artifacts/write@v1" => "Write, delete, comment on, and resolve versioned artifacts.",
+        "loom/artifacts/write@v1" => {
+            "Write, archive, restore, delete, comment on, and resolve versioned artifacts."
+        }
         _ => "Versioned artifact operations.",
     }
 }
@@ -125,6 +129,7 @@ async fn with_dashboard_url(
             let mut artifacts = client
                 .invoke::<artifacts::list::Op>(&artifacts::list::Input {
                     repo,
+                    all: matches!(arguments.get("all"), Some(Value::Bool(true))),
                     branch: branch.to_string(),
                 })
                 .await?;
@@ -215,7 +220,15 @@ mod tests {
     #[test]
     fn capability_sets_are_grouped_by_grant() {
         assert_eq!(expand_tool_set("loom/artifacts/read@v1").unwrap().len(), 4);
-        assert_eq!(expand_tool_set("loom/artifacts/write@v1").unwrap().len(), 4);
+        // write, archive, restore, delete, comment, resolve.
+        let write = expand_tool_set("loom/artifacts/write@v1").unwrap();
+        assert_eq!(write.len(), 6);
+        assert!(write
+            .iter()
+            .any(|rule| rule == "mcp__loom__artifact_archive"));
+        assert!(write
+            .iter()
+            .any(|rule| rule == "mcp__loom__artifact_restore"));
         assert!(expand_tool_set("mcp/artifact/read@v1").is_none());
     }
 }

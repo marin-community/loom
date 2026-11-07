@@ -25,8 +25,13 @@ fn row(artifact: &ArtifactMeta) -> String {
     } else {
         format!("  {}", artifact.title)
     };
+    let archived = if artifact.archived_at.is_some() {
+        "  [archived]"
+    } else {
+        ""
+    };
     format!(
-        "{}{:<24} [rev {}] {}{title}",
+        "{}{:<24} [rev {}] {}{title}{archived}",
         scope(artifact.branch_id.as_deref()),
         artifact.name,
         artifact.rev,
@@ -54,6 +59,9 @@ fn envelope(artifact: &ArtifactMeta) -> String {
     lines.push(format!("rev:     {}", artifact.rev));
     lines.push(format!("created: {}", artifact.created_at));
     lines.push(format!("updated: {}", artifact.updated_at));
+    if let Some(archived_at) = &artifact.archived_at {
+        lines.push(format!("archived: {archived_at}"));
+    }
     lines.join("\n")
 }
 
@@ -94,6 +102,18 @@ impl Render for artifacts::get::Op {
         } else {
             output.content.clone()
         }
+    }
+}
+
+impl Render for artifacts::archive::Op {
+    fn text(output: &ArtifactView, _: &NoView) -> String {
+        format!("archived {} (rev {})", output.meta.name, output.meta.rev)
+    }
+}
+
+impl Render for artifacts::restore::Op {
+    fn text(output: &ArtifactView, _: &NoView) -> String {
+        format!("restored {} (rev {})", output.meta.name, output.meta.rev)
     }
 }
 

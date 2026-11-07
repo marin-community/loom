@@ -588,8 +588,9 @@ async fn cue_inputs(db: &Db, session: &Session, branch: &Branch) -> Result<Optio
     if page.records.is_empty() {
         return Ok(None);
     }
-    let artifacts =
-        recent_artifacts(artifact::list_for_session(db, &branch.repo_root, &branch.id).await?);
+    let artifacts = recent_artifacts(
+        artifact::list_for_session(db, &branch.repo_root, &branch.id, false).await?,
+    );
     Ok(Some(CueInputs { page, artifacts }))
 }
 

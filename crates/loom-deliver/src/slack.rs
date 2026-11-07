@@ -971,15 +971,18 @@ async fn sync_status_message_once_inner(state: &AppState, branch_id: &str) -> bo
     retain_current_session_events(&mut events, &wired.set_at, &session.created_at);
     let artifacts: Vec<String> = if presentation.show_artifacts {
         match crate::branch::get(&state.db, branch_id).await {
-            Ok(Some(branch)) => {
-                weaver_core::artifact::list_for_session(&state.db, &branch.repo_root, branch_id)
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|a| a.name)
-                    .filter(|n| n != "goal")
-                    .collect()
-            }
+            Ok(Some(branch)) => weaver_core::artifact::list_for_session(
+                &state.db,
+                &branch.repo_root,
+                branch_id,
+                false,
+            )
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|a| a.name)
+            .filter(|n| n != "goal")
+            .collect(),
             _ => Vec::new(),
         }
     } else {

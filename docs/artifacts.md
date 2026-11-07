@@ -21,6 +21,16 @@ select an older one. Concurrent user and agent writes therefore create history
 instead of overwriting a revision. Removing an artifact removes all of its
 revisions; individual revisions are not pruned.
 
+Archiving retires a document without destroying it. `artifacts.archive` sets
+`archived_at`, which hides the artifact from every default listing — the session
+panel, `loom artifacts ls`, catch-up, and the Slack/GitHub status cards — while
+leaving the envelope, its revisions, reviews, and discussion threads intact.
+Archived documents still resolve by name and id, so links, `artifact:<name>`
+embeds, and their history keep working, and `artifacts.restore` clears the flag.
+A write to an archived artifact is refused until it is restored, so a stray
+write cannot quietly put a retired document back in front of every session in
+the repo. The `goal` artifact cannot be archived.
+
 Markdown is the primary format. The renderer supports GFM and Mermaid and
 projects these live reference forms:
 
@@ -60,8 +70,10 @@ running server's machine-readable contract.
 
 Session **Review → Artifacts** lists branch and shared documents, renders a
 selected revision, and exposes source editing as a secondary mode. Saving an
-edit creates a new revision. The panel can dock in the work area or open beside
-Conversation/Agent without creating a global Artifacts destination.
+edit creates a new revision. `Show archived` in the list header includes retired
+documents, and an archived document's toolbar offers Restore instead of Edit.
+The panel can dock in the work area or open beside Conversation/Agent without
+creating a global Artifacts destination.
 
 Scratch is the inbound complement: Scratch is reference material the user gives
 the agent; artifacts are documents the agent gives the user.

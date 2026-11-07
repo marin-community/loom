@@ -1314,11 +1314,11 @@ mod tests {
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:e2196b45b3727a2993f8c6fb29e1c28d067cbcd28236357b1120e88e175cb0c2",
+                "sha256:0d30a77b6ce8298c95eb36217e6c0217c0e8b15756fad577659a3d8eab94795b",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:517436e95f976e259d652d3d969cf8f2312230223ba44a5c9f24e080643e370b",
+                "sha256:997581be29ecee9edb3f3254b31717a4d5d9343423add8f1c5b132555fb2b8e7",
             ),
             (
                 "loom/issues/read@v1",

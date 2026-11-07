@@ -42,13 +42,14 @@ fn loom_bin() -> std::path::PathBuf {
 /// every declaration-served command.
 async fn seed_session(
     db: &weaver_core::db::Db,
+    id: &str,
     branch_id: &str,
     policy: &session_mod::SessionLaunchPolicy,
 ) -> loom::session::Session {
     session_mod::insert_with_policy(
         db,
         &session_mod::NewSession {
-            id: "sess-agent-cli".to_string(),
+            id: id.to_string(),
             branch_id: branch_id.to_string(),
             work_dir: "/repo".to_string(),
             term_session: "weaver-sess-agent-cli".to_string(),
@@ -175,7 +176,7 @@ impl Env {
         };
         tokio::spawn(server::serve(state, listener));
 
-        let session = seed_session(&pool, &branch.id, &policy).await;
+        let session = seed_session(&pool, "sess-agent-cli", &branch.id, &policy).await;
         let token = auth::create_session_token(&pool, None, &session.id, &branch.id)
             .await
             .unwrap();
@@ -258,6 +259,38 @@ impl Env {
     /// success) — for tests exercising a failure path.
     fn run_raw(&self, args: &[&str]) -> std::process::Output {
         self.command(args).output().expect("failed to spawn weaver")
+    }
+
+    /// Register a second session in the same repo on its own branch, returning
+    /// its branch id and credential — what a *different* session sees of a
+    /// repo-shared document.
+    async fn add_session(&self, id: &str, branch_name: &str) -> (String, String) {
+        let branch = weaver_core::branch::upsert(&self.db, &self.repo_root, branch_name, "main")
+            .await
+            .unwrap();
+        seed_session(&self.db, id, &branch.id, &launch_policy()).await;
+        let token = auth::create_session_token(&self.db, None, id, &branch.id)
+            .await
+            .unwrap();
+        (branch.id, token)
+    }
+
+    /// Run the Loom binary as another session's credential.
+    fn run_as(&self, branch_id: &str, token: &str, args: &[&str]) -> String {
+        let out = Command::new(loom_bin())
+            .args(args)
+            .env("WEAVER_API", format!("http://{}", self.addr))
+            .env("WEAVER_BRANCH", branch_id)
+            .env("LOOM_TOKEN", token)
+            .output()
+            .expect("failed to spawn weaver");
+        assert!(
+            out.status.success(),
+            "weaver {args:?} failed as {branch_id}: {} / {}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
     async fn replace_token_capabilities(&self, capabilities: Vec<String>) {
@@ -822,6 +855,117 @@ async fn artifact_history_lists_every_revision() {
         history.contains("agent"),
         "history names the author: {history}"
     );
+}
+
+/// Archive hides a shared document from every session's default listing without
+/// destroying it: `--all` reveals it, `show`/`history` still resolve it, a write
+/// has to restore first, and restore brings it back for everyone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_archive_hides_until_all_and_restore_is_lossless() {
+    let env = Env::start().await;
+    env.run_with_stdin(
+        &["artifacts", "write", "brief", "--repo"],
+        "# Brief\n\nBody.\n",
+    );
+    let (other_branch, other_token) = env.add_session("sess-other", "feature-other").await;
+    assert!(
+        env.run_as(&other_branch, &other_token, &["artifacts", "ls"])
+            .contains("repo:brief"),
+        "a repo-shared document is visible from another session"
+    );
+
+    // One open discussion thread, so archiving can be shown to keep it.
+    env.run(&[
+        "artifacts",
+        "comment",
+        "brief",
+        "--quote",
+        "Body.",
+        "note",
+        "this",
+    ]);
+
+    let out = env.run(&["artifacts", "archive", "brief", "--repo"]);
+    assert_eq!(out.trim(), "archived brief (rev 1)");
+
+    // A thread opened before archiving still lists afterwards: history and
+    // discussion are not part of the visibility state.
+    assert!(env
+        .run(&["artifacts", "threads", "brief"])
+        .contains("Body."));
+
+    // Gone from both sessions' default listings, still reachable by name.
+    assert!(!env.run(&["artifacts", "ls"]).contains("brief"));
+    assert!(!env
+        .run_as(&other_branch, &other_token, &["artifacts", "ls"])
+        .contains("brief"));
+    assert!(!env.run(&["artifacts", "ls", "--repo"]).contains("brief"));
+    assert!(env.run(&["artifacts", "show", "brief"]).contains("Body."));
+    assert!(env
+        .run(&["artifacts", "history", "brief"])
+        .contains("rev 1"));
+
+    // `--all` includes it and marks it; `show --meta` reports the state.
+    let all = env.run(&["artifacts", "ls", "--all"]);
+    assert!(
+        all.contains("brief") && all.contains("[archived]"),
+        "ls --all: {all}"
+    );
+    let repo_all = env.run(&["artifacts", "ls", "--repo", "--all"]);
+    assert!(
+        repo_all.contains("brief") && repo_all.contains("[archived]"),
+        "ls --repo --all: {repo_all}"
+    );
+    assert!(env
+        .run(&["artifacts", "show", "brief", "--meta"])
+        .contains("archived:"));
+
+    // A write cannot quietly resurrect it.
+    let refused = env.run_raw(&["artifacts", "write", "brief", "--repo"]);
+    assert!(
+        !refused.status.success(),
+        "writing to an archived artifact is refused"
+    );
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal.contains("archived"),
+        "refusal names the state: {refusal}"
+    );
+    // Resolution, not the flag, decides: without `--repo` this branch has no
+    // copy, so the name resolves to the same archived shared row and is refused.
+    let refused_plain = env.run_raw(&["artifacts", "write", "brief"]);
+    assert!(
+        !refused_plain.status.success(),
+        "a plain write resolves the archived shared artifact and is refused"
+    );
+
+    // Restore is lossless: same revision, visible to both sessions again.
+    let out = env.run(&["artifacts", "restore", "brief", "--repo"]);
+    assert_eq!(out.trim(), "restored brief (rev 1)");
+    assert!(env.run(&["artifacts", "ls"]).contains("brief"));
+    assert!(env
+        .run_as(&other_branch, &other_token, &["artifacts", "ls"])
+        .contains("repo:brief"));
+    assert!(env
+        .run(&["artifacts", "show", "brief", "--rev", "1"])
+        .contains("Body."));
+    assert!(!env.run(&["artifacts", "ls"]).contains("[archived]"));
+}
+
+/// The goal is the session's charter, so it is not an archivable document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn artifact_archive_refuses_the_goal_artifact() {
+    let env = Env::start().await;
+    let refused = env.run_raw(&["artifacts", "archive", "goal"]);
+    assert!(!refused.status.success(), "archiving the goal is refused");
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        refusal.contains("goal artifact cannot be archived"),
+        "{refusal}"
+    );
+    assert!(env.run(&["artifacts", "ls"]).contains("goal"));
 }
 
 /// `resolve` answers with the thread as it now stands — `[resolved]` — instead

@@ -7,6 +7,32 @@ use super::registry::OperationSpec;
 use super::OperationBundle;
 
 pub(super) use super::prelude;
+pub mod archive {
+    use super::prelude::*;
+
+    /// Archive an artifact: hide it from default listings without removing it.
+    ///
+    /// The document stays readable by name and id, so links, embeds, reviews,
+    /// and review threads keep working. `artifacts.restore` reverses it.
+    #[operation(id = "artifacts.archive", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts archive",
+                render = custom)]
+    pub struct Input {
+        /// The artifact's name.
+        #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
+        pub name: String,
+        /// When true, archive the repository-shared artifact. By default,
+        /// resolve this branch's own copy first.
+        #[operand(default = false)]
+        pub repo: bool,
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = ArtifactView;
+}
+
 pub mod delete {
     use super::prelude::*;
 
@@ -97,6 +123,9 @@ pub mod list {
         /// only this branch's own artifacts and the repository-shared ones.
         #[operand(default = false)]
         pub repo: bool,
+        /// When true, include archived artifacts. By default they are hidden.
+        #[operand(default = false)]
+        pub all: bool,
         #[operand(context)]
         pub branch: String,
     }
@@ -126,6 +155,29 @@ pub mod raw {
     }
 
     pub type Output = ();
+}
+
+pub mod restore {
+    use super::prelude::*;
+
+    /// Restore an archived artifact, making it visible in listings again.
+    #[operation(id = "artifacts.restore", actor = SessionSelf, scope = Branch, risk = Write,
+                grants = ["loom/artifacts/write@v1"], cli = "artifacts restore",
+                render = custom)]
+    pub struct Input {
+        /// The artifact's name.
+        #[operand(positional)]
+        #[schemars(length(min = 1, max = 255))]
+        pub name: String,
+        /// When true, restore the repository-shared artifact. By default,
+        /// resolve this branch's own copy first.
+        #[operand(default = false)]
+        pub repo: bool,
+        #[operand(context)]
+        pub branch: String,
+    }
+
+    pub type Output = ArtifactView;
 }
 
 pub mod threads {
@@ -328,6 +380,8 @@ static OPERATIONS: &[&OperationSpec] = &[
     get::SPEC,
     raw::SPEC,
     write::SPEC,
+    archive::SPEC,
+    restore::SPEC,
     delete::SPEC,
     history::SPEC,
     url::SPEC,
