@@ -98,7 +98,7 @@ pub async fn reconcile_supervisors(
         );
     }
 
-    let sessions: HashMap<String, String> = session::list(db)
+    let sessions: HashMap<String, String> = session::list_liveness(db)
         .await?
         .into_iter()
         .map(|session| (session.id, session.status))

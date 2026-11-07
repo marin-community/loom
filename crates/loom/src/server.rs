@@ -194,7 +194,7 @@ pub async fn run(addr: &str) -> Result<()> {
 /// monitor to mark orphaned, while a surviving relay is re-subscribed from the
 /// persisted ACK cursor.
 pub async fn repair_acp_sessions(state: &AppState) {
-    let sessions = match session_mod::list(&state.db).await {
+    let sessions = match session_mod::list_liveness(&state.db).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("acp repair: listing sessions failed: {e}");
