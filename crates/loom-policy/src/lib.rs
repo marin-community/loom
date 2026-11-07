@@ -7,6 +7,7 @@ pub mod db;
 pub mod oauth;
 pub mod profile;
 pub mod remote_mcp;
+pub mod shared_grants;
 
 pub use loom_agent::Ctx;
 pub use loom_agent::{

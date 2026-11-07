@@ -96,6 +96,7 @@ pub async fn run(addr: &str) -> Result<()> {
     tracing::debug!(addr = %actual, "listener bound");
 
     let db = db::connect(&db::default_db_path()).await?;
+    crate::auth::shared_grant_config(&db).await?;
     ensure_bootstrap_operator(&db).await?;
     runner::validate().await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());

@@ -17,6 +17,7 @@ pub struct Run {
     pub profile: String,
     pub idempotency_key: String,
     pub channel: Option<String>,
+    pub shared_grant_id: Option<String>,
     pub request_json: String,
     pub session_id: String,
     pub status: String,
@@ -40,6 +41,7 @@ impl From<Run> for RunView {
             profile: run.profile,
             idempotency_key: run.idempotency_key,
             channel: run.channel,
+            shared_grant_id: run.shared_grant_id,
             session_id: run.session_id,
             status: run.status,
             outcome: run.outcome,
@@ -62,6 +64,7 @@ pub struct NewRun<'a> {
     pub profile: &'a str,
     pub idempotency_key: &'a str,
     pub channel: Option<&'a str>,
+    pub shared_grant_id: Option<&'a str>,
     pub request_json: &'a str,
 }
 
@@ -101,8 +104,8 @@ pub async fn reserve(db: &Db, request: NewRun<'_>) -> Result<Reservation> {
     let result = sqlx::query(
         "INSERT INTO automation_runs
          (id, actor_subject, source, service_tag, profile, idempotency_key, channel,
-          request_json, session_id, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?)
+          request_json, session_id, status, created_at, updated_at, shared_grant_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, ?, ?)
          ON CONFLICT(actor_subject, idempotency_key) DO NOTHING",
     )
     .bind(&id)
@@ -116,6 +119,7 @@ pub async fn reserve(db: &Db, request: NewRun<'_>) -> Result<Reservation> {
     .bind(&session_id)
     .bind(&now)
     .bind(&now)
+    .bind(request.shared_grant_id)
     .execute(db)
     .await?;
     let run = get_by_key(db, request.subject, request.idempotency_key)
@@ -593,6 +597,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "delivery",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -611,6 +616,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "delivery",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "different",
             },
         )
@@ -638,6 +644,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "key",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -667,6 +674,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "first",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -690,6 +698,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "second",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -723,6 +732,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "retry",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -757,6 +767,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "suspend-owner",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -809,6 +820,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "suspend-delivery",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -842,6 +854,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "cancelled-channel",
                 channel: Some("operator"),
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -881,6 +894,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "missing-session",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -911,6 +925,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "removed-session",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -941,6 +956,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "cancelled-race",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )
@@ -979,6 +995,7 @@ mod tests {
                 profile: "default",
                 idempotency_key: "creating-session",
                 channel: None,
+                shared_grant_id: None,
                 request_json: "{}",
             },
         )

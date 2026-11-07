@@ -104,6 +104,11 @@ pub enum Grant {
     /// with no principal yet is still authorized through the ordinary
     /// `authorize()` path.
     Anonymous,
+    Shared {
+        claims: Box<crate::shared_grants::SharedGrantClaims>,
+        #[serde(skip)]
+        bearer: Option<SharedBearer>,
+    },
     Automation {
         subject: String,
         profiles: Vec<String>,
@@ -118,6 +123,132 @@ pub enum Grant {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         capabilities: Option<Vec<String>>,
     },
+}
+
+/// Request-only proof: never serialized into stored grants or exposed in logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SharedBearer(String);
+
+impl SharedBearer {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SharedBearer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedBearer([redacted])")
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedGrantConfig {
+    pub issuer: String,
+    pub public_keys: Vec<String>,
+    pub authorize_url: String,
+    pub credentials_url: String,
+    pub callback_token_file: std::path::PathBuf,
+    pub ca_file: Option<std::path::PathBuf>,
+    pub profiles: HashMap<String, SharedGrantProfile>,
+}
+
+impl SharedGrantConfig {
+    pub fn client(&self) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(10));
+        if let Some(path) = &self.ca_file {
+            let pem = std::fs::read(path).context("reading shared grant authority CA bundle")?;
+            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                .context("parsing shared grant authority CA bundle")?;
+            anyhow::ensure!(
+                !certificates.is_empty(),
+                "shared grant authority CA bundle is empty"
+            );
+            for certificate in certificates {
+                builder = builder.add_root_certificate(certificate);
+            }
+        }
+        builder
+            .build()
+            .context("constructing shared grant authority HTTPS client")
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedGrantProfile {
+    pub cwd: String,
+    pub revision: i64,
+    pub resolver_revision: String,
+}
+
+pub fn validate_shared_url(value: &str) -> Result<()> {
+    let url = reqwest::Url::parse(value)?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    anyhow::ensure!(
+        url.host().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && (url.scheme() == "https" || (url.scheme() == "http" && loopback)),
+        "shared grant endpoints require HTTPS except on loopback, without userinfo, query, or fragment"
+    );
+    Ok(())
+}
+
+pub async fn shared_grant_config(db: &Db) -> Result<Option<SharedGrantConfig>> {
+    let Some(value) = crate::config::try_get(db, weaver_core::config::SHARED_GRANTS_KEY).await?
+    else {
+        return Ok(None);
+    };
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+    crate::config::latch_shared_grant_mode(db).await?;
+    let config: SharedGrantConfig = serde_json::from_str(&value)?;
+    validate_shared_url(&config.authorize_url)?;
+    validate_shared_url(&config.credentials_url)?;
+    for (name, profile) in &config.profiles {
+        crate::profile::validate_name(name).map_err(|error| anyhow!(error))?;
+        anyhow::ensure!(
+            std::path::Path::new(&profile.cwd).is_absolute()
+                && std::path::Path::new(&profile.cwd)
+                    .components()
+                    .all(|part| !matches!(part, std::path::Component::ParentDir)),
+            "shared grant launch roots must be absolute paths without parent components"
+        );
+        anyhow::ensure!(
+            profile.revision > 0 && !profile.resolver_revision.is_empty(),
+            "shared grant profiles require pinned revisions"
+        );
+    }
+    crate::shared_grants::SharedGrantVerifier::new(&config.issuer, &config.public_keys)?;
+    Ok(Some(config))
+}
+
+/// Whether shared grant configuration permanently disabled implicit local authority.
+pub async fn shared_grant_authorization_enabled(db: &Db) -> Result<bool> {
+    if crate::config::try_get(db, weaver_core::config::SHARED_GRANT_MODE_LATCH_KEY)
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let configured = crate::config::try_get(db, weaver_core::config::SHARED_GRANTS_KEY).await?;
+    if configured.is_some_and(|value| !value.trim().is_empty()) {
+        crate::config::latch_shared_grant_mode(db).await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// An authenticated caller: identity, proof mechanism, and explicit grant.
@@ -157,7 +288,10 @@ impl Principal {
         match self.grant {
             Grant::Admin => Some(UserRole::Admin),
             Grant::User => Some(UserRole::User),
-            Grant::Automation { .. } | Grant::Session { .. } | Grant::Anonymous => None,
+            Grant::Automation { .. }
+            | Grant::Shared { .. }
+            | Grant::Session { .. }
+            | Grant::Anonymous => None,
         }
     }
 }
@@ -838,7 +972,9 @@ pub async fn verify_login(db: &Db, username: &str, password: &str) -> Result<Opt
 
 /// Build the loopback [`Principal`] — the primary user, marked [`AuthVia::Loopback`].
 pub async fn loopback_principal(db: &Db) -> Result<Option<Principal>> {
-    if github_organization_authorization_enabled(db).await? {
+    if github_organization_authorization_enabled(db).await?
+        || shared_grant_authorization_enabled(db).await?
+    {
         return Ok(None);
     }
     let Some(username) = primary_user(db).await? else {
@@ -1065,6 +1201,29 @@ pub async fn lookup_connector_token(db: &Db, token: &str) -> Result<Option<Princ
 
 async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Option<Principal>> {
     if !token.starts_with(TOKEN_PREFIX) {
+        if let Some(config) = shared_grant_config(db).await.inspect_err(|_| {
+            tracing::warn!(
+                stage = "configuration",
+                "shared grant authentication configuration is invalid"
+            )
+        })? {
+            let verifier = crate::shared_grants::SharedGrantVerifier::new(
+                &config.issuer,
+                &config.public_keys,
+            )?;
+            if let Ok(claims) = verifier.verify(token) {
+                return Ok(Some(Principal {
+                    username: claims.sub.clone(),
+                    github_login: None,
+                    via: AuthVia::Token,
+                    grant: Grant::Shared {
+                        claims: Box::new(claims),
+                        bearer: Some(SharedBearer(token.to_string())),
+                    },
+                    automation_context: None,
+                }));
+            }
+        }
         return Ok(crate::automation::verify(db, token)
             .await?
             .map(|claims| Principal {
@@ -1105,7 +1264,10 @@ async fn resolve_token(db: &Db, token: &str, accept_oauth: bool) -> Result<Optio
     if kind == TokenKind::OAuth.as_str() && !accept_oauth {
         return Ok(None);
     }
-    if kind == TokenKind::Local.as_str() && github_organization_authorization_enabled(db).await? {
+    if kind == TokenKind::Local.as_str()
+        && (github_organization_authorization_enabled(db).await?
+            || shared_grant_authorization_enabled(db).await?)
+    {
         return Ok(None);
     }
     let role_backed = [TokenKind::Pat, TokenKind::Local, TokenKind::Engine]
@@ -2821,6 +2983,40 @@ mod tests {
         // each ensures a working bearer for the same owner.
         let first = register_then_lookup(&db).await;
         assert_eq!(first.username, "rjpower");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn shared_grant_withdrawal_keeps_local_authority_disabled() {
+        let db = connect_in_memory_with_owner("rjpower").await;
+        let (local, _) =
+            create_token_kind(&db, "rjpower", LOCAL_TOKEN_NAME, None, TokenKind::Local)
+                .await
+                .unwrap();
+        let (operator, _) = create_token(&db, "rjpower", "operator", None)
+            .await
+            .unwrap();
+        assert!(lookup_token(&db, &local).await.unwrap().is_some());
+        // An imported deployment may predate the latch. Even malformed policy must latch before removal.
+        sqlx::query("INSERT INTO deployment_settings (key,value) VALUES (?, ?)")
+            .bind(weaver_core::config::SHARED_GRANTS_KEY)
+            .bind("invalid-json")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(shared_grant_config(&db).await.is_err());
+        assert!(lookup_token(&db, &local).await.unwrap().is_none());
+        crate::config::reconcile_deployment(&db, &[], true)
+            .await
+            .unwrap();
+        assert!(shared_grant_authorization_enabled(&db).await.unwrap());
+        assert!(loopback_principal(&db).await.unwrap().is_none());
+        assert!(lookup_token(&db, &local).await.unwrap().is_none());
+        assert!(lookup_token(&db, &operator)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_admin());
     }
 
     #[tokio::test]

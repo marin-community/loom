@@ -49,6 +49,9 @@ pub const GITHUB_ORGANIZATIONS_KEY: &str = "auth.github_organizations";
 /// reappear because configuration or teardown state changed.
 pub const GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY: &str =
     "auth.github_organization_shared_mode_latched";
+pub const SHARED_GRANTS_KEY: &str = "auth.shared_grants";
+/// Hidden durable boundary; removing the public policy must not restore machine authority.
+pub const SHARED_GRANT_MODE_LATCH_KEY: &str = "auth.shared_grant_mode_latched";
 /// Reasoning effort for Slack-origin sessions. Slack conversations usually
 /// expect a prompt answer, so they use a cheaper/faster tier than long-form
 /// workspace sessions by default.
@@ -379,6 +382,15 @@ pub const REGISTRY: &[SettingSpec] = &[
             mode stays latched and implicit local admin remains disabled.",
         kind: SettingKind::String,
         default: DEFAULT_GITHUB_ORGANIZATIONS,
+        group: "Authentication",
+        options: &[],
+    },
+    SettingSpec {
+        key: SHARED_GRANTS_KEY,
+        label: "Shared grant authority",
+        description: "JSON trust policy with issuer, public_keys (Ed25519 PEM), authorize_url, credentials_url, callback_token_file (private Loom service credential), optional ca_file (PEM CA bundle), and profiles mapping approved restricted profile names to {cwd, revision, resolver_revision}. Empty disables shared tokens. Enabling permanently disables implicit local admin and machine tokens, even after the setting is removed.",
+        kind: SettingKind::Text,
+        default: "",
         group: "Authentication",
         options: &[],
     },
@@ -1021,50 +1033,62 @@ pub async fn get_bool(db: &Db, key: &str, default: bool) -> bool {
 /// (so the key falls back to its deployment value, then its registered default).
 pub type Change = (String, Option<String>);
 
-async fn effective_github_organizations(
-    connection: &mut SqliteConnection,
-) -> Result<Option<String>> {
+async fn effective_setting(connection: &mut SqliteConnection, key: &str) -> Result<Option<String>> {
     let runtime = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
-        .bind(GITHUB_ORGANIZATIONS_KEY)
+        .bind(key)
         .fetch_optional(&mut *connection)
         .await?;
     if runtime.is_some() {
         return Ok(runtime);
     }
     sqlx::query_scalar("SELECT value FROM deployment_settings WHERE key = ?")
-        .bind(GITHUB_ORGANIZATIONS_KEY)
+        .bind(key)
         .fetch_optional(connection)
         .await
         .map_err(Into::into)
 }
 
-async fn latch_github_organization_shared_mode_if_configured(
-    connection: &mut SqliteConnection,
-    now: &str,
-) -> Result<()> {
-    let configured = effective_github_organizations(connection).await?;
-    if configured.is_none_or(|value| value.trim().is_empty()) {
-        return Ok(());
-    }
-    sqlx::query(
-        "INSERT INTO settings (key, value, updated_at) VALUES (?, 'latched', ?)
+async fn latch_configured_shared_modes(connection: &mut SqliteConnection, now: &str) -> Result<()> {
+    for (key, latch) in [
+        (
+            GITHUB_ORGANIZATIONS_KEY,
+            GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY,
+        ),
+        (SHARED_GRANTS_KEY, SHARED_GRANT_MODE_LATCH_KEY),
+    ] {
+        let configured = effective_setting(connection, key).await?;
+        if configured.is_none_or(|value| value.trim().is_empty()) {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?, 'latched', ?)
          ON CONFLICT(key) DO NOTHING",
-    )
-    .bind(GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
-    .bind(now)
-    .execute(connection)
-    .await?;
+        )
+        .bind(latch)
+        .bind(now)
+        .execute(&mut *connection)
+        .await?;
+    }
     Ok(())
 }
 
 /// Permanently enter shared-deployment mode for this database.
 pub async fn latch_github_organization_shared_mode(db: &Db) -> Result<()> {
+    latch_shared_mode(db, GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY).await
+}
+
+/// Keep implicit machine authority disabled after the shared grant setting is removed.
+pub async fn latch_shared_grant_mode(db: &Db) -> Result<()> {
+    latch_shared_mode(db, SHARED_GRANT_MODE_LATCH_KEY).await
+}
+
+async fn latch_shared_mode(db: &Db, key: &str) -> Result<()> {
     let now = now_iso();
     sqlx::query(
         "INSERT INTO settings (key, value, updated_at) VALUES (?, 'latched', ?)
          ON CONFLICT(key) DO NOTHING",
     )
-    .bind(GITHUB_ORGANIZATION_SHARED_MODE_LATCH_KEY)
+    .bind(key)
     .bind(now)
     .execute(db)
     .await?;
@@ -1077,9 +1101,8 @@ pub async fn latch_github_organization_shared_mode(db: &Db) -> Result<()> {
 pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
     let mut tx = crate::db::begin_immediate(db).await?;
     let now = now_iso();
-    // Preserve shared mode even when this batch clears a pre-existing
-    // organization setting.
-    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
+    // Preserve shared mode when this batch removes a previously configured authority.
+    latch_configured_shared_modes(&mut tx, &now).await?;
     for (key, value) in changes {
         match value {
             Some(value) => {
@@ -1104,7 +1127,7 @@ pub async fn apply(db: &Db, changes: &[Change]) -> Result<()> {
             }
         }
     }
-    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
+    latch_configured_shared_modes(&mut tx, &now).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1140,7 +1163,7 @@ pub async fn reconcile_deployment(db: &Db, values: &[(String, String)], prune: b
     let now = now_iso();
     // A deployment prune must not make implicit machine-owner authority
     // reappear after shared access was enabled.
-    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
+    latch_configured_shared_modes(&mut tx, &now).await?;
     for (key, value) in values {
         sqlx::query(
             "INSERT INTO deployment_settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -1169,7 +1192,7 @@ pub async fn reconcile_deployment(db: &Db, values: &[(String, String)], prune: b
             }
         }
     }
-    latch_github_organization_shared_mode_if_configured(&mut tx, &now).await?;
+    latch_configured_shared_modes(&mut tx, &now).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1394,6 +1417,41 @@ mod tests {
         assert_eq!(reset.source, SettingSource::Default);
         assert_eq!(reset.deployment_value, None);
         assert!(reset.is_default);
+    }
+
+    #[tokio::test]
+    async fn shared_grant_mode_survives_runtime_clear_and_deployment_prune() {
+        for deployment in [false, true] {
+            let db = crate::db::connect_in_memory().await.unwrap();
+            if deployment {
+                // A pre-existing deployment must latch when prune removes the effective setting.
+                sqlx::query("INSERT INTO deployment_settings (key,value) VALUES (?,?)")
+                    .bind(SHARED_GRANTS_KEY)
+                    .bind("configured-authority")
+                    .execute(&db)
+                    .await
+                    .unwrap();
+                reconcile_deployment(&db, &[], true).await.unwrap();
+            } else {
+                apply(
+                    &db,
+                    &[(
+                        SHARED_GRANTS_KEY.into(),
+                        Some("configured-authority".into()),
+                    )],
+                )
+                .await
+                .unwrap();
+                apply(&db, &[(SHARED_GRANTS_KEY.into(), None)])
+                    .await
+                    .unwrap();
+            }
+            assert!(try_get(&db, SHARED_GRANT_MODE_LATCH_KEY)
+                .await
+                .unwrap()
+                .is_some());
+            assert!(try_get(&db, SHARED_GRANTS_KEY).await.unwrap().is_none());
+        }
     }
 
     #[tokio::test]

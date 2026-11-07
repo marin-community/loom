@@ -18,8 +18,10 @@ pub mod create {
     /// session: the entry point GitHub Actions, ops scripts, and Grafana alerts
     /// call through their federated automation credential.
     ///
-    /// The runtime is the only real caller, presenting an automation bearer token
-    /// minted by `auth.automation_token`. `Admin` can still reach it directly.
+    /// Callers present a Loom automation token or a configured shared authority's
+    /// access JWT. Shared grants require a live session.create decision for the
+    /// approved profile and use its fixed server-side repository. Admin can also
+    /// reach the operation directly.
     #[operation(id = "runs.create", actor = Internal, scope = Global, risk = Write,
                 cli = "runs create")]
     pub struct Input {

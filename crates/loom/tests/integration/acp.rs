@@ -6033,6 +6033,7 @@ async fn scheduled_agent_turn_completes_or_times_out_and_stops_runtime() {
         let reservation = loom::runs::reserve(
             &ts.state.db,
             loom::runs::NewRun {
+                shared_grant_id: None,
                 subject: "scheduler-test",
                 source: "watch",
                 service_tag: "watch",
