@@ -10,9 +10,13 @@ import AcpConversation from './AcpConversation.vue';
 // (`sessions.chat` + `sessions.chat.stream`); a terminal session keeps the iris scrape path
 // (`/conversation`) untouched. One prop, one seam — everything backend-specific
 // lives in the two child components.
-const props = withDefaults(defineProps<{ session: Session; localCommands?: AcpCommand[] }>(), {
-  localCommands: () => [],
-});
+const props = withDefaults(
+  defineProps<{ session: Session; localCommands?: AcpCommand[]; active?: boolean }>(),
+  {
+    localCommands: () => [],
+    active: true,
+  },
+);
 const emit = defineEmits<{ command: [name: string, args: string] }>();
 const isAcp = computed(() => props.session.protocol === 'acp');
 const forwardCommand = (name: string, args: string) => emit('command', name, args);
@@ -175,8 +179,9 @@ watch(
       class="min-h-0 flex-1"
       :session="session"
       :local-commands="localCommands"
+      :active="active"
       @command="forwardCommand"
     />
-    <TerminalConversation v-else class="min-h-0 flex-1" :session="session" />
+    <TerminalConversation v-else class="min-h-0 flex-1" :session="session" :active="active" />
   </div>
 </template>

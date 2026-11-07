@@ -135,6 +135,32 @@ async function queueAcpPrompt(
   if (!res.ok) throw new Error(`queueing ACP prompt failed: ${await res.text()}`);
 }
 
+/** Emulate the display-toggle reset some browsers (notably Safari) apply to a
+ *  scroll container hidden by `v-show`. The real hidden ancestor is the work-area
+ *  wrapper, not the scroller's direct parent: lay that pane out invisibly, zero
+ *  the offset, let the scroll event dispatch while the app still treats the pane
+ *  as inactive, then hide it again. */
+async function dropHiddenScrollOffset(conv: ReturnType<Page['getByTestId']>) {
+  await conv.evaluate(async (el) => {
+    let pane = el.parentElement as HTMLElement | null;
+    while (pane && getComputedStyle(pane).display !== 'none') pane = pane.parentElement;
+    if (!pane) throw new Error('conversation pane is not hidden');
+    const previousDisplay = pane.style.display;
+    pane.style.display = 'block';
+    pane.style.visibility = 'hidden';
+    el.scrollTop = 0;
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+    pane.style.visibility = '';
+    pane.style.display = previousDisplay;
+  });
+}
+
+function footDistance(conv: ReturnType<Page['getByTestId']>) {
+  return conv.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight);
+}
+
 async function holdNextChatSnapshot(page: Page): Promise<{
   read: Promise<void>;
   release: () => void;
@@ -1418,5 +1444,53 @@ test.describe('acp conversation', () => {
         path: test.info().outputPath(`acp-conversation-${theme}.png`),
       });
     }
+  });
+
+  test('returning from an artifact link keeps the conversation place', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await openAcp(page, weaver, { goal: 'say:ready', name: 'acp-back' });
+    await weaver.writeArtifact(s, 'plan', '# The plan\n\nShip it.\n', { title: 'The plan' });
+    const filler = (start: number, count: number) =>
+      Array.from(
+        { length: count },
+        (_, i) => `Paragraph ${start + i}: enough prose to keep the transcript scrolling.`,
+      ).join('\n\n');
+    const prompt = [
+      'say:ready',
+      '',
+      filler(1, 12),
+      `Details are in the [plan](/s/${s.id}/artifacts/plan).`,
+      filler(13, 30),
+    ].join('\n\n');
+    await page.getByTestId('acp-composer-input').fill(prompt);
+    await page.getByTestId('acp-composer-send').click();
+
+    const conv = page.getByTestId('acp-conversation');
+    const link = conv.getByRole('link', { name: 'plan' }).first();
+    await expect(link).toBeVisible({ timeout: 20_000 });
+    await link.scrollIntoViewIfNeeded();
+    // The link sits below the fold, so the reader is off the foot and the pin
+    // has released — the state the return must preserve.
+    await expect.poll(() => footDistance(conv)).toBeGreaterThan(120);
+    const before = await conv.evaluate((el) => el.scrollTop);
+
+    await link.click();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}/artifacts/plan`);
+    await expect(page.getByRole('heading', { name: 'The plan' })).toBeVisible();
+    await dropHiddenScrollOffset(conv);
+
+    // The session is live: a new turn lands while the reader is on the artifact.
+    await queueAcpPrompt(weaver, s, `say:${filler(43, 20).replace(/\n\n/g, ' ')}`);
+    await page.waitForTimeout(1_500);
+
+    await page.goBack();
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${s.id}`);
+    const returned = page.getByTestId('acp-conversation');
+    await expect(returned).toBeVisible();
+    await expect
+      .poll(() => returned.evaluate((el) => el.scrollTop), { timeout: 5_000 })
+      .toBeGreaterThan(before * 0.6);
   });
 });
