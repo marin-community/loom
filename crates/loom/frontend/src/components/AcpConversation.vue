@@ -479,6 +479,8 @@ const composerVisible = computed(() => canSend(props.session));
 const selectedFiles = ref<string[]>([]);
 const attachmentInput = ref<HTMLInputElement | null>(null);
 const uploadingAttachment = ref(false);
+const pendingAttachments: File[] = [];
+let attachmentEpoch = 0;
 const settingsOpen = ref(false);
 const settingsRoot = ref<HTMLElement | null>(null);
 const settingsPanel = ref<HTMLElement | null>(null);
@@ -530,31 +532,93 @@ watch(id, () => {
   selectedFiles.value = [];
   sendError.value = '';
   settingsOpen.value = false;
+  // Abandon any upload owned by the session we just left.
+  pendingAttachments.length = 0;
+  attachmentEpoch += 1;
+  uploadingAttachment.value = false;
 });
 
 function removeSelectedFile(path: string) {
   selectedFiles.value = selectedFiles.value.filter((selected) => selected !== path);
 }
 
+async function attachFiles(files: File[]) {
+  if (!files.length) return;
+  pendingAttachments.push(...files);
+  // A drop during an in-flight upload joins the queue; the active drain picks
+  // it up rather than letting the browser handle the dropped file itself.
+  if (uploadingAttachment.value) return;
+  const sessionId = id.value;
+  const epoch = ++attachmentEpoch;
+  uploadingAttachment.value = true;
+  sendError.value = '';
+  try {
+    while (pendingAttachments.length) {
+      const file = pendingAttachments.shift()!;
+      const uploaded = await uploadSessionScratch(sessionId, file);
+      // A session switch mid-upload must not hand one session's files to another.
+      if (id.value !== sessionId || epoch !== attachmentEpoch) return;
+      if (!selectedFiles.value.includes(uploaded.path)) selectedFiles.value.push(uploaded.path);
+    }
+    window.dispatchEvent(new CustomEvent('loom:scratch-changed', { detail: { id: sessionId } }));
+    resizeComposer();
+  } catch (e) {
+    if (id.value !== sessionId || epoch !== attachmentEpoch) return;
+    pendingAttachments.length = 0;
+    sendError.value = (e as Error).message ?? 'Failed to attach file';
+  } finally {
+    if (epoch === attachmentEpoch) uploadingAttachment.value = false;
+  }
+}
+
 async function onAttachmentPick(event: Event) {
   const input = event.target as HTMLInputElement;
   const files = Array.from(input.files ?? []);
   input.value = '';
-  if (!files.length || uploadingAttachment.value) return;
-  uploadingAttachment.value = true;
-  sendError.value = '';
-  try {
-    for (const file of files) {
-      const uploaded = await uploadSessionScratch(id.value, file);
-      if (!selectedFiles.value.includes(uploaded.path)) selectedFiles.value.push(uploaded.path);
-    }
-    window.dispatchEvent(new CustomEvent('loom:scratch-changed', { detail: { id: id.value } }));
-    resizeComposer();
-  } catch (e) {
-    sendError.value = (e as Error).message ?? 'Failed to attach file';
-  } finally {
-    uploadingAttachment.value = false;
-  }
+  await attachFiles(files);
+}
+
+// The composer accepts a file drop wherever it is, staging the same Scratch
+// attachments as the Attach button so both input paths end up in the prompt.
+const droppingFiles = ref(false);
+
+function isFileDrag(event: DragEvent): boolean {
+  const types = Array.from(event.dataTransfer?.types ?? []);
+  // Some browsers omit or misreport DataTransfer.types; the drop payload is
+  // the authority, so an empty list still counts as a possible file drag.
+  return !types.length || types.includes('Files');
+}
+
+function onComposerDragEnter(event: DragEvent) {
+  if (isFileDrag(event)) droppingFiles.value = true;
+}
+
+function onComposerDragOver(event: DragEvent) {
+  if (!isFileDrag(event)) return;
+  // Keep accepting the drop during an upload: the file is queued instead of
+  // falling through to the browser's own open/navigate handling.
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+}
+
+function onComposerDragLeave(event: DragEvent) {
+  if (!droppingFiles.value) return;
+  // Children fire their own dragleave as the pointer crosses them; only the
+  // exit that leaves the composer ends the highlight.
+  if (
+    event.relatedTarget instanceof Node &&
+    (event.currentTarget as Node).contains(event.relatedTarget)
+  )
+    return;
+  droppingFiles.value = false;
+}
+
+function onComposerDrop(event: DragEvent) {
+  droppingFiles.value = false;
+  const files = event.dataTransfer?.files;
+  if (!files?.length) return;
+  event.preventDefault();
+  void attachFiles(Array.from(files));
 }
 
 async function submitPrompt() {
@@ -2206,9 +2270,17 @@ async function goToActivity(target: {
     <form
       v-if="composerVisible"
       class="acp-composer"
+      :class="{ 'acp-composer--drop': droppingFiles }"
       data-testid="acp-composer"
       @submit.prevent="submitPrompt()"
+      @dragenter="onComposerDragEnter"
+      @dragover="onComposerDragOver"
+      @dragleave="onComposerDragLeave"
+      @drop="onComposerDrop"
     >
+      <div v-if="droppingFiles" class="acp-composer-drop" aria-hidden="true">
+        Drop files to attach
+      </div>
       <p
         v-if="sendError"
         class="acp-composer-error text-xs text-block"
@@ -2918,6 +2990,25 @@ async function goToActivity(target: {
   box-shadow:
     0 7px 24px rgb(0 0 0 / 0.08),
     0 0 0 2px color-mix(in srgb, var(--accent) 13%, transparent);
+}
+.acp-composer--drop {
+  border-color: var(--accent);
+  box-shadow:
+    0 7px 24px rgb(0 0 0 / 0.08),
+    0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.acp-composer-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  pointer-events: none;
 }
 .acp-composer-error {
   margin: 0;
