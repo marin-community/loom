@@ -90,8 +90,11 @@ const props = withDefaults(
     /** Client-local commands owned by the embedding surface (Chat supplies
      * `/clear`; everything else comes from the ACP agent). */
     localCommands?: AcpCommand[];
+    /** Whether the hosting conversation pane is on screen (not hidden by the
+     * work-area tab or a docked artifact). Drives scroll restoration. */
+    active?: boolean;
   }>(),
-  { localCommands: () => [] },
+  { localCommands: () => [], active: true },
 );
 const emit = defineEmits<{ command: [name: string, args: string] }>();
 const id = computed(() => props.session.id);
@@ -1590,9 +1593,11 @@ const progressLabel = computed(() => {
 // ── Follow-the-foot scroll (lib/followFoot.ts): pinned-at-the-newest-exchange. ──
 const convScroll = ref<HTMLElement | null>(null);
 const convBody = ref<HTMLElement | null>(null);
+const paneActive = computed(() => props.active !== false);
 const { pinned, scrollToBottom, scrollToEnd, autoFollow, trackPin } = useFollowFoot(
   convScroll,
   convBody,
+  paneActive,
 );
 function onScroll() {
   trackPin();

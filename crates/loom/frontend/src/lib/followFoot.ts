@@ -6,11 +6,29 @@
 // ResizeObserver on the transcript body does the following; a one-shot scroll
 // after nextTick would race the paint and strand the view mid-history.
 
-import { ref, watch, onUnmounted, nextTick, type Ref } from 'vue';
+import { ref, watch, onScopeDispose, nextTick, type Ref } from 'vue';
 
-export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTMLElement | null>) {
+export function useFollowFoot(
+  scrollEl: Ref<HTMLElement | null>,
+  bodyEl: Ref<HTMLElement | null>,
+  /** Whether the hosting pane is on screen. When supplied, the pane state owns
+   *  the hidden→shown edge instead of inferring it from layout notifications. */
+  active?: Ref<boolean>,
+) {
   // Starts pinned, so a fresh chat scrolls to the foot as soon as it has height.
   const pinned = ref(true);
+
+  // The reader's place. A chat pane is hidden with `display:none` while an
+  // artifact is docked over it (and on the route to/from that artifact). Some
+  // browsers drop a hidden scroll container's offset, and history restoration
+  // cannot put it back when the element was not laid out as the navigation
+  // landed — so remember the position while visible and restore it on return.
+  let lastTop = 0;
+  let visible = active ? active.value : true;
+
+  function laidOut(el: HTMLElement): boolean {
+    return el.getClientRects().length > 0;
+  }
 
   // Whether the stream is scrolled to (near) its foot. A missing scroll root
   // counts as "at the bottom" (nothing scrolled yet).
@@ -30,8 +48,35 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
   function scrollToBottom() {
     const el = scrollEl.value;
     if (!el) return;
+    // Hidden (display:none): the offset reads zero and writing it would discard
+    // the reader's place. The show edge follows once it is laid out.
+    if (!laidOut(el)) return;
     el.scrollTop = el.scrollHeight;
     autoScrollTarget = el.scrollTop; // the clamped position actually applied
+    lastTop = el.scrollTop;
+  }
+  /** Put the reader back where they left unless they were following the foot. */
+  function restorePlace() {
+    const el = scrollEl.value;
+    if (!el) return;
+    if (pinned.value) {
+      scrollToBottom();
+      return;
+    }
+    if (!laidOut(el)) return;
+    el.scrollTop = lastTop;
+  }
+  /** Handle a hidden pane becoming visible: follow the foot or restore the place. */
+  function returnToView() {
+    const el = scrollEl.value;
+    if (!el || !laidOut(el)) return;
+    const returning = !visible;
+    visible = true;
+    if (returning) {
+      restorePlace();
+    } else if (pinned.value) {
+      scrollToBottom();
+    }
   }
   /** Post-mutation follow: scroll after the DOM settles, only while pinned. */
   function autoFollow() {
@@ -47,11 +92,35 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
   function trackPin() {
     const el = scrollEl.value;
     if (!el) return;
+    // A hide/reset scroll event carries a meaningless zero and must not release
+    // the reader's saved place.
+    if (!visible || !laidOut(el)) return;
     if (autoScrollTarget != null) {
       if (Math.abs(el.scrollTop - autoScrollTarget) < 1) return; // our echo — the pin stands
       autoScrollTarget = null; // the reader has scrolled since — fall through and derive
     }
     pinned.value = nearBottom();
+    lastTop = el.scrollTop;
+  }
+
+  if (active) {
+    // Own the edge from the pane state. The hide half runs before the DOM flips
+    // so a reset scroll event is ignored; the show half runs after the pane has
+    // been laid out again.
+    watch(
+      active,
+      (now) => {
+        if (!now) visible = false;
+      },
+      { flush: 'sync' },
+    );
+    watch(
+      active,
+      (now) => {
+        if (now) nextTick(returnToView);
+      },
+      { flush: 'post' },
+    );
   }
 
   // Browser scroll anchoring must be off on the container: when a late-painting
@@ -61,7 +130,11 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
   // away and wrongly release the pin. This surface has exactly two legitimate
   // scrollers: this composable and the reader.
   watch(scrollEl, (el) => {
-    if (el) el.style.overflowAnchor = 'none';
+    if (!el) return;
+    el.style.overflowAnchor = 'none';
+    // A replaced scroller (a fresh transcript load) starts in whatever layout
+    // state the pane is in; only a later show edge should restore the place.
+    if (!active) visible = laidOut(el);
   });
 
   let bodyRO: ResizeObserver | null = null;
@@ -69,11 +142,30 @@ export function useFollowFoot(scrollEl: Ref<HTMLElement | null>, bodyEl: Ref<HTM
     bodyRO?.disconnect();
     if (!el) return;
     bodyRO ??= new ResizeObserver(() => {
-      if (pinned.value) scrollToBottom();
+      const scroller = scrollEl.value;
+      if (!scroller) return;
+      if (!laidOut(scroller)) {
+        // Any unrendered layout (the work-area tab, a docked artifact, or the
+        // kept-alive page being parked off-screen) means the next render is a
+        // return whose place must be restored.
+        visible = false;
+        return;
+      }
+      if (active) {
+        // The pane state also owns hide/show, covering an engine that coalesces
+        // or skips the layout edge; layout notifications handle the rest.
+        if (!visible) {
+          if (active.value) returnToView();
+        } else if (pinned.value) {
+          scrollToBottom();
+        }
+        return;
+      }
+      returnToView();
     });
     bodyRO.observe(el);
   });
-  onUnmounted(() => {
+  onScopeDispose(() => {
     bodyRO?.disconnect();
     bodyRO = null;
   });

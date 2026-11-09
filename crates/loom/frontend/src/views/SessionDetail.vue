@@ -642,7 +642,7 @@ onUnmounted(() => {
         <!-- Conversation — the agent's chat with the model. Lazily mounted, then
              kept (v-show) so flipping back is instant. -->
         <div v-if="mounted.conversation" v-show="workTab === 'conversation'" class="h-full">
-          <SessionConversation :session="ws" />
+          <SessionConversation :session="ws" :active="workTab === 'conversation'" />
         </div>
 
         <!-- Review is the one route owner for the kept-alive Artifacts and
