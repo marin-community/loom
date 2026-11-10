@@ -423,7 +423,8 @@ let movedToSessionId = false;
 
 async function moveToSessionId(session: Session) {
   movedToSessionId = true;
-  const rest = route.fullPath.slice(`/s/${props.id}`.length);
+  // Strip the encoded first segment: `props.id` is decoded, `fullPath` is not.
+  const rest = route.fullPath.replace(/^\/s\/[^/?#]+/, '');
   await router.replace(`/s/${session.id}${rest}`);
 }
 
