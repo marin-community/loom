@@ -751,6 +751,23 @@ pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Sessio
     Ok(row)
 }
 
+/// The branch's newest session in any state, archived included. Read paths use
+/// it so a link that names the branch still resolves after its session ends;
+/// [`active_for_branch`] stays the live-only answer for everything that acts on
+/// the session.
+pub async fn latest_for_branch(db: &Db, branch_id: &str) -> Result<Option<Session>> {
+    let query = select_sessions(
+        "WHERE branch_id = ?
+         ORDER BY created_at DESC
+         LIMIT 1",
+    );
+    let row = sqlx::query_as::<_, Session>(&query)
+        .bind(branch_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(row)
+}
+
 /// Every session, ordered newest-first — managed (warm) sessions included. The
 /// internal view: the monitor's liveness walk, the adopt reconcile, and any
 /// engine bookkeeping use this so a managed session is never dropped from
