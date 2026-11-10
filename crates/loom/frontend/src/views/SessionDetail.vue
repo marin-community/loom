@@ -418,18 +418,22 @@ async function loadSession() {
 // session, including one that has ended. Everything else on this page is keyed
 // by `props.id`, and the channel and live-session calls only understand the
 // session's own id, so move to that URL instead of loading under the branch key.
-async function moveToSessionId(session: Session): Promise<boolean> {
-  if (session.id === props.id) return false;
+// The page opened under the branch key then stops loading.
+let movedToSessionId = false;
+
+async function moveToSessionId(session: Session) {
+  movedToSessionId = true;
   const rest = route.fullPath.slice(`/s/${props.id}`.length);
   await router.replace(`/s/${session.id}${rest}`);
-  return true;
 }
 
-/** The acknowledgement notice, or null when the page moved to the session's own id. */
-async function acknowledgeSessionAttention(): Promise<string | null> {
+async function acknowledgeSessionAttention(): Promise<string> {
   const epoch = ++sessionLoadEpoch;
   let session = await getSession(props.id);
-  if (await moveToSessionId(session)) return null;
+  if (session.id !== props.id) {
+    await moveToSessionId(session);
+    return '';
+  }
   try {
     // The session id is also its default channel id. Opening the workbench is
     // the user's acknowledgement gesture for both legacy tags and channel
@@ -464,10 +468,10 @@ async function acknowledgeSessionAttention(): Promise<string | null> {
   return notices.join(' ');
 }
 
-async function loadAllWith(sessionLoad: () => Promise<string | null>) {
+async function loadAllWith(sessionLoad: () => Promise<string>) {
   try {
     const acknowledgementError = await sessionLoad();
-    if (acknowledgementError === null) return;
+    if (movedToSessionId) return;
     events.value = await invokeOperation('sessions.events.list', { session: props.id });
     error.value = acknowledgementError;
   } catch (e) {

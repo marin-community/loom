@@ -5,6 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 use tokio::io::AsyncWriteExt;
@@ -344,15 +345,17 @@ async fn branch_key_still_reads_its_archived_session() {
     assert_eq!(view["status"], "archived");
     assert_eq!(view["branch"]["id"], branch_id);
 
-    let error = client
-        .post(
-            "/api/sessions/tags/set",
-            json!({ "key": "attention", "value": "attention", "by": "manual", "session": branch_id }),
-        )
+    // A verb that acts on the session still needs a live one.
+    let tag_write = reqwest::Client::new()
+        .post(format!("http://{}/api/sessions/tags/set", ts.addr))
+        .json(&json!({
+            "key": "attention",
+            "value": "attention",
+            "by": "manual",
+            "session": branch_id,
+        }))
+        .send()
         .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("server returned 404"),
-        "a mutation on an ended branch key must stay a 404: {error}"
-    );
+        .unwrap();
+    assert_eq!(tag_write.status(), StatusCode::NOT_FOUND);
 }
