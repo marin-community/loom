@@ -198,8 +198,8 @@ pub mod tags {
         use super::prelude::*;
 
         /// Set one free-form tag on a branch — the branch-scoped twin of
-        /// `sessions.tags.set`, for a target with no live session bound to it (a
-        /// finished session, or an id naming another branch entirely).
+        /// `sessions.tags.set`, for a target with no session bound to it (an id
+        /// naming another branch entirely).
         #[operation(id = "branches.tags.set", actor = SessionSelf, scope = Branch, risk = Write,
                     grants = ["loom/branches/write@v1"], cli = "branches tags set")]
         pub struct Input {

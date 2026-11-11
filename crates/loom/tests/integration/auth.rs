@@ -1568,3 +1568,70 @@ async fn session_token_is_refused_a_foreign_branch_in_every_key_form() {
         assert_eq!(view["id"].as_str(), Some(branch_id.as_str()));
     }
 }
+
+/// A session token reaches its descendants by any key the handlers accept, and a
+/// branch key keeps naming the branch's session after it ends. So the scope check
+/// must resolve an ended child's branch id the way `sessions.get` does: the parent
+/// reads it, and a foreign branch's ended session stays refused.
+#[tokio::test]
+#[serial]
+async fn session_token_reads_an_ended_child_by_its_branch_id() {
+    let ts = TestServer::start().await;
+    let parent = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "ended parent", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let parent_token = loom::auth::create_session_token(
+        &ts.state.db,
+        Some("rjpower"),
+        parent["id"].as_str().unwrap(),
+        parent["branch"]["id"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let http = reqwest::Client::new();
+    let child = http
+        .post(url(&ts, "/api/sessions/launch"))
+        .bearer_auth(&parent_token)
+        .json(&json!({ "cwd": ts.cwd(), "goal": "ended child", "agent": "shell" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(child.status(), StatusCode::OK);
+    let child: Value = child.json().await.unwrap();
+    let foreign = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "cwd": ts.cwd(), "goal": "ended foreign", "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    for session in [&child, &foreign] {
+        ts.client
+            .post("/api/sessions/archive", json!({ "session": session["id"] }))
+            .await
+            .unwrap();
+    }
+
+    let get = |key: &str| {
+        http.post(url(&ts, "/api/sessions/get"))
+            .bearer_auth(&parent_token)
+            .json(&json!({ "session": key }))
+            .send()
+    };
+
+    let read = get(child["branch"]["id"].as_str().unwrap()).await.unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read["id"], child["id"]);
+
+    let refused = get(foreign["branch"]["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+}
