@@ -18,6 +18,7 @@ use crate::Db;
 
 pub const DEFAULT_LIMIT: usize = 100;
 pub use weaver_api::operations::sessions::history::{MAX_LIMIT, MAX_QUERY_BYTES};
+const ACP_BATCH_SIZE: usize = 64;
 
 #[derive(Debug, Default)]
 pub struct PageOptions {
@@ -113,14 +114,14 @@ async fn page_acp(
     session_id: &str,
     options: PageOptions,
 ) -> Result<HistoryPageView, PageError> {
-    const BATCH_SIZE: usize = 64;
     let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
     let mut records = Vec::with_capacity(limit);
     let mut skip = options.offset;
     let mut before = None;
     let mut next_offset = None;
     'scan: loop {
-        let (blocks, has_more) = crate::chat::list_page(db, session_id, before, BATCH_SIZE).await?;
+        let (blocks, has_more) =
+            crate::chat::list_page(db, session_id, before, ACP_BATCH_SIZE).await?;
         before = blocks.first().map(|block| (block.turn, block.seq));
         for block in blocks.into_iter().rev() {
             let record = acp_record(&block);
@@ -462,16 +463,22 @@ mod tests {
             &session,
             &branch,
             PageOptions {
-                offset: 63,
+                offset: ACP_BATCH_SIZE - 1,
                 limit: Some(2),
                 ..Default::default()
             },
         )
         .await
         .unwrap();
-        assert_eq!(content(&across_batches, 0), "m487");
-        assert_eq!(content(&across_batches, 1), "m488");
-        assert_eq!(across_batches.next_offset, Some(65));
+        assert_eq!(
+            content(&across_batches, 0),
+            format!("m{}", total - ACP_BATCH_SIZE - 1)
+        );
+        assert_eq!(
+            content(&across_batches, 1),
+            format!("m{}", total - ACP_BATCH_SIZE)
+        );
+        assert_eq!(across_batches.next_offset, Some(ACP_BATCH_SIZE + 1));
     }
 
     #[tokio::test]
