@@ -46,22 +46,13 @@ impl From<anyhow::Error> for PageError {
     }
 }
 
-fn page_records(
-    source: &str,
-    records: &[HistoryRecordView],
-    options: PageOptions,
-) -> Result<HistoryPageView, PageError> {
+fn validate_options(mut options: PageOptions) -> Result<PageOptions, PageError> {
     let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
     if !(1..=MAX_LIMIT).contains(&limit) {
         return Err(PageError::bad_request(format!(
             "limit must be between 1 and {MAX_LIMIT}"
         )));
     }
-    let query = options
-        .query
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_lowercase);
     if let Some(query) = &options.query {
         if query.trim().is_empty() || query.len() > MAX_QUERY_BYTES {
             return Err(PageError::bad_request(format!(
@@ -69,30 +60,90 @@ fn page_records(
             )));
         }
     }
+    options.query = options
+        .query
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_lowercase);
+    Ok(options)
+}
+
+fn matches_record(record: &HistoryRecordView, options: &PageOptions) -> bool {
+    (options.kinds.is_empty()
+        || options
+            .kinds
+            .iter()
+            .any(|kind| kind.as_str() == record.kind))
+        && options
+            .role
+            .is_none_or(|role| record.role.as_deref() == Some(role.as_str()))
+        && options
+            .query
+            .as_ref()
+            .is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
+}
+
+fn page_records(
+    source: &str,
+    records: &[HistoryRecordView],
+    options: PageOptions,
+) -> HistoryPageView {
+    let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
     let mut matching = records
         .iter()
         .rev()
-        .filter(|record| {
-            (options.kinds.is_empty()
-                || options
-                    .kinds
-                    .iter()
-                    .any(|kind| kind.as_str() == record.kind))
-                && options
-                    .role
-                    .is_none_or(|role| record.role.as_deref() == Some(role.as_str()))
-                && query
-                    .as_ref()
-                    .is_none_or(|needle| searchable_text(record).to_lowercase().contains(needle))
-        })
+        .filter(|record| matches_record(record, &options))
         .skip(options.offset);
     let mut records: Vec<_> = matching.by_ref().take(limit).cloned().collect();
     let next_offset = matching
         .next()
         .map(|_| options.offset.saturating_add(records.len()));
     records.reverse();
-    Ok(HistoryPageView {
+    HistoryPageView {
         source: source.to_string(),
+        records,
+        next_offset,
+    }
+}
+
+/// Search backwards in bounded batches. A history request must not materialize
+/// both the entire JSON journal and its normalized records to return one page.
+async fn page_acp(
+    db: &Db,
+    session_id: &str,
+    options: PageOptions,
+) -> Result<HistoryPageView, PageError> {
+    const BATCH_SIZE: usize = 64;
+    let limit = options.limit.unwrap_or(DEFAULT_LIMIT);
+    let mut records = Vec::with_capacity(limit);
+    let mut skip = options.offset;
+    let mut before = None;
+    let mut next_offset = None;
+    'scan: loop {
+        let (blocks, has_more) = crate::chat::list_page(db, session_id, before, BATCH_SIZE).await?;
+        before = blocks.first().map(|block| (block.turn, block.seq));
+        for block in blocks.into_iter().rev() {
+            let record = acp_record(&block);
+            if !matches_record(&record, &options) {
+                continue;
+            }
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if records.len() == limit {
+                next_offset = Some(options.offset.saturating_add(records.len()));
+                break 'scan;
+            }
+            records.push(record);
+        }
+        if !has_more {
+            break;
+        }
+    }
+    records.reverse();
+    Ok(HistoryPageView {
+        source: "acp".to_string(),
         records,
         next_offset,
     })
@@ -105,19 +156,12 @@ pub async fn page(
     branch: &Branch,
     options: PageOptions,
 ) -> Result<HistoryPageView, PageError> {
-    let (source, records) = if session.protocol == "acp" {
-        (
-            "acp".to_string(),
-            crate::chat::list(db, &session.id)
-                .await?
-                .iter()
-                .map(acp_record)
-                .collect(),
-        )
-    } else {
-        load_terminal(db, session, branch).await?
-    };
-    page_records(&source, &records, options)
+    let options = validate_options(options)?;
+    if session.protocol == "acp" {
+        return page_acp(db, &session.id, options).await;
+    }
+    let (source, records) = load_terminal(db, session, branch).await?;
+    Ok(page_records(&source, &records, options))
 }
 
 async fn load_terminal(
@@ -412,6 +456,68 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(content(&older, 0), format!("m{}", total - 3));
+
+        let across_batches = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                offset: 63,
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(content(&across_batches, 0), "m487");
+        assert_eq!(content(&across_batches, 1), "m488");
+        assert_eq!(across_batches.next_offset, Some(65));
+    }
+
+    #[tokio::test]
+    async fn newest_history_page_does_not_read_old_payloads() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let (session, branch) = seed_acp_session(&db, 552).await;
+        // Make evaluating an old payload fail: a newest-page request must stop
+        // before it reads the rest of a potentially enormous journal.
+        sqlx::raw_sql(
+            "ALTER TABLE chat_blocks RENAME TO stored_chat_blocks;
+             CREATE VIEW chat_blocks AS
+             SELECT session_id, turn, seq, kind, created_at,
+                    CASE WHEN seq = 0 THEN json('invalid') ELSE payload END AS payload
+             FROM stored_chat_blocks;",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let newest = page(
+            &db,
+            &session,
+            &branch,
+            PageOptions {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(newest.records[0].content.as_deref(), Some("m550"));
+        assert_eq!(newest.records[1].content.as_deref(), Some("m551"));
+        assert_eq!(newest.next_offset, Some(2));
+        assert!(
+            page(
+                &db,
+                &session,
+                &branch,
+                PageOptions {
+                    query: Some("missing".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .is_err(),
+            "a full search reaches the unreadable old payload"
+        );
     }
 
     #[tokio::test]
