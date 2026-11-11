@@ -1369,27 +1369,8 @@ async fn op_summary_list(
 }
 
 async fn op_get(context: OperationContext, input: ops::get::Input) -> ApiResult<SessionView> {
-    let db = &context.state.db;
-    let (session, branch) = match session_mod::resolve_key(db, &input.session).await? {
-        Some(pair) => pair,
-        None => ended_branch_session(db, &input.session).await?,
-    };
-    session_view(db, &session, &branch).await
-}
-
-/// A branch key whose session has ended (done, errored or archived) reads as the
-/// branch's newest session, so a link minted with the branch id keeps working.
-/// Only this read falls back: every verb that acts on a session still needs a
-/// live one through `require_session`.
-async fn ended_branch_session(db: &Db, key: &str) -> ApiResult<(Session, Branch)> {
-    let not_found = || AppError::not_found("session");
-    let branch = branch_mod::resolve_key(db, key)
-        .await?
-        .ok_or_else(not_found)?;
-    let session = session_mod::latest_for_branch(db, &branch.id)
-        .await?
-        .ok_or_else(not_found)?;
-    Ok((session, branch))
+    let (session, branch) = require_session(&context.state.db, &input.session).await?;
+    session_view(&context.state.db, &session, &branch).await
 }
 
 async fn op_launch(context: OperationContext, input: ops::launch::Input) -> ApiResult<SessionView> {

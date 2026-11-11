@@ -5,7 +5,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use reqwest::StatusCode;
 use serde_json::json;
 use serial_test::serial;
 use tokio::io::AsyncWriteExt;
@@ -312,9 +311,10 @@ async fn archive_keeps_branch_and_history() {
 }
 
 /// A link minted with the branch id (`artifact_url` takes any session key) must
-/// keep opening the session page after that session is archived: `sessions.get`
-/// on the branch id falls back to the branch's newest session. Only that read
-/// falls back; a verb that acts on the session still needs a live one.
+/// keep opening the session page after that session is archived: a branch key
+/// resolves to the branch's newest session once none is live. Every verb resolves
+/// keys the same way, so one that acts on the session reaches it by branch key
+/// just as it already does by session id.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn branch_key_still_reads_its_archived_session() {
@@ -345,17 +345,19 @@ async fn branch_key_still_reads_its_archived_session() {
     assert_eq!(view["status"], "archived");
     assert_eq!(view["branch"]["id"], branch_id);
 
-    // A verb that acts on the session still needs a live one.
-    let tag_write = reqwest::Client::new()
-        .post(format!("http://{}/api/sessions/tags/set", ts.addr))
-        .json(&json!({
-            "key": "attention",
-            "value": "attention",
-            "by": "manual",
-            "session": branch_id,
-        }))
-        .send()
+    client
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "attention", "value": "attention", "by": "manual", "session": branch_id }),
+        )
         .await
         .unwrap();
-    assert_eq!(tag_write.status(), StatusCode::NOT_FOUND);
+    let by_id = client
+        .post("/api/sessions/get", json!({ "session": session_id }))
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_tag(&by_id, "attention").unwrap()["value"],
+        "attention"
+    );
 }

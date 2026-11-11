@@ -751,10 +751,9 @@ pub async fn active_for_branch(db: &Db, branch_id: &str) -> Result<Option<Sessio
     Ok(row)
 }
 
-/// The branch's newest session in any state, archived included. Read paths use
-/// it so a link that names the branch still resolves after its session ends;
-/// [`active_for_branch`] stays the live-only answer for everything that acts on
-/// the session.
+/// The branch's newest session in any state, archived included. [`resolve_key`]
+/// falls back to it so a key that names the branch still resolves after its
+/// session ends.
 pub async fn latest_for_branch(db: &Db, branch_id: &str) -> Result<Option<Session>> {
     let query = select_sessions(
         "WHERE branch_id = ?
@@ -861,12 +860,13 @@ pub async fn with_branch(db: &Db, id: &str) -> Result<Option<(Session, Branch)>>
 }
 
 /// Resolve a session key — a session id, a branch id, a branch name, or
-/// `repo:branch` — to the live session behind it and its branch.
+/// `repo:branch` — to the session behind it and its branch.
 ///
-/// `None` when nothing active answers to `key`: either the key names nothing at
-/// all, or it names a branch whose session has already reached a terminal state.
-/// Callers that need to distinguish "no such thing" from "nothing running" can
-/// fall back to [`weaver_core::branch::resolve_key`] themselves.
+/// A session id resolves to that session in any state. A branch key resolves to
+/// the branch's live session, or, once that has ended, to its newest session in
+/// any state, so a link minted with the branch id keeps working. The scope check
+/// and every handler resolve through here, so they agree on what a key names.
+/// `None` only when the key names nothing, or a branch with no session at all.
 pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<(Session, Branch)>> {
     if let Some(pair) = with_branch(db, key).await? {
         return Ok(Some(pair));
@@ -874,7 +874,10 @@ pub async fn resolve_key(db: &Db, key: &str) -> Result<Option<(Session, Branch)>
     let Some(branch) = branch_mod::resolve_key(db, key).await? else {
         return Ok(None);
     };
-    Ok(active_for_branch(db, &branch.id)
+    if let Some(session) = active_for_branch(db, &branch.id).await? {
+        return Ok(Some((session, branch)));
+    }
+    Ok(latest_for_branch(db, &branch.id)
         .await?
         .map(|session| (session, branch)))
 }
