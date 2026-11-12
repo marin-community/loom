@@ -92,6 +92,52 @@ jobs:
       # supervisors (PTYs); both are available on the runner without extra setup.
       - run: cargo test --workspace --locked
 
+  e2e:
+    name: e2e
+    # Pinned: ubuntu-latest is ubuntu-26.04, where Playwright ships no Chromium
+    # and `install --with-deps` fails ("does not support chromium on
+    # ubuntu26.04-x64"). 24.04 is supported, so the browser and its system
+    # dependencies install as documented. Move to ubuntu-latest once Playwright
+    # supports it (docs/ARCHITECTURE.md has the local override for 26.04).
+    runs-on: ubuntu-24.04
+    # The Playwright suite in e2e/ drives the real SPA against a real `loom`
+    # server (one per worker; see e2e/playwright.config.ts). Its globalSetup runs
+    # `cargo build`, so the binaries and SPA are built here first, with the same
+    # caches as the other jobs.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          check-latest: true
+          cache: npm
+          cache-dependency-path: |
+            crates/loom/frontend/package-lock.json
+            e2e/package-lock.json
+      # Saving a custom MCP source validates it by running its PEP 723 script
+      # through uv (settings.spec.ts), as in the test job.
+      - name: Install uv for custom MCP validation
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.13.5"
+      - run: cargo build --workspace --locked
+      - run: npm ci
+        working-directory: e2e
+      - run: npx playwright install --with-deps chromium
+        working-directory: e2e
+      - run: npx playwright test
+        working-directory: e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-test-results
+          path: e2e/test-results/
+          retention-days: 7
+
   python-binding:
     name: python-binding
     runs-on: ubuntu-latest

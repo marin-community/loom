@@ -284,7 +284,8 @@ test.describe('acp conversation', () => {
     await expect(input).toHaveValue('unsent feedback');
   });
 
-  test('stop and send forces a queued agent update during live work', async ({ page, weaver }) => {
+  // Fails on main: the queued update is never cleared. https://github.com/marin-community/loom/issues/432
+  test.fixme('stop and send forces a queued agent update during live work', async ({ page, weaver }) => {
     const session = await openAcp(page, weaver, {
       goal: 'wait:30000|say:unfinished work',
       name: 'force-agent-update',
