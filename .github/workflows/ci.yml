@@ -118,6 +118,12 @@ jobs:
           cache-dependency-path: |
             crates/loom/frontend/package-lock.json
             e2e/package-lock.json
+      # Saving a custom MCP source validates it by running its PEP 723 script
+      # through uv (settings.spec.ts), as in the test job.
+      - name: Install uv for custom MCP validation
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.13.5"
       - run: cargo build --workspace --locked
       - run: npm ci
         working-directory: e2e
