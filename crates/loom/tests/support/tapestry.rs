@@ -6,10 +6,10 @@ use std::process::Command;
 
 /// The `tapestry` binary built alongside this test binary.
 ///
-/// A sibling two levels up from `<dir>/<profile>/deps/<test>` only holds while
-/// cargo's build and artifact directories are the same tree. `build.build-dir`
-/// splits them: test binaries stay in the build dir, `tapestry` is uplifted
-/// into `<workspace>/target/<profile>/`.
+/// Looking in the test binary's own profile directory only works while cargo's
+/// build and artifact directories are the same tree. `build.build-dir` splits
+/// them: test binaries stay in the build dir, `tapestry` is uplifted into
+/// `<workspace>/target/<profile>/`.
 pub fn tapestry_bin() -> PathBuf {
     if let Some(bin) = std::env::var_os("WEAVER_TAPESTRY_BIN").map(PathBuf::from) {
         if bin.is_file() {
@@ -18,10 +18,7 @@ pub fn tapestry_bin() -> PathBuf {
     }
 
     let exe = std::env::current_exe().expect("test executable path");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("<profile>/deps/<test>");
+    let profile_dir = profile_dir(&exe);
     let profile = profile_dir.file_name().expect("profile directory name");
 
     let mut tried = Vec::new();
@@ -60,6 +57,24 @@ pub fn tapestry_bin() -> PathBuf {
         "tapestry binary missing — run `cargo build -p tapestry` (or `cargo test --workspace`) first.\nLooked in:\n  {}",
         tried.join("\n  ")
     );
+}
+
+/// The `<profile>` directory holding a test binary. Cargo puts test binaries at
+/// `<profile>/deps/<test>`, or since 1.100 at `<profile>/build/<package>/<hash>/out/<test>`.
+fn profile_dir(exe: &Path) -> &Path {
+    let dir = exe.parent().expect("test executable directory");
+    let name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_owned);
+    let found = match name(dir).as_deref() {
+        Some("deps") => dir.parent(),
+        Some("out") => {
+            let build = dir.ancestors().nth(3);
+            build
+                .filter(|b| name(b).as_deref() == Some("build"))
+                .and_then(Path::parent)
+        }
+        _ => None,
+    };
+    found.unwrap_or_else(|| panic!("unrecognized test binary layout: {}", exe.display()))
 }
 
 fn metadata_target_dir(manifest_dir: &Path) -> Option<PathBuf> {
