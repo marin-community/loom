@@ -309,3 +309,55 @@ async fn archive_keeps_branch_and_history() {
         .await
         .unwrap();
 }
+
+/// A link minted with the branch id (`artifact_url` takes any session key) must
+/// keep opening the session page after that session is archived: a branch key
+/// resolves to the branch's newest session once none is live. Every verb resolves
+/// keys the same way, so one that acts on the session reaches it by branch key
+/// just as it already does by session id.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn branch_key_still_reads_its_archived_session() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let launched = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "link me", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    let session_id = launched["id"].as_str().unwrap().to_string();
+    let branch_id = launched["branch"]["id"].as_str().unwrap().to_string();
+    assert_ne!(session_id, branch_id);
+
+    client
+        .post("/api/sessions/archive", json!({ "session": session_id }))
+        .await
+        .unwrap();
+
+    let view = client
+        .post("/api/sessions/get", json!({ "session": branch_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["id"], session_id);
+    assert_eq!(view["status"], "archived");
+    assert_eq!(view["branch"]["id"], branch_id);
+
+    client
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "attention", "value": "attention", "by": "manual", "session": branch_id }),
+        )
+        .await
+        .unwrap();
+    let by_id = client
+        .post("/api/sessions/get", json!({ "session": session_id }))
+        .await
+        .unwrap();
+    assert_eq!(
+        branch_tag(&by_id, "attention").unwrap()["value"],
+        "attention"
+    );
+}

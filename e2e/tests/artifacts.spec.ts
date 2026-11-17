@@ -138,6 +138,24 @@ test.describe('artifacts surface', () => {
     await expect(page.locator('.markdown-body')).toContainText('A user revision.');
   });
 
+  // Agents mint artifact links with their branch id. Once the session is
+  // archived the link must still open, and the page moves to the session id.
+  test('a branch-id link opens an archived session under its own id', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await weaver.seedSession({
+      goal: 'link me',
+      name: 'artifacts-branch-link',
+    });
+    await weaver.writeArtifact(session, 'notes', '# Linked notes\n', { title: 'Notes' });
+    await weaver.archiveSession(session.id);
+
+    await page.goto(`${weaver.baseUrl}/s/${session.branch.id}/artifacts/notes`);
+    await expect(page).toHaveURL(`${weaver.baseUrl}/s/${session.id}/artifacts/notes`);
+    await expect(page.locator('.markdown-body h1')).toContainText('Linked notes');
+  });
+
   test('deleting an artifact removes it and falls back to the next', async ({ page, weaver }) => {
     const session = await weaver.seedSession({
       goal: '# Session goal\n\nClean up the docs.',

@@ -414,9 +414,27 @@ async function loadSession() {
   if (epoch === sessionLoadEpoch) ws.value = session;
 }
 
+// A branch key (a link minted with `$WEAVER_BRANCH`) resolves to the branch's
+// session, including one that has ended. Everything else on this page is keyed
+// by `props.id`, and the channel and live-session calls only understand the
+// session's own id, so move to that URL instead of loading under the branch key.
+// The page opened under the branch key then stops loading.
+let movedToSessionId = false;
+
+async function moveToSessionId(session: Session) {
+  movedToSessionId = true;
+  // Strip the encoded first segment: `props.id` is decoded, `fullPath` is not.
+  const rest = route.fullPath.replace(/^\/s\/[^/?#]+/, '');
+  await router.replace(`/s/${session.id}${rest}`);
+}
+
 async function acknowledgeSessionAttention(): Promise<string> {
   const epoch = ++sessionLoadEpoch;
   let session = await getSession(props.id);
+  if (session.id !== props.id) {
+    await moveToSessionId(session);
+    return '';
+  }
   try {
     // The session id is also its default channel id. Opening the workbench is
     // the user's acknowledgement gesture for both legacy tags and channel
@@ -454,6 +472,7 @@ async function acknowledgeSessionAttention(): Promise<string> {
 async function loadAllWith(sessionLoad: () => Promise<string>) {
   try {
     const acknowledgementError = await sessionLoad();
+    if (movedToSessionId) return;
     events.value = await invokeOperation('sessions.events.list', { session: props.id });
     error.value = acknowledgementError;
   } catch (e) {
