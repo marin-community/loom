@@ -1,4 +1,5 @@
 use axum::{extract::State, http::StatusCode, Json};
+use serde::Deserialize;
 use weaver_api::operations::runs as run_operations;
 use weaver_api::{AutomationTokenView, FederateReq, RunView, SlackThreadRef};
 
@@ -56,8 +57,8 @@ pub(super) async fn federate(
 }
 
 /// The requesting identity for `runs.create`, `actor = Internal`:
-/// `authorize()` has already refused anything but `Grant::Admin` or
-/// `Grant::Automation` by the time this runs. The automation grant's own
+/// `authorize()` admits admin, automation, or shared authority here. Shared
+/// launches have also passed their live action/resource check. An automation grant's own
 /// profile allowlist is per-token business state, not something the central
 /// actor/scope check can see, so it stays here.
 fn run_identity(
@@ -77,6 +78,9 @@ fn run_identity(
                 ));
             }
             Ok((subject.clone(), profiles.clone()))
+        }
+        Grant::Shared { claims, .. } => {
+            Ok((claims.sub.clone(), vec![requested_profile.to_string()]))
         }
         // `actor = Internal` should refuse these before we got here, but defend against
         // misconfiguration by returning an error rather than panicking.
@@ -161,6 +165,7 @@ async fn launch_run(
     profiles: Vec<String>,
     run: crate::runs::Run,
     failure: LaunchFailure,
+    credentials: Option<crate::provision::RuntimeCredentials>,
 ) -> ApiResult<RunView> {
     if req.source == "watch" {
         let attached = sqlx::query("UPDATE watch_occurrences SET run_id = ?, session_id = ?, status = 'dispatching' WHERE id = ? AND status IN ('pending','dispatching') AND EXISTS(SELECT 1 FROM watches w WHERE w.id = watch_occurrences.watch_id AND w.revision = watch_occurrences.revision AND ((w.enabled = 1 AND w.paused = 0) OR trigger_reason IN ('run','manual')))")
@@ -171,13 +176,16 @@ async fn launch_run(
             ));
         }
     }
-    let actor = crate::provision::Actor::automation(
+    let mut actor = crate::provision::Actor::automation(
         req.source.clone(),
         subject,
         profiles,
         run.id.clone(),
         run.session_id.clone(),
     );
+    if let Some(credentials) = credentials {
+        actor = actor.with_runtime_credentials(credentials);
+    }
     let slack = req.slack.clone();
     let source = req.source.clone();
     match crate::provision::create(st.clone(), req.session, actor).await {
@@ -324,7 +332,16 @@ async fn dispatch_channel_run(
     let req: run_operations::create::Input = serde_json::from_str(&run.request_json)?;
     match crate::runs::route_channel(&st.db, &run.id).await? {
         crate::runs::ChannelAction::Launch(run) => {
-            launch_run(st, req, subject, profiles, run, LaunchFailure::Retryable).await
+            launch_run(
+                st,
+                req,
+                subject,
+                profiles,
+                run,
+                LaunchFailure::Retryable,
+                None,
+            )
+            .await
         }
         crate::runs::ChannelAction::Prompt(run) => prompt_channel_run(st, &req, run).await,
         crate::runs::ChannelAction::Ready(run) => Ok(run.into()),
@@ -343,6 +360,7 @@ pub(super) async fn create_run_core(
     subject: String,
     profiles: Vec<String>,
     scheduler: bool,
+    credentials: Option<crate::provision::RuntimeCredentials>,
 ) -> ApiResult<RunView> {
     if req.source == "watch" && !scheduler {
         return Err(AppError::bad_request(
@@ -443,10 +461,21 @@ pub(super) async fn create_run_core(
             profile: &profile,
             idempotency_key: &idempotency_key,
             channel: req.channel.as_deref(),
+            shared_grant_id: match &principal.grant {
+                Grant::Shared { claims, .. } => Some(claims.grant_id.as_str()),
+                _ => None,
+            },
             request_json: &request_json,
         },
     )
     .await?;
+    if let crate::runs::Reservation::Existing(run) = &reservation {
+        if matches!(principal.grant, Grant::Shared { .. }) && run.request_json != request_json {
+            return Err(AppError::conflict(
+                "a shared grant already belongs to a different launch request",
+            ));
+        }
+    }
     if req.channel.is_some() {
         let run = match reservation {
             crate::runs::Reservation::Existing(run)
@@ -498,7 +527,228 @@ pub(super) async fn create_run_core(
         }
         crate::runs::Reservation::Created(run) => run,
     };
-    launch_run(st, req, subject, profiles, run, LaunchFailure::Final).await
+    let credentials = if matches!(principal.grant, Grant::Shared { .. }) {
+        match shared_runtime_credentials(st, principal, &run).await {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                crate::runs::failed(&st.db, &run.id, "Shared grant credential issuance failed")
+                    .await?;
+                return Err(error);
+            }
+        }
+    } else {
+        credentials
+    };
+    launch_run(
+        st,
+        req,
+        subject,
+        profiles,
+        run,
+        LaunchFailure::Final,
+        credentials,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct BrokerCredentials {
+    #[serde(flatten)]
+    decision: loom_policy::shared_grants::LiveGrantDecision,
+    auth_url: String,
+    storage_token: Option<String>,
+    iris_token: Option<String>,
+}
+
+async fn prepare_shared_launch(
+    st: &AppState,
+    principal: &Principal,
+    request: &mut run_operations::create::Input,
+) -> ApiResult<()> {
+    let Grant::Shared { claims, bearer } = &principal.grant else {
+        return Ok(());
+    };
+    let denied = || {
+        AppError::new(
+            StatusCode::FORBIDDEN,
+            "shared grant cannot launch this request",
+        )
+    };
+    let config = crate::auth::shared_grant_config(&st.db)
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "configuration",
+                "shared grant launch configuration is invalid"
+            )
+        })
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let approved = config.profiles.get(&request.profile).ok_or_else(denied)?;
+    let session = &request.session;
+    if request.channel.is_some()
+        || request.slack.is_some()
+        || request.watch_id.is_some()
+        || !session.cwd.is_empty()
+        || session.repo.is_some()
+        || session.base.is_some()
+        || session.agent.is_some()
+        || session.protocol.is_some()
+        || session.mode.is_some()
+        || session.class.is_some()
+        || session.profile.is_some()
+        || session.claim_issue.is_some()
+        || session.issue.is_some()
+        || session.parent_branch.is_some()
+        || session.name.is_some()
+        || session.existing_branch.is_some()
+        || session.github_issue.is_some()
+        || session.model.is_some()
+        || session.effort.is_some()
+        || session.selection.is_some()
+        || !session.scratch.is_empty()
+        || session.expected_profile_revision.is_some()
+        || session.expected_resolver_revision.is_some()
+    {
+        return Err(denied());
+    }
+    let profile = crate::profile::get(&st.db, &request.profile)
+        .await?
+        .ok_or_else(denied)?;
+    if !(profile.restricted && profile.strict && profile.env_clear) {
+        return Err(denied());
+    }
+    let preview = super::launches::resolve_launch(
+        st,
+        &weaver_api::LaunchSelection {
+            profile: request.profile.clone(),
+            overrides: Default::default(),
+        },
+        &crate::launch::ResolveOptions {
+            ignore_capacity: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    if preview.view.profile_revision != approved.revision
+        || preview.view.resolver_revision != approved.resolver_revision
+    {
+        return Err(denied());
+    }
+    let resource = format!("/{}/", request.profile);
+    let bearer = bearer.as_ref().ok_or_else(denied)?.as_str();
+    let verifier =
+        loom_policy::shared_grants::SharedGrantVerifier::new(&config.issuer, &config.public_keys)
+            .map_err(|_| denied())?;
+    let client = config
+        .client()
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "client_configuration",
+                "shared grant broker client configuration is invalid"
+            )
+        })
+        .map_err(|_| denied())?;
+    verifier
+        .authorize(
+            &client,
+            &config.authorize_url,
+            bearer,
+            "session.create",
+            &resource,
+        )
+        .await
+        .map_err(|_| denied())?;
+    request.session.cwd = approved.cwd.clone();
+    request.session.expected_profile_revision = Some(approved.revision);
+    request.session.expected_resolver_revision = Some(approved.resolver_revision.clone());
+    request.idempotency_key = format!("shared:{}", claims.grant_id);
+    request.source = "ops".to_string();
+    Ok(())
+}
+
+async fn shared_runtime_credentials(
+    st: &AppState,
+    principal: &Principal,
+    run: &crate::runs::Run,
+) -> ApiResult<Option<crate::provision::RuntimeCredentials>> {
+    let Grant::Shared { claims, bearer } = &principal.grant else {
+        return Ok(None);
+    };
+    let denied = || {
+        AppError::new(
+            StatusCode::FORBIDDEN,
+            "shared grant cannot launch this request",
+        )
+    };
+    let config = crate::auth::shared_grant_config(&st.db)
+        .await
+        .map_err(|_| denied())?
+        .ok_or_else(denied)?;
+    let client = config.client().map_err(|_| denied())?;
+    let callback = tokio::fs::read_to_string(&config.callback_token_file)
+        .await
+        .map_err(|_| denied())?;
+    if callback.trim().is_empty() {
+        return Err(denied());
+    }
+    let mut callback =
+        reqwest::header::HeaderValue::from_str(callback.trim()).map_err(|_| denied())?;
+    callback.set_sensitive(true);
+    let bearer = bearer.as_ref().ok_or_else(denied)?.as_str();
+    let resource = format!("/{}/", run.profile);
+    let response = client
+        .post(&config.credentials_url)
+        .bearer_auth(bearer)
+        .header("X-Marin-Loom-Callback", callback)
+        .json(&serde_json::json!({"resource": resource, "run_id": run.id, "session_id": run.session_id}))
+        .send()
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_transport",
+                "shared grant broker request failed"
+            )
+        })
+        .map_err(|_| denied())?;
+    if response.status() != StatusCode::OK {
+        tracing::warn!(
+            stage = "credentials_status",
+            status = response.status().as_u16(),
+            "shared grant broker request failed"
+        );
+        return Err(denied());
+    }
+    let credentials: BrokerCredentials = response
+        .json()
+        .await
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_reply",
+                "shared grant broker returned an invalid reply"
+            )
+        })
+        .map_err(|_| denied())?;
+    if !credentials.decision.matches_claims(claims) {
+        tracing::warn!(
+            stage = "credentials_identity",
+            "shared grant broker returned an invalid reply"
+        );
+        return Err(denied());
+    }
+    crate::auth::validate_shared_url(&credentials.auth_url)
+        .inspect_err(|_| {
+            tracing::warn!(
+                stage = "credentials_endpoint",
+                "shared grant broker returned an invalid reply"
+            )
+        })
+        .map_err(|_| denied())?;
+    Ok(Some(crate::provision::RuntimeCredentials::new(
+        credentials.auth_url,
+        credentials.storage_token,
+        credentials.iris_token,
+    )))
 }
 
 // ---------------------------------------------------------------------------
@@ -508,12 +758,13 @@ pub(super) async fn create_run_core(
 // ---------------------------------------------------------------------------
 
 /// `runs.create`. `actor = Internal` means `authorize()` has already
-/// narrowed the reachable grants to `Admin`/`Automation` before this runs
+/// narrowed the reachable grants to `Admin`/`Automation`/`Shared` before this runs
 /// (see `run_identity`).
 pub(super) async fn create_run(
     context: OperationContext,
-    input: run_operations::create::Input,
+    mut input: run_operations::create::Input,
 ) -> ApiResult<RunView> {
+    prepare_shared_launch(&context.state, &context.principal, &mut input).await?;
     let profile = input.profile.trim().to_string();
     let (subject, profiles) = run_identity(&context.principal, &profile)?;
     create_run_core(
@@ -523,6 +774,7 @@ pub(super) async fn create_run(
         subject,
         profiles,
         false,
+        None,
     )
     .await
 }

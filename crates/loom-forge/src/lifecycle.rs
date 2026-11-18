@@ -103,6 +103,13 @@ pub async fn rotate_session_token(
     session: &Session,
     env: &mut Vec<(String, String)>,
 ) -> Result<()> {
+    if let Some(run_id) = session.automation_run_id.as_deref() {
+        let run = crate::runs::get(db, run_id).await?;
+        anyhow::ensure!(
+            run.is_none_or(|run| run.shared_grant_id.is_none()),
+            "shared-grant sessions require a fresh authorized launch to restore runtime credentials"
+        );
+    }
     crate::auth::revoke_session_tokens(db, &session.id).await?;
     let token = crate::auth::create_session_token(
         db,

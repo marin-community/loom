@@ -139,6 +139,7 @@ enum ActorKind {
         profiles: Vec<String>,
         run_id: Option<String>,
         session_id: Option<String>,
+        runtime_credentials: Option<RuntimeCredentials>,
     },
     Session {
         username: String,
@@ -147,19 +148,67 @@ enum ActorKind {
     },
 }
 
+/// Credentials returned by the configured broker, kept only in launch memory.
+#[derive(Clone)]
+pub struct RuntimeCredentials {
+    auth_url: String,
+    storage_token: Option<String>,
+    iris_token: Option<String>,
+}
+
+impl RuntimeCredentials {
+    pub fn new(
+        auth_url: String,
+        storage_token: Option<String>,
+        iris_token: Option<String>,
+    ) -> Self {
+        Self {
+            auth_url,
+            storage_token,
+            iris_token,
+        }
+    }
+}
+
+impl std::fmt::Debug for RuntimeCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RuntimeCredentials([redacted])")
+    }
+}
+
+fn apply_runtime_credentials(
+    environment: &mut Vec<(String, String)>,
+    credentials: Option<&RuntimeCredentials>,
+) {
+    environment.retain(|(name, _)| {
+        !matches!(
+            name.as_str(),
+            "MARIN_AUTH_URL" | "MARIN_GRANT_TOKEN" | "MARIN_IRIS_TOKEN"
+        )
+    });
+    if let Some(credentials) = credentials {
+        set_env(environment, "MARIN_AUTH_URL", credentials.auth_url.clone());
+        if let Some(token) = &credentials.storage_token {
+            set_env(environment, "MARIN_GRANT_TOKEN", token.clone());
+        }
+        if let Some(token) = &credentials.iris_token {
+            set_env(environment, "MARIN_IRIS_TOKEN", token.clone());
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Actor(ActorKind);
 
 impl Actor {
     /// The actor a credential launches as, or `None` if it cannot launch at all.
     ///
-    /// `None` is currently only an anonymous caller. `authorize()` refuses
-    /// anonymous grants on every operation without `actor = Anonymous`, so
-    /// this is unreachable in practice. It returns an `Option` so provisioning
-    /// fails closed if that invariant ever breaks.
+    /// Anonymous callers cannot launch. Shared grants use the run handler's
+    /// live authorization and broker credential path, so they cannot enter
+    /// generic provisioning through this constructor.
     pub fn from_principal(principal: &Principal, delegated: bool) -> Option<Self> {
         Some(match &principal.grant {
-            Grant::Anonymous => return None,
+            Grant::Anonymous | Grant::Shared { .. } => return None,
             Grant::Admin | Grant::User => Self(ActorKind::Admin {
                 username: principal.username.clone(),
                 delegated,
@@ -170,6 +219,7 @@ impl Actor {
                 profiles: profiles.clone(),
                 run_id: None,
                 session_id: None,
+                runtime_credentials: None,
             }),
             Grant::Session {
                 session_id,
@@ -207,7 +257,20 @@ impl Actor {
             profiles,
             run_id: Some(run_id.into()),
             session_id: Some(session_id.into()),
+            runtime_credentials: None,
         })
+    }
+
+    pub fn with_runtime_credentials(mut self, credentials: RuntimeCredentials) -> Self {
+        let ActorKind::Automation {
+            runtime_credentials,
+            ..
+        } = &mut self.0
+        else {
+            unreachable!("runtime broker credentials belong to automation launches")
+        };
+        *runtime_credentials = Some(credentials);
+        self
     }
 
     fn origin(&self) -> &str {
@@ -580,6 +643,14 @@ async fn create_inner(
             .map_err(|e| ProvisionError::invalid(e.to_string()))?;
         extra_env = crate::profile::cleared_environment(extra_env, &allowlist);
     }
+    let credentials = match &actor.0 {
+        ActorKind::Automation {
+            runtime_credentials,
+            ..
+        } => runtime_credentials.as_ref(),
+        _ => None,
+    };
+    apply_runtime_credentials(&mut extra_env, credentials);
     tracing::debug!(model = %model, effort = %effort, protocol = %protocol, "resolved and validated model/effort/protocol");
     let github_app = if crate::runtime::scopes_an_app_token(&session_github_repositories)
         || (launch_profile.restricted && managed_slug.is_some())
@@ -1661,5 +1732,31 @@ mod tests {
             build_launch_prompt("do the work", "weaver", instructions, "Weaver context.", None),
             "do the work\n\nWeaver context.\n\n## Profile instructions\n\nUse the organization workflow."
         );
+    }
+
+    #[test]
+    fn broker_credentials_replace_profile_authority_and_omit_unapproved_audiences() {
+        let mut environment = vec![
+            ("MARIN_AUTH_URL".into(), "https://untrusted.example".into()),
+            ("MARIN_GRANT_TOKEN".into(), "profile-storage".into()),
+            ("MARIN_IRIS_TOKEN".into(), "profile-iris".into()),
+            ("OTHER".into(), "preserved".into()),
+        ];
+        let credentials = RuntimeCredentials::new(
+            "https://auth.example".into(),
+            None,
+            Some("approved-iris".into()),
+        );
+        apply_runtime_credentials(&mut environment, Some(&credentials));
+        assert_eq!(
+            environment,
+            vec![
+                ("OTHER".into(), "preserved".into()),
+                ("MARIN_AUTH_URL".into(), "https://auth.example".into()),
+                ("MARIN_IRIS_TOKEN".into(), "approved-iris".into()),
+            ]
+        );
+        apply_runtime_credentials(&mut environment, None);
+        assert_eq!(environment, vec![("OTHER".into(), "preserved".into())]);
     }
 }

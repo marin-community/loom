@@ -171,14 +171,11 @@ async fn authorize(
 
 fn actor_allows(principal: &Principal, operation: &OperationSpec) -> bool {
     use crate::auth::Grant;
-    // An operation that needs no credential is reachable by everyone, including
-    // a caller that has one. `Grant::Anonymous` reaches nothing else: forgetting
-    // to authenticate a route cannot widen it, since reachability is controlled
-    // by the operation's declared `ActorPolicy`, not by whether a check exists.
-    if operation.actor == ActorPolicy::Anonymous {
-        return true;
-    }
+    // Shared credentials stay confined to their launch operation. Other
+    // identities can reach anonymous operations without additional authority.
     match &principal.grant {
+        Grant::Shared { .. } => operation.id == weaver_api::operations::runs::create::SPEC.id,
+        _ if operation.actor == ActorPolicy::Anonymous => true,
         Grant::Anonymous => false,
         Grant::Admin => operation.actor != ActorPolicy::SessionOnly,
         // A human may stand in for a session on `SessionSelf`, but never on

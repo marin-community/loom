@@ -106,7 +106,85 @@ Automation requests carry the task prompt and are stored for audit and
 idempotency. Loom resolves the short-lived, repository-scoped App credential
 while executing a fixed GitHub tool.
 
-## Deployment checklist
+## Shared grant authority
+
+Loom can accept a shared authority's Ed25519 access JWT directly for
+`runs.create`. This is a separate authentication mode from browser login and
+Loom's own automation tokens. Configure the `auth.shared_grants` setting as a
+JSON document with these fields:
+
+| Field | Value |
+| --- | --- |
+| `issuer` | Exact trusted JWT issuer |
+| `public_keys` | Array of trusted Ed25519 public keys in PEM form |
+| `authorize_url` | Authority endpoint for the live operation decision |
+| `credentials_url` | Authority endpoint for the same grant's runtime credentials |
+| `callback_token_file` | Private Loom service credential shared with the broker, separate from launch bearers |
+| `ca_file` | Optional PEM CA bundle for a private authority; omission uses the client's public trust roots |
+| `profiles` | Map of reviewed profile names to `{cwd, revision, resolver_revision}` |
+
+Every configured profile must be strict, restricted, and environment-cleared.
+Obtain the profile revision and resolver fingerprint from
+`sessions.launches.resolve`; changing either requires reviewing and updating
+the trust policy. The configured `cwd` is an absolute server-side repository
+root. Authority endpoints require HTTPS, except for isolated loopback tests.
+Requests never follow redirects with a bearer credential.
+Enabling this setting permanently disables implicit loopback administration
+and local machine tokens for this database, including deployment reconciliation.
+Clearing or pruning the setting does not restore that authority. Provision an
+operator PAT before enabling shared mode; server-issued engine credentials and
+ordinary browser sign-in remain available.
+
+The JWT must have protected header `typ=at+jwt`, algorithm `EdDSA`, exact
+audience `loom`, a matching subject and acting principal, and a grant ID,
+owner, policy revision, expiry, and service permissions. Launching profile
+`review` requires action `session.create` beneath `/review/`. Loom checks the
+signature and token bounds, then posts the original bearer to `authorize_url`
+with `{"audience":"loom","action":"session.create","resource":"/review/"}`.
+An unavailable authority or a revoked grant denies the launch.
+
+The Marin authority uses OpenFGA for current standing permissions and transitive
+group membership, and its grant ledger for scope, delegation, expiry, and
+revocation. Loom does not load OpenFGA models or evaluate group membership
+locally. Removing standing access can therefore deny a previously issued JWT;
+the live decision is required even when its signature and expiry are valid.
+The authority's model, store and credentials are operator configuration, never
+fields selected by the launch caller. OpenBao supplies identity and signing.
+
+The caller supplies the profile, title, and goal. It cannot
+choose a repository path, launch overrides, scratch uploads, a channel, or a
+Slack route. Loom selects the configured repository and pinned profile. A
+shared grant reaches no other API operation, including profile changes and
+automation-token minting. Run metadata records `shared_grant_id`; idempotency
+keys are fixed by that grant, so one grant owns exactly one run. Retries with
+different task content are rejected.
+
+After reserving the native run, Loom posts `{"resource":"/review/","run_id":"...","session_id":"..."}`
+and the launch bearer to `credentials_url`. It authenticates separately with
+`X-Marin-Loom-Callback`, read from `callback_token_file`; this header is marked
+sensitive and the secret never enters the agent environment. The broker must
+verify that exact creating run, reserved session, actor, grant and profile through its trusted
+observer before returning credentials. A launch bearer alone cannot exchange
+runtime authority.
+
+The response contains matching launch identity, `auth_url`, optional
+`storage_token` and optional `iris_token`. Runtime tokens enter only the new
+session environment as `MARIN_GRANT_TOKEN` and `MARIN_IRIS_TOKEN`, with
+`MARIN_AUTH_URL`, after environment clearing. Profile values cannot supply
+these reserved credentials. Tokens never enter the stored launch request or
+profile. The broker derives their bounds from a narrowed child of the launch
+grant and rechecks live authority before delivery.
+
+Runtime credentials remain in memory. A stopped shared-grant session needs a
+fresh authorized launch; wake and recovery refuse to respawn it without its
+credential context. The authority's lifecycle observer revokes the recorded
+grant when the actual run ends, which stops future credential refresh.
+
+Restricted Loom currently has no built-in CoreWeave storage tool. Injecting a
+storage grant establishes runtime identity but does not add a shell or an
+unreviewed MCP to the restricted tool set.
+
+## GitHub deployment checklist
 
 1. Configure and install the production GitHub App on each target repository.
 2. Add one `githubFederations` entry per approved caller workflow, constrained
