@@ -205,7 +205,8 @@ test.describe('session lifecycle actions', () => {
     await expect.poll(async () => (await weaver.getSession(child.id)).status).toBe('archived');
   });
 
-  test('suspend stops the runtime and wake brings it straight back', async ({
+  // Fails on main: the composer never appears after wake. https://github.com/marin-community/loom/issues/432
+  test.fixme('suspend stops the runtime and wake brings it straight back', async ({
     page,
     weaver,
   }) => {

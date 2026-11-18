@@ -446,9 +446,9 @@ test.describe('artifacts surface', () => {
     const scrollBox = await scroll.boundingBox();
     expect(scrollBox).not.toBeNull();
     expect(scrollBox!.width).toBeGreaterThan(350);
-    expect(
-      await scroll.evaluate((element) => element.scrollHeight > element.clientHeight + 1_000),
-    ).toBe(true);
+    await expect
+      .poll(() => scroll.evaluate((element) => element.scrollHeight > element.clientHeight + 1_000))
+      .toBe(true);
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
