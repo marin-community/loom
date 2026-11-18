@@ -459,7 +459,7 @@ pub async fn create(db: &Db, input: &ProfileInput) -> Result<CreateProfileOutcom
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(name)
         .bind(&normalized.description)
@@ -524,7 +524,7 @@ pub async fn upsert(db: &Db, input: &ProfileInput) -> Result<Profile> {
           strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
           turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
           github_repositories, allowed_tools, mcp_access, mcp_policy)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
           description=excluded.description, agent_kind=excluded.agent_kind,
           model=excluded.model, effort=excluded.effort, fast=excluded.fast, protocol=excluded.protocol,
@@ -822,7 +822,7 @@ pub async fn create_clone_prepared(
               strict, env_clear, ambient_allowlist, idle_archive_secs, max_concurrent,
               turn_budget, revision, created_at, updated_at, prelude, instructions, doc_artifact, restricted,
               github_repositories, allowed_tools, mcp_access, mcp_policy)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(target_name)
         .bind(&normalized.description)
