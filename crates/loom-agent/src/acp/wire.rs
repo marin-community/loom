@@ -101,6 +101,19 @@ pub fn response_line(id: &Value, result: Value) -> Vec<u8> {
     line(&msg)
 }
 
+/// Serialize a client→agent error response answering an agent request `id`.
+pub fn error_line(id: &Value, code: i64, message: &str) -> Vec<u8> {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    line(&msg)
+}
+
+/// JSON-RPC `METHOD_NOT_FOUND`.
+pub const METHOD_NOT_FOUND: i64 = -32601;
+
 fn line(v: &Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(v).unwrap_or_default();
     bytes.push(b'\n');

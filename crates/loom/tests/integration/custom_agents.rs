@@ -57,6 +57,32 @@ async fn catalog_refresh_reports_whether_it_started() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_refresh_rejects_an_unknown_harness() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // A typo would otherwise queue a probe of a harness that cannot exist and
+    // report success, which reads like a completed refresh.
+    let err = client
+        .post(
+            "/api/agents/catalog/refresh",
+            json!({ "harness": "curser-agent" }),
+        )
+        .await
+        .expect_err("an unknown harness is rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown harness 'curser-agent'"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("cursor-agent"),
+        "unexpected error: {message}"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_agent_crud_and_validation() {
     let ts = TestServer::start().await;
     let client = &ts.client;

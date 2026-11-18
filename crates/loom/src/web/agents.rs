@@ -111,7 +111,21 @@ async fn catalog_refresh_operation(
     input: ops::catalog_refresh::Input,
 ) -> ApiResult<ops::catalog_refresh::Output> {
     let harness = input.harness.trim();
-    let harness = (!harness.is_empty()).then_some(harness.to_string());
+    let harness = if harness.is_empty() {
+        None
+    } else {
+        let kind = crate::agent::BuiltinAgentKind::parse(harness).ok_or_else(|| {
+            AppError::bad_request(format!(
+                "unknown harness '{harness}': expected one of {}",
+                crate::agent::BuiltinAgentKind::ALL
+                    .iter()
+                    .map(|kind| kind.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+        Some(kind.as_str().to_string())
+    };
     Ok(ops::catalog_refresh::Output {
         started: crate::catalog::spawn_refresh(context.state.db.clone(), harness),
     })

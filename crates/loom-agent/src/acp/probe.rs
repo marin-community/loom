@@ -13,6 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::time::timeout;
 
+use super::wire;
 use crate::catalog::selectors::{self, current_model, model_choices, model_option_id};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -82,15 +83,11 @@ impl LiveSession {
         let init_id = 1u64;
         write_frame(
             &mut stdin,
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": init_id,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": 1,
-                    "clientCapabilities": client_capabilities(harness),
-                },
-            }),
+            &wire::request_line(
+                init_id,
+                wire::method::INITIALIZE,
+                wire::initialize_params(harness),
+            ),
         )
         .await?;
         let initialized = read_response(&mut lines, &mut stdin, init_id).await?;
@@ -106,12 +103,11 @@ impl LiveSession {
         let cwd = std::env::temp_dir();
         write_frame(
             &mut stdin,
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": new_id,
-                "method": "session/new",
-                "params": { "cwd": cwd, "mcpServers": [] },
-            }),
+            &wire::request_line(
+                new_id,
+                wire::method::SESSION_NEW,
+                wire::new_session_params(&cwd.to_string_lossy(), &[], &[], None),
+            ),
         )
         .await?;
         let created = read_response(&mut lines, &mut stdin, new_id).await?;
@@ -158,16 +154,15 @@ impl ProbeSession for LiveSession {
         let id = self.next_id;
         write_frame(
             &mut self.stdin,
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": "session/set_config_option",
-                "params": {
-                    "sessionId": self.session_id,
-                    "configId": self.handshake.model_config_id,
-                    "value": model_id,
-                },
-            }),
+            &wire::request_line(
+                id,
+                wire::method::SESSION_SET_CONFIG_OPTION,
+                wire::set_config_option_params(
+                    &self.session_id,
+                    &self.handshake.model_config_id,
+                    Value::String(model_id.to_string()),
+                ),
+            ),
         )
         .await?;
         let response = read_response(&mut self.lines, &mut self.stdin, id).await?;
@@ -237,10 +232,9 @@ fn listed_models(result: &Value, config_options: &[Value]) -> Vec<ListedModel> {
         .collect()
 }
 
-async fn write_frame(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
-    let mut line = serde_json::to_vec(value)?;
-    line.push(b'\n');
-    stdin.write_all(&line).await.context("writing ACP frame")?;
+/// Write one ACP line (already newline-terminated) and flush it.
+async fn write_frame(stdin: &mut ChildStdin, line: &[u8]) -> Result<()> {
+    stdin.write_all(line).await.context("writing ACP frame")?;
     stdin.flush().await.ok();
     Ok(())
 }
@@ -260,15 +254,23 @@ async fn read_response(
             };
             if frame.get("method").is_some() {
                 if let Some(request_id) = frame.get("id").cloned() {
-                    write_frame(
-                        stdin,
-                        &serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": request_id,
-                            "result": {},
-                        }),
-                    )
-                    .await?;
+                    // A probe runs no prompts, so a permission request has no
+                    // one to ask. Cancel it rather than reply with a shapeless
+                    // empty result, and name any other request as unsupported.
+                    let reply = if frame.get("method").and_then(Value::as_str)
+                        == Some(wire::method::SESSION_REQUEST_PERMISSION)
+                    {
+                        wire::response_line(&request_id, wire::permission_cancelled())
+                    } else {
+                        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
+                        wire::error_line(
+                            &request_id,
+                            wire::METHOD_NOT_FOUND,
+                            &format!("{method} is not supported by a catalogue probe"),
+                        )
+                    };
+                    stdin.write_all(&reply).await.context("writing ACP reply")?;
+                    stdin.flush().await.ok();
                 }
                 continue;
             }
