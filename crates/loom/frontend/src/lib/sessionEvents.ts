@@ -17,6 +17,8 @@ type Listener = (event: WeaverEvent) => void;
 export interface SessionEventsHandle {
   /** Subscribe this handle to one event kind. */
   on(kind: string, fn: Listener): void;
+  /** Run `fn` whenever the underlying stream (re)connects — the re-snapshot edge. */
+  onOpen(fn: () => void): void;
   /** Drop this handle's subscriptions. */
   close(): void;
 }
@@ -26,6 +28,9 @@ export function openSessionEvents(id: string): SessionEventsHandle {
   return {
     on(kind: string, fn: Listener) {
       topic.on(kind, (data) => fn(data as WeaverEvent));
+    },
+    onOpen(fn: () => void) {
+      topic.onOpen(fn);
     },
     close() {
       topic.close();
