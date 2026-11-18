@@ -182,7 +182,7 @@ async fn sweep_children(
         if skipped.contains(child_id) {
             continue;
         }
-        let (child, child_branch) = match session_mod::with_branch(&st.db, child_id).await {
+        let child = match session_mod::get(&st.db, child_id).await {
             Ok(Some(found)) => found,
             Ok(None) => {
                 outcome.warnings.push(format!(
@@ -200,22 +200,13 @@ async fn sweep_children(
         if child.status == "archived" {
             continue;
         }
-        if respect_opt_out {
-            let opted_out = match tags::auto_archive_disabled(&st.db, &child_branch.id).await {
-                Ok(opted_out) => opted_out,
-                Err(error) => {
-                    outcome.warnings.push(format!(
-                        "child session {} was skipped: its opt-out could not be read: {error}",
-                        child.id
-                    ));
-                    continue;
-                }
-            };
-            if opted_out {
-                tracing::info!(
-                    session = %child.id,
-                    "automatic archive skipped by child's auto-archive: disabled tag"
-                );
+        match archive_one_detached(st, &child.id, respect_opt_out).await {
+            Ok(Some(child_warnings)) => {
+                outcome.children_archived += 1;
+                outcome.warnings.extend(child_warnings);
+            }
+            Ok(None) => {
+                // The opt-out was seen under the lock; take the subtree too.
                 match session_mod::live_descendant_ids(&st.db, &child.id).await {
                     Ok(subtree) => {
                         skipped.extend(subtree);
@@ -225,13 +216,6 @@ async fn sweep_children(
                         child.id
                     )),
                 }
-                continue;
-            }
-        }
-        match archive_one_detached(st, &child.id).await {
-            Ok(child_warnings) => {
-                outcome.children_archived += 1;
-                outcome.warnings.extend(child_warnings);
             }
             Err(error) => outcome
                 .warnings
@@ -246,8 +230,8 @@ async fn sweep_children(
 /// share the lifecycle lock, so setting the label before an automatic
 /// operation acquires the lock reliably prevents that operation; manual
 /// [`archive`] ignores it. When the setting says so, the root's live
-/// descendants ride along — each honoring its own opt-out, read just before
-/// its teardown, a skipped child taking its subtree.
+/// descendants ride along — each honoring its own opt-out under the same
+/// lock as its teardown, a skipped child taking its subtree.
 pub async fn auto_archive(
     st: &AppState,
     session: &Session,
@@ -290,33 +274,58 @@ pub async fn auto_archive(
 
 /// Manual archive entry point: the root, then its live descendants when the
 /// caller asked or the `session.archive_children` setting says so — the
-/// per-child opt-out is ignored.
+/// per-child opt-out is ignored. The whole operation, snapshot and sweep
+/// included, runs detached so a dropped request cannot lose the children after
+/// the root has already gone down.
 pub async fn archive(
     st: &AppState,
     session: &Session,
     _branch: &Branch,
     children: Option<bool>,
 ) -> Result<ArchiveOutcome> {
-    let sweep_wanted = resolves_children(&st.db, children).await?;
-    let (descendants, list_warning) = if sweep_wanted {
-        snapshot_descendants(st, &session.id).await
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    let root = ArchiveOutcome {
-        warnings: archive_one_detached(st, &session.id).await?,
-        children_archived: 0,
-    };
-    if !sweep_wanted {
-        return Ok(root);
-    }
-    Ok(root.merge(sweep_children(st, &descendants, false, list_warning).await))
+    let st = st.clone();
+    let session_id = session.id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let result = async {
+            let sweep_wanted = resolves_children(&st.db, children).await?;
+            let (descendants, list_warning) = if sweep_wanted {
+                snapshot_descendants(&st, &session_id).await
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            // Manual archives never pass `respect_opt_out`, so the row is
+            // always torn down.
+            let root = ArchiveOutcome {
+                warnings: archive_one_detached(&st, &session_id, false)
+                    .await?
+                    .unwrap_or_default(),
+                children_archived: 0,
+            };
+            if !sweep_wanted {
+                return Ok(root);
+            }
+            Ok(root.merge(sweep_children(&st, &descendants, false, list_warning).await))
+        }
+        .await;
+        let _ = result_tx.send(result);
+    }));
+    result_rx
+        .await
+        .map_err(|_| anyhow!("archive task stopped before reporting its result"))?
 }
 
 /// Tear down exactly one session behind the lifecycle lock, in a server-owned
 /// task because dropping an HTTP request future must not cancel teardown after
-/// its durable transition has been recorded.
-async fn archive_one_detached(st: &AppState, session_id: &str) -> Result<Vec<String>> {
+/// its durable transition has been recorded. When `respect_opt_out` is set and
+/// the row carries the `auto-archive: disabled` tag — read under the same lock
+/// as the teardown, so a tag set while this call waits on the lock is honored —
+/// returns `None` without tearing anything down.
+async fn archive_one_detached(
+    st: &AppState,
+    session_id: &str,
+    respect_opt_out: bool,
+) -> Result<Option<Vec<String>>> {
     let st = st.clone();
     let session_id = session_id.to_string();
     let (result_tx, result_rx) = oneshot::channel();
@@ -328,7 +337,16 @@ async fn archive_one_detached(st: &AppState, session_id: &str) -> Result<Vec<Str
             else {
                 return Err(anyhow!("session not found"));
             };
-            archive_locked(&st, &current_session, &current_branch).await
+            if respect_opt_out && tags::auto_archive_disabled(&st.db, &current_branch.id).await? {
+                tracing::info!(
+                    session = %current_session.id,
+                    "automatic archive skipped by auto-archive: disabled tag"
+                );
+                return Ok(None);
+            }
+            archive_locked(&st, &current_session, &current_branch)
+                .await
+                .map(Some)
         }
         .await;
         let _ = result_tx.send(result);
@@ -562,6 +580,15 @@ pub async fn archive_locked(
         // parent and again through its own request, or when a user retries
         // after a warned teardown. Nothing left to tear down is a no-op;
         // leftovers re-run the teardown.
+        // An archived row owns nothing, though: its branch slot is free, and a
+        // replacement session on the branch owns the worktree path, the issue
+        // claims, and the tags. Repair only when no replacement has taken it.
+        if session_mod::active_for_branch(&st.db, &branch.id)
+            .await?
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
         let work_dir = PathBuf::from(&session.work_dir);
         if !work_dir.exists() && !backend::has_session(&session.term_session).await {
             // The finalize below can also be skipped by a crash or a failed

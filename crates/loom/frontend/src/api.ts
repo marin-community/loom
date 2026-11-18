@@ -206,27 +206,17 @@ export const listRuns = () => invokeOperation('runs.list', {});
 export const archiveSession = (id: string, children?: boolean) =>
   invokeOperation('sessions.archive', { children, session: id });
 /** The server's default for archiving children alongside a session
- * (`session.archive_children`), fetched once and cached. */
-let archiveChildrenDefault: boolean | null = null;
-let archiveChildrenInflight: Promise<boolean> | null = null;
+ * (`session.archive_children`), fetched fresh each call — a dialog opens
+ * rarely, and a stale tick would ride along as an explicit override. */
 export async function fetchArchiveChildrenDefault(): Promise<boolean> {
-  if (archiveChildrenDefault !== null) return archiveChildrenDefault;
-  if (!archiveChildrenInflight) {
-    archiveChildrenInflight = (async () => {
-      try {
-        const settings = await invokeOperation('settings.get', {});
-        const value = settings.settings.find((s) => s.key === 'session.archive_children')?.value;
-        archiveChildrenDefault = value === 'true';
-      } catch {
-        // A failed read is not cached: untick this dialog, retry on the next.
-        return false;
-      }
-      return archiveChildrenDefault;
-    })().finally(() => {
-      archiveChildrenInflight = null;
-    });
+  try {
+    const settings = await invokeOperation('settings.get', {});
+    const value = settings.settings.find((s) => s.key === 'session.archive_children')?.value;
+    return value === 'true';
+  } catch {
+    // A failed read unticks the dialog; the checkbox still carries the choice.
+    return false;
   }
-  return archiveChildrenInflight;
 }
 /** Suspend a session: stop its runtime to free memory, keeping the session,
  *  worktree, and branch in place. */

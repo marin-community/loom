@@ -99,10 +99,33 @@ async fn archive_survives_request_disconnect() {
     let id = created["id"].as_str().unwrap().to_string();
     let work_dir = created["work_dir"].as_str().unwrap().to_string();
 
+    // A legacy child, linked only by the parent's branch id — the linkage a
+    // retry could not rediscover once the parent is archived — so the test
+    // proves the requested sweep itself survives the disconnect.
+    sqlx::query("UPDATE sessions SET status = 'done' WHERE id = ?")
+        .bind(&id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let child = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "legacy child of the disconnected archive",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "parent_branch": created["branch"]["id"],
+            }),
+        )
+        .await
+        .unwrap();
+    let child_id = child["id"].as_str().unwrap().to_string();
+
     // A raw connection lets the test close the transport without waiting for a
     // response, matching a browser navigation or reverse-proxy disconnect.
     let mut connection = tokio::net::TcpStream::connect(ts.addr).await.unwrap();
-    let body = json!({ "session": id }).to_string();
+    let body = json!({ "session": id, "children": true }).to_string();
     let request = format!(
         "POST /api/sessions/archive HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         ts.addr,
@@ -146,6 +169,22 @@ async fn archive_survives_request_disconnect() {
 
     assert!(archived.lifecycle_transition.is_none());
     assert!(!Path::new(&work_dir).exists());
+
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let session = loom::session::get(&ts.state.db, &child_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if session.status == "archived" {
+                break session;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the requested child sweep survives the disconnect too");
+    assert!(child.lifecycle_transition.is_none());
 }
 
 #[serial]
@@ -761,6 +800,83 @@ async fn a_done_parents_legacy_child_still_rides_along() {
         .await
         .unwrap();
     assert_eq!(view["status"], "archived");
+}
+
+/// Retrying an archived row must not touch a replacement session on the same
+/// branch: the archived row no longer owns the branch, its worktree path, its
+/// issue claims, or its tags.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retrying_an_archived_row_leaves_a_replacement_session_alone() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let first = client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "first tenant", "cwd": ts.cwd(), "agent": "shell", "name": "slot" }),
+        )
+        .await
+        .unwrap();
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let branch_ref = first["branch"]["branch"].as_str().unwrap().to_string();
+    client
+        .post("/api/sessions/archive", json!({ "session": first_id }))
+        .await
+        .unwrap();
+
+    // The archived session no longer occupies the slot: a fresh session
+    // attaches to the kept branch, re-provisioning the same worktree path.
+    let second = client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "second tenant",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+                "existing_branch": branch_ref,
+            }),
+        )
+        .await
+        .unwrap();
+    let second_id = second["id"].as_str().unwrap().to_string();
+    let second_work_dir = second["work_dir"].as_str().unwrap().to_string();
+    assert_ne!(second_id, first_id);
+    assert!(Path::new(&second_work_dir).exists());
+    client
+        .post(
+            "/api/sessions/tags/set",
+            json!({ "key": "attention", "value": "attention", "by": "manual", "session": second_id }),
+        )
+        .await
+        .unwrap();
+
+    // The retry of the old, archived row — whose probe now sees a worktree at
+    // the path the replacement owns.
+    let res = client
+        .post("/api/sessions/archive", json!({ "session": first_id }))
+        .await
+        .unwrap();
+    assert_eq!(res["archived"], true);
+
+    let view = client
+        .post("/api/sessions/get", json!({ "session": second_id }))
+        .await
+        .unwrap();
+    assert_eq!(view["status"], "running", "the replacement keeps running");
+    assert!(
+        Path::new(&second_work_dir).exists(),
+        "the replacement's worktree is not torn down"
+    );
+    assert!(
+        branch_tag(&view, "attention").is_some(),
+        "the replacement's tags are not cleared"
+    );
+
+    client
+        .post("/api/sessions/delete", json!({ "session": second_id }))
+        .await
+        .unwrap();
 }
 
 /// Archiving an already-archived row is the idempotent success a fleet batch
