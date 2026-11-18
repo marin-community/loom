@@ -163,17 +163,29 @@ watch(
   { immediate: true },
 );
 
+// Set while a user layout change (Split/Dock, a tab or shortcut) holds the
+// artifact surface frozen, e.g. a pop saving its review draft. Another layout
+// change or an outside navigation must not nest under it and swap the layout
+// mid-save; only the panel's own content refresh nests under a swap.
+let userLayoutSwap = false;
+
 async function guardedArtifactLayout(change: () => void | Promise<void>): Promise<boolean> {
+  if (userLayoutSwap) return false;
+  userLayoutSwap = true;
   const panel = activeArtifactsPanel();
-  if (panel && !(await panel.prepareLayoutSwap())) return false;
   try {
-    layoutNavigationAuthorized = true;
-    await change();
-    await nextTick();
-    return true;
+    if (panel && !(await panel.prepareLayoutSwap())) return false;
+    try {
+      layoutNavigationAuthorized = true;
+      await change();
+      await nextTick();
+      return true;
+    } finally {
+      layoutNavigationAuthorized = false;
+      panel?.finishLayoutSwap();
+    }
   } finally {
-    layoutNavigationAuthorized = false;
-    panel?.finishLayoutSwap();
+    userLayoutSwap = false;
   }
 }
 
@@ -570,6 +582,7 @@ onBeforeRouteUpdate(async (to, from) => {
   if (!changesArtifact) return;
   const panel = activeArtifactsPanel();
   if (!panel || panel.isOpeningArtifact(nextName)) return;
+  if (userLayoutSwap && !layoutNavigationAuthorized) return false;
   if (!(await panel.prepareLayoutSwap())) return false;
   finishArtifactSwapAfterNavigation(panel);
 });
@@ -577,6 +590,7 @@ onBeforeRouteUpdate(async (to, from) => {
 onBeforeRouteLeave(async (to) => {
   const staysInArtifacts =
     to.params.id === props.id && to.path.startsWith(`/s/${props.id}/artifacts`);
+  if (userLayoutSwap && !layoutNavigationAuthorized) return false;
   if (artifactsActive.value && !staysInArtifacts && !layoutNavigationAuthorized) {
     const panel = activeArtifactsPanel();
     if (panel && !(await panel.prepareLayoutSwap())) return false;
