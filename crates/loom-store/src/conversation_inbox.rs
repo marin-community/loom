@@ -14,18 +14,18 @@ use crate::channel_data::Urgency;
 
 /// How long ordinary queued input (a normal-urgency session update or a
 /// queued prompt) waits for a turn boundary before it interrupts the turn.
-const NORMAL_INTERRUPT_DELAY: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
+pub const NORMAL_INTERRUPT_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn update_interrupt_at(urgency: Urgency) -> Option<String> {
     let delay = match urgency {
         Urgency::Debug => return None,
         Urgency::Normal => NORMAL_INTERRUPT_DELAY,
-        Urgency::Attention | Urgency::Blocked => chrono::TimeDelta::zero(),
+        Urgency::Attention | Urgency::Blocked => std::time::Duration::ZERO,
     };
     Some(interrupt_at_after(delay))
 }
 
-fn interrupt_at_after(delay: chrono::TimeDelta) -> String {
+fn interrupt_at_after(delay: std::time::Duration) -> String {
     (chrono::Utc::now() + delay)
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string()

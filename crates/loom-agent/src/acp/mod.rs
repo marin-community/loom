@@ -94,7 +94,7 @@ const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How long a launch goal turn runs before automatic delivery may interrupt
 /// it; the same delay a normal-urgency input waits for a turn boundary.
-const GOAL_TURN_GRACE: Duration = Duration::from_secs(60);
+const GOAL_TURN_GRACE: Duration = crate::conversation_inbox::NORMAL_INTERRUPT_DELAY;
 
 /// Whether an adapter's setup error is the transient "not ready yet" class.
 fn retryable_setup_error(error: &Value) -> bool {
