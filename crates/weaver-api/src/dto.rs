@@ -2910,6 +2910,9 @@ pub struct SessionArchiveResult {
     pub branch: String,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// How many descendants were archived alongside the root.
+    #[serde(default)]
+    pub children_archived: usize,
 }
 
 /// Result of `sessions.suspend`. Warnings report a runtime stop that could not

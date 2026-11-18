@@ -155,7 +155,7 @@ test.describe('session lifecycle actions', () => {
     const dialog = page.getByTestId('confirm-dialog');
     await expect(dialog).toContainText('Archive this session?');
     await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
-      'Also archive 1 child session',
+      'Also archive child sessions',
     );
     await dialog.getByTestId('confirm-dialog-option').getByRole('checkbox').check();
     await page.getByTestId('confirm-dialog-confirm').click();
@@ -176,7 +176,7 @@ test.describe('session lifecycle actions', () => {
     await page.getByTestId('action-archive').click();
     const dialog = page.getByTestId('confirm-dialog');
     await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
-      'Also archive 1 child session',
+      'Also archive child sessions',
     );
     await page.getByTestId('confirm-dialog-confirm').click();
     await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
@@ -197,12 +197,47 @@ test.describe('session lifecycle actions', () => {
     const dialog = page.getByTestId('confirm-dialog');
     await expect(dialog).toContainText('Archive 1 selected session?');
     await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
-      'Also archive 1 child session',
+      'Also archive child sessions',
     );
     await dialog.getByTestId('confirm-dialog-option').getByRole('checkbox').check();
     await page.getByTestId('confirm-dialog-confirm').click();
     await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
     await expect.poll(async () => (await weaver.getSession(child.id)).status).toBe('archived');
+  });
+
+  test('the archive-children setting pre-ticks the ride-along checkbox', async ({ page, weaver }) => {
+    const parent = await weaver.seedSession({
+      goal: 'Delegate with a default',
+      name: 'default-parent',
+    });
+    const child = await weaver.seedSession({
+      goal: 'Child under the default tick',
+      name: 'default-child',
+      parent: parent.branch.id,
+    });
+
+    // Patched before the page loads: the SPA fetches the default once, at the
+    // first archive dialog it opens. Restored so later tests see the default off.
+    await page.request.post(`${weaver.baseUrl}/api/settings/patch`, {
+      data: { changes: { 'session.archive_children': true } },
+    });
+    try {
+      await page.goto(`${weaver.baseUrl}/s/${parent.id}`);
+      await page.getByRole('button', { name: /Details/ }).click();
+      await page.getByTestId('action-archive').click();
+      const dialog = page.getByTestId('confirm-dialog');
+      await expect(dialog.getByTestId('confirm-dialog-option')).toContainText(
+        'Also archive child sessions',
+      );
+      await expect(dialog.getByTestId('confirm-dialog-option').getByRole('checkbox')).toBeChecked();
+      await page.getByTestId('confirm-dialog-confirm').click();
+      await expect.poll(async () => (await weaver.getSession(parent.id)).status).toBe('archived');
+      await expect.poll(async () => (await weaver.getSession(child.id)).status).toBe('archived');
+    } finally {
+      await page.request.post(`${weaver.baseUrl}/api/settings/patch`, {
+        data: { changes: { 'session.archive_children': null } },
+      });
+    }
   });
 
   // Fails on main: the composer never appears after wake. https://github.com/marin-community/loom/issues/432

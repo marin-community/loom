@@ -418,10 +418,9 @@ export const childSessionsPhrase = (count: number): string =>
   `${count} child session${count === 1 ? '' : 's'}`;
 
 // One index of session parentage, shared by every surface that asks "who
-// launched this session": the fleet tree (SessionList), the archive
-// confirmation's child count, and any other ancestry read. Parentage is the
-// persisted `parent_session_id`, else the legacy branch-id `parent_id` when
-// it names exactly one row.
+// launched this session": the fleet tree (SessionList) and any other
+// ancestry read. Parentage is the persisted `parent_session_id`, else the
+// legacy branch-id `parent_id` when it names exactly one row.
 export interface SessionAncestry {
   parentOf(session: SessionSummary): SessionSummary | undefined;
   childrenOf(id: string): SessionSummary[];
@@ -451,23 +450,10 @@ export function sessionAncestry(sessions: SessionSummary[]): SessionAncestry {
   return { parentOf, childrenOf: (id) => children.get(id) ?? [] };
 }
 
-// The sessions whose delegation thread roots at `id`, in tree order: direct
-// children first, then their children, transitively. The visited set cuts
-// cycles that corrupt legacy ancestry can contain.
-export function sessionDescendants(sessions: SessionSummary[], id: string): SessionSummary[] {
-  const { childrenOf } = sessionAncestry(sessions);
-  const out: SessionSummary[] = [];
-  const seen = new Set<string>([id]);
-  function visit(root: string) {
-    for (const child of childrenOf(root)) {
-      if (seen.has(child.id)) continue;
-      seen.add(child.id);
-      out.push(child);
-      visit(child.id);
-    }
-  }
-  visit(id);
-  return out;
+// Whether any live session sits directly under `id` in the delegation tree.
+export function hasChildSessions(sessions: SessionSummary[], id: string): boolean {
+  const live = sessions.filter((session) => session.status !== 'archived');
+  return sessionAncestry(live).childrenOf(id).length > 0;
 }
 
 // ---------------------------------------------------------------------------

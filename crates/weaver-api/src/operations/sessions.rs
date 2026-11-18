@@ -32,6 +32,12 @@ pub mod archive {
     pub struct Input {
         #[operand(context)]
         pub session: String,
+        /// Also archive the session's live descendants, best-effort: one
+        /// that cannot be archived is reported in `warnings`. Omitted, the
+        /// `session.archive_children` setting decides. The sweep's
+        /// boundaries are documented in docs/session-lifecycle.md.
+        #[operand(default = None)]
+        pub children: Option<bool>,
     }
 
     pub type Output = SessionArchiveResult;

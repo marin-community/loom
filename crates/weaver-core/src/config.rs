@@ -688,6 +688,19 @@ pub const REGISTRY: &[SettingSpec] = &[
         options: &[],
     },
     SettingSpec {
+        key: "session.archive_children",
+        label: "When archiving, also archive its children",
+        description: "When on, archiving a session also archives the sessions \
+            it launched — its live descendants. An explicit choice always \
+            wins (`loom sessions archive --children[=false]`); requests that \
+            stay silent follow this setting, including automatic archives \
+            (merged PR, idle reaper, warm-adopt, Slack idle).",
+        kind: SettingKind::Bool,
+        default: "false",
+        group: "Sessions",
+        options: &[],
+    },
+    SettingSpec {
         key: "session.log_dir",
         label: "Session log directory",
         description: "Where the agent's conversation log is captured when a \

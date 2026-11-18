@@ -96,7 +96,7 @@ loom sessions wait <session>
 loom sessions send <session> "try the curl again"
 loom sessions interrupt <session>
 loom sessions url [<session>] [--path reports/index.md]
-loom sessions archive <session>
+loom sessions archive <session> [--children[=false]]
 ```
 
 The task becomes the branch goal and opening prompt; Loom derives the

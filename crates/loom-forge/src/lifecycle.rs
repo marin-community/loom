@@ -116,42 +116,218 @@ pub async fn rotate_session_token(
     Ok(())
 }
 
+/// What an archive did beyond the root row: the teardown warnings and how
+/// many descendants rode along.
+#[derive(Debug, Clone, Default)]
+pub struct ArchiveOutcome {
+    pub warnings: Vec<String>,
+    pub children_archived: usize,
+}
+
+impl ArchiveOutcome {
+    /// Fold another outcome into this one — the root's teardown plus the
+    /// sweep that followed it.
+    fn merge(self, other: Self) -> Self {
+        Self {
+            warnings: [self.warnings, other.warnings].concat(),
+            children_archived: self.children_archived + other.children_archived,
+        }
+    }
+}
+
+/// Resolve the caller's explicit children choice, defaulting to the
+/// `session.archive_children` setting when the caller stayed silent. This is
+/// the only place in the codebase that reads that setting.
+async fn resolves_children(db: &Db, requested: Option<bool>) -> Result<bool> {
+    match requested {
+        Some(explicit) => Ok(explicit),
+        None => Ok(crate::config::get_bool(db, "session.archive_children", false).await),
+    }
+}
+
+/// The root's live descendants, snapshotted before it archives: a legacy
+/// link names its parent by branch, and an archived row no longer holds the
+/// branch. A read failure means no children are swept, reported as a warning
+/// rather than a failed request.
+async fn snapshot_descendants(st: &AppState, root_id: &str) -> (Vec<String>, Vec<String>) {
+    match session_mod::live_descendant_ids(&st.db, root_id).await {
+        Ok(ids) => (ids, Vec::new()),
+        Err(error) => (
+            Vec::new(),
+            vec![format!("could not list the session's children: {error}")],
+        ),
+    }
+}
+
+/// One delegation-tree sweep over `descendants`: each live descendant in tree
+/// order through the normal archive path, a refusal, failure, or unreadable
+/// row becoming a warning on the returned outcome — the root's archive is
+/// never failed by the sweep. When `respect_opt_out` is set, a child carrying
+/// the `auto-archive: disabled` tag is skipped together with its whole
+/// subtree. `list_warning` carries any failure from the pre-archive snapshot.
+async fn sweep_children(
+    st: &AppState,
+    descendants: &[String],
+    respect_opt_out: bool,
+    list_warning: Vec<String>,
+) -> ArchiveOutcome {
+    let mut outcome = ArchiveOutcome {
+        warnings: list_warning,
+        children_archived: 0,
+    };
+    // The pre-order walk lists a child before its subtree, so an opted-out
+    // child's descendants can be collected and skipped as they come up.
+    let mut skipped: std::collections::HashSet<String> = Default::default();
+    for child_id in descendants {
+        if skipped.contains(child_id) {
+            continue;
+        }
+        let child = match session_mod::get(&st.db, child_id).await {
+            Ok(Some(found)) => found,
+            Ok(None) => {
+                outcome.warnings.push(format!(
+                    "child session {child_id} was skipped: its session or branch row is missing"
+                ));
+                continue;
+            }
+            Err(error) => {
+                outcome.warnings.push(format!(
+                    "child session {child_id} was skipped: it could not be read: {error}"
+                ));
+                continue;
+            }
+        };
+        if child.status == "archived" {
+            continue;
+        }
+        match archive_one_detached(st, &child.id, respect_opt_out).await {
+            Ok(Some(child_warnings)) => {
+                outcome.children_archived += 1;
+                outcome.warnings.extend(child_warnings);
+            }
+            Ok(None) => {
+                // The opt-out was seen under the lock; take the subtree too.
+                match session_mod::live_descendant_ids(&st.db, &child.id).await {
+                    Ok(subtree) => {
+                        skipped.extend(subtree);
+                    }
+                    Err(error) => outcome.warnings.push(format!(
+                        "child session {} was skipped by its opt-out; its subtree could not be listed: {error}",
+                        child.id
+                    )),
+                }
+            }
+            Err(error) => outcome
+                .warnings
+                .push(format!("child session {child_id} did not archive: {error}")),
+        }
+    }
+    outcome
+}
+
 /// Archive from a retention/integration path unless this branch carries the
-/// explicit `auto-archive: disabled` opt-out. The check and teardown share the
-/// lifecycle lock, so setting the label before an automatic operation acquires
-/// the lock reliably prevents that operation; manual [`archive`] ignores it.
+/// explicit `auto-archive: disabled` opt-out. The root's check and teardown
+/// share the lifecycle lock, so setting the label before an automatic
+/// operation acquires the lock reliably prevents that operation; manual
+/// [`archive`] ignores it. When the setting says so, the root's live
+/// descendants ride along — each honoring its own opt-out under the same
+/// lock as its teardown, a skipped child taking its subtree.
 pub async fn auto_archive(
     st: &AppState,
     session: &Session,
     _branch: &Branch,
-) -> Result<Option<Vec<String>>> {
-    let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
-    let Some((current_session, current_branch)) =
-        session_mod::with_branch(&st.db, &session.id).await?
-    else {
-        return Err(anyhow!("session not found"));
+) -> Result<Option<ArchiveOutcome>> {
+    let sweep_wanted = resolves_children(&st.db, None).await?;
+    let (descendants, list_warning) = if sweep_wanted {
+        snapshot_descendants(st, &session.id).await
+    } else {
+        (Vec::new(), Vec::new())
     };
-    if tags::auto_archive_disabled(&st.db, &current_branch.id).await? {
-        tracing::info!(
-            session = %current_session.id,
-            branch = %current_branch.id,
-            "automatic archive skipped by auto-archive: disabled tag"
-        );
-        return Ok(None);
+    let root_warnings = {
+        let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
+        let Some((current_session, current_branch)) =
+            session_mod::with_branch(&st.db, &session.id).await?
+        else {
+            return Err(anyhow!("session not found"));
+        };
+        if tags::auto_archive_disabled(&st.db, &current_branch.id).await? {
+            tracing::info!(
+                session = %current_session.id,
+                branch = %current_branch.id,
+                "automatic archive skipped by auto-archive: disabled tag"
+            );
+            return Ok(None);
+        }
+        archive_locked(st, &current_session, &current_branch).await?
+    };
+    let root = ArchiveOutcome {
+        warnings: root_warnings,
+        children_archived: 0,
+    };
+    if !sweep_wanted {
+        return Ok(Some(root));
     }
-    archive_locked(st, &current_session, &current_branch)
-        .await
-        .map(Some)
+    Ok(Some(root.merge(
+        sweep_children(st, &descendants, true, list_warning).await,
+    )))
 }
 
-/// Manual archive entry point. Refresh after acquiring the lifecycle lock so a
-/// request queued behind adoption/recovery acts on the completed state rather
-/// than the stale row it resolved before waiting. The operation runs in a
-/// server-owned task because dropping an HTTP request future must not cancel
-/// teardown after its durable transition has been recorded.
-pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Result<Vec<String>> {
+/// Manual archive entry point: the root, then its live descendants when the
+/// caller asked or the `session.archive_children` setting says so — the
+/// per-child opt-out is ignored. The whole operation, snapshot and sweep
+/// included, runs detached so a dropped request cannot lose the children after
+/// the root has already gone down.
+pub async fn archive(
+    st: &AppState,
+    session: &Session,
+    _branch: &Branch,
+    children: Option<bool>,
+) -> Result<ArchiveOutcome> {
     let st = st.clone();
     let session_id = session.id.clone();
+    let (result_tx, result_rx) = oneshot::channel();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let result = async {
+            let sweep_wanted = resolves_children(&st.db, children).await?;
+            let (descendants, list_warning) = if sweep_wanted {
+                snapshot_descendants(&st, &session_id).await
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            // Manual archives never pass `respect_opt_out`, so the row is
+            // always torn down.
+            let root = ArchiveOutcome {
+                warnings: archive_one_detached(&st, &session_id, false)
+                    .await?
+                    .unwrap_or_default(),
+                children_archived: 0,
+            };
+            if !sweep_wanted {
+                return Ok(root);
+            }
+            Ok(root.merge(sweep_children(&st, &descendants, false, list_warning).await))
+        }
+        .await;
+        let _ = result_tx.send(result);
+    }));
+    result_rx
+        .await
+        .map_err(|_| anyhow!("archive task stopped before reporting its result"))?
+}
+
+/// Tear down exactly one session behind the lifecycle lock, in a server-owned
+/// task because dropping an HTTP request future must not cancel teardown after
+/// its durable transition has been recorded. When `respect_opt_out` is set and
+/// the row carries the `auto-archive: disabled` tag — read under the same lock
+/// as the teardown, so a tag set while this call waits on the lock is honored —
+/// returns `None` without tearing anything down.
+async fn archive_one_detached(
+    st: &AppState,
+    session_id: &str,
+    respect_opt_out: bool,
+) -> Result<Option<Vec<String>>> {
+    let st = st.clone();
+    let session_id = session_id.to_string();
     let (result_tx, result_rx) = oneshot::channel();
     weaver_core::spawn_boxed(Box::pin(async move {
         let result = async {
@@ -161,7 +337,16 @@ pub async fn archive(st: &AppState, session: &Session, _branch: &Branch) -> Resu
             else {
                 return Err(anyhow!("session not found"));
             };
-            archive_locked(&st, &current_session, &current_branch).await
+            if respect_opt_out && tags::auto_archive_disabled(&st.db, &current_branch.id).await? {
+                tracing::info!(
+                    session = %current_session.id,
+                    "automatic archive skipped by auto-archive: disabled tag"
+                );
+                return Ok(None);
+            }
+            archive_locked(&st, &current_session, &current_branch)
+                .await
+                .map(Some)
         }
         .await;
         let _ = result_tx.send(result);
@@ -198,12 +383,14 @@ pub async fn close_sessions_created_by(st: &AppState, username: &str) {
             tracing::warn!(username, session = %session.id, "session had no branch while closing user access");
             continue;
         };
-        match archive(st, &session, &branch).await {
-            Ok(warnings) if warnings.is_empty() => {
+        // Revocation closes everything the user launched; child opt-outs are
+        // intentionally not honored here.
+        match archive(st, &session, &branch, None).await {
+            Ok(outcome) if outcome.warnings.is_empty() => {
                 tracing::info!(username, session = %session.id, "closed session after authorization expired");
             }
-            Ok(warnings) => {
-                tracing::warn!(username, session = %session.id, ?warnings, "closed session with warnings after authorization expired");
+            Ok(outcome) => {
+                tracing::warn!(username, session = %session.id, ?outcome.warnings, "closed session with warnings after authorization expired");
             }
             Err(error) => {
                 tracing::warn!(%error, username, session = %session.id, "could not close session after authorization expired");
@@ -356,6 +543,26 @@ async fn archive_teardown(
     Ok(warnings)
 }
 
+/// The durable half of archiving, after the row reaches `archived`: close the
+/// channel, return every issue the branch held to the backlog (preserving
+/// source-branch provenance and issue status, as full session deletion does),
+/// and clear the loud and `idle` tags so the row stops showing as flagged.
+/// Every step is idempotent, so the archived-row no-op re-runs it to repair a
+/// crash or a failed step between the status commit and here.
+async fn finalize_archive(st: &AppState, session: &Session, branch: &Branch) -> Result<()> {
+    crate::channels::archive_session_channel(&st.db, &session.id).await?;
+    weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
+    for tag in tags::list(&st.db, &branch.id).await? {
+        if tags::is_loud_value(&tag.value) || tag.key == tags::IDLE_KEY {
+            tags::clear(&st.db, &branch.id, &tag.key).await?;
+            events::record_tag(&st.db, &st.bus, &branch.id, &tag.key, "", "", "manual")
+                .await
+                .ok();
+        }
+    }
+    Ok(())
+}
+
 /// Shared teardown after the caller has acquired the runtime lifecycle lock and
 /// refreshed the session row.
 pub async fn archive_locked(
@@ -368,6 +575,29 @@ pub async fn archive_locked(
     // marker from a dead operation must not be able to refuse that forever.
     let refreshed = release_abandoned_transition(&st.db, session).await?;
     let session = &refreshed;
+    if session.status == "archived" {
+        // A row is reached twice when a fleet batch sweeps a child through its
+        // parent and again through its own request, or when a user retries
+        // after a warned teardown. Nothing left to tear down is a no-op;
+        // leftovers re-run the teardown.
+        // An archived row owns nothing, though: its branch slot is free, and a
+        // replacement session on the branch owns the worktree path, the issue
+        // claims, and the tags. Repair only when no replacement has taken it.
+        if session_mod::active_for_branch(&st.db, &branch.id)
+            .await?
+            .is_some()
+        {
+            return Ok(Vec::new());
+        }
+        let work_dir = PathBuf::from(&session.work_dir);
+        if !work_dir.exists() && !backend::has_session(&session.term_session).await {
+            // The finalize below can also be skipped by a crash or a failed
+            // step after the status committed; re-running it here repairs
+            // that, without repeating the status event.
+            finalize_archive(st, session, branch).await?;
+            return Ok(Vec::new());
+        }
+    }
     require_no_transition(session)?;
     if !session_mod::begin_transition(&st.db, &session.id, "archiving", "Capturing conversation")
         .await?
@@ -401,24 +631,7 @@ pub async fn archive_locked(
         if !session_mod::complete_transition(&st.db, &session.id, "archiving", "archived").await? {
             return Err(anyhow!("archive lost ownership of its lifecycle transition"));
         }
-        crate::channels::archive_session_channel(&st.db, &session.id).await?;
-        // A torn-down session cannot keep owning work. Return every issue it held
-        // to the repo backlog while preserving source-branch provenance and issue
-        // status, just as full session deletion does.
-        weaver_core::issue::unclaim_branch(&st.db, &branch.repo_root, &branch.branch).await?;
-        // Clear every loud tag (the agent's `attention`, plus any watch mark —
-        // loudness is value-driven, so match by value, not a fixed key set) and
-        // the `idle` mark, so an archived session no longer shows as flagged.
-        // History (goal, status, events), the `description`, and other quiet
-        // pills are kept.
-        for tag in tags::list(&st.db, &branch.id).await? {
-            if tags::is_loud_value(&tag.value) || tag.key == tags::IDLE_KEY {
-                tags::clear(&st.db, &branch.id, &tag.key).await?;
-                events::record_tag(&st.db, &st.bus, &branch.id, &tag.key, "", "", "manual")
-                    .await
-                    .ok();
-            }
-        }
+        finalize_archive(st, session, branch).await?;
         events::record(
             &st.db,
             &st.bus,
@@ -1104,7 +1317,9 @@ pub async fn reconcile_interrupted_transitions(state: &AppState) {
                         continue;
                     }
                 }
-                if let Err(error) = archive(state, &session, &branch).await {
+                // The interrupted request's provenance is lost with it; the
+                // rerun follows the setting and does not honor child opt-outs.
+                if let Err(error) = archive(state, &session, &branch, None).await {
                     tracing::warn!(session = %session.id, %error, "transition recovery: archive failed");
                 }
             }

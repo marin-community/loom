@@ -1820,7 +1820,7 @@ async fn op_archive(
         }
         Err(error) => return Err(error),
     };
-    let warnings = archive(st, &session, &branch).await.map_err(|error| {
+    let outcome = archive(st, &session, &branch, input.children).await.map_err(|error| {
         // A refusal names a state the caller can act on (another transition
         // owns the session); only a genuine failure becomes the reassuring
         // 500.
@@ -1839,7 +1839,8 @@ async fn op_archive(
         archived: true,
         kind: "session".to_string(),
         branch: branch.branch,
-        warnings,
+        warnings: outcome.warnings,
+        children_archived: outcome.children_archived,
     })
 }
 
@@ -1871,6 +1872,7 @@ async fn op_archive_launch_attempt(
         kind: "launch_attempt".to_string(),
         branch: session_id.to_string(),
         warnings,
+        children_archived: 0,
     })
 }
 

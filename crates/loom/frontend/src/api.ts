@@ -201,7 +201,23 @@ export const decidePermissionRequest = (
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session. */
 export const listRuns = () => invokeOperation('runs.list', {});
-export const archiveSession = (id: string) => invokeOperation('sessions.archive', { session: id });
+/** Archive a session (tear down runtime, keep history). `children` also
+ * archives its live descendants; omitted follows the setting. */
+export const archiveSession = (id: string, children?: boolean) =>
+  invokeOperation('sessions.archive', { children, session: id });
+/** The server's default for archiving children alongside a session
+ * (`session.archive_children`), fetched fresh each call — a dialog opens
+ * rarely, and a stale tick would ride along as an explicit override. */
+export async function fetchArchiveChildrenDefault(): Promise<boolean> {
+  try {
+    const settings = await invokeOperation('settings.get', {});
+    const value = settings.settings.find((s) => s.key === 'session.archive_children')?.value;
+    return value === 'true';
+  } catch {
+    // A failed read unticks the dialog; the checkbox still carries the choice.
+    return false;
+  }
+}
 /** Suspend a session: stop its runtime to free memory, keeping the session,
  *  worktree, and branch in place. */
 export const suspendSession = (id: string) => invokeOperation('sessions.suspend', { session: id });
