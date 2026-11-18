@@ -2827,6 +2827,148 @@ async fn prompt_stops_and_sends_the_durable_queue() {
     }));
 }
 
+/// The launch goal turn is ordinary work for an explicit send. Stop & send,
+/// and sending a queued input now, must cancel it and start the message —
+/// not leave the message stranded in the queue behind a turn that may run
+/// for hours (Slack follow-ups take the Stop & send path).
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_sends_interrupt_the_launch_goal_turn() {
+    for force_queued in [false, true] {
+        let ts = TestServer::start().await;
+        let id = if force_queued {
+            "acp-goal-force"
+        } else {
+            "acp-goal-send-now"
+        };
+        start_new(&ts, id, None, Some("wait:30000|say:goal-finished")).await;
+
+        let sent = if force_queued {
+            let queued = ts
+                .client
+                .post(
+                    "/api/sessions/prompt/create",
+                    json!({ "text": "say:follow-up", "session": id }),
+                )
+                .await
+                .unwrap();
+            assert_eq!(queued["queued"], true, "response: {queued}");
+            let key = loom::conversation_inbox::pending_inputs(&ts.state.db, id)
+                .await
+                .unwrap()[0]
+                .delivery_key
+                .clone();
+            ts.client
+                .post(
+                    "/api/sessions/prompt/create",
+                    json!({ "text": "", "force_queued": true, "delivery_key": key, "session": id }),
+                )
+                .await
+                .unwrap()
+        } else {
+            ts.client
+                .post(
+                    "/api/sessions/prompt/create",
+                    json!({ "text": "say:follow-up", "send_now": true, "session": id }),
+                )
+                .await
+                .unwrap()
+        };
+        assert_eq!(sent["queued"], false, "response: {sent}");
+        assert_eq!(sent["turn"], 1, "the message opens the next turn");
+
+        let chat = poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+            blocks.iter().any(|block| {
+                block["kind"] == "agent_message" && block["payload"]["text"] == "follow-up"
+            })
+        })
+        .await;
+        assert!(
+            chat["pending_inputs"].as_array().unwrap().is_empty(),
+            "{chat}"
+        );
+        let blocks = chat["blocks"].as_array().unwrap();
+        assert!(blocks.iter().any(|block| {
+            block["turn"] == 0
+                && block["kind"] == "turn_end"
+                && block["payload"]["stop_reason"] == "cancelled"
+        }));
+        assert!(
+            blocks.iter().any(|block| {
+                block["turn"] == 1
+                    && block["kind"] == "user_message"
+                    && block["payload"]["text"] == "say:follow-up"
+            }),
+            "a person's explicit send carries no interruption note: {chat}"
+        );
+    }
+}
+
+/// A queued prompt waits for the turn boundary only as long as a normal
+/// session update: once due, the inbox tick interrupts the turn, tells the
+/// agent to continue its task, and leaves automatic delivery running.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overdue_queued_prompt_interrupts_ordinary_work() {
+    let ts = TestServer::start().await;
+    let id = "acp-overdue-prompt";
+    start_new(&ts, id, None, None).await;
+
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "wait:30000|say:stale-work", "session": id }),
+        )
+        .await
+        .unwrap();
+    let queued = ts
+        .client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "text": "say:queued-feedback", "session": id }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(queued["queued"], true, "response: {queued}");
+    let pending = loom::conversation_inbox::pending_inputs(&ts.state.db, id)
+        .await
+        .unwrap();
+    assert!(
+        pending[0].interrupt_at.is_some(),
+        "a queued prompt carries an interrupt deadline: {pending:?}"
+    );
+
+    // Advance the durable deadline; the periodic tick must deliver it.
+    sqlx::query(
+        "UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z'
+         WHERE preferred_session_id = ?",
+    )
+    .bind(id)
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+    let chat = poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+        count_kind(blocks, "turn_end") >= 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|block| block["turn"] == 0
+        && block["kind"] == "turn_end"
+        && block["payload"]["stop_reason"] == "cancelled"
+        && block["payload"]["cancelled_by"] == "update_policy"));
+    let delivered = blocks
+        .iter()
+        .find(|block| block["turn"] == 1 && block["kind"] == "user_message")
+        .unwrap_or_else(|| panic!("the queued prompt's turn: {chat}"));
+    assert_eq!(delivered["payload"]["by"], "manual");
+    let text = delivered["payload"]["text"].as_str().unwrap();
+    assert!(text.starts_with("say:queued-feedback"), "{text}");
+    assert!(text.contains("continue your task"), "{text}");
+    assert!(!loom::chat::latest_turn_was_user_stopped(&ts.state.db, id)
+        .await
+        .unwrap());
+}
+
 /// User-console feedback is immediate. Without steering support, that is one
 /// atomic stop-and-replace operation rather than a queue write followed by a
 /// second promotion request.
@@ -6320,12 +6462,12 @@ async fn wake_opens_a_fresh_acp_session_when_no_adapter_session_is_recorded() {
 }
 
 /// A wake that re-opens fresh (no loadable session id) re-sends the goal as
-/// its first turn, and a queued prompt must not dispatch on top of it: the
-/// inbox holds the prompt until the goal turn settles and starts it as the
-/// next turn — no update-policy cancellation, no errored turn. The
-/// 5ijvbegy failure is the concrete shape: the queued prompt immediately
-/// cancelled the resumed goal turn, and the replacement errored before any
-/// model output.
+/// its first turn, and input already overdue at the wake must not dispatch
+/// on top of it: the goal turn's grace holds automatic delivery, so the
+/// prompt starts as the next turn — no update-policy cancellation, no
+/// errored turn. The 5ijvbegy failure is the concrete shape: the queued
+/// prompt immediately cancelled the resumed goal turn, and the replacement
+/// errored before any model output.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
@@ -6340,7 +6482,7 @@ async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
     let created = client
         .post(
             "/api/sessions/launch",
-            json!({ "title": "wake serializes", "goal": "wait:3000 say:ready", "cwd": ts.cwd(),
+            json!({ "title": "wake serializes", "goal": "wait:3000|say:ready", "cwd": ts.cwd(),
                     "agent": "codex", "protocol": "acp" }),
         )
         .await
@@ -6352,8 +6494,8 @@ async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
     })
     .await;
 
-    // Park it, and leave a due queued prompt behind — as an automation or a
-    // channel delivery would.
+    // Park it, and leave an overdue queued prompt behind — as an automation
+    // or a channel delivery would.
     client
         .post("/api/sessions/suspend", json!({ "session": id }))
         .await
@@ -6361,7 +6503,7 @@ async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
     sqlx::query(
         "INSERT INTO conversation_inbox
          (delivery_key, branch_id, preferred_session_id, payload, author, resources, interrupt_at)
-         VALUES (?, ?, ?, 'the queued follow-up', 'manual', '[]', NULL)",
+         VALUES (?, ?, ?, 'the queued follow-up', 'manual', '[]', '2000-01-01T00:00:00.000Z')",
     )
     .bind(format!("prompt:{id}:test"))
     .bind(&branch)
@@ -6396,9 +6538,10 @@ async fn a_wakes_goal_turn_serializes_a_queued_prompt() {
     })
     .await;
     let blocks = chat["blocks"].as_array().unwrap();
+    // The launch journaled the goal once already; the wake re-sent it.
     let goal_at = blocks
         .iter()
-        .position(|b| {
+        .rposition(|b| {
             b["kind"] == "user_message"
                 && b["payload"]["text"]
                     .as_str()

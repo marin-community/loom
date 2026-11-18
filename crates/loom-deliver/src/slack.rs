@@ -1150,9 +1150,16 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
         match outcome {
             Ok(()) => update_health(|h| h.followups_routed += 1),
             Err(e) => {
-                tracing::warn!(error = %e, "slack: routed follow-up failed");
-                record_skip(&format!("routed follow-up failed: {e}"));
-                let _ = notify(&web, &trigger, &format!("Couldn't reach that session: {e}")).await;
+                // `{:#}` keeps the cause chain: the outer context alone
+                // ("sending follow-up to ACP conversation") hides why.
+                tracing::warn!(error = %format!("{e:#}"), "slack: routed follow-up failed");
+                record_skip(&format!("routed follow-up failed: {e:#}"));
+                let _ = notify(
+                    &web,
+                    &trigger,
+                    &format!("Couldn't reach that session: {e:#}"),
+                )
+                .await;
             }
         }
         return;
@@ -1183,9 +1190,9 @@ async fn handle_trigger(state: AppState, web: SlackWeb, bot: AuthTest, trigger: 
         // counting it as one would overstate what the trigger path did.
         Ok(Outcome::Forwarded) => {}
         Err(e) => {
-            tracing::warn!(error = %e, repo = %repo, "slack: launch failed");
-            record_skip(&format!("launch failed: {e}"));
-            let _ = notify(&web, &trigger, &format!("Couldn't start a session: {e}")).await;
+            tracing::warn!(error = %format!("{e:#}"), repo = %repo, "slack: launch failed");
+            record_skip(&format!("launch failed: {e:#}"));
+            let _ = notify(&web, &trigger, &format!("Couldn't start a session: {e:#}")).await;
         }
     }
 }
