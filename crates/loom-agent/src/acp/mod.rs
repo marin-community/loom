@@ -92,6 +92,10 @@ const SETUP_READINESS_BACKOFF: Duration = Duration::from_millis(500);
 /// Loom settles the turn locally. Matches opencode's cancel-drain budget.
 const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a launch goal turn runs before automatic delivery may interrupt
+/// it; the same delay a normal-urgency input waits for a turn boundary.
+const GOAL_TURN_GRACE: Duration = crate::conversation_inbox::NORMAL_INTERRUPT_DELAY;
+
 /// Whether an adapter's setup error is the transient "not ready yet" class.
 fn retryable_setup_error(error: &Value) -> bool {
     let text = error.to_string();
@@ -831,7 +835,9 @@ impl AcpHandle {
     }
 
     /// Send a user message: dispatched as a `session/prompt` when idle or
-    /// appended to the durable next-turn queue while the agent is working.
+    /// appended to the durable queue while the agent is working. A queued
+    /// message that is still waiting after the normal interrupt delay
+    /// interrupts the turn, as Stop & send would.
     pub async fn prompt(
         &self,
         text: String,
@@ -1795,14 +1801,15 @@ struct Task {
     next_seq: i64,
     turns_dispatched: i64,
     turn_live: bool,
-    /// The launch's goal turn is live: set when the handshake starts one
-    /// (a fresh open re-orienting the session from its goal) and cleared
-    /// at that turn's end. While it runs, the inbox does not dispatch —
-    /// a queued prompt would otherwise cancel the goal turn to start
-    /// itself, racing the freshly respawned adapter (the 5ijvbegy
-    /// failure). The goal turn is the session's reorientation; it goes
-    /// first, and queued input starts as the next turn.
-    goal_turn_live: bool,
+    /// When the launch's goal turn started: set when the handshake starts one
+    /// (a fresh open re-orienting the session from its goal) and cleared at
+    /// that turn's end. For [`GOAL_TURN_GRACE`] after it starts, automatic
+    /// delivery does not interrupt it — input already overdue at a respawn
+    /// would otherwise cancel the goal turn immediately, racing the freshly
+    /// respawned adapter (the 5ijvbegy failure). After the grace, the goal
+    /// turn is ordinary work: a long first turn must not hold queued input
+    /// indefinitely. Explicit sends are never held.
+    goal_turn_started: Option<Instant>,
     /// A provider-owned `/compact` mutates the conversation state behind the
     /// ACP session. Ordinary incoming messages wait for that turn boundary so
     /// `session/cancel` cannot leave the provider's context half-compacted.
@@ -1896,7 +1903,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: false,
-            goal_turn_live: false,
+            goal_turn_started: None,
             compaction_turn: false,
             message_buf: None,
             thought_buf: None,
@@ -2006,7 +2013,7 @@ impl Task {
             next_seq,
             turns_dispatched,
             turn_live: live_turn.is_some(),
-            goal_turn_live: false,
+            goal_turn_started: None,
             compaction_turn,
             message_buf: None,
             thought_buf: None,
@@ -2378,9 +2385,9 @@ impl Task {
 
         if let Some(goal) = &launch.goal {
             // The goal turn is the session's reorientation after a (re)spawn:
-            // while it runs, the inbox holds queued input back (see
-            // `goal_turn_live`).
-            self.goal_turn_live = true;
+            // automatic delivery holds queued input back while it is fresh
+            // (see `goal_turn_started`).
+            self.goal_turn_started = Some(Instant::now());
             match handoff {
                 Some(payload) => self.start_handoff_turn(goal.clone(), payload).await?,
                 None => self.start_turn(goal.clone(), None, Vec::new()).await?,
@@ -3061,7 +3068,7 @@ impl Task {
         // Settle the durable turn state *before* signalling the end over SSE, so a
         // client that reacts to the event sees a consistent `live_turn`.
         self.turn_live = false;
-        self.goal_turn_live = false;
+        self.goal_turn_started = None;
         self.compaction_turn = false;
         self.inflight_prompt = None;
         self.external_turn = false;
@@ -3231,11 +3238,14 @@ impl Task {
             InputDispatch::Automatic => None,
             InputDispatch::Force(key) => Some(key),
         };
-        if self.goal_turn_live {
-            // The launch's goal turn is still running: queued input waits for
-            // it to settle and starts as the next turn. Dispatching now would
-            // cancel the goal turn to start itself — an update-policy
-            // replacement racing the freshly respawned adapter.
+        if forced_key.is_none()
+            && self
+                .goal_turn_started
+                .is_some_and(|started| started.elapsed() < GOAL_TURN_GRACE)
+        {
+            // The launch's goal turn has only just started: automatic input
+            // waits rather than cancel it while the adapter is fresh. An
+            // explicit send is the user's own Stop, so it is not held.
             return Ok(false);
         }
         if (forced_key.is_none() && self.automatic_dispatch_paused)
@@ -3294,8 +3304,11 @@ impl Task {
                 return Err(error);
             }
         }
-        if interrupt && item.author.is_none() {
-            item.payload.push_str("\n\nYour previous turn was interrupted to deliver this update. Incorporate it and continue your task.");
+        // A person who chose Stop & send meant to stop the work. Any other
+        // interruption, including a queued prompt that outwaited its deadline,
+        // should not read to the agent as a request to abandon its task.
+        if interrupt && (forced_key.is_none() || item.author.is_none()) {
+            item.payload.push_str("\n\nYour previous turn was interrupted to deliver this message. Incorporate it and continue your task.");
         }
         let started = self.dispatch_claimed_inbox(item, active_claim).await;
         self.emit_queue().await;

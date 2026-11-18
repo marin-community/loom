@@ -466,12 +466,19 @@ Normal agent updates wait for a turn boundary for up to 60 seconds, then cancel
 ordinary work (including turns opened by earlier session updates) and open an
 update turn. Channel urgency `attention`/`blocked` interrupts immediately;
 `debug` never interrupts due to age. Status and other
-bookkeeping kinds do not prompt agents. Direct agent sends use normal urgency.
-Explicit Stop, compaction, submitted UI review turns, session generation, and turn
-caps hold automatic delivery. Human-prompted work is ordinary work for this
-policy. Submitted UI reviews retain their immediate delivery path.
+bookkeeping kinds do not prompt agents. Direct agent sends use normal urgency,
+and so do queued user prompts: one still waiting after 60 seconds interrupts
+the turn as **Stop & send** would. Explicit Stop, compaction, submitted UI
+review turns, session generation, and turn caps hold automatic delivery. A
+launch goal turn holds it for its first 60 seconds, so input already overdue
+when a respawned adapter re-sends its goal cannot cancel that turn at once;
+after that the goal turn is ordinary work. Explicit sends (Stop & send,
+`force_queued`, Slack follow-ups) are never held by a goal turn.
+Human-prompted work is ordinary work for this policy. Submitted UI reviews
+retain their immediate delivery path.
 
-Session updates store an immutable `interrupt_at` deadline (null for debug).
+Session updates and queued prompts store an immutable `interrupt_at` deadline
+(null for debug updates and doc-edit notices).
 The one-second ACP inbox tick also checks deadlines during active work; wakes
 are hints and retries never reset the clock. Migration gives the existing
 backlog a fresh 60-second grace while preserving publication timestamps. Later

@@ -846,7 +846,8 @@ pub mod prompt {
         use super::prelude::*;
 
         /// Send a user message to an ACP session. Dispatched immediately when idle,
-        /// or appended to the durable queue while a turn is live; `send_now` instead
+        /// or appended to the durable queue while a turn is live, where it waits up
+        /// to 60 seconds before interrupting the turn; `send_now` instead
         /// cancels an ordinary live turn and starts the message as a normal prompt.
         /// A live compaction always finishes before queued feedback starts. Every
         /// send records a `nudge` event on the branch.
