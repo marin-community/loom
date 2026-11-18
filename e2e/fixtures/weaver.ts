@@ -159,6 +159,11 @@ export interface WeaverFixture {
   /** Remove an artifact via `loom artifacts delete` — drops it and its whole
    *  history. `--repo` targets the repo-shared row when a branch copy shadows it. */
   removeArtifact(session: Session, name: string, opts?: { repo?: boolean }): Promise<void>;
+  /** Retire an artifact via `loom artifacts archive` — hides it from listings
+   *  without deleting anything. `--repo` targets the repo-shared row. */
+  archiveArtifact(session: Session, name: string, opts?: { repo?: boolean }): Promise<void>;
+  /** Put an archived artifact back in the listings via `loom artifacts restore`. */
+  restoreArtifact(session: Session, name: string, opts?: { repo?: boolean }): Promise<void>;
   /** Set (upsert) a free-form label on an issue via `issues.tags.set`. */
   tagIssue(id: number, key: string, value: string): Promise<Issue>;
   /** `issues.board` (cross-repo board). */
@@ -629,6 +634,24 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
 
       async removeArtifact(session, name, opts) {
         const args = ['artifacts', 'delete', name];
+        if (opts?.repo) args.push('--repo');
+        execFileSync(LOOM_BINARY, args, {
+          env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      },
+
+      async archiveArtifact(session, name, opts) {
+        const args = ['artifacts', 'archive', name];
+        if (opts?.repo) args.push('--repo');
+        execFileSync(LOOM_BINARY, args, {
+          env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      },
+
+      async restoreArtifact(session, name, opts) {
+        const args = ['artifacts', 'restore', name];
         if (opts?.repo) args.push('--repo');
         execFileSync(LOOM_BINARY, args, {
           env: { ...childEnv, WEAVER_BRANCH: session.branch.id },
