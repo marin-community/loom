@@ -5,6 +5,10 @@ name: CI
 # a broken frontend dependency tree (e.g. an rspack peer-dependency conflict from
 # a Dependabot bump) fails CI on any of them instead of on a contributor's
 # machine. `rerun-if-changed` keeps the SPA build a no-op when nothing changed.
+#
+# Every job pins the same exact Rust release: `stable` floats, and a compiler
+# bump can change cargo's artifact layout or a lint under us. Move the pin in
+# all five jobs together.
 
 on:
   push:
@@ -33,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -51,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
         with:
           components: rustfmt, clippy
       - uses: mozilla-actions/sccache-action@v0.0.10
@@ -73,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
@@ -108,7 +112,7 @@ jobs:
     # over python/weaver-loom/tests is the whole invocation.
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
         with:
@@ -126,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: mozilla-actions/sccache-action@v0.0.10
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
