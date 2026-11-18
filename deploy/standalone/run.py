@@ -11,6 +11,10 @@ LOOM_DOMAIN=localhost, so Caddy signs with its own internal CA (self-signed —
 the browser warns, expected) and you can exercise the real three-service stack
 (Caddy + loom-init + loom) on your own machine before pointing DNS at a server.
 
+Rendering needs a `loom` binary, but never a host-side build: the script
+builds the compose image — where loom is compiled anyway — and renders .env
+from a one-shot container of it.
+
 Why .env lives next to the compose file (a common question): docker compose
 auto-loads `.env` from the compose project directory and uses it both to
 interpolate the compose file (${LOOM_DOMAIN}, ${LOOM_IMAGE}) and as each
@@ -22,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import click
@@ -49,18 +54,6 @@ def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, **kw)
 
 
-def find_loom() -> str:
-    """The `loom` binary: PATH first, then a local cargo build under target/."""
-    on_path = shutil.which("loom")
-    if on_path:
-        return on_path
-    for profile in ("release", "debug"):
-        candidate = REPO_ROOT / "target" / profile / "loom"
-        if candidate.is_file():
-            return str(candidate)
-    die("`loom` not found — build it (`cargo build -p loom`) or put it on PATH.")
-
-
 def docker_gid() -> str | None:
     """The host's `docker` group gid, so the loom container's app user can join
     it (compose `group_add`) and reach the bind-mounted Docker socket for
@@ -77,15 +70,130 @@ def docker_gid() -> str | None:
         return None
 
 
-def owner_configured(env_text: str) -> bool:
-    """Whether the rendered env names a non-empty LOOM_OWNER_GITHUB. Without one
-    the daemon refuses to boot (it would come up locked out), so we fail early
-    with a pointer to `loom setup` rather than after `compose up`."""
-    for line in env_text.splitlines():
+def config_path(config: str | None) -> Path:
+    """The loom.toml this run renders: the flag, then $LOOM_CONFIG, else the
+    repo-root default (`--config`'s help text)."""
+    return Path(config or os.environ.get("LOOM_CONFIG") or REPO_ROOT / "loom.toml").resolve()
+
+
+def env_value(name: str) -> str | None:
+    """One KEY=VALUE from the rendered .env, if it is set there."""
+    if not ENV_PATH.exists():
+        return None
+    for line in ENV_PATH.read_text().splitlines():
         key, _, value = line.partition("=")
-        if key.strip() == "LOOM_OWNER_GITHUB":
-            return bool(value.strip())
-    return False
+        if key.strip() == name:
+            return value.strip()
+    return None
+
+
+def interpolated(name: str, fallback: str) -> str:
+    """A compose interpolation variable at compose's own precedence: the
+    process env, then what a previous render left in .env, else the fallback
+    the compose file declares."""
+    return os.environ.get(name) or env_value(name) or fallback
+
+
+def image_tag() -> str:
+    """The image tag this run builds and deploys (${LOOM_IMAGE:-loom:latest})."""
+    return interpolated("LOOM_IMAGE", "loom:latest")
+
+
+def image_exists(tag: str) -> bool:
+    probe = subprocess.run(
+        ["docker", "image", "inspect", tag],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return probe.returncode == 0
+
+
+def write_env(rendered: str) -> None:
+    """Write the rendered dotenv 0600 — it can hold secrets, matching the
+    permissions `loom config render-env` itself writes with."""
+    ENV_PATH.write_text(rendered)
+    os.chmod(ENV_PATH, 0o600)
+
+
+def render_env(config: str | None, local_: bool, no_build: bool, env: dict) -> None:
+    """Render .env from the compose image: build it (the only place loom needs
+    to be built), then run `loom config render-env` in a one-shot container
+    of it.
+
+    Raw `docker run` rather than `docker compose run`: every compose service
+    lists .env as its env_file, so a compose-spawned render would inherit the
+    very file it is re-rendering — and render-env resolves a same-named env
+    var over the file, so those stale values would win over loom.toml."""
+    cfg = config_path(config)
+    if not cfg.exists() and not ENV_PATH.exists():
+        die(
+            f"neither {cfg} nor {ENV_PATH} exists — copy loom.toml.example to "
+            "loom.toml and fill it in (or run `loom setup`) first."
+        )
+    tag = image_tag()
+    if no_build:
+        if not image_exists(tag):
+            die(f"no {tag} image to render from — drop --no-build for a first build")
+        log(f"rendering .env from the existing {tag} image")
+    else:
+        log(f"building the {tag} image to render .env from")
+        # Plain `docker build`: compose cannot even load docker-compose.yml
+        # before .env exists — it is every service's env_file, and LOOM_DOMAIN
+        # is required just to interpolate the file — and this build only
+        # exists to give the render an image. `up --build` is the
+        # authoritative build, re-run with the rendered .env.
+        build = ["docker", "build", "-t", tag, str(REPO_ROOT)]
+        # The build args docker-compose.yml declares, at compose's own
+        # precedence and defaults, so `up --build` cache-hits this image.
+        for arg, fallback in (
+            ("HOST_UID", "1000"),
+            ("HOST_GID", "1000"),
+            ("CARGO_PROFILE", "debug"),
+        ):
+            build += ["--build-arg", f"{arg}={interpolated(arg, fallback)}"]
+        run(build, env=env)
+
+    # Root so the mount reads whatever uid owns loom.toml on the host (the
+    # image's app user may differ); render-env only reads and prints.
+    cmd = ["docker", "run", "--rm", "--user", "0:0", "-v", f"{cfg.parent}:/loom-cfg:ro"]
+    # render-env resolves a same-named env var over loom.toml — the way an
+    # operator overrides a single value for one run without editing the file —
+    # so forward the ambient environment into the render to keep that working.
+    # One generated env-file rather than -e flags per variable: the variable
+    # names are loom's own contract, not this script's to duplicate.
+    # PATH/HOME/LOOM_CONFIG stay out (the image's own PATH must resolve the
+    # entrypoint, and --config below names the mounted copy), as do values
+    # with newlines, which env-file's line format can't carry.
+    forwarded = {
+        key: value
+        for key, value in os.environ.items()
+        if "\n" not in value and key not in ("PATH", "HOME", "HOSTNAME", "LOOM_CONFIG")
+    }
+    with tempfile.NamedTemporaryFile("w", prefix="loom-render-env.") as env_file:
+        env_file.write("".join(f"{key}={value}\n" for key, value in forwarded.items()))
+        env_file.flush()
+        cmd += ["--env-file", env_file.name]
+        if local_:
+            cmd += ["-e", "LOOM_DOMAIN=localhost"]
+        cmd += [
+            tag,
+            "loom",
+            "config",
+            "render-env",
+            "--config",
+            f"/loom-cfg/{cfg.name}",
+            "--out",
+            "-",
+        ]
+        log(" ".join(cmd))
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    if result.stderr:
+        click.echo(result.stderr, err=True)
+    if result.returncode != 0:
+        die(f"rendering .env from the {tag} image failed")
+    if not result.stdout.strip():
+        die(f"rendering .env from the {tag} image produced nothing — is {cfg} filled in?")
+    write_env(result.stdout)
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -103,42 +211,35 @@ def owner_configured(env_text: str) -> bool:
 @click.option(
     "--no-build",
     is_flag=True,
-    help="Skip the image rebuild (`up` without `--build`).",
+    help="Skip the image rebuild (`up` without `--build`; the image must "
+    "already exist, since .env is rendered from it).",
 )
 def main(local_: bool, config: str | None, no_build: bool) -> None:
     """Render .env and bring up the standalone loom stack."""
     if not shutil.which("docker"):
         die("`docker` not found — install Docker (with the compose plugin) first.")
-    loom = find_loom()
 
-    # 1. Render deploy/standalone/.env from loom.toml. For --local, override the
-    #    domain via the process env — loom_config resolves an env var over the
-    #    file, so this doesn't touch loom.toml itself.
-    render = [loom, "config", "render-env", "--out", str(ENV_PATH)]
-    if config:
-        render += ["--config", config]
     env = os.environ.copy()
     # BuildKit is required for the Dockerfile's cargo cache mounts — the default
     # with compose v2, but set explicitly so an older/opted-out Docker still gets
     # the fast, cached build. (CARGO_PROFILE defaults to debug in the compose
     # file; export CARGO_PROFILE=release before running for a production build.)
+    # The buildx builder is whatever the operator's docker defaults to (the
+    # docker driver of the current context); an exported BUILDX_BUILDER passes
+    # through untouched.
     env["DOCKER_BUILDKIT"] = "1"
-    # Build with the `docker` driver (writes straight into the image store) rather
-    # than a `docker-container` builder, which would export the large image as an
-    # OCI tarball and re-load it — tens of seconds per build. This local, single-
-    # arch deploy doesn't need a multi-arch container builder. Respects an
-    # explicit BUILDX_BUILDER if you've set one.
-    env.setdefault("BUILDX_BUILDER", "default")
     # Pass the host docker gid through for the loom service's `group_add`, so
     # sessions can reach the bind-mounted Docker socket (see docker-compose.yml).
     env.setdefault("DOCKER_GID", docker_gid() or "0")
     if local_:
         env["LOOM_DOMAIN"] = "localhost"
-    run(render, env=env)
+
+    # 1. Render deploy/standalone/.env from loom.toml via the image.
+    render_env(config, local_, no_build, env)
 
     # 2. Refuse early if no operator is configured — the daemon would otherwise
     #    boot-loop on its "no operator" guard.
-    if not owner_configured(ENV_PATH.read_text()):
+    if not env_value("LOOM_OWNER_GITHUB"):
         die(
             "no operator in the rendered env (LOOM_OWNER_GITHUB is empty) — run "
             "`loom setup` (or set LOOM_OWNER_GITHUB in loom.toml) first."

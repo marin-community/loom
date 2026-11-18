@@ -85,6 +85,11 @@ goes through GitHub (loopback trust doesn't apply behind Caddy), so the App's
 OAuth callback list must include `https://localhost/api/auth/github/callback` —
 `loom setup github-app --base-url https://localhost` sets that up.
 
+`run.py` never uses (or needs) a host-side `loom`: it builds the image first
+— where loom is compiled anyway — and renders `.env` from a one-shot container
+of that image, the same `--out -` render the first-run walkthrough below shows
+by hand.
+
 To validate the config without starting anything:
 
 ```sh
