@@ -6,6 +6,15 @@ import {
   availableAgents,
   isAgentAvailable,
 } from '../lib/agentAvailability';
+import {
+  MODE_CHOICES,
+  clearedForAgentChange,
+  effortChoices as effortFor,
+  fastChoices as fastChoicesFor,
+  modelById,
+  protocolChoices as protocolsFor,
+  prunedForModelChange,
+} from '../lib/pickerChoices';
 import ModelCombobox from './ModelCombobox.vue';
 
 const props = withDefaults(
@@ -39,26 +48,14 @@ const agentChoices = computed(() =>
   })),
 );
 const metadata = computed(() => props.agents.find((agent) => agent.kind === effectiveAgent.value));
-const selectedModel = computed(() =>
-  metadata.value?.models.find((model) => model.id === value('model')),
-);
+const selectedModel = computed(() => modelById(metadata.value, value('model')));
 // A model that scopes effort per model owns the list; one that does not falls
 // back to the agent's global list, which is all there is until a catalogue
 // fetch fills the per-model choices.
-const effortChoices = computed(() =>
-  selectedModel.value?.efforts?.length
-    ? selectedModel.value.efforts
-    : (metadata.value?.efforts ?? []),
-);
-const modeChoices = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'].map((mode) => ({
-  id: mode,
-  label: mode,
-}));
-const protocolChoices = computed(() => [
-  ...(metadata.value?.supports_acp !== false ? [{ id: 'acp', label: 'ACP' }] : []),
-  { id: 'terminal', label: 'Terminal' },
-]);
-const fastChoices = computed(() => selectedModel.value?.fast ?? []);
+const effortChoices = computed(() => effortFor(metadata.value, selectedModel.value));
+const modeChoices = MODE_CHOICES;
+const protocolChoices = computed(() => protocolsFor(metadata.value));
+const fastChoices = computed(() => fastChoicesFor(selectedModel.value));
 function value(field: keyof LaunchOverrides): string {
   return props.modelValue[field] ?? (settings.value?.[field] as string | undefined) ?? '';
 }
@@ -73,22 +70,18 @@ function set(field: keyof LaunchOverrides, nextValue: string) {
     // Choosing the agent already in effect is not a change; clearing the
     // selectors here would drop what the profile resolved.
     if (nextValue === effectiveAgent.value) return;
-    next.model = '';
-    next.effort = '';
-    next.fast = '';
+    Object.assign(next, clearedForAgentChange());
   }
   if (field === 'model') {
-    const model = metadata.value?.models.find((choice) => choice.id === nextValue);
     // Only prune when the new model states its own choices; an unfetched model
     // says nothing about what the adapter accepts.
-    const efforts = model?.efforts ?? [];
-    const fast = model?.fast ?? [];
-    if (efforts.length && !efforts.some((choice) => choice.id === value('effort'))) {
-      next.effort = '';
-    }
-    if (fast.length && !fast.some((choice) => choice.id === value('fast'))) {
-      next.fast = '';
-    }
+    Object.assign(
+      next,
+      prunedForModelChange(modelById(metadata.value, nextValue), {
+        effort: value('effort'),
+        fast: value('fast'),
+      }),
+    );
   }
   emit('update:modelValue', next);
 }

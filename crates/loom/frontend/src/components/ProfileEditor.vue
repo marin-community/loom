@@ -8,6 +8,15 @@ import type {
   ProfileInput,
 } from '../types';
 import { agentOptionsWithCurrent, isAgentAvailable } from '../lib/agentAvailability';
+import {
+  MODE_CHOICES,
+  effortChoices as effortFor,
+  fastChoices as fastChoicesFor,
+  modelById,
+  protocolChoices as protocolsFor,
+  clearedForAgentChange,
+  prunedForModelChange,
+} from '../lib/pickerChoices';
 import ModelCombobox from './ModelCombobox.vue';
 
 const props = withDefaults(
@@ -39,23 +48,11 @@ const agentChoices = computed(() =>
 const selectedAgent = computed(() =>
   props.agents.find((agent) => agent.kind === draft.value.agent_kind),
 );
-const selectedModel = computed(() =>
-  selectedAgent.value?.models.find((model) => model.id === draft.value.model),
-);
-const effortChoices = computed(() =>
-  selectedModel.value?.efforts?.length
-    ? selectedModel.value.efforts
-    : (selectedAgent.value?.efforts ?? []),
-);
-const modeChoices = ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions'].map((mode) => ({
-  id: mode,
-  label: mode,
-}));
-const protocolChoices = computed(() => [
-  ...(selectedAgent.value?.supports_acp !== false ? [{ id: 'acp', label: 'ACP' }] : []),
-  { id: 'terminal', label: 'Terminal' },
-]);
-const fastChoices = computed(() => selectedModel.value?.fast ?? []);
+const selectedModel = computed(() => modelById(selectedAgent.value, draft.value.model));
+const effortChoices = computed(() => effortFor(selectedAgent.value, selectedModel.value));
+const modeChoices = MODE_CHOICES;
+const protocolChoices = computed(() => protocolsFor(selectedAgent.value));
+const fastChoices = computed(() => fastChoicesFor(selectedModel.value));
 const mcpGroups = computed(() => {
   const groups = new Map<string, boolean>();
   for (const set of props.mcpRegistry?.capability_sets ?? []) groups.set(set.group, true);
@@ -161,21 +158,17 @@ watch(selectedAgent, () => normalizeAgentChoices());
 /// profile cannot save a selector its own model rejects.
 function onModelPick(modelId: string) {
   draft.value.model = modelId;
-  const model = selectedAgent.value?.models.find((choice) => choice.id === modelId);
-  const efforts = model?.efforts ?? [];
-  const fast = model?.fast ?? [];
-  if (efforts.length && !efforts.some((choice) => choice.id === draft.value.effort)) {
-    draft.value.effort = '';
-  }
-  if (fast.length && !fast.some((choice) => choice.id === draft.value.fast)) {
-    draft.value.fast = '';
-  }
+  Object.assign(
+    draft.value,
+    prunedForModelChange(modelById(selectedAgent.value, modelId), {
+      effort: draft.value.effort,
+      fast: draft.value.fast,
+    }),
+  );
 }
 
 function onAgentChange() {
-  draft.value.model = '';
-  draft.value.effort = '';
-  draft.value.fast = '';
+  Object.assign(draft.value, clearedForAgentChange());
 }
 
 function onAgentPick(kind: string) {
