@@ -341,7 +341,8 @@ with the model — user turns, replies, thinking, and tool calls — live and
 For ACP sessions, the conversation composer sends immediately: it stops a live
 turn and starts the message as the next turn. Feedback queued by another client
 stays visible and can be pulled back into the composer with its **Edit** action
-or ArrowUp from an empty composer, or sent immediately with **Stop & send**. The
+or ArrowUp from an empty composer, or sent immediately with **Stop & send**;
+feedback still waiting after 60 seconds interrupts the turn on its own. The
 live status names visible thinking, writing, or tool activity and reports how
 long it has been since the agent produced an observable update; quiet time is
 not guessed to mean stuck. Human `loom sessions send` uses the same stop-and-send

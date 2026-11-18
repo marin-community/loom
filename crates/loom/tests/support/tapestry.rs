@@ -1,15 +1,20 @@
 //! Pulled in with `#[path]` by every suite that spawns a real supervisor —
 //! separate integration-test targets can't share code any other way.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The `tapestry` binary built alongside this test binary.
 ///
-/// A sibling two levels up from `<dir>/<profile>/deps/<test>` only holds while
-/// cargo's build and artifact directories are the same tree. `build.build-dir`
-/// splits them: test binaries stay in the build dir, `tapestry` is uplifted
-/// into `<workspace>/target/<profile>/`.
+/// Cargo 1.100 runs integration-test binaries from the build side —
+/// `<target>/<profile>/build/<pkg>/<hash>/…` — where older cargo ran them
+/// from the artifact side, `<target>/<profile>/deps/`. In both layouts the
+/// `build` (or, pre-1.100, `deps`) directory sits just under the profile
+/// directory, and the uplifted `tapestry` lands at
+/// `<target>/<profile>/tapestry` — or wherever a split `build.build-dir`
+/// puts the artifacts, which the `CARGO_TARGET_DIR` and cargo-metadata
+/// probes below cover.
 pub fn tapestry_bin() -> PathBuf {
     if let Some(bin) = std::env::var_os("WEAVER_TAPESTRY_BIN").map(PathBuf::from) {
         if bin.is_file() {
@@ -18,10 +23,26 @@ pub fn tapestry_bin() -> PathBuf {
     }
 
     let exe = std::env::current_exe().expect("test executable path");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("<profile>/deps/<test>");
+    let mut marker: Option<PathBuf> = None;
+    for dir in exe.ancestors().skip(1) {
+        let is = |name: &str| dir.file_name().and_then(OsStr::to_str) == Some(name);
+        if is("build") {
+            marker = Some(dir.to_path_buf());
+            break;
+        }
+        // A `deps` directory may also appear inside the build side; the
+        // `build` marker above replaces it when the split layout is present.
+        if marker.is_none() && is("deps") {
+            marker = Some(dir.to_path_buf());
+        }
+    }
+    let Some(marker) = marker else {
+        panic!(
+            "tapestry binary missing — unrecognized test-binary layout: {}",
+            exe.display()
+        );
+    };
+    let profile_dir = marker.parent().expect("profile directory");
     let profile = profile_dir.file_name().expect("profile directory name");
 
     let mut tried = Vec::new();

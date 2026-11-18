@@ -655,14 +655,14 @@ pub async fn cmd_launch(a: LaunchArgs) -> Result<()> {
 }
 
 /// Resolve a session view by key, surfacing a clearer error than a bare 404 when
-/// the key matches no live session.
+/// the key matches no session.
 pub(crate) async fn fetch_session(client: &Client, key: &str) -> Result<SessionView> {
     client
         .invoke::<sessions::get::Op>(&sessions::get::Input {
             session: key.to_string(),
         })
         .await
-        .with_context(|| format!("no live session for '{key}'"))
+        .with_context(|| format!("no session for '{key}'"))
 }
 
 /// One-line attention summary: the resolved level (the agent's `attention` tag,
@@ -702,7 +702,7 @@ pub(crate) async fn cmd_session_url(key: Option<String>, path: Option<String>) -
             path,
         })
         .await
-        .with_context(|| format!("no live session for '{key}'"))?;
+        .with_context(|| format!("no session for '{key}'"))?;
     println!("{}", res.url);
     Ok(())
 }

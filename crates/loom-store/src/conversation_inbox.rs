@@ -12,17 +12,23 @@ use std::future::Future;
 
 use crate::channel_data::Urgency;
 
+/// How long ordinary queued input (a normal-urgency session update or a
+/// queued prompt) waits for a turn boundary before it interrupts the turn.
+pub const NORMAL_INTERRUPT_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub fn update_interrupt_at(urgency: Urgency) -> Option<String> {
     let delay = match urgency {
         Urgency::Debug => return None,
-        Urgency::Normal => chrono::TimeDelta::seconds(60),
-        Urgency::Attention | Urgency::Blocked => chrono::TimeDelta::zero(),
+        Urgency::Normal => NORMAL_INTERRUPT_DELAY,
+        Urgency::Attention | Urgency::Blocked => std::time::Duration::ZERO,
     };
-    Some(
-        (chrono::Utc::now() + delay)
-            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-            .to_string(),
-    )
+    Some(interrupt_at_after(delay))
+}
+
+fn interrupt_at_after(delay: std::time::Duration) -> String {
+    (chrono::Utc::now() + delay)
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 pub fn session_update_text(source: &str, text: &str) -> String {
@@ -74,6 +80,11 @@ pub async fn pending_inputs(
 
 /// Explicitly queued adjacent user inputs can remain one editable draft. Other senders keep their
 /// place in the queue, and claiming or editing a draft fences further appends.
+///
+/// A queued prompt waits for the running turn to end, but only as long as a
+/// normal-urgency session update: after that its deadline lets automatic
+/// delivery interrupt the turn. Appending to a draft keeps the draft's
+/// original deadline.
 pub async fn enqueue_prompt(
     db: &crate::db::Db,
     session: &str,
@@ -110,13 +121,15 @@ pub async fn enqueue_prompt(
     let key = format!("prompt:{session}:{}", weaver_core::branch::new_id());
     let inserted = sqlx::query(
         "INSERT INTO conversation_inbox
-            (delivery_key, branch_id, preferred_session_id, payload, editable, author, resources)
-         SELECT ?, branch_id, id, ?, 1, ?, ? FROM sessions WHERE id = ? AND status != 'archived'",
+            (delivery_key, branch_id, preferred_session_id, payload, editable, author, resources,
+             interrupt_at)
+         SELECT ?, branch_id, id, ?, 1, ?, ?, ? FROM sessions WHERE id = ? AND status != 'archived'",
     )
     .bind(&key)
     .bind(text)
     .bind(by)
     .bind(serde_json::to_string(resources)?)
+    .bind(interrupt_at_after(NORMAL_INTERRUPT_DELAY))
     .bind(session)
     .execute(&mut *tx)
     .await?;
@@ -851,6 +864,60 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(retained, deadline);
+    }
+
+    #[tokio::test]
+    async fn queued_prompts_become_due_like_normal_updates_and_appends_keep_the_deadline() {
+        let (db, review) = claimed_inbox().await;
+        consume_conversation_inbox(&db, &review.delivery_key, &review.claim_token, "acp-review")
+            .await
+            .unwrap();
+        let before = chrono::Utc::now();
+        let key = enqueue_prompt(&db, "acp-review", "first", Some("manual"), &[], true)
+            .await
+            .unwrap();
+        let deadline = pending_inputs(&db, "acp-review").await.unwrap()[0]
+            .interrupt_at
+            .clone()
+            .expect("a queued prompt carries an interrupt deadline");
+        let due = chrono::DateTime::parse_from_rfc3339(&deadline)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(due >= before + NORMAL_INTERRUPT_DELAY - chrono::TimeDelta::milliseconds(1));
+        assert!(!has_due_input(&db, "acp-review", None).await.unwrap());
+
+        let appended = enqueue_prompt(&db, "acp-review", "second", Some("manual"), &[], true)
+            .await
+            .unwrap();
+        assert_eq!(appended, key);
+        let pending = pending_inputs(&db, "acp-review").await.unwrap();
+        assert_eq!(pending[0].interrupt_at.as_deref(), Some(deadline.as_str()));
+
+        let branch: String =
+            sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        for (now, expected) in [
+            (due - chrono::TimeDelta::milliseconds(1), false),
+            (due, true),
+        ] {
+            let item = claim_at(
+                &db,
+                &branch,
+                "acp-review",
+                Some("owner"),
+                |_, _| false,
+                now,
+                InboxLane::Session {
+                    interrupt_only: true,
+                    delivery_key: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(item.is_some(), expected);
+        }
     }
 
     #[tokio::test]

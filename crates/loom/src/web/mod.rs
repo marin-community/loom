@@ -536,8 +536,8 @@ fn session_transition_view(session: &Session) -> Option<weaver_api::SessionTrans
 }
 
 /// Resolve a session key (session id, branch id, branch name, or `repo:branch`)
-/// to `(Session, Branch)`. The session must exist and be active; clients hitting
-/// a branch with no live session get a 404.
+/// to `(Session, Branch)`, as [`session_mod::resolve_key`] does. A 404 only when
+/// the key names nothing, or names a branch with no session.
 pub(crate) async fn require_session(db: &Db, key: &str) -> ApiResult<(Session, Branch)> {
     session_mod::resolve_key(db, key)
         .await?
