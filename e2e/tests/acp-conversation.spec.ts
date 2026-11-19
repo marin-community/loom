@@ -1236,7 +1236,10 @@ test.describe('acp conversation', () => {
 
     await page.getByTestId('acp-composer-send').click();
     await expect(
-      page.getByTestId('acp-conversation').getByText('README.md', { exact: true }),
+      page
+        .getByTestId('acp-conversation')
+        .getByRole('region', { name: 'Agent update' })
+        .getByText('README.md', { exact: true }),
     ).toBeVisible({
       timeout: 15_000,
     });
@@ -1259,7 +1262,10 @@ test.describe('acp conversation', () => {
     await page.getByTestId('acp-composer-input').fill('resources');
     await page.getByTestId('acp-composer-send').click();
     await expect(
-      page.getByTestId('acp-conversation').getByText('scratch/long-notes.txt', { exact: true }),
+      page
+        .getByTestId('acp-conversation')
+        .getByRole('region', { name: 'Agent update' })
+        .getByText('scratch/long-notes.txt', { exact: true }),
     ).toBeVisible({ timeout: 15_000 });
     await expect(page.getByTestId('acp-attachment-pill')).toHaveCount(0);
   });
