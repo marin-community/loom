@@ -755,22 +755,20 @@ export const getSessionChat = (id: string, before?: { turn: number; seq: number 
 // `sessions.prompt.create` serves both ACP prompt paths. It takes no `by`: the
 // legacy body's caller-supplied author is gone, and provenance is derived from
 // the credential instead (a dashboard call is a human, so it records `manual`).
-/** Send a user message now, stopping an ordinary live turn. During compaction
- * the server queues it for the next turn instead. */
+/** Send through the adapter's native queue or steering, with Loom queueing as fallback. */
 export const promptSession = (id: string, text: string, files: string[] = []) =>
   invokeOperation('sessions.prompt.create', {
     text,
-    send_now: true,
+    send_now: false,
     files,
     session: id,
   });
 
-/** Queue a user message as next-turn feedback, leaving a live turn running
- * instead of cancelling it. Dispatched immediately when the session is idle. */
-export const queueSession = (id: string, text: string, files: string[] = []) =>
+/** Explicitly stop the active turn and send a replacement prompt. */
+export const stopAndSendSession = (id: string, text: string, files: string[] = []) =>
   invokeOperation('sessions.prompt.create', {
     text,
-    send_now: false,
+    send_now: true,
     files,
     session: id,
   });

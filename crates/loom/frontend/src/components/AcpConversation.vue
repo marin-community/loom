@@ -13,7 +13,7 @@ import {
 import {
   getSessionChat,
   promptSession,
-  queueSession,
+  stopAndSendSession,
   forceQueuedSession,
   retractQueuedSession,
   interruptSession,
@@ -117,7 +117,7 @@ const optimistic = ref<{ key: number; text: string }[]>([]);
 const pendingInputs = ref<QueuedInputView[]>([]);
 let queueRevision = 0;
 const editableInput = computed(() =>
-  [...pendingInputs.value].reverse().find((input) => input.editable),
+  [...pendingInputs.value].reverse().find((input) => input.editable && input.state === 'queued'),
 );
 function updateBody(text: string, sourceSession: string | null | undefined): string {
   const prefix = sourceSession ? `Update from loom session ${sourceSession}\n` : '';
@@ -475,7 +475,7 @@ watch(
 const draft = ref(restoreDraft(id.value, draftStorage()));
 const composerInput = ref<HTMLTextAreaElement | null>(null);
 const sending = ref(false);
-const queueing = ref(false);
+const sendingReplacement = ref(false);
 const editingQueued = ref(false);
 const sendError = ref('');
 const composerVisible = computed(() => canSend(props.session));
@@ -628,7 +628,7 @@ async function submitPrompt() {
   if (
     !draft.value.trim() ||
     sending.value ||
-    queueing.value ||
+    sendingReplacement.value ||
     editingQueued.value ||
     uploadingAttachment.value
   )
@@ -677,38 +677,33 @@ async function submitPrompt() {
   }
 }
 
-// Local slash commands act on the dashboard immediately; there is nothing to
-// defer to a later turn, so the Queue button stands down for them.
+// Local slash commands act on the dashboard without interrupting the agent.
 const draftIsLocalCommand = computed(() => localCommand(draft.value) !== null);
 
-// Send interrupts a live turn; Queue leaves it running and hands the text to
-// the server's durable next-turn queue instead.
-async function queuePrompt() {
+async function stopAndSendPrompt() {
   if (
     !draft.value.trim() ||
     draftIsLocalCommand.value ||
     sending.value ||
-    queueing.value ||
+    sendingReplacement.value ||
     editingQueued.value ||
     uploadingAttachment.value
   )
     return;
   const restoreComposerFocus = document.activeElement === composerInput.value;
-  queueing.value = true;
+  sendingReplacement.value = true;
   sendError.value = '';
   const text = draft.value;
   try {
-    await queueSession(id.value, text, [...selectedFiles.value]);
+    await stopAndSendSession(id.value, text, [...selectedFiles.value]);
     draft.value = '';
     selectedFiles.value = [];
-    // The queued copy is server-owned: the pending section renders it, so
-    // reconcile against the snapshot instead of adding an optimistic twin.
     await load({ preserve: true });
     autoFollow();
   } catch (e) {
-    sendError.value = (e as Error).message ?? 'Failed to queue';
+    sendError.value = (e as Error).message ?? 'Failed to stop and send';
   } finally {
-    queueing.value = false;
+    sendingReplacement.value = false;
     if (
       restoreComposerFocus &&
       (!document.activeElement || document.activeElement === document.body)
@@ -720,7 +715,7 @@ async function queuePrompt() {
 }
 
 async function forceQueued(deliveryKey?: string) {
-  if (sending.value || queueing.value || editingQueued.value) return;
+  if (sending.value || sendingReplacement.value || editingQueued.value) return;
   sending.value = true;
   sendError.value = '';
   try {
@@ -735,7 +730,7 @@ async function forceQueued(deliveryKey?: string) {
 }
 
 async function editQueued(deliveryKey = editableInput.value?.delivery_key) {
-  if (!deliveryKey || sending.value || queueing.value || editingQueued.value) return;
+  if (!deliveryKey || sending.value || sendingReplacement.value || editingQueued.value) return;
   editingQueued.value = true;
   sendError.value = '';
   let moved = false;
@@ -1145,6 +1140,7 @@ type Row =
       time: string;
       text: string;
       steered: boolean;
+      deliveryUncertain: boolean;
       sourceSession: string | null;
       sourceChannel: string | null;
       sourceMessage: string | null;
@@ -1273,6 +1269,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
           time: localTime(b.created_at),
           text: updateBody(text, user.source_session_id),
           steered,
+          deliveryUncertain: user.delivery_uncertain === true,
           sourceSession: user.source_session_id ?? null,
           sourceChannel: user.source_channel_id ?? null,
           sourceMessage: user.source_message_id ?? null,
@@ -1633,6 +1630,7 @@ function durationLabel(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 function inputTimeoutLabel(input: QueuedInputView): string {
+  if (input.state === 'delivering') return 'Waiting for agent acknowledgement';
   const deadline = timeOf(input.interrupt_at ?? undefined);
   if (deadline == null) return 'Next turn';
   if (!turnLive.value) return 'Auto-send paused';
@@ -1846,9 +1844,9 @@ async function goToActivity(target: {
                     class="acp-prompt-action"
                     >Open source</RouterLink
                   >
-                  <span v-if="row.steered" class="acp-prompt-state" data-testid="acp-steered"
-                    >steered turn {{ row.turn + 1 }}</span
-                  >
+                  <span v-if="row.steered" class="acp-prompt-state" data-testid="acp-steered">{{
+                    row.deliveryUncertain ? 'delivery unconfirmed' : `steered turn ${row.turn + 1}`
+                  }}</span>
                   <span class="acp-time">{{ row.time }}</span>
                 </header>
                 <MarkdownView :id="id" path="" :source="row.text" />
@@ -2122,7 +2120,13 @@ async function goToActivity(target: {
                   class="acp-prompt-state"
                   :data-testid="input.editable ? 'acp-queued' : undefined"
                 >
-                  {{ input.editable ? 'queued · agent hasn’t seen this yet' : 'queued' }}
+                  {{
+                    input.state === 'delivering'
+                      ? 'sending'
+                      : input.editable
+                        ? 'queued · agent hasn’t seen this yet'
+                        : 'queued'
+                  }}
                 </span>
                 <span class="acp-update-timeout" data-testid="acp-update-timeout">
                   {{ inputTimeoutLabel(input) }}
@@ -2135,21 +2139,22 @@ async function goToActivity(target: {
                 >
                 <span class="acp-prompt-actions">
                   <button
-                    v-if="input.editable"
+                    v-if="input.editable && input.state === 'queued'"
                     type="button"
                     class="acp-prompt-action"
                     data-testid="acp-edit-queued"
-                    :disabled="sending || queueing || editingQueued"
+                    :disabled="sending || sendingReplacement || editingQueued"
                     title="Move this unseen feedback back into the editor (ArrowUp from an empty editor)"
                     @click="editQueued(input.delivery_key)"
                   >
                     {{ editingQueued ? 'Moving…' : 'Edit' }}
                   </button>
                   <button
+                    v-if="input.state === 'queued'"
                     type="button"
                     class="acp-prompt-action"
                     :data-testid="input.editable ? 'acp-force-queued' : 'acp-force-update'"
-                    :disabled="sending || queueing || editingQueued"
+                    :disabled="sending || sendingReplacement || editingQueued"
                     :title="
                       turnLive
                         ? 'Stop the running turn and send this queued input as the next turn'
@@ -2297,7 +2302,7 @@ async function goToActivity(target: {
         ref="composerInput"
         v-model="draft"
         rows="2"
-        :disabled="sending || queueing || editingQueued"
+        :disabled="sending || sendingReplacement || editingQueued"
         :placeholder="commandHint || 'Message the agent…'"
         autocomplete="off"
         data-testid="acp-composer-input"
@@ -2535,10 +2540,10 @@ async function goToActivity(target: {
             v-if="turnLive"
             type="button"
             class="btn-secondary px-3 py-1 text-xs"
-            data-testid="acp-composer-queue"
+            data-testid="acp-composer-stop-send"
             :disabled="
               sending ||
-              queueing ||
+              sendingReplacement ||
               editingQueued ||
               uploadingAttachment ||
               !draft.trim() ||
@@ -2546,19 +2551,21 @@ async function goToActivity(target: {
             "
             :title="
               draftIsLocalCommand
-                ? 'Local commands run immediately and cannot be queued'
-                : 'Queue for the agent’s next turn instead of interrupting the current one'
+                ? 'Local commands run without interrupting the agent'
+                : 'Stop the running turn and send this message as a new turn'
             "
-            @click="queuePrompt"
+            @click="stopAndSendPrompt"
           >
-            {{ queueing ? 'Queueing…' : 'Queue' }}
+            {{ sendingReplacement ? 'Sending…' : 'Stop & send' }}
           </button>
           <button
             type="submit"
             class="btn-primary px-3 py-1 text-sm"
             data-testid="acp-composer-send"
             title="Enter to send · Shift+Enter for a new line"
-            :disabled="sending || queueing || editingQueued || uploadingAttachment || !draft.trim()"
+            :disabled="
+              sending || sendingReplacement || editingQueued || uploadingAttachment || !draft.trim()
+            "
           >
             {{ sending ? 'Sending…' : 'Send' }}
           </button>

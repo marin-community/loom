@@ -46,6 +46,12 @@ pub struct InboxItem {
     pub source_session_id: Option<String>,
     pub source_channel_id: Option<String>,
     pub source_message_id: Option<String>,
+    #[sqlx(default)]
+    pub input_request_id: Option<i64>,
+    #[sqlx(default)]
+    pub input_turn: Option<i64>,
+    #[sqlx(default)]
+    pub input_method: Option<String>,
 }
 
 pub async fn pending_inputs(
@@ -56,7 +62,10 @@ pub async fn pending_inputs(
     let rows = sqlx::query(
         "SELECT delivery_key, source_session_id, source_channel_id, source_message_id,
                 payload, state, interrupt_at, editable FROM conversation_inbox
-         WHERE preferred_session_id = ? AND review_id IS NULL AND state = 'queued'
+         WHERE preferred_session_id = ? AND review_id IS NULL
+           AND (state = 'queued' OR (state = 'delivering' AND input_request_id IS NOT NULL))
+           AND NOT EXISTS (SELECT 1 FROM chat_blocks
+             WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)
          ORDER BY created_at, rowid",
     )
     .bind(session)
@@ -345,6 +354,107 @@ pub async fn has_due_input(
     .await?)
 }
 
+/// Input already handed to an adapter must not be reclaimed and sent twice.
+pub async fn pending_input_delivery(
+    db: &crate::db::Db,
+    session: &str,
+) -> Result<Option<InboxItem>> {
+    Ok(sqlx::query_as(
+        "SELECT * FROM conversation_inbox
+         WHERE claimed_session_id = ? AND state = 'delivering'
+           AND input_request_id IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM chat_blocks
+             WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)",
+    )
+    .bind(session)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Record ownership before writing so reattachment can recognize the response.
+pub async fn prepare_input_delivery(
+    db: &crate::db::Db,
+    item: &InboxItem,
+    session: &str,
+    request_id: u64,
+    turn: i64,
+    method: &str,
+) -> Result<bool> {
+    Ok(sqlx::query(&format!(
+        "UPDATE conversation_inbox SET input_request_id = ?, input_turn = ?, input_method = ?
+         WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?
+           AND claimed_session_id = ? AND EXISTS (
+             SELECT 1 FROM sessions WHERE id = ? AND {}
+           )",
+        crate::session::turn_fence_predicate()
+    ))
+    .bind(request_id as i64)
+    .bind(turn)
+    .bind(method)
+    .bind(&item.delivery_key)
+    .bind(&item.claim_token)
+    .bind(session)
+    .bind(session)
+    .execute(db)
+    .await?
+    .rows_affected()
+        == 1)
+}
+
+/// Journal a delivery response without replacing the running prompt.
+pub async fn record_input_delivery(
+    db: &crate::db::Db,
+    item: &InboxItem,
+    session: &str,
+    turn: i64,
+    seq: i64,
+    payload: &Value,
+) -> Result<crate::chat::ChatBlockView> {
+    let now = crate::db::now_iso();
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let consumed = sqlx::query(
+        "UPDATE conversation_inbox SET state = 'consumed', consumed_at = ?,
+             claim_token = NULL, claim_owner = NULL
+         WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?
+           AND claimed_session_id = ? AND input_request_id IS NOT NULL",
+    )
+    .bind(&now)
+    .bind(&item.delivery_key)
+    .bind(&item.claim_token)
+    .bind(session)
+    .execute(&mut *tx)
+    .await?;
+    anyhow::ensure!(consumed.rows_affected() == 1, "steering claim was lost");
+    sqlx::query(
+        "INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
+         VALUES (?, ?, ?, 'user_message', ?, ?)",
+    )
+    .bind(session)
+    .bind(turn)
+    .bind(seq)
+    .bind(payload.to_string())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE channel_deliveries SET state = 'delivered', attempts = attempts + 1,
+             last_error = NULL, updated_at = ?
+         WHERE 'channel:' || message_id || ':' || target_session_id = ?",
+    )
+    .bind(&now)
+    .bind(&item.delivery_key)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(crate::chat::ChatBlockView {
+        turn,
+        seq,
+        kind: crate::chat::kind::USER_MESSAGE.to_string(),
+        payload: payload.clone(),
+        created_at: now,
+    })
+}
+
 pub struct InboxTurnBoundary<'a> {
     pub turn: i64,
     pub seq: i64,
@@ -453,6 +563,7 @@ async fn claim_at(
              inbox.state = 'queued'
              OR (
                inbox.state = 'delivering'
+               AND inbox.input_request_id IS NULL
                AND inbox.claimed_at <= ?
                AND NOT EXISTS (
                  SELECT 1 FROM sessions AS target
@@ -688,7 +799,8 @@ pub async fn release_conversation_inbox(
          SET state = CASE WHEN review_id IS NULL AND EXISTS (
                  SELECT 1 FROM chat_blocks WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key
              ) THEN 'consumed' ELSE 'queued' END, claimed_session_id = NULL,
-             claim_token = NULL, claim_owner = NULL, claimed_at = NULL
+             claim_token = NULL, claim_owner = NULL, claimed_at = NULL,
+             input_request_id = NULL, input_turn = NULL, input_method = NULL
          WHERE delivery_key = ? AND state = 'delivering' AND claim_token = ?",
     )
     .bind(delivery_key)

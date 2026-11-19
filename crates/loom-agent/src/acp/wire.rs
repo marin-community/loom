@@ -62,6 +62,7 @@ pub mod method {
     pub const SESSION_NEW: &str = "session/new";
     pub const SESSION_LOAD: &str = "session/load";
     pub const SESSION_PROMPT: &str = "session/prompt";
+    pub const SESSION_STEERING: &str = "_session/steering";
     pub const SESSION_CANCEL: &str = "session/cancel";
     pub const SESSION_SET_MODE: &str = "session/set_mode";
     pub const SESSION_SET_CONFIG_OPTION: &str = "session/set_config_option";
@@ -422,6 +423,8 @@ pub struct AgentCapabilities {
     pub load_session: bool,
     #[serde(default)]
     pub mcp_capabilities: McpCapabilities,
+    #[serde(default, rename = "_meta")]
+    pub meta: AgentCapabilitiesMeta,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -437,9 +440,31 @@ pub struct InitializeMeta {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+pub struct AgentCapabilitiesMeta {
+    #[serde(default, rename = "claudeCode")]
+    pub claude_code: ClaudeCodeCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeCodeCapabilities {
+    #[serde(default)]
+    pub prompt_queueing: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SteeringCapability {
     #[serde(default)]
     pub supported: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum SteeringResult {
+    Injected,
+    PromptRequired,
+    StartedNewTurn,
+    Failed,
 }
 
 // ---------------------------------------------------------------------------
@@ -855,11 +880,15 @@ mod tests {
         assert_eq!(pr.stop_reason, "end_turn");
 
         let init: InitializeResult = serde_json::from_value(json!({
-            "agentCapabilities": { "loadSession": true },
+            "agentCapabilities": {
+                "loadSession": true,
+                "_meta": { "claudeCode": { "promptQueueing": true } },
+            },
             "_meta": { "steering": { "supported": true } },
         }))
         .unwrap();
         assert!(init.agent_capabilities.load_session);
+        assert!(init.agent_capabilities.meta.claude_code.prompt_queueing);
         assert!(init.meta.steering.supported);
     }
 

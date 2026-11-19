@@ -2558,10 +2558,10 @@ async fn queue_consume_failure_does_not_dispatch_or_replay() {
     );
 }
 
-/// Adapter-specific private steering must not bypass the durable queue.
+/// Steering preserves the active tool and joins feedback to the same turn.
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn advertised_private_steering_still_uses_the_durable_queue() {
+async fn queued_feedback_steers_without_cancelling_live_tools() {
     let ts = TestServer::start().await;
     start_new_with_env(
         &ts,
@@ -2576,7 +2576,7 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
         .client
         .post(
             "/api/sessions/prompt/create",
-            json!({ "text": "wait:500|say:first", "session": "acp-ignore-steering" }),
+            json!({ "text": "toolwait:500:child work|say:first", "session": "acp-ignore-steering" }),
         )
         .await
         .unwrap();
@@ -2593,29 +2593,428 @@ async fn advertised_private_steering_still_uses_the_durable_queue() {
     assert_eq!(second["queued"], true);
     assert_eq!(second["turn"], 0);
 
-    assert_eq!(
-        loom::conversation_inbox::pending_inputs(&ts.state.db, "acp-ignore-steering")
-            .await
-            .unwrap()[0]
-            .text,
-        "say:second"
-    );
-
     let chat = poll_chat_state(
         &ts,
         "acp-ignore-steering",
         Duration::from_secs(10),
         |chat| {
             chat["live_turn"].is_null()
-                && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 2
+                && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 1
         },
     )
     .await;
     assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
-        block["turn"] == 1
+        block["turn"] == 0
             && block["kind"] == "user_message"
             && block["payload"]["text"] == "say:second"
+            && block["payload"]["steered"] == true
     }));
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|b| b["kind"] == "tool_call"
+        && b["payload"]["title"] == "child work"
+        && b["payload"]["status"] == "completed"));
+    assert_eq!(count_kind(blocks, "user_message"), 2);
+    assert!(chat["pending_inputs"].as_array().unwrap().is_empty());
+    assert!(blocks
+        .iter()
+        .filter(|b| b["kind"] == "turn_end")
+        .all(|b| b["payload"]["stop_reason"] == "end_turn"));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn declined_steering_keeps_the_cancellation_deadline() {
+    for outcome in ["promptRequired", "error"] {
+        let ts = TestServer::start().await;
+        let id = "acp-steering-fallback";
+        start_new_with_env(
+            &ts,
+            id,
+            None,
+            None,
+            vec![
+                ("FAKE_ACP_STEERING".into(), "1".into()),
+                ("FAKE_ACP_STEERING_OUTCOME".into(), outcome.into()),
+            ],
+        )
+        .await;
+        ts.client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "wait:30000|say:stale" }),
+            )
+            .await
+            .unwrap();
+        ts.client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "say:feedback" }),
+            )
+            .await
+            .unwrap();
+        poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+            chat["pending_inputs"]
+                .as_array()
+                .is_some_and(|inputs| inputs.len() == 1 && inputs[0]["state"] == "queued")
+        })
+        .await;
+        sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ? AND state = 'queued'")
+            .bind(id).execute(&ts.state.db).await.unwrap();
+        let chat = poll_chat(&ts, id, Duration::from_secs(10), |blocks| {
+            count_kind(blocks, "turn_end") == 2
+        })
+        .await;
+        let blocks = chat["blocks"].as_array().unwrap();
+        assert!(
+            blocks.iter().any(|b| b["turn"] == 0
+                && b["kind"] == "turn_end"
+                && b["payload"]["cancelled_by"] == "update_policy"),
+            "{outcome}: {chat}"
+        );
+        assert_eq!(count_kind(blocks, "user_message"), 2);
+        assert!(chat["pending_inputs"].as_array().unwrap().is_empty());
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unconfirmed_steering_is_not_automatically_replayed() {
+    let ts = TestServer::start().await;
+    let id = "acp-steering-uncertain";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".into(), "1".into()),
+            ("FAKE_ACP_STEERING_OUTCOME".into(), "failed".into()),
+        ],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "toolwait:1500:child work|say:original" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:feedback" }),
+        )
+        .await
+        .unwrap();
+    let uncertain = poll_chat(&ts, id, Duration::from_secs(5), |blocks| {
+        blocks
+            .iter()
+            .any(|b| b["payload"]["delivery_uncertain"] == true)
+    })
+    .await;
+    assert!(uncertain["pending_inputs"].as_array().unwrap().is_empty());
+    sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
+        .bind(id).execute(&ts.state.db).await.unwrap();
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+        chat["live_turn"].is_null()
+            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 1
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "user_message"), 2);
+    assert!(blocks
+        .iter()
+        .any(|b| b["kind"] == "tool_call" && b["payload"]["status"] == "completed"));
+    assert!(blocks
+        .iter()
+        .filter(|b| b["kind"] == "turn_end")
+        .all(|b| b["payload"]["stop_reason"] == "end_turn"));
+    assert!(!blocks.iter().any(|b| b["kind"] == "agent_message"
+        && b["payload"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("feedback"))));
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_stop_and_send_settles_an_unacknowledged_steer() {
+    let ts = TestServer::start().await;
+    let id = "acp-stop-pending-steer";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".into(), "1".into()),
+            ("FAKE_ACP_STEERING_ACK_DELAY".into(), "3000".into()),
+        ],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "wait:30000|say:original" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:feedback" }),
+        )
+        .await
+        .unwrap();
+    poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+        chat["pending_inputs"][0]["state"] == "delivering"
+    })
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:replacement", "send_now": true }),
+        )
+        .await
+        .unwrap();
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+        chat["live_turn"].is_null()
+            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert!(blocks.iter().any(|b| b["kind"] == "user_message"
+        && b["payload"]["text"] == "say:feedback"
+        && b["payload"]["delivery_uncertain"] == true));
+    assert!(blocks
+        .iter()
+        .any(|b| b["kind"] == "agent_message" && b["payload"]["text"] == "replacement"));
+    assert!(chat["pending_inputs"].as_array().unwrap().is_empty());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_prompt_queue_preserves_work_and_survives_reattachment() {
+    let ts = TestServer::start().await;
+    let id = "acp-native-queue";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".into(), "1".into()),
+            ("FAKE_ACP_PROMPT_QUEUEING".into(), "1".into()),
+        ],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "toolwait:1500:child work|say:original" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:feedback", "files": ["README.md"] }),
+        )
+        .await
+        .unwrap();
+    poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+        chat["pending_inputs"][0]["state"] == "delivering"
+    })
+    .await;
+    sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
+        .bind(id).execute(&ts.state.db).await.unwrap();
+    assert!(ts.state.acp.stop(id));
+    acp::attach(&ts.state.acp_ctx(), id).await.unwrap();
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(10), |chat| {
+        chat["live_turn"].is_null()
+            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 2
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "user_message"), 2, "{blocks:?}");
+    assert!(blocks.iter().any(|b| b["kind"] == "tool_call"
+        && b["payload"]["title"] == "child work"
+        && b["payload"]["status"] == "completed"));
+    assert!(blocks.iter().any(|b| b["kind"] == "user_message"
+        && b["turn"] == 1
+        && b["payload"]["resources"][0]["name"] == "README.md"));
+    assert!(blocks
+        .iter()
+        .filter(|b| b["kind"] == "turn_end")
+        .all(|b| b["payload"]["stop_reason"] == "end_turn"));
+    assert!(chat["pending_inputs"].as_array().unwrap().is_empty());
+}
+
+/// The accepted input can land before its acknowledgement, including across
+/// a host restart. Expiring the old deadline must not cancel and replay it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delayed_steering_acknowledgement_survives_reattachment() {
+    let ts = TestServer::start().await;
+    let id = "acp-steering-recover";
+    start_new_with_env(
+        &ts,
+        id,
+        None,
+        None,
+        vec![
+            ("FAKE_ACP_STEERING".into(), "1".into()),
+            ("FAKE_ACP_STEERING_ACK_DELAY".into(), "1800".into()),
+        ],
+    )
+    .await;
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "toolwait:300:child work|say:original" }),
+        )
+        .await
+        .unwrap();
+    ts.client
+        .post(
+            "/api/sessions/prompt/create",
+            json!({ "session": id, "text": "say:feedback" }),
+        )
+        .await
+        .unwrap();
+    poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+        chat["pending_inputs"][0]["state"] == "delivering"
+    })
+    .await;
+    sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
+        .bind(id).execute(&ts.state.db).await.unwrap();
+    assert!(ts.state.acp.stop(id));
+    acp::attach(&ts.state.acp_ctx(), id).await.unwrap();
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(10), |chat| {
+        chat["live_turn"].is_null()
+            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == 1
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "user_message"), 2, "{chat}");
+    assert!(blocks
+        .iter()
+        .any(|b| b["kind"] == "user_message" && b["payload"]["steered"] == true && b["turn"] == 0));
+    assert!(blocks
+        .iter()
+        .any(|b| b["kind"] == "tool_call" && b["payload"]["status"] == "completed"));
+    assert!(blocks
+        .iter()
+        .filter(|b| b["kind"] == "turn_end")
+        .all(|b| b["payload"]["stop_reason"] == "end_turn"));
+    assert!(chat["pending_inputs"].as_array().unwrap().is_empty());
+}
+
+/// Opt-in smoke against a real adapter, using the same isolated server/relay
+/// harness as the deterministic cases. No user's running session is touched.
+#[ignore = "requires LOOM_STEERING_TEST_ADAPTER and provider credentials"]
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_agent_steering_preserves_active_work() {
+    real_agent_steering_case("Run a shell command that creates .steering-started in the working directory, sleeps for 8 seconds, and prints ORIGINAL_DONE. Wait for the command to finish, then include ORIGINAL_DONE in your final reply.", &["Bash"]).await;
+}
+
+#[ignore = "requires LOOM_STEERING_TEST_ADAPTER and provider credentials"]
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_agent_steering_preserves_subagent_work() {
+    real_agent_steering_case("Use the Agent tool to launch a Haiku subagent. Have it run a shell command that creates .steering-started in the working directory, sleeps for 8 seconds, and prints ORIGINAL_DONE, then report ORIGINAL_DONE. Wait for that subagent to finish and include ORIGINAL_DONE in your final reply. Do not run the command yourself.", &["Agent", "Task"]).await;
+}
+
+async fn real_agent_steering_case(task: &str, tool_names: &[&str]) {
+    let ts = TestServer::start().await;
+    let id = "acp-real-steering";
+    make_session(&ts, id).await;
+    let mut launch = transient_launch(&ts, vec![("CLAUDECODE".into(), String::new())]);
+    launch.adapter_cmd = std::env::var("LOOM_STEERING_TEST_ADAPTER").unwrap();
+    launch.initial_model =
+        Some(std::env::var("LOOM_STEERING_TEST_MODEL").unwrap_or("haiku".into()));
+    launch.mode = Some("bypassPermissions".into());
+    launch.setup_timeout = Duration::from_secs(60);
+    acp::start(&ts.state.acp_ctx(), id, launch).await.unwrap();
+    let handle = ts.state.acp.get(id).unwrap();
+    assert!(
+        handle.metadata().prompt_queueing_supported,
+        "the Claude adapter must advertise native prompt queueing"
+    );
+    let native_queue = handle.metadata().prompt_queueing_supported;
+    let expected_turns = if native_queue { 2 } else { 1 };
+    handle
+        .prompt(task.into(), Some("manual".into()), Vec::new())
+        .await
+        .unwrap();
+    // ACP's pending tool notification precedes execution. The file proves
+    // the actual command (inside the child for the subagent case) has started.
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !tokio::fs::try_exists(ts.repo_path().join(".steering-started"))
+            .await
+            .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("agent started the requested work");
+    let snapshot = handle.subscribe_with_snapshot().await.unwrap().snapshot;
+    let original_tool = snapshot.data["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| {
+            tool["name"]
+                .as_str()
+                .is_some_and(|name| tool_names.contains(&name))
+        })
+        .unwrap_or_else(|| panic!("expected a live tool: {}", snapshot.data))["tool_call_id"]
+        .clone();
+    handle.prompt(
+        "Also include STEERING_CONFIRMED in your final reply. Continue waiting for the existing command and complete the original task.".into(),
+        Some("manual".into()), Vec::new(),
+    ).await.unwrap();
+    let chat = poll_chat_state(&ts, id, Duration::from_secs(120), |chat| {
+        chat["live_turn"].is_null()
+            && count_kind(chat["blocks"].as_array().unwrap(), "turn_end") == expected_turns
+    })
+    .await;
+    let blocks = chat["blocks"].as_array().unwrap();
+    assert_eq!(count_kind(blocks, "turn_end"), expected_turns, "{blocks:?}");
+    assert!(
+        blocks.iter().any(|b| b["kind"] == "user_message"
+            && b["payload"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("STEERING_CONFIRMED"))
+            && (native_queue || b["payload"]["steered"] == true)),
+        "{blocks:?}"
+    );
+    assert!(
+        blocks.iter().any(|b| b["kind"] == "tool_call"
+            && b["payload"]["status"] == "completed"
+            && b["payload"]["tool_call_id"] == original_tool),
+        "{blocks:?}"
+    );
+    let replies: String = blocks
+        .iter()
+        .filter(|b| b["kind"] == "agent_message")
+        .filter_map(|b| b["payload"]["text"].as_str())
+        .collect();
+    assert!(
+        replies.contains("ORIGINAL_DONE") && replies.contains("STEERING_CONFIRMED"),
+        "{chat}"
+    );
+    assert!(
+        blocks
+            .iter()
+            .filter(|b| b["kind"] == "turn_end")
+            .all(|b| b["payload"]["stop_reason"] == "end_turn"),
+        "{chat}"
+    );
+    eprintln!(
+        "Real-agent delivery: original tool preserved, no cancellation, both response markers."
+    );
 }
 
 #[serial]

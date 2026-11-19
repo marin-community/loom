@@ -50,7 +50,7 @@ async function defineFakeAcpAgent(
   weaver: WeaverFixture,
   name: string,
   label: string,
-  options: { summaryDelay?: number } = {},
+  options: { summaryDelay?: number; steering?: boolean; nativeQueue?: boolean } = {},
 ): Promise<void> {
   const summaryEnv = options.summaryDelay
     ? `FAKE_ACP_SUMMARY_OUTPUT_B64= FAKE_ACP_SUMMARY_DELAY=${options.summaryDelay} `
@@ -62,7 +62,7 @@ async function defineFakeAcpAgent(
       name,
       label,
       setup: '',
-      launch: `${summaryEnv}node ${FAKE_AGENT}`,
+      launch: `${summaryEnv}${options.steering ? 'FAKE_ACP_STEERING=1 ' : ''}${options.nativeQueue ? 'FAKE_ACP_PROMPT_QUEUEING=1 ' : ''}node ${FAKE_AGENT}`,
       resume: '',
       reports_status: false,
       protocol: 'acp',
@@ -78,14 +78,14 @@ async function defineFakeAcpAgent(
  *  brought it up as `protocol='acp'`, else null (the acp axis isn't wired yet). */
 async function launchAcpSession(
   weaver: WeaverFixture,
-  opts: { goal: string; mode?: string; name?: string },
+  opts: { goal: string; mode?: string; name?: string; steering?: boolean; nativeQueue?: boolean },
 ): Promise<Session | null> {
   // The fake adapter is launched by the custom agent's `launch` command. The
   // `protocol` axis marks it ACP rather than a PTY TUI (added by the lifecycle
   // phase; ignored by the current backend, which is exactly why the probe below
   // detects support).
-  const agent = 'acp-fake';
-  await defineFakeAcpAgent(weaver, agent, 'ACP fake');
+  const agent = opts.nativeQueue ? 'acp-fake-native-queue' : opts.steering ? 'acp-fake-steering' : 'acp-fake';
+  await defineFakeAcpAgent(weaver, agent, 'ACP fake', { steering: opts.steering, nativeQueue: opts.nativeQueue });
 
   const res = await fetch(`${weaver.baseUrl}/api/sessions/launch`, {
     method: 'POST',
@@ -109,7 +109,7 @@ async function launchAcpSession(
 async function openAcp(
   page: Page,
   weaver: WeaverFixture,
-  opts: { goal: string; mode?: string; name?: string },
+  opts: { goal: string; mode?: string; name?: string; steering?: boolean; nativeQueue?: boolean },
 ): Promise<Session> {
   const s = await launchAcpSession(weaver, opts);
   test.skip(s === null, SKIP_MSG);
@@ -119,9 +119,7 @@ async function openAcp(
   return s!;
 }
 
-/** Exercise the durable queue contract directly. The conversation composer is
- * immediate by default, but queued feedback from another client remains an
- * editable, promotable part of the UI. */
+/** Exercise queued feedback from another client through the same API. */
 async function queueAcpPrompt(
   weaver: WeaverFixture,
   session: Session,
@@ -1073,7 +1071,52 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-recover')).toBeHidden();
   });
 
-  test('composer stops and sends when the running agent cannot steer', async ({ page, weaver }) => {
+  test('Send steers feedback into the live turn without cancelling its tool', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-steering-ui',
+      steering: true,
+    });
+    const input = page.getByTestId('acp-composer-input');
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await input.fill('toolwait:4000:child work|say:original done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+    await input.fill('say:steered feedback');
+    await input.press('Enter');
+    await expect(page.getByTestId('acp-steered')).toHaveCount(1);
+    await expect(page.getByTestId('acp-pending')).toBeHidden();
+    await expect(page.getByTestId('acp-conversation')).toContainText('steered feedback', { timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(0);
+    await expect(page.getByTestId('acp-conversation')).toContainText('original done');
+  });
+
+  test('Send uses the native queue while preserving the running tool', async ({ page, weaver }) => {
+    await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'acp-native-queue-ui',
+      steering: true,
+      nativeQueue: true,
+    });
+    const input = page.getByTestId('acp-composer-input');
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await input.fill('toolwait:4000:child work|say:original done');
+    await page.getByTestId('acp-composer-send').click();
+    await expect(page.getByTestId('acp-working')).toBeVisible();
+    await input.fill('say:queued feedback');
+    await input.press('Enter');
+    await expect(page.getByTestId('acp-queued')).toHaveText('sending');
+    await expect(page.getByTestId('acp-edit-queued')).toBeHidden();
+    await expect(page.getByTestId('acp-force-queued')).toBeHidden();
+    await expect(page.getByTestId('acp-pending')).toBeHidden({ timeout: 15_000 });
+    await expect(page.getByTestId('acp-working')).toBeHidden();
+    await expect(page.getByTestId('acp-conversation').getByText('queued feedback', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('acp-conversation')).toContainText('original done');
+    await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(0);
+  });
+
+  test('composer explicitly stops and sends', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
       name: 'acp-queue-ui',
@@ -1086,7 +1129,7 @@ test.describe('acp conversation', () => {
     });
 
     await input.fill('say:queued feedback');
-    await page.getByTestId('acp-composer-send').click();
+    await page.getByTestId('acp-composer-stop-send').click();
     await expect(page.getByTestId('acp-queued')).toBeHidden();
     await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(1);
     await expect(
@@ -1094,7 +1137,7 @@ test.describe('acp conversation', () => {
     ).toBeVisible({ timeout: 20_000 });
   });
 
-  test('Queue defers a message to the next turn without stopping the live one', async ({
+  test('Send queues feedback when steering is unavailable without stopping the live turn', async ({
     page,
     weaver,
   }) => {
@@ -1104,7 +1147,7 @@ test.describe('acp conversation', () => {
       name: 'acp-queue-button',
     });
     const input = page.getByTestId('acp-composer-input');
-    // Keep the turn live comfortably beyond scheduling jitter so the queue click
+    // Keep the turn live comfortably beyond scheduling jitter so the send click
     // lands mid-turn, then let it end normally so the queue drains by itself.
     await input.fill('wait:15000|say:first turn done');
     await page.getByTestId('acp-composer-send').click();
@@ -1113,11 +1156,11 @@ test.describe('acp conversation', () => {
     });
 
     await input.fill('say:queued feedback');
-    await page.getByTestId('acp-composer-queue').click();
+    await page.getByTestId('acp-composer-send').click();
     await expect(page.getByTestId('acp-queued')).toHaveText('queued · agent hasn’t seen this yet');
     await expect(page.getByTestId('acp-pending')).toContainText('say:queued feedback');
     await expect(input).toHaveValue('');
-    // Unlike Send, Queue leaves the running turn alone.
+    // Normal sends leave the running turn alone.
     await expect(page.getByTestId('acp-working')).toBeVisible();
     await expect(page.getByTestId('acp-turn-rule').filter({ hasText: 'cancelled' })).toHaveCount(0);
 

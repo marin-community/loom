@@ -802,9 +802,10 @@ pub struct AcpMetadata {
     pub commands: Vec<Value>,
     pub config_options: Vec<Value>,
     pub modes: Vec<Value>,
-    /// Whether this adapter advertises injected live-turn input. Loom exposes
-    /// the provider metadata but uses normal prompt boundaries for delivery.
+    /// Whether this adapter advertises injected live-turn input.
     pub steering_supported: bool,
+    /// Native prompt queueing avoids Claude's preemptive steering priority.
+    pub prompt_queueing_supported: bool,
 }
 
 /// A live session's handle, held in the [`AcpRegistry`]: send commands to its
@@ -834,10 +835,9 @@ impl AcpHandle {
         self.metadata.lock().unwrap().clone()
     }
 
-    /// Send a user message: dispatched as a `session/prompt` when idle or
-    /// appended to the durable queue while the agent is working. A queued
-    /// message that is still waiting after the normal interrupt delay
-    /// interrupts the turn, as Stop & send would.
+    /// Send a user message: prompt when idle, otherwise use the adapter's
+    /// native queue or steering. Input still in Loom's queue interrupts after
+    /// the normal delay; agent-owned input is never cancelled and replayed.
     pub async fn prompt(
         &self,
         text: String,
@@ -1089,6 +1089,19 @@ struct InflightInbox {
     /// Present only for a claim activated by this process. A recovered turn is
     /// fenced durably by `sessions.acp_inflight` instead.
     active_claim: Option<ActiveInboxClaim>,
+}
+
+struct InflightDelivery {
+    item: crate::conversation_inbox::InboxItem,
+    // Recovered requests are fenced by the durable input_request_id.
+    active_claim: Option<ActiveInboxClaim>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputDeliveryDisposition {
+    Injected,
+    Rejected,
+    Unconfirmed,
 }
 
 #[cfg(test)]
@@ -1796,6 +1809,12 @@ struct Task {
     /// A protected inbox claim stays recoverable until the matching ACP
     /// prompt response proves that the adapter accepted the attempted write.
     inflight_inbox: Option<InflightInbox>,
+    inflight_delivery: Option<InflightDelivery>,
+    /// A prompt response can race its steer response. Keep its frame unacked
+    /// and its turn open until the steer's disposition is known.
+    deferred_prompt_response: Option<(u64, Incoming)>,
+    deferred_queued_response: Option<(u64, Incoming)>,
+    input_delivery_unavailable_turn: Option<i64>,
 
     current_turn: i64,
     next_seq: i64,
@@ -1899,6 +1918,10 @@ impl Task {
             next_req_id: 0,
             inflight_prompt: None,
             inflight_inbox: None,
+            inflight_delivery: None,
+            deferred_prompt_response: None,
+            deferred_queued_response: None,
+            input_delivery_unavailable_turn: None,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -1993,6 +2016,19 @@ impl Task {
         let turns_dispatched = if max_seq < 0 { 0 } else { current_turn + 1 };
 
         let metadata = Self::load_persisted_metadata(&state.db, &session.id).await?;
+        let inflight_delivery =
+            crate::conversation_inbox::pending_input_delivery(&state.db, &session.id)
+                .await?
+                .map(|item| InflightDelivery {
+                    item,
+                    active_claim: None,
+                });
+        let next_req_id = inflight.map_or(0, |(id, _)| id).max(
+            inflight_delivery
+                .as_ref()
+                .and_then(|steer| steer.item.input_request_id)
+                .unwrap_or(0) as u64,
+        );
         Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
@@ -2006,9 +2042,13 @@ impl Task {
             acp_session_id,
             events_tx,
             stream,
-            next_req_id: 0,
+            next_req_id,
             inflight_prompt: inflight,
             inflight_inbox,
+            inflight_delivery,
+            deferred_prompt_response: None,
+            deferred_queued_response: None,
+            input_delivery_unavailable_turn: None,
             current_turn,
             next_seq,
             turns_dispatched,
@@ -2243,6 +2283,8 @@ impl Task {
         validate_mcp_capabilities(launch, &init.agent_capabilities)?;
         self.load_session_cap = init.agent_capabilities.load_session;
         self.metadata.lock().unwrap().steering_supported = init.meta.steering.supported;
+        self.metadata.lock().unwrap().prompt_queueing_supported =
+            init.agent_capabilities.meta.claude_code.prompt_queueing;
 
         match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => {
@@ -2492,6 +2534,16 @@ impl Task {
     // -- main loop ----------------------------------------------------------
 
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
+        if !self.turn_live
+            && self.inflight_delivery.as_ref().is_some_and(|delivery| {
+                delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
+            })
+        {
+            if let Err(error) = self.activate_queued_prompt().await {
+                tracing::error!(session = %self.session_id, %error, "could not recover agent-queued prompt");
+                self.journal_failed = true;
+            }
+        }
         let mut handoff_reply = None;
         let mut ack_tick = tokio::time::interval(ACK_FLUSH_INTERVAL);
         ack_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2501,6 +2553,9 @@ impl Task {
         let mut inbox_tick = tokio::time::interval(Duration::from_secs(1));
         inbox_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let stop_reason = loop {
+            if self.journal_replay_needed() {
+                break TaskStopReason::JournalFailure;
+            }
             tokio::select! {
                 ev = self.stream.recv() => match ev {
                     Some(RelayEvent::Frame { seq, payload }) => {
@@ -2669,7 +2724,7 @@ impl Task {
                     }
                 }
             }
-            IncomingKind::Response => self.handle_response(inc).await,
+            IncomingKind::Response => self.handle_response(seq, inc).await,
             IncomingKind::Unknown => {}
         }
     }
@@ -2896,10 +2951,40 @@ impl Task {
 
     // -- responses / turn state machine ------------------------------------
 
-    async fn handle_response(&mut self, inc: Incoming) {
+    async fn handle_response(&mut self, seq: u64, inc: Incoming) {
         let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
             return;
         };
+        if self
+            .inflight_delivery
+            .as_ref()
+            .is_some_and(|steer| steer.item.input_request_id == Some(id as i64))
+        {
+            if self.inflight_delivery.as_ref().is_some_and(|delivery| {
+                delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
+            }) && inc.error.is_none()
+            {
+                self.deferred_queued_response = Some((seq, inc));
+                return;
+            }
+            if let Err(error) = self.handle_input_delivery_response(inc).await {
+                tracing::error!(session = %self.session_id, %error, "could not settle ACP steering");
+                self.journal_failed = true;
+                return;
+            }
+            if let Some((_, response)) = self.deferred_prompt_response.take() {
+                if let Some((_, turn)) = self.inflight_prompt {
+                    self.on_turn_end(
+                        turn,
+                        response.result,
+                        response.error,
+                        TurnEndSource::MatchingPromptResponse,
+                    )
+                    .await;
+                }
+            }
+            return;
+        }
         if let Some(pending) = self.pending_mode.remove(&id) {
             let result = if let Some(error) = inc.error {
                 Err(anyhow!("session/set_mode failed: {error}"))
@@ -2950,6 +3035,12 @@ impl Task {
         }
         if let Some((pid, turn)) = self.inflight_prompt {
             if id == pid {
+                if self.inflight_delivery.as_ref().is_some_and(|delivery| {
+                    delivery.item.input_method.as_deref() == Some(method::SESSION_STEERING)
+                }) {
+                    self.deferred_prompt_response = Some((seq, inc));
+                    return;
+                }
                 self.on_turn_end(
                     turn,
                     inc.result,
@@ -3090,6 +3181,16 @@ impl Task {
             return;
         }
 
+        if self.inflight_delivery.as_ref().is_some_and(|delivery| {
+            delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
+        }) {
+            if let Err(error) = Box::pin(self.activate_queued_prompt()).await {
+                tracing::error!(session = %self.session_id, %error, "could not activate agent-queued prompt");
+                self.journal_failed = true;
+            }
+            return;
+        }
+
         self.dispatch_pending_inputs().await;
     }
 
@@ -3132,7 +3233,7 @@ impl Task {
         item: crate::conversation_inbox::InboxItem,
         active_claim: ActiveInboxClaim,
     ) -> bool {
-        match self.start_inbox_turn(&item, active_claim).await {
+        match self.start_inbox_turn(&item, Some(active_claim), None).await {
             Ok(outcome) if outcome.blocks_followup_dispatch() => {
                 if let crate::conversation_inbox::InboxTurnStartOutcome::TransportWrittenUnpersisted {
                     error,
@@ -3215,6 +3316,9 @@ impl Task {
             .iter()
             .find(|input| key.is_none_or(|key| input.delivery_key == key))
             .ok_or_else(|| anyhow!("this input is no longer queued"))?;
+        if selected.state != "queued" {
+            bail!("this input is already being delivered to the agent");
+        }
         if self.compaction_turn {
             return Ok(PromptAck {
                 queued: true,
@@ -3238,14 +3342,7 @@ impl Task {
             InputDispatch::Automatic => None,
             InputDispatch::Force(key) => Some(key),
         };
-        if forced_key.is_none()
-            && self
-                .goal_turn_started
-                .is_some_and(|started| started.elapsed() < GOAL_TURN_GRACE)
-        {
-            // The launch's goal turn has only just started: automatic input
-            // waits rather than cancel it while the adapter is fresh. An
-            // explicit send is the user's own Stop, so it is not held.
+        if self.inflight_delivery.is_some() && forced_key.is_none() {
             return Ok(false);
         }
         if (forced_key.is_none() && self.automatic_dispatch_paused)
@@ -3260,7 +3357,23 @@ impl Task {
             return Ok(false);
         }
         let interrupt = self.turn_live;
+        let steer = interrupt
+            && forced_key.is_none()
+            && {
+                let metadata = self.metadata.lock().unwrap();
+                metadata.steering_supported || metadata.prompt_queueing_supported
+            }
+            && self.input_delivery_unavailable_turn != Some(self.current_turn);
+        if !steer
+            && forced_key.is_none()
+            && self
+                .goal_turn_started
+                .is_some_and(|started| started.elapsed() < GOAL_TURN_GRACE)
+        {
+            return Ok(false);
+        }
         if interrupt
+            && !steer
             && forced_key.is_none()
             && !crate::conversation_inbox::has_due_input(
                 &self.db,
@@ -3284,13 +3397,27 @@ impl Task {
             &self.session_id,
             Some(active_claim.owner()),
             |session, owner| self.registry.is_claim_owner_live(session, owner),
-            interrupt && forced_key.is_none(),
+            interrupt && forced_key.is_none() && !steer,
             forced_key,
         )
         .await?
         else {
             return Ok(false);
         };
+        if steer && !is_compaction_prompt(&item.payload) {
+            return self.start_input_delivery(item, active_claim).await;
+        }
+        if steer {
+            // Slash commands that mutate context need an ordinary prompt boundary.
+            self.input_delivery_unavailable_turn = Some(self.current_turn);
+            crate::conversation_inbox::release_conversation_inbox(
+                &self.db,
+                &item.delivery_key,
+                &item.claim_token,
+            )
+            .await?;
+            return Ok(false);
+        }
         if self.turn_live {
             if let Err(error) =
                 Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation)).await
@@ -3318,6 +3445,172 @@ impl Task {
         Ok(true)
     }
 
+    async fn activate_queued_prompt(&mut self) -> Result<()> {
+        let delivery = self
+            .inflight_delivery
+            .take()
+            .context("no agent-queued input")?;
+        let request_id = delivery
+            .item
+            .input_request_id
+            .context("queued request id is missing")? as u64;
+        let outcome = self
+            .start_inbox_turn(&delivery.item, delivery.active_claim, Some(request_id))
+            .await?;
+        anyhow::ensure!(
+            matches!(
+                outcome,
+                crate::conversation_inbox::InboxTurnStartOutcome::Persisted
+            ),
+            "could not journal agent-queued prompt: {outcome:?}"
+        );
+        self.emit_queue().await;
+        if let Some((_, response)) = self.deferred_queued_response.take() {
+            Box::pin(self.on_turn_end(
+                self.current_turn,
+                response.result,
+                response.error,
+                TurnEndSource::MatchingPromptResponse,
+            ))
+            .await;
+        }
+        Ok(())
+    }
+
+    async fn start_input_delivery(
+        &mut self,
+        mut item: crate::conversation_inbox::InboxItem,
+        active_claim: ActiveInboxClaim,
+    ) -> Result<bool> {
+        let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
+        let id = self.next_id();
+        let method = if self.metadata.lock().unwrap().prompt_queueing_supported {
+            method::SESSION_PROMPT
+        } else {
+            method::SESSION_STEERING
+        };
+        if !crate::conversation_inbox::prepare_input_delivery(
+            &self.db,
+            &item,
+            &self.session_id,
+            id,
+            self.current_turn,
+            method,
+        )
+        .await?
+        {
+            crate::conversation_inbox::release_conversation_inbox(
+                &self.db,
+                &item.delivery_key,
+                &item.claim_token,
+            )
+            .await?;
+            return Ok(false);
+        }
+        item.input_request_id = Some(id as i64);
+        item.input_turn = Some(self.current_turn);
+        item.input_method = Some(method.to_string());
+        let mut params = wire::prompt_params(&self.acp_session_id, &item.payload, &resources);
+        if method == method::SESSION_STEERING {
+            params["_meta"] = json!({ "steering": { "idleBehavior": "promptRequired" } });
+        }
+        // Once a write is attempted, a transport failure is ambiguous. Retain
+        // the durable request rather than cancelling and replaying its input.
+        self.inflight_delivery = Some(InflightDelivery {
+            item,
+            active_claim: Some(active_claim),
+        });
+        if let Err(error) = self
+            .stream
+            .write(&wire::request_line(id, method, params))
+            .await
+        {
+            tracing::warn!(session = %self.session_id, %error, "input write unconfirmed; retaining pending delivery");
+        }
+        self.emit_queue().await;
+        Ok(true)
+    }
+
+    async fn handle_input_delivery_response(&mut self, response: Incoming) -> Result<()> {
+        let disposition = match response
+            .result
+            .and_then(|result| serde_json::from_value::<wire::SteeringResult>(result).ok())
+        {
+            Some(wire::SteeringResult::Injected | wire::SteeringResult::StartedNewTurn) => {
+                InputDeliveryDisposition::Injected
+            }
+            Some(wire::SteeringResult::PromptRequired) => InputDeliveryDisposition::Rejected,
+            _ if response
+                .error
+                .as_ref()
+                .is_some_and(|error| matches!(error["code"].as_i64(), Some(-32601 | -32602))) =>
+            {
+                InputDeliveryDisposition::Rejected
+            }
+            _ => InputDeliveryDisposition::Unconfirmed,
+        };
+        self.settle_input_delivery(disposition).await
+    }
+
+    async fn settle_input_delivery(&mut self, disposition: InputDeliveryDisposition) -> Result<()> {
+        let steering = self
+            .inflight_delivery
+            .as_ref()
+            .expect("matched steering request");
+        if disposition != InputDeliveryDisposition::Rejected {
+            let payload = json!({
+                "text": steering.item.payload,
+                "by": steering.item.author,
+                "resources": serde_json::from_str::<Vec<Value>>(&steering.item.resources)?,
+                "delivery_key": steering.item.delivery_key,
+                "source_session_id": steering.item.source_session_id,
+                "source_channel_id": steering.item.source_channel_id,
+                "source_message_id": steering.item.source_message_id,
+                "steered": true,
+                "delivery_uncertain": disposition == InputDeliveryDisposition::Unconfirmed,
+            });
+            if disposition == InputDeliveryDisposition::Unconfirmed {
+                tracing::warn!(session = %self.session_id,
+                    "steering outcome unconfirmed; suppressing automatic replay");
+            }
+            self.flush_buf().await;
+            let steering = self
+                .inflight_delivery
+                .as_ref()
+                .expect("matched steering request");
+            let turn = steering
+                .item
+                .input_turn
+                .context("steering turn is missing")?;
+            let block = crate::conversation_inbox::record_input_delivery(
+                &self.db,
+                &steering.item,
+                &self.session_id,
+                turn,
+                self.next_seq,
+                &payload,
+            )
+            .await?;
+            self.next_seq += 1;
+            self.emit("block", serde_json::to_value(block)?);
+        } else {
+            crate::conversation_inbox::release_conversation_inbox(
+                &self.db,
+                &steering.item.delivery_key,
+                &steering.item.claim_token,
+            )
+            .await?;
+            // A declined steer may be waiting for user action. Do not probe it
+            // every tick; the normal boundary/deadline policy owns the fallback.
+            self.input_delivery_unavailable_turn = Some(self.current_turn);
+            tracing::debug!(session = %self.session_id, "ACP steering declined; input remains queued");
+        }
+        self.inflight_delivery = None;
+        self.deferred_queued_response = None;
+        self.emit_queue().await;
+        Ok(())
+    }
+
     async fn send_queued_prompt(
         &mut self,
         text: String,
@@ -3341,6 +3634,7 @@ impl Task {
         .await?;
         self.emit_queue().await;
         if self.turn_live && delivery == PromptDelivery::Queue {
+            self.dispatch_queued_input(InputDispatch::Automatic).await?;
             return Ok(PromptAck {
                 queued: true,
                 turn: Some(self.current_turn),
@@ -3373,11 +3667,14 @@ impl Task {
     async fn start_inbox_turn(
         &mut self,
         item: &crate::conversation_inbox::InboxItem,
-        active_claim: ActiveInboxClaim,
+        active_claim: Option<ActiveInboxClaim>,
+        queued_request_id: Option<u64>,
     ) -> Result<crate::conversation_inbox::InboxTurnStartOutcome> {
         let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
         let compaction = item.author.is_some() && is_compaction_prompt(&item.payload);
-        self.refuse_if_turn_capped().await?;
+        if queued_request_id.is_none() {
+            self.refuse_if_turn_capped().await?;
+        }
         let turn = if self.turns_dispatched > 0 {
             self.current_turn + 1
         } else {
@@ -3389,7 +3686,7 @@ impl Task {
             self.next_seq
         };
         let effective_mode = self.current_mode.clone();
-        let id = self.next_id();
+        let id = queued_request_id.unwrap_or_else(|| self.next_id());
         let inflight = json!({
             "prompt_id": id,
             "turn": turn,
@@ -3418,11 +3715,18 @@ impl Task {
                 opening_payload: &opening_payload,
                 inflight: &inflight,
             },
-            self.stream.write(&wire::request_line(
-                id,
-                method::SESSION_PROMPT,
-                wire::prompt_params(&self.acp_session_id, &item.payload, &resources),
-            )),
+            async {
+                if queued_request_id.is_some() {
+                    return Ok(());
+                }
+                self.stream
+                    .write(&wire::request_line(
+                        id,
+                        method::SESSION_PROMPT,
+                        wire::prompt_params(&self.acp_session_id, &item.payload, &resources),
+                    ))
+                    .await
+            },
         )
         .await;
         if !outcome.blocks_followup_dispatch() {
@@ -3462,7 +3766,7 @@ impl Task {
             delivery_key: item.delivery_key.clone(),
             review_id: item.review_id,
             claim_token: item.claim_token.clone(),
-            active_claim: Some(active_claim),
+            active_claim,
         });
         crate::status::record_acp_lifecycle(&self.db, &self.bus, &self.session_id, "working").await;
         Ok(outcome)
@@ -3746,6 +4050,10 @@ impl Task {
     // -- commands -----------------------------------------------------------
 
     async fn cancel_live_turn(&mut self, source: TurnEndSource) -> Result<()> {
+        if self.inflight_delivery.is_some() {
+            self.settle_input_delivery(InputDeliveryDisposition::Unconfirmed)
+                .await?;
+        }
         let result = self
             .stream
             .write(&wire::notification_line(
@@ -3806,6 +4114,9 @@ impl Task {
         let Some((want, _)) = self.inflight_prompt.take() else {
             return;
         };
+        if self.deferred_prompt_response.take().is_some() {
+            return;
+        }
         let deadline = tokio::time::Instant::now() + CANCEL_SETTLE_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4024,6 +4335,14 @@ impl Task {
 
     async fn on_failure(&mut self, reason: &str) {
         tracing::warn!(session = %self.session_id, reason, "acp task failed");
+        if self.inflight_delivery.is_some() {
+            if let Err(error) = self
+                .settle_input_delivery(InputDeliveryDisposition::Unconfirmed)
+                .await
+            {
+                tracing::error!(session = %self.session_id, %error, "could not settle input after agent exit");
+            }
+        }
         self.settle_inflight_inbox(
             crate::conversation_inbox::InboxClaimSettlement::Abandoned,
             "ACP task failure",
@@ -4106,6 +4425,12 @@ impl Task {
         let mut track = |s: u64| {
             min_pending = Some(min_pending.map_or(s, |m| m.min(s)));
         };
+        if let Some((seq, _)) = &self.deferred_prompt_response {
+            track(*seq);
+        }
+        if let Some((seq, _)) = &self.deferred_queued_response {
+            track(*seq);
+        }
         if let Some(b) = &self.message_buf {
             track(b.first_seq);
         }
