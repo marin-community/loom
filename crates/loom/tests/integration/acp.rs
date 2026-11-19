@@ -2565,7 +2565,7 @@ async fn queued_feedback_steers_without_cancelling_live_tools() {
     let ts = TestServer::start().await;
     start_new_with_env(
         &ts,
-        "acp-ignore-steering",
+        "acp-steered-feedback",
         None,
         None,
         vec![("FAKE_ACP_STEERING".to_string(), "1".to_string())],
@@ -2576,7 +2576,7 @@ async fn queued_feedback_steers_without_cancelling_live_tools() {
         .client
         .post(
             "/api/sessions/prompt/create",
-            json!({ "text": "toolwait:500:child work|say:first", "session": "acp-ignore-steering" }),
+            json!({ "text": "toolwait:500:child work|say:first", "session": "acp-steered-feedback" }),
         )
         .await
         .unwrap();
@@ -2586,7 +2586,7 @@ async fn queued_feedback_steers_without_cancelling_live_tools() {
         .client
         .post(
             "/api/sessions/prompt/create",
-            json!({ "text": "say:second", "session": "acp-ignore-steering" }),
+            json!({ "text": "say:second", "session": "acp-steered-feedback" }),
         )
         .await
         .unwrap();
@@ -2595,7 +2595,7 @@ async fn queued_feedback_steers_without_cancelling_live_tools() {
 
     let chat = poll_chat_state(
         &ts,
-        "acp-ignore-steering",
+        "acp-steered-feedback",
         Duration::from_secs(10),
         |chat| {
             chat["live_turn"].is_null()
@@ -2941,8 +2941,7 @@ async fn real_agent_steering_case(task: &str, tool_names: &[&str]) {
         handle.metadata().prompt_queueing_supported,
         "the Claude adapter must advertise native prompt queueing"
     );
-    let native_queue = handle.metadata().prompt_queueing_supported;
-    let expected_turns = if native_queue { 2 } else { 1 };
+    let expected_turns = 2;
     handle
         .prompt(task.into(), Some("manual".into()), Vec::new())
         .await
@@ -2987,7 +2986,7 @@ async fn real_agent_steering_case(task: &str, tool_names: &[&str]) {
             && b["payload"]["text"]
                 .as_str()
                 .is_some_and(|text| text.contains("STEERING_CONFIRMED"))
-            && (native_queue || b["payload"]["steered"] == true)),
+            && b["turn"] == 1),
         "{blocks:?}"
     );
     assert!(

@@ -1097,6 +1097,10 @@ struct InflightDelivery {
     active_claim: Option<ActiveInboxClaim>,
 }
 
+fn is_agent_queued_prompt(delivery: &InflightDelivery) -> bool {
+    delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InputDeliveryDisposition {
     Injected,
@@ -2535,9 +2539,10 @@ impl Task {
 
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
         if !self.turn_live
-            && self.inflight_delivery.as_ref().is_some_and(|delivery| {
-                delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
-            })
+            && self
+                .inflight_delivery
+                .as_ref()
+                .is_some_and(is_agent_queued_prompt)
         {
             if let Err(error) = self.activate_queued_prompt().await {
                 tracing::error!(session = %self.session_id, %error, "could not recover agent-queued prompt");
@@ -2960,9 +2965,11 @@ impl Task {
             .as_ref()
             .is_some_and(|steer| steer.item.input_request_id == Some(id as i64))
         {
-            if self.inflight_delivery.as_ref().is_some_and(|delivery| {
-                delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
-            }) && inc.error.is_none()
+            if self
+                .inflight_delivery
+                .as_ref()
+                .is_some_and(is_agent_queued_prompt)
+                && inc.error.is_none()
             {
                 self.deferred_queued_response = Some((seq, inc));
                 return;
@@ -3181,9 +3188,11 @@ impl Task {
             return;
         }
 
-        if self.inflight_delivery.as_ref().is_some_and(|delivery| {
-            delivery.item.input_method.as_deref() == Some(method::SESSION_PROMPT)
-        }) {
+        if self
+            .inflight_delivery
+            .as_ref()
+            .is_some_and(is_agent_queued_prompt)
+        {
             if let Err(error) = Box::pin(self.activate_queued_prompt()).await {
                 tracing::error!(session = %self.session_id, %error, "could not activate agent-queued prompt");
                 self.journal_failed = true;
@@ -3357,14 +3366,14 @@ impl Task {
             return Ok(false);
         }
         let interrupt = self.turn_live;
-        let steer = interrupt
+        let agent_delivery = interrupt
             && forced_key.is_none()
             && {
                 let metadata = self.metadata.lock().unwrap();
                 metadata.steering_supported || metadata.prompt_queueing_supported
             }
             && self.input_delivery_unavailable_turn != Some(self.current_turn);
-        if !steer
+        if !agent_delivery
             && forced_key.is_none()
             && self
                 .goal_turn_started
@@ -3373,7 +3382,7 @@ impl Task {
             return Ok(false);
         }
         if interrupt
-            && !steer
+            && !agent_delivery
             && forced_key.is_none()
             && !crate::conversation_inbox::has_due_input(
                 &self.db,
@@ -3397,17 +3406,17 @@ impl Task {
             &self.session_id,
             Some(active_claim.owner()),
             |session, owner| self.registry.is_claim_owner_live(session, owner),
-            interrupt && forced_key.is_none() && !steer,
+            interrupt && forced_key.is_none() && !agent_delivery,
             forced_key,
         )
         .await?
         else {
             return Ok(false);
         };
-        if steer && !is_compaction_prompt(&item.payload) {
+        if agent_delivery && !is_compaction_prompt(&item.payload) {
             return self.start_input_delivery(item, active_claim).await;
         }
-        if steer {
+        if agent_delivery {
             // Slash commands that mutate context need an ordinary prompt boundary.
             self.input_delivery_unavailable_turn = Some(self.current_turn);
             crate::conversation_inbox::release_conversation_inbox(
@@ -3558,17 +3567,11 @@ impl Task {
             .as_ref()
             .expect("matched steering request");
         if disposition != InputDeliveryDisposition::Rejected {
-            let payload = json!({
-                "text": steering.item.payload,
-                "by": steering.item.author,
-                "resources": serde_json::from_str::<Vec<Value>>(&steering.item.resources)?,
-                "delivery_key": steering.item.delivery_key,
-                "source_session_id": steering.item.source_session_id,
-                "source_channel_id": steering.item.source_channel_id,
-                "source_message_id": steering.item.source_message_id,
-                "steered": true,
-                "delivery_uncertain": disposition == InputDeliveryDisposition::Unconfirmed,
-            });
+            let resources: Vec<Value> = serde_json::from_str(&steering.item.resources)?;
+            let mut payload = inbox_message_payload(&steering.item, &resources);
+            payload["steered"] = json!(true);
+            payload["delivery_uncertain"] =
+                json!(disposition == InputDeliveryDisposition::Unconfirmed);
             if disposition == InputDeliveryDisposition::Unconfirmed {
                 tracing::warn!(session = %self.session_id,
                     "steering outcome unconfirmed; suppressing automatic replay");
@@ -3696,15 +3699,7 @@ impl Task {
             "compaction": compaction,
         })
         .to_string();
-        let opening_payload = json!({
-            "text": item.payload,
-            "by": item.author,
-            "resources": resources,
-            "delivery_key": item.delivery_key,
-            "source_session_id": item.source_session_id,
-            "source_channel_id": item.source_channel_id,
-            "source_message_id": item.source_message_id,
-        });
+        let opening_payload = inbox_message_payload(item, &resources);
         let outcome = crate::conversation_inbox::start_conversation_inbox_turn(
             &self.db,
             item,
@@ -4504,6 +4499,21 @@ fn id_key(id: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+fn inbox_message_payload(
+    item: &crate::conversation_inbox::InboxItem,
+    resources: &[Value],
+) -> Value {
+    json!({
+        "text": item.payload,
+        "by": item.author,
+        "resources": resources,
+        "delivery_key": item.delivery_key,
+        "source_session_id": item.source_session_id,
+        "source_channel_id": item.source_channel_id,
+        "source_message_id": item.source_message_id,
+    })
 }
 
 /// Render ACP resources into the durable text-only pending queue. Prefer the
