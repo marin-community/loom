@@ -12,7 +12,7 @@ name = "tapestry"
 path = "src/bin/tapestry.rs"
 
 [dependencies]
-weaver-core = { path = "../weaver-core" }
+weaver-runtime = { path = "../weaver-runtime" }
 anyhow = "1"
 libc = "0.2"
 portable-pty = "0.9"

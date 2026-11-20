@@ -13,7 +13,7 @@ pub fn run_dir() -> PathBuf {
     if let Ok(p) = std::env::var("WEAVER_TAPESTRY_DIR") {
         return PathBuf::from(p);
     }
-    weaver_core::db::weaver_home().join("sock")
+    weaver_runtime::weaver_home().join("sock")
 }
 
 /// The control-socket path for a session name.
