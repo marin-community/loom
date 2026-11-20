@@ -8,6 +8,7 @@ name = "weaver_core"
 path = "src/lib.rs"
 
 [dependencies]
+weaver-runtime = { path = "../weaver-runtime" }
 # Domain types embedded in wire DTOs need a derivable schema so the registry can
 # describe operations that carry them.
 schemars = "1"
