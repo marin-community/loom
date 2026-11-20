@@ -14,7 +14,7 @@ const trigger = ref<HTMLButtonElement>();
 const menu = ref<HTMLElement>();
 const menuId = `${useId()}-menu`;
 const busy = ref('');
-const pendingAction = ref<'archive' | 'remove' | ''>('');
+const pendingRemove = ref(false);
 const canArchive = computed(
   () => props.run.status !== 'cancelled' && props.run.status !== 'completed',
 );
@@ -38,23 +38,22 @@ async function act(name: string, fn: () => Promise<void>) {
   }
 }
 
-function requestConfirmation(action: 'archive' | 'remove') {
-  open.value = false;
-  pendingAction.value = action;
+function archive() {
+  void act('archive', async () => {
+    await archiveSession(props.run.session_id);
+  });
 }
 
-function confirmAction() {
-  const action = pendingAction.value;
-  pendingAction.value = '';
-  if (action === 'archive') {
-    void act('archive', async () => {
-      await archiveSession(props.run.session_id);
-    });
-  } else if (action === 'remove') {
-    void act('remove', async () => {
-      await removeSession(props.run.session_id);
-    });
-  }
+function requestRemove() {
+  open.value = false;
+  pendingRemove.value = true;
+}
+
+function confirmRemove() {
+  pendingRemove.value = false;
+  void act('remove', async () => {
+    await removeSession(props.run.session_id);
+  });
 }
 
 watch(open, async (isOpen) => {
@@ -113,7 +112,7 @@ function onKeydown(event: KeyboardEvent) {
       data-testid="run-action-clear"
       class="shrink-0 rounded border border-line px-2 py-1 text-xs text-muted transition-colors hover:border-muted hover:text-fg"
       :disabled="!!busy"
-      @click="requestConfirmation('archive')"
+      @click="archive"
     >
       Clear
     </button>
@@ -149,7 +148,7 @@ function onKeydown(event: KeyboardEvent) {
           type="button"
           data-testid="run-action-archive"
           class="block w-full px-3 py-1.5 text-left text-fg transition-colors hover:bg-subtle"
-          @click="requestConfirmation('archive')"
+          @click="archive"
         >
           <span class="block text-xs font-medium">Archive</span>
           <span class="block text-2xs text-faint">Tear down runtime, keep launch history</span>
@@ -158,7 +157,7 @@ function onKeydown(event: KeyboardEvent) {
           type="button"
           data-testid="run-action-remove"
           class="block w-full px-3 py-1.5 text-left text-block transition-colors hover:bg-block-soft"
-          @click="requestConfirmation('remove')"
+          @click="requestRemove"
         >
           <span class="block text-xs font-medium">Remove</span>
           <span class="block text-2xs text-faint">Delete this attempt and reserved runtime</span>
@@ -166,18 +165,14 @@ function onKeydown(event: KeyboardEvent) {
       </div>
     </div>
     <ConfirmDialog
-      :open="pendingAction !== ''"
-      :title="pendingAction === 'archive' ? 'Archive launch attempt?' : 'Remove launch attempt?'"
-      :description="
-        pendingAction === 'archive'
-          ? 'Any reserved runtime is torn down and the attempt is kept in History.'
-          : 'This permanently deletes the attempt and any reserved runtime.'
-      "
-      :confirm-label="pendingAction === 'archive' ? 'Archive' : 'Remove'"
-      :danger="pendingAction === 'remove'"
+      :open="pendingRemove"
+      title="Remove launch attempt?"
+      description="This permanently deletes the attempt and any reserved runtime."
+      confirm-label="Remove"
+      danger
       :busy="!!busy"
-      @confirm="confirmAction"
-      @cancel="pendingAction = ''"
+      @confirm="confirmRemove"
+      @cancel="pendingRemove = false"
     />
   </li>
 </template>
