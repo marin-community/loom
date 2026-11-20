@@ -462,20 +462,49 @@ Agent-authored input begins with `Update from loom session <id>`, derived from
 the authenticated sender. Direct ACP sends and channel messages use the
 shared `conversation_inbox`, alongside queued user feedback. Each input carries
 its provenance, editability, attachments, and optional interruption deadline.
-Normal agent updates wait for a turn boundary for up to 60 seconds, then cancel
-ordinary work (including turns opened by earlier session updates) and open an
-update turn. Channel urgency `attention`/`blocked` interrupts immediately;
+Normal agent updates and user feedback use the adapter's native input delivery.
+An adapter advertising `agentCapabilities._meta.claudeCode.promptQueueing`
+receives a concurrent `session/prompt`, which it runs after the current turn without interrupting tools
+or foreground subagents. Loom keeps the queued request's identity across the
+turn boundary and journals its new turn without sending the prompt again.
+Otherwise Loom tries `_session/steering` when the adapter advertises
+`_meta.steering.supported`. Claude's native queue takes precedence because its
+steering priority can interrupt foreground subagents. Loom requests the host-owned
+`promptRequired` idle fallback, keeping new-turn lifecycle under `session/prompt`.
+An injected message is journaled within the existing turn without cancellation.
+Confirmed rejection (`promptRequired`, method not found, or invalid parameters)
+leaves the original interruption deadline in place. Unsupported adapters use
+the same fallback. Input then waits for a turn boundary for up to 60 seconds,
+then cancels ordinary work (including turns opened by earlier session updates)
+and opens an update turn. Without agent-owned delivery, channel urgency
+`attention`/`blocked` interrupts immediately;
 `debug` never interrupts due to age. Status and other
 bookkeeping kinds do not prompt agents. Direct agent sends use normal urgency,
-and so do queued user prompts: one still waiting after 60 seconds interrupts
+and so do queued user prompts: one still undelivered after 60 seconds interrupts
 the turn as **Stop & send** would. Explicit Stop, compaction, submitted UI
 review turns, session generation, and turn caps hold automatic delivery. A
-launch goal turn holds it for its first 60 seconds, so input already overdue
+launch goal turn holds automatic interruption for its first 60 seconds, so input already overdue
 when a respawned adapter re-sends its goal cannot cancel that turn at once;
 after that the goal turn is ordinary work. Explicit sends (Stop & send,
 `force_queued`, Slack follow-ups) are never held by a goal turn.
 Human-prompted work is ordinary work for this policy. Submitted UI reviews
 retain their immediate delivery path.
+
+The composer’s normal Send uses this agent-owned delivery policy. Stop & send is an
+explicit cancellation. Input ownership, method, and request IDs are persisted before
+the relay write and survive host reattachment. A pending acknowledgement is
+shown as sending, with editing and forced replay disabled. A missing response
+or ambiguous transport failure never triggers cancellation and retransmission:
+the adapter may already have accepted the input. An injected acknowledgement
+means the agent owns the message, not that the model has read it. It ends the
+delivery timeout. Unexpected failure responses are shown as delivery unconfirmed
+and are not automatically replayed, since they may follow partial delivery.
+Explicit cancellation, agent exit, or replacement of the adapter process also
+settles unacknowledged input as unconfirmed, preventing it from wedging later
+messages or being replayed blindly. Reattachment to the same surviving process
+keeps the pending request so its response can still be replayed.
+A prompt response racing a steer response is held unacknowledged
+until the steer settles, preserving the original turn’s completion boundary.
 
 Session updates and queued prompts store an immutable `interrupt_at` deadline
 (null for debug updates and doc-edit notices).

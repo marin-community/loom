@@ -49,6 +49,8 @@ let additionalDirectories = [];
 let mcpServers = [];
 let cancelled = false;
 const steeringSupported = process.env.FAKE_ACP_STEERING === "1";
+const promptQueueing = process.env.FAKE_ACP_PROMPT_QUEUEING === "1";
+const promptQueue = [];
 const agentName = process.env.FAKE_ACP_AGENT_NAME || "fake-acp-agent";
 const agentVersion = process.env.FAKE_ACP_AGENT_VERSION || "1.0.0";
 const loadPermission = process.env.FAKE_ACP_LOAD_PERMISSION || "";
@@ -491,17 +493,36 @@ async function handlePrompt(id, params) {
   }
   promptActive = false;
   if (id !== null) respond(id, { stopReason: cancelled ? "cancelled" : "end_turn" });
+  if (promptQueue.length > 0) {
+    const next = promptQueue.shift();
+    void handlePrompt(next.id, next.params);
+  }
 }
 
 function handleSteering(id, params) {
+  const outcome = process.env.FAKE_ACP_STEERING_OUTCOME;
+  if (outcome === "error") {
+    send({ jsonrpc: JSONRPC, id, error: { code: -32601, message: "Steering unavailable" } });
+    return;
+  }
+  if (outcome === "promptRequired" || outcome === "failed") {
+    respond(id, { outcome, reason: "noRunningTurn" });
+    return;
+  }
   const text = (params.prompt || []).map((block) => block.text || "").join("");
   if (!promptActive) {
+    if (params._meta?.steering?.idleBehavior === "promptRequired") {
+      respond(id, { outcome: "promptRequired", reason: "noRunningTurn" });
+      return;
+    }
     void handlePrompt(null, params);
     respond(id, { outcome: "startedNewTurn" });
     return;
   }
   steeringQueue.push(text);
-  respond(id, { outcome: "injected" });
+  const delay = Number(process.env.FAKE_ACP_STEERING_ACK_DELAY || "0");
+  if (delay) setTimeout(() => respond(id, { outcome: "injected" }), delay);
+  else respond(id, { outcome: "injected" });
 }
 
 function handleMessage(msg) {
@@ -541,9 +562,14 @@ function handleMessage(msg) {
     case "initialize":
       respond(msg.id, {
         protocolVersion: 1,
-        agentCapabilities: { loadSession: true, promptCapabilities: {} },
+        agentCapabilities: {
+          loadSession: true, promptCapabilities: {},
+          _meta: { claudeCode: { promptQueueing } },
+        },
         agentInfo: { name: agentName, version: agentVersion },
-        ...(steeringSupported ? { _meta: { steering: { supported: true } } } : {}),
+        _meta: {
+          steering: { supported: steeringSupported },
+        },
       });
       break;
     case "session/new":
@@ -591,7 +617,8 @@ function handleMessage(msg) {
       respond(msg.id, { configOptions: configOptions() });
       break;
     case "session/prompt":
-      void handlePrompt(msg.id, msg.params);
+      if (promptQueueing && promptActive) promptQueue.push({ id: msg.id, params: msg.params });
+      else void handlePrompt(msg.id, msg.params);
       break;
     case "_session/steering":
       if (steeringSupported) handleSteering(msg.id, msg.params);
@@ -599,6 +626,10 @@ function handleMessage(msg) {
       break;
     case "session/cancel":
       cancelled = true;
+      steeringQueue.length = 0;
+      for (const queued of promptQueue.splice(0)) {
+        send({ jsonrpc: JSONRPC, id: queued.id, error: { code: -32800, message: "Cancelled" } });
+      }
       if (process.env.FAKE_ACP_CANCEL_NOTICE === "1") {
         setTimeout(() => {
           notify({
