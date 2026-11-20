@@ -401,6 +401,7 @@ function openStream() {
   source = topic;
   // Stored history must not wait for the live agent to accept a subscription.
   // Paint the initial page first, then repair any gap once SSE is subscribed.
+  hasLiveSnapshot = false;
   let initialLoad: Promise<void> | null = load({ preserve: state.value === 'ready' });
   let reconcileAfterInitial = false;
   initialLoad.finally(() => {

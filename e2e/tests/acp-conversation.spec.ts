@@ -1686,6 +1686,8 @@ test.describe('acp conversation', () => {
     const conv = page.getByTestId('acp-conversation');
     const link = conv.getByRole('link', { name: 'plan' }).first();
     await expect(link).toBeVisible({ timeout: 20_000 });
+    // Streaming markdown can replace the link before its durable block lands.
+    await expect(page.getByTestId('acp-working')).toBeHidden();
     await link.scrollIntoViewIfNeeded();
     // The link sits below the fold, so the reader is off the foot and the pin
     // has released — the state the return must preserve.
