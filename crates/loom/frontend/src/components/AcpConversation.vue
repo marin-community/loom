@@ -234,7 +234,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     if (seq !== loadSeq) return;
     const accepted = journal.applySnapshot(journalRevision, snap.blocks);
     for (const b of accepted) settleDurableBlock(b);
-    if (!preserve) olderCursor.value = snap.older_cursor;
+    if (!preserve || state.value !== 'ready') olderCursor.value = snap.older_cursor;
     if (!hasLiveSnapshot && liveAt === liveRevision) {
       liveTurnNo.value = snap.live_turn;
       turnLive.value = snap.live_turn != null;
@@ -247,8 +247,11 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     state.value = 'ready';
   } catch (e) {
     if (seq !== loadSeq) return;
-    if (!preserve) {
-      errorMsg.value = (e as Error).message ?? 'Failed to load conversation';
+    if (state.value !== 'ready') {
+      errorMsg.value =
+        (e as Error).name === 'TimeoutError'
+          ? 'Loading the conversation timed out. Please retry.'
+          : ((e as Error).message ?? 'Failed to load conversation');
       state.value = 'error';
     }
     return;
@@ -385,7 +388,6 @@ function onQueue(ev: SseQueue) {
 
 // ── SSE lifecycle (kept-alive discipline) ────────────────────────────────────
 let source: TopicHandle | null = null;
-let snapshotFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 function rebindAfterHandoff(event: Event) {
   const handedOffId = (event as CustomEvent<{ id?: string }>).detail?.id;
   if (handedOffId !== id.value) return;
@@ -397,16 +399,14 @@ function rebindAfterHandoff(event: Event) {
 function openStream() {
   const topic = openTopic(`chat:${id.value}`);
   source = topic;
-  // The stream normally opens immediately and then owns the first snapshot,
-  // closing the snapshot→SSE gap. If a proxy/browser delays EventSource setup,
-  // do not leave the conversation on "Loading…" forever: fetch after a short
-  // grace period, then reconcile once the stream eventually connects.
-  if (state.value === 'loading' && !snapshotFallbackTimer) {
-    snapshotFallbackTimer = setTimeout(() => {
-      snapshotFallbackTimer = null;
-      if (state.value === 'loading') load();
-    }, 1500);
-  }
+  // Stored history must not wait for the live agent to accept a subscription.
+  // Paint the initial page first, then repair any gap once SSE is subscribed.
+  let initialLoad: Promise<void> | null = load({ preserve: state.value === 'ready' });
+  let reconcileAfterInitial = false;
+  initialLoad.finally(() => {
+    initialLoad = null;
+    if (reconcileAfterInitial && source === topic) load({ preserve: true });
+  });
   topic.on('block', (d) => onBlock(d as ChatBlock));
   topic.on('snapshot', (d) => onSnapshot(d as SseSnapshot));
   topic.on('delta', (d) => onDelta(d as SseDelta));
@@ -418,24 +418,20 @@ function openStream() {
     state.value = 'loading';
     topic.refresh();
   });
-  // Fetch only after the server installed the subscription, closing the
-  // snapshot-to-stream gap without the former duplicate journal request. A
-  // reconnect reconciles the newest page while retaining explicitly loaded
-  // older pages. `onOpen` also fires when the shared stream reconnects for an
-  // unrelated topic, which is exactly when a gap could have opened here.
+  // A snapshot taken after subscription repairs the initial or reconnect gap,
+  // retaining older pages. Coalesce opens while the first page is in flight so
+  // reconnects cannot keep superseding it and prolong the loading state.
   topic.onOpen(() => {
     hasLiveSnapshot = false;
-    if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
-    snapshotFallbackTimer = null;
-    load({ preserve: state.value === 'ready' });
+    if (initialLoad) reconcileAfterInitial = true;
+    else load({ preserve: true });
   });
   // The shared connection may still carry this topic from a previous visit.
   // Rebind so this subscriber receives the current live buffers as well.
   topic.refresh();
 }
 function closeStream() {
-  if (snapshotFallbackTimer) clearTimeout(snapshotFallbackTimer);
-  snapshotFallbackTimer = null;
+  loadSeq++;
   source?.close();
   source = null;
 }
@@ -1735,7 +1731,10 @@ async function goToActivity(target: {
 <template>
   <div class="flex h-full flex-col">
     <p v-if="state === 'loading'" class="text-sm text-muted">Loading conversation…</p>
-    <p v-else-if="state === 'error'" class="text-sm text-block">{{ errorMsg }}</p>
+    <div v-else-if="state === 'error'" class="text-sm text-block" role="alert">
+      <p>{{ errorMsg }}</p>
+      <button type="button" class="btn-secondary mt-2" @click="load()">Retry</button>
+    </div>
 
     <template v-else>
       <div v-if="hasContext" class="mb-1 flex shrink-0 justify-end">

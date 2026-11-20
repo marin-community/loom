@@ -921,19 +921,23 @@ is a logged warning, never a failed archive. The same conversion/render pipeline
 backs `loom sessions transcript`, which renders the current worktree's (or a named file's)
 transcript on demand.
 
-The dashboard surfaces this as a **Conversation tab** on the session detail,
-backed by `sessions.conversation` (`chatlog::conversation` → for a
-`terminal` session the live transcript when present, else the archived
-`chat.json`; for an `acp` session the chat journal mapped to iris live, so the
-existing tab keeps working before the SPA rewires onto `/chat`). The Vue viewer
-renders the iris log natively — user/assistant turns, collapsible thinking, and
-each tool call with its result — so a session stays reviewable in the UI after
-its terminal is gone. While the agent is still live the tab is also drivable: a
-composer at its foot sends a new prompt straight to the agent pane via
-`sessions.send` (`POST /api/sessions/send`, type + Enter), and the log auto-refreshes on the
-agent's lifecycle edges (the `status`/`tag` SSE events that fire at each
-turn boundary), so a reply lands without a manual reload. The composer hides
-once the terminal is gone (orphaned/done/archived), leaving the read-only log.
+The dashboard's **Conversation tab** reads ACP history through `sessions.chat`:
+the newest 200 journal blocks first, with older pages fetched on demand. The
+first read starts immediately, independently of the live agent's event-stream
+subscription. Once subscribed, the viewer reconciles another journal page to
+repair the gap, preserving blocks received over the stream and any older pages
+already loaded. Stream opens during the first read coalesce into one follow-up
+read so repeated reconnects cannot postpone the initial render. Conversation
+reads time out after 15 seconds; an initial failure offers Retry, while a failed
+background refresh preserves the visible history.
+
+Terminal sessions use `sessions.conversation` (`chatlog::conversation`): the
+live transcript when present, else the archived `chat.json`. The Vue viewer
+renders user/assistant turns, collapsible thinking, and tool calls with their
+results. A composer sends prompts to a live terminal via `sessions.send`, and
+the log refreshes at turn boundaries (`status`/`tag` SSE events). Its Refresh
+button also retries failed reads. Once the terminal is gone, the composer hides
+and the log remains reviewable.
 
 Agent recall uses the related
 [normalized history/search contract](session-history.md). ACP records come
