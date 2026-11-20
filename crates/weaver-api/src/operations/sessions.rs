@@ -952,6 +952,34 @@ pub mod raw {
     pub type Output = ();
 }
 
+pub mod image {
+    use super::prelude::*;
+
+    /// An image file's bytes, for inline images in agent-authored markdown:
+    /// the renderer points the `<img src>` here when prose embeds an absolute
+    /// path. Reads are confined to the session's own worktree, and the magic
+    /// bytes must sniff as a supported raster format.
+    ///
+    /// `io = Download`: the browser fetches this directly and needs raw bytes
+    /// rather than a JSON envelope.
+    #[operation(id = "sessions.image", actor = SessionSelf, scope = Session, risk = Read,
+                grants = ["loom/sessions/read@v1"], io = Download)]
+    pub struct Input {
+        /// Absolute path of the image file to read.
+        //
+        // `serde(default)`: download operands arrive via the query string,
+        // extracted before defaults fill in. Empty path is rejected by the handler.
+        #[serde(default)]
+        #[operand(default = String::new())]
+        pub path: String,
+        #[serde(default)]
+        #[operand(context)]
+        pub session: String,
+    }
+
+    pub type Output = ();
+}
+
 pub mod recover {
     use super::prelude::*;
 
@@ -1007,8 +1035,9 @@ pub mod resumption_cue {
 }
 
 pub mod scratch {
-    //! A session's Scratch directory: the files handed to it at launch and the
-    //! ones written to it while it runs.
+    //! A session's attachment directory: the files a user hands to the session
+    //! at launch or drops in while it runs. The agent's own files live in the
+    //! sibling `.agent-scratch/` slot, which no API here touches.
     pub(super) use super::prelude;
     pub mod delete {
         use super::prelude::*;
@@ -1063,6 +1092,11 @@ pub mod scratch {
         /// Launch-time attachments instead go base64-encoded inside
         /// `sessions.launch`'s JSON, since that request carries several files
         /// plus the rest of the launch configuration.
+        ///
+        /// Scratch is the session-scoped, gitignored slot for the reference
+        /// files a user attaches to a session; `.agent-scratch/` beside it
+        /// is the agent's own slot. Both live only as long as the session's
+        /// worktree; durable content belongs in an artifact instead.
         #[operation(id = "sessions.scratch.write", actor = SessionSelf, scope = Session,
                     risk = Write, grants = ["loom/sessions/write@v1"], io = Upload)]
         pub struct Input {
@@ -1496,6 +1530,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     files::SPEC,
     mode::SPEC,
     raw::SPEC,
+    image::SPEC,
     url::SPEC,
     ide_info::SPEC,
     shells::list::SPEC,

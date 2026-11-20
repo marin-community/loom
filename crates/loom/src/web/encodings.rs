@@ -35,7 +35,7 @@
 use axum::body::Bytes;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{DefaultBodyLimit, FromRef, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{header::IF_NONE_MATCH, HeaderMap};
 use axum::response::{IntoResponse, Response};
 use axum::{routing, Extension, Router};
 use weaver_api::operations::{artifacts, sessions, shell, Operation, Scoped};
@@ -72,6 +72,7 @@ fn mount_inner(router: Router<AppState>) -> (Router<AppState>, Vec<&'static str>
             "sessions.shells.terminal" => routing::get(session_shell_terminal),
             "shell.terminal" => routing::get(shell_terminal),
             "sessions.raw" => routing::get(session_raw_file),
+            "sessions.image" => routing::get(session_host_image),
             "artifacts.raw" => routing::get(artifact_raw_image),
             // The body limit here is the scratch file cap, not the JSON cap:
             // this route allows large uploads; others don't.
@@ -125,6 +126,16 @@ async fn session_raw_file(
 ) -> ApiResult<Response> {
     let input = authorized::<sessions::raw::Op>(&st, &principal, input).await?;
     super::sessions::raw_session_bytes(&st, &input).await
+}
+
+async fn session_host_image(
+    State(st): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(input): Query<sessions::image::Input>,
+    headers: HeaderMap,
+) -> ApiResult<Response> {
+    let input = authorized::<sessions::image::Op>(&st, &principal, input).await?;
+    super::sessions::image_session_bytes(&st, &input, headers.get(IF_NONE_MATCH)).await
 }
 
 async fn artifact_raw_image(
@@ -277,6 +288,7 @@ mod tests {
         check::<sessions::shells::terminal::Op>();
         check::<shell::terminal::Op>();
         check::<sessions::raw::Op>();
+        check::<sessions::image::Op>();
         check::<sessions::scratch::write::Op>();
         check::<artifacts::raw::Op>();
     }

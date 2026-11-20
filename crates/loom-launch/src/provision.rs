@@ -867,6 +867,7 @@ async fn create_inner(
     // used by live upload/delete routes, before creating branch/work-item/session.
     let _scratch_permit = st.launch_gate.acquire_scratch(&work_dir).await;
     let scratch_names = write_prepared_initial_scratch(&work_dir, &prepared_scratch).await?;
+    crate::scratch::ensure_agent_scratch(&work_dir).await;
 
     // Get-or-create the branch row, then stamp its title/goal/description.
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
@@ -1273,6 +1274,8 @@ fn entrance_note(tracking_issue: Option<i64>) -> String {
                     - Report progress: `loom status set --tag ok --message \"tests running\"` (use `attention` or `blocked` when a person must act).\n\
                     - Communicate: `loom channels read`; `loom channels send \"question or update\"`.\n\
                     - Save or delegate: `loom artifacts write plan plan.md`; `loom sessions launch \"implement the parser\"`.\n\
+                    - Throwaway scratch work goes in your worktree's `.agent-scratch/` directory (created gitignored; ephemeral, dies with the session).\n\
+                    - Embed an image inline in chat by writing it there and referencing `![alt](.agent-scratch/<name>)`.\n\
                     - Link a worktree file: `loom sessions url --path reports/index.md` (uses the public Loom URL).\n\
                     - Read a child's result: `loom channels read --channel <child-id> --kinds result`. A typed child result also notifies its parent channel.\n\
                     - Wait for a result: `loom channels wait --channel <child-id> --kind result --after <last-seen-seq>` (0 for a new child's first result); `sessions wait` observes lifecycle.\n\
@@ -1624,6 +1627,8 @@ mod tests {
         assert!(note.contains("Loom issue #42"));
         assert!(note.contains("loom issues close 42"));
         assert!(note.contains("loom status"));
+        assert!(note.contains(".agent-scratch/"));
+        assert!(note.contains("![alt](.agent-scratch/<name>)"));
         // Untracked sessions get the orientation with no issue contract.
         let untracked = entrance_note(None);
         assert!(untracked.contains("loom summary"));

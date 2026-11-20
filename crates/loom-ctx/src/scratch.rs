@@ -194,6 +194,42 @@ async fn write_initial_scratch(
     write_prepared_initial_scratch(work_dir, &prepared).await
 }
 
+/// Seed the agent's own gitignored scratch slot, `<work_dir>/.agent-scratch/`.
+/// The user's `scratch/` slot is untouched: only attachments create it. Any
+/// failure is logged with the directory and skipped, never fatal.
+pub async fn ensure_agent_scratch(work_dir: &std::path::Path) {
+    let dir = work_dir.join(".agent-scratch");
+    if let Err(error) = seed_agent_slot(&dir).await {
+        tracing::warn!(dir = %dir.display(), ?error, "agent scratch slot not seeded");
+    }
+}
+
+async fn seed_agent_slot(dir: &std::path::Path) -> Result<()> {
+    match tokio::fs::symlink_metadata(dir).await {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(ScratchError::invalid("a symlink occupies the slot"));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    tokio::fs::create_dir_all(dir).await?;
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dir.join(".gitignore"))
+        .await
+    {
+        Ok(mut file) => {
+            use tokio::io::AsyncWriteExt as _;
+            file.write_all(b"*\n").await?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 /// A sentence telling the agent about its launch-time scratch files, or `None`
 /// when none were attached. Appended to the launch prompt so a fresh agent
 /// knows the reference material exists without the user having to mention it.
@@ -342,6 +378,39 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(scratch.join(".gitignore")).unwrap(),
             "*\n"
+        );
+    }
+
+    /// Seeding must not create `scratch/` — only attachments do.
+    #[tokio::test]
+    async fn agent_scratch_is_seeded_gitignored_and_leaves_scratch_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::scratch::ensure_agent_scratch(dir.path()).await;
+        crate::scratch::ensure_agent_scratch(dir.path()).await;
+        let agent = dir.path().join(".agent-scratch");
+        assert!(agent.is_dir());
+        assert_eq!(
+            std::fs::read_to_string(agent.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+        assert!(
+            !dir.path().join("scratch").exists(),
+            "the user's slot is created by attachments, not by this seeding"
+        );
+    }
+
+    /// A symlink planted where the agent's slot belongs is skipped with a
+    /// warning naming the directory — never written through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_agent_slot_is_skipped_not_written_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".agent-scratch")).unwrap();
+        crate::scratch::ensure_agent_scratch(dir.path()).await;
+        assert!(
+            !outside.path().join(".gitignore").exists(),
+            "nothing may be created through the link"
         );
     }
 

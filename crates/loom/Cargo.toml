@@ -43,6 +43,11 @@ clap = { version = "4", features = ["derive", "env", "string"] }
 clap_complete = "4"
 # Hex-encode the SHA-256 digests we store for API tokens and session cookies.
 hex = "0.4"
+# `O_NONBLOCK`/`O_NOFOLLOW` for opening session-served files: open(2) on a FIFO
+# parks the calling thread, so the open must not block before the type check.
+libc = "0.2"
+# Magic-byte content sniffing for `sessions.image`.
+infer = "0.22"
 mime_guess = "2"
 percent-encoding = "2"
 # Generate and load the machine-local Ed25519 keypair used to sign scoped

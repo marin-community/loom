@@ -68,7 +68,7 @@ and the rule for placing a new module.
 | `crates/loom-core/src/launch.rs` | canonical profile-template and override resolution for previews, creates, clones, and handoffs; returns the concrete private launch snapshot plus its transport-safe view |
 | `crates/loom-launch/src/handoff.rs` | provider handoff orchestration: canonical/legacy target resolution, conversation continuity, lifecycle fencing, rollback, and replacement cleanup; depends on runtime/domain owners, never the REST adapter |
 | `crates/loom-launch/src/provision.rs` | ordinary session provisioning: trusted actor attribution, canonical launch resolution, repository/worktree lifecycle, stamped launch snapshots, tracking, recoverable launch-failure surfacing, and title generation; returns only the created `Session` + `Branch` domain facts |
-| `crates/loom-ctx/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments and live route mutations; Axum-free semantic errors keep transport mapping in `web/` |
+| `crates/loom-ctx/src/scratch.rs` | shared Scratch validation and filesystem storage for launch-time attachments, live route mutations, and the seeded `.agent-scratch/` slot; Axum-free semantic errors keep transport mapping in `web/` |
 | `crates/loom-store/src/session.rs` | `Session` row + sqlx queries |
 | `crates/loom-store/src/channels.rs` | same-id session channels and custom communication contexts: atomic creation, append-only typed messages, per-subject subscriptions/read markers, lifecycle, and runtime-delivery receipts |
 | `crates/loom-store/src/session_layout.rs` | durable Spaces → Groups → Sessions placement, defaults, ordering, optimistic mutation revisions, and revision-invalidation publication; independent of immutable provenance and launch policy |
@@ -645,7 +645,12 @@ clean text the user typed. Launch-time and live uploads share a 20-file,
 25-MiB-per-file, 50-MiB-total decoded limit and the same filename validation.
 The create route has a base64-aware transport envelope, validates the whole
 batch before repo/worktree/branch/issue/session side effects, counts ordinary
-dotfiles, and reserves `.gitignore` for Loom's `scratch/*` exclusion guard.
+dotfiles, and reserves `.gitignore` for Loom's `scratch/*` exclusion guard. A
+sibling `.agent-scratch/` directory (git-ignored the same way, seeded at every
+worktree creation and on recovery) is the agent's own slot for throwaway work
+— never budgeted or listed, and the home of the ephemeral files an agent
+embeds in chat. `scratch/` itself behaves exactly as it did before the
+sibling existed: created by attachments, budgeted, and listed in the UI.
 
 **Resolved launch snapshots.** A profile is a reusable template. A canonical
 `LaunchSelection` layers optional one-launch selectors over it; omissions

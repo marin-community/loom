@@ -1,5 +1,5 @@
 import { test, expect } from '../fixtures/weaver';
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 
 // loom's Markdown rendering pipeline (MarkdownView + markdown.ts): GFM
@@ -40,7 +40,13 @@ test.describe('rich markdown rendering', () => {
 
     // The image the doc references lives in the worktree; inline images resolve
     // against the session's raw-bytes endpoint regardless of the hosting view.
-    writeFileSync(join(session.work_dir, 'shot.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    // Real PNG bytes — a truncated stub would now degrade to the fallback card
+    // (MarkdownImage swaps out an <img> whose load fails), and the point here
+    // is a source that resolves *and* displays.
+    writeFileSync(
+      join(session.work_dir, 'shot.png'),
+      readFileSync(join(__dirname, '../../crates/loom/frontend/src/favicon-32.png')),
+    );
     await weaver.writeArtifact(session, 'design', DOC, { title: 'Design Doc' });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}/artifacts/design`);
