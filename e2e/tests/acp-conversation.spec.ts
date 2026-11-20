@@ -291,7 +291,7 @@ test.describe('acp conversation', () => {
     await page.reload();
     await expect(update).toHaveCount(1);
     await expect(page.getByTestId('acp-working')).toBeHidden();
-    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Auto-send paused');
+    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Waiting to start');
     await expect(update.getByTestId('acp-force-update')).toHaveText('Send now');
     await page.screenshot({
       path: test.info().outputPath('session-update-queue.png'),
