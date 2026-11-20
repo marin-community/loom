@@ -61,9 +61,9 @@ pub async fn pending_inputs(
     use sqlx::Row;
     let rows = sqlx::query(
         "SELECT delivery_key, source_session_id, source_channel_id, source_message_id,
-                payload, state, interrupt_at, editable FROM conversation_inbox
+                payload, state, input_method, interrupt_at, editable FROM conversation_inbox
          WHERE preferred_session_id = ? AND review_id IS NULL
-           AND (state = 'queued' OR (state = 'delivering' AND input_request_id IS NOT NULL))
+           AND state IN ('queued', 'delivering')
            AND NOT EXISTS (SELECT 1 FROM chat_blocks
              WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)
          ORDER BY created_at, rowid",
@@ -80,6 +80,7 @@ pub async fn pending_inputs(
                 source_message_id: row.try_get("source_message_id")?,
                 text: row.try_get("payload")?,
                 state: row.try_get("state")?,
+                input_method: row.try_get("input_method")?,
                 interrupt_at: row.try_get("interrupt_at")?,
                 editable: row.try_get("editable")?,
             })
@@ -1212,13 +1213,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(claimed.delivery_key, first);
+        let pending = pending_inputs(&db, "acp-review").await.unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "claimed input stays visible before its turn starts"
+        );
+        assert_eq!(pending[0].state, "delivering");
+        assert_eq!(pending[0].input_method, None);
         let later = enqueue_doc_edit(&db, "acp-review", "doc", 4).await.unwrap();
         assert_ne!(
             later, first,
             "an edit after the session took the message is a new one"
         );
         assert_eq!(
-            pending_inputs(&db, "acp-review").await.unwrap()[0].text,
+            pending_inputs(&db, "acp-review").await.unwrap()[1].text,
             doc_edit_text("doc", 4)
         );
     }

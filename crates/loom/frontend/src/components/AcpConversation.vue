@@ -648,6 +648,7 @@ async function submitPrompt() {
   recoveryError.value = '';
   recoveryNotice.value = '';
   const text = draft.value;
+  draft.value = '';
   const pending = { key: nextOptimisticKey++, text };
   optimistic.value.push(pending);
   autoFollow();
@@ -655,7 +656,6 @@ async function submitPrompt() {
     await promptSession(id.value, text, [...selectedFiles.value]);
     const index = optimistic.value.findIndex((o) => o.key === pending.key);
     if (index >= 0) optimistic.value.splice(index, 1);
-    draft.value = '';
     selectedFiles.value = [];
     // Reconcile against the journal + durable queue that produced the ack. SSE
     // covers other clients; this closes the request/event race for this client.
@@ -664,6 +664,7 @@ async function submitPrompt() {
   } catch (e) {
     const index = optimistic.value.findIndex((o) => o.key === pending.key);
     if (index >= 0) optimistic.value.splice(index, 1);
+    draft.value = text;
     sendError.value = (e as Error).message ?? 'Failed to send';
   } finally {
     sending.value = false;
@@ -694,13 +695,14 @@ async function stopAndSendPrompt() {
   sendingReplacement.value = true;
   sendError.value = '';
   const text = draft.value;
+  draft.value = '';
   try {
     await stopAndSendSession(id.value, text, [...selectedFiles.value]);
-    draft.value = '';
     selectedFiles.value = [];
     await load({ preserve: true });
     autoFollow();
   } catch (e) {
+    draft.value = text;
     sendError.value = (e as Error).message ?? 'Failed to stop and send';
   } finally {
     sendingReplacement.value = false;
@@ -1630,10 +1632,14 @@ function durationLabel(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 function inputTimeoutLabel(input: QueuedInputView): string {
-  if (input.state === 'delivering') return 'Waiting for agent acknowledgement';
+  if (input.state === 'delivering') {
+    if (input.input_method === 'session/prompt') return 'Waiting for current turn to finish';
+    if (input.input_method === '_session/steering') return 'Waiting for agent acknowledgement';
+    return 'Starting next turn';
+  }
   const deadline = timeOf(input.interrupt_at ?? undefined);
   if (deadline == null) return 'Next turn';
-  if (!turnLive.value) return 'Auto-send paused';
+  if (!turnLive.value) return 'Waiting to start';
   const seconds = Math.max(0, Math.ceil((deadline - clock.value) / 1000));
   return seconds > 0 ? `Auto-send in ${durationLabel(seconds)}` : 'Auto-send pending';
 }
@@ -2122,7 +2128,11 @@ async function goToActivity(target: {
                 >
                   {{
                     input.state === 'delivering'
-                      ? 'sending'
+                      ? input.input_method === 'session/prompt'
+                        ? 'queueing in agent'
+                        : input.input_method === '_session/steering'
+                          ? 'steering'
+                          : 'sending'
                       : input.editable
                         ? 'queued · agent hasn’t seen this yet'
                         : 'queued'
@@ -2182,6 +2192,7 @@ async function goToActivity(target: {
             >
               <header class="acp-rule">
                 <span class="acp-label text-accent">You</span>
+                <span class="acp-prompt-state" role="status">sending · waiting for Loom</span>
               </header>
               <MarkdownView :id="id" path="" :source="o.text" />
             </section>
