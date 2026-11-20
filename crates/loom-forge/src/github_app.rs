@@ -680,12 +680,10 @@ impl GithubApp {
         })
     }
 
-    /// Resolve `owner/name` to an installation and return a valid token for it —
-    /// the two-step the REST gateway methods share, and what `crate::repo`
-    /// mints a per-clone credential from.
+    /// Return a write token constrained to `owner/name`.
     pub async fn token_for_repo(&self, owner: &str, name: &str) -> Result<String> {
-        let installation_id = self.installation_id(owner, name).await?;
-        self.installation_token(installation_id).await
+        self.token_for_repositories(&[format!("{owner}/{name}")])
+            .await
     }
 
     /// Mint a token constrained to the named repositories and the fixed write
@@ -1433,6 +1431,21 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 }
             })]
         );
+    }
+
+    #[tokio::test]
+    async fn single_repository_token_cannot_reuse_installation_authority() {
+        let mock = MockState::new(3600);
+        let base = spawn_mock(mock.clone()).await;
+        let app = configured_app(base).await;
+        app.installation_token(42).await.unwrap();
+        app.token_for_repo("acme", "widgets").await.unwrap();
+        app.token_for_repo("acme", "widgets").await.unwrap();
+
+        let requests = mock.token_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["repositories"], json!(["widgets"]));
+        assert!(requests[1]["permissions"].get("members").is_none());
     }
 
     /// A token at/after its expiry is never served from cache: each request

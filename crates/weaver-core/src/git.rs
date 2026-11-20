@@ -1,8 +1,10 @@
 //! Thin async wrapper over the `git` binary.
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -76,20 +78,178 @@ pub async fn repo_root(dir: &Path) -> Result<PathBuf> {
 /// `token` over HTTPS, via git's env-var config mechanism
 /// (`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`, since git 2.31) rather than a CLI
 /// arg or a persisted `.git/config` entry — so the token never appears in
-/// `argv` (visible to `ps`, and to the `args`-logging `git()`/`git_with_envs`
-/// failure path above), a process listing, or the repo's remote URL. Scoped to
-/// this one subprocess only; nothing is written to disk.
-fn token_auth_envs(token: &str) -> Vec<(&'static str, String)> {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
+/// `argv` or the repo's remote URL. The header applies only to the registered
+/// remote URL and this subprocess; its environment still contains the secret.
+fn token_auth_envs(url: &str, token: &str) -> Vec<(&'static str, String)> {
     let header = format!(
         "AUTHORIZATION: basic {}",
         STANDARD.encode(format!("x-access-token:{token}"))
     );
     vec![
         ("GIT_CONFIG_COUNT", "1".to_string()),
-        ("GIT_CONFIG_KEY_0", "http.extraheader".to_string()),
+        ("GIT_CONFIG_KEY_0", format!("http.{url}.extraheader")),
         ("GIT_CONFIG_VALUE_0", header),
     ]
+}
+
+fn clone_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .kill_on_drop(true)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args([
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "credential.helper=",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "-c",
+            "http.followRedirects=false",
+        ]);
+    command
+}
+
+async fn clone_output(command: &mut Command, action: &str) -> Result<String> {
+    let output = command.output().await.with_context(|| action.to_string())?;
+    if !output.status.success() {
+        // An upstream can echo request headers into its error response. Keep
+        // credential-bearing subprocess output out of errors and operator logs.
+        bail!("{action} failed ({})", output.status);
+    }
+    Ok(String::from_utf8(output.stdout)?.trim_end().to_string())
+}
+
+async fn update_clone_refs(
+    git_directory: &Path,
+    object_directory: &str,
+    updates: &str,
+) -> Result<()> {
+    let mut child = clone_command()
+        .arg("--git-dir")
+        .arg(git_directory)
+        .env("GIT_OBJECT_DIRECTORY", object_directory)
+        .args(["update-ref", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("updating managed repository refs")?;
+    child
+        .stdin
+        .take()
+        .expect("managed Git ref update configures piped stdin")
+        .write_all(updates.as_bytes())
+        .await?;
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!("updating managed repository refs failed ({status})");
+    }
+    Ok(())
+}
+
+async fn refresh_clone(url: &str, dest: &Path, envs: &[(&str, String)]) -> Result<()> {
+    let object_directory = clone_output(
+        clone_command().arg("-C").arg(dest).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "objects",
+        ]),
+        "locating managed repository objects",
+    )
+    .await?;
+    let git_directory = Path::new(&object_directory)
+        .parent()
+        .context("managed repository has no Git directory")?;
+    // Only refs/config live in this temporary directory. Objects are retained
+    // in the managed checkout, including for large repositories. No credential
+    // is present in a process that reads the checkout's executable Git config.
+    let staging = tempfile::tempdir().context("creating managed fetch staging directory")?;
+    clone_output(
+        clone_command()
+            .args(["init", "--bare", "--template="])
+            .arg(staging.path()),
+        "initializing managed fetch staging repository",
+    )
+    .await?;
+    let previous_refs = clone_output(
+        clone_command().arg("-C").arg(dest).args([
+            "for-each-ref",
+            "--format=%(if)%(symref)%(then)%(else)update %(refname) %(objectname)%(end)",
+            "refs/heads/",
+            "refs/remotes/",
+            "refs/tags/",
+        ]),
+        "reading managed repository refs",
+    )
+    .await?;
+    let mut seed = String::from("start\n");
+    for reference in previous_refs.lines().filter(|line| !line.is_empty()) {
+        seed.push_str(reference);
+        seed.push('\n');
+    }
+    seed.push_str("prepare\ncommit\n");
+    update_clone_refs(staging.path(), &object_directory, &seed).await?;
+    clone_output(
+        clone_command()
+            .arg("--git-dir")
+            .arg(staging.path())
+            .env("GIT_OBJECT_DIRECTORY", &object_directory)
+            .envs(envs.iter().map(|(key, value)| (*key, value)))
+            .args([
+                "fetch",
+                "--prune",
+                "--",
+                url,
+                "+refs/heads/*:refs/remotes/origin/*",
+            ]),
+        "fetching registered repository",
+    )
+    .await?;
+    let remote_refs = clone_output(
+        clone_command()
+            .arg("--git-dir")
+            .arg(staging.path())
+            .env("GIT_OBJECT_DIRECTORY", &object_directory)
+            .args([
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                "refs/remotes/origin/",
+                "refs/tags/",
+            ]),
+        "reading fetched repository refs",
+    )
+    .await?;
+    let previous_refs = clone_output(
+        clone_command().arg("-C").arg(dest).args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/remotes/origin/",
+        ]),
+        "reading managed repository refs",
+    )
+    .await?;
+    let mut updates = String::from("start\n");
+    let mut fetched = std::collections::HashSet::new();
+    for reference in remote_refs.lines() {
+        let (object, name) = reference
+            .split_once(' ')
+            .context("invalid fetched Git ref")?;
+        fetched.insert(name);
+        updates.push_str(&format!("update {name} {object}\n"));
+    }
+    for name in previous_refs.lines() {
+        if name != "refs/remotes/origin/HEAD" && !fetched.contains(name) {
+            updates.push_str(&format!("delete {name}\n"));
+        }
+    }
+    updates.push_str("prepare\ncommit\n");
+    update_clone_refs(git_directory, &object_directory, &updates).await
 }
 
 /// Clone `url` into `dest`, or fetch into it when `dest` is already a clone —
@@ -100,11 +260,15 @@ fn token_auth_envs(token: &str) -> Vec<(&'static str, String)> {
 /// (a GitHub App installation token) via [`token_auth_envs`]. `None` performs an
 /// unauthenticated operation.
 pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
-    let envs = token.map(token_auth_envs).unwrap_or_default();
+    let destination = std::path::absolute(dest).context("resolving managed clone destination")?;
+    let dest = destination.as_path();
+    let envs = token
+        .map(|token| token_auth_envs(url, token))
+        .unwrap_or_default();
     // An existing clone (its `.git` is present) is refreshed, not re-cloned.
     if dest.join(".git").exists() {
         tracing::info!(dest = %dest.display(), authenticated = token.is_some(), "fetching existing clone");
-        git_with_envs(dest, &["fetch", "--all", "--prune"], &envs).await?;
+        refresh_clone(url, dest, &envs).await?;
         tracing::info!(dest = %dest.display(), "fetched existing clone");
         return Ok(());
     }
@@ -116,24 +280,17 @@ pub async fn clone(url: &str, dest: &Path, token: Option<&str>) -> Result<()> {
     }
     // `git clone` has no working tree to `-C` into yet, so it is spawned directly
     // rather than through the `git()` helper.
-    let dest_str = dest.to_string_lossy();
+    let directory = tempfile::tempdir().context("creating managed clone working directory")?;
     tracing::info!(dest = %dest.display(), authenticated = token.is_some(), "cloning repository");
-    let out = Command::new("git")
-        .args(["clone", url, &dest_str])
-        .envs(envs.iter().map(|(k, v)| (*k, v.as_str())))
-        .output()
-        .await
-        .context("failed to spawn git clone")?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        tracing::warn!(
-            url,
-            dest = %dest.display(),
-            stderr = %truncate(stderr.trim(), 500),
-            "git clone failed"
-        );
-        bail!("git clone failed: {}", stderr.trim());
-    }
+    clone_output(
+        clone_command()
+            .current_dir(directory.path())
+            .args(["clone", "--template=", "--no-recurse-submodules", "--", url])
+            .arg(dest)
+            .envs(envs.iter().map(|(key, value)| (*key, value))),
+        "cloning registered repository",
+    )
+    .await?;
     tracing::info!(url, dest = %dest.display(), "cloned repo");
     Ok(())
 }
@@ -701,7 +858,75 @@ pub async fn read_blob(work_dir: &Path, rev: &str, path: &str) -> Result<Option<
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
     use super::*;
+
+    struct HttpGitRemote {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        redirect: Arc<Mutex<Option<String>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for HttpGitRemote {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn http_git_remote(root: PathBuf) -> HttpGitRemote {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/repo.git", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let redirect = Arc::new(Mutex::new(None::<String>));
+        let recorded = requests.clone();
+        let target = redirect.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let request = String::from_utf8(request).unwrap();
+                recorded.lock().unwrap().push(request.clone());
+                let redirect = target.lock().unwrap().clone();
+                let (status, location, body) = match redirect {
+                    Some(url) => ("302 Found", format!("Location: {url}\r\n"), Vec::new()),
+                    None => {
+                        let path = request.split_whitespace().nth(1).unwrap();
+                        let path = path.split('?').next().unwrap();
+                        let path = root.join(path.strip_prefix("/repo.git/").unwrap());
+                        match tokio::fs::read(path).await {
+                            Ok(body) => ("200 OK", String::new(), body),
+                            Err(_) => ("404 Not Found", String::new(), Vec::new()),
+                        }
+                    }
+                };
+                let header = format!(
+                    "HTTP/1.1 {status}\r\n{location}Content-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        HttpGitRemote {
+            url,
+            requests,
+            redirect,
+            task,
+        }
+    }
 
     /// The env-var-borne `http.extraheader` decodes to exactly
     /// `x-access-token:<token>` — the Basic-auth shape a GitHub App
@@ -710,11 +935,13 @@ mod tests {
     /// only ever passed as subprocess env, never written to `.git/config`.
     #[test]
     fn token_auth_envs_carries_a_correctly_shaped_extraheader() {
-        use base64::{engine::general_purpose::STANDARD, Engine as _};
-        let envs = token_auth_envs("ghs_abc123");
+        let envs = token_auth_envs("https://github.com/acme/widgets.git", "ghs_abc123");
         let pairs: std::collections::HashMap<_, _> = envs.into_iter().collect();
         assert_eq!(pairs["GIT_CONFIG_COUNT"], "1");
-        assert_eq!(pairs["GIT_CONFIG_KEY_0"], "http.extraheader");
+        assert_eq!(
+            pairs["GIT_CONFIG_KEY_0"],
+            "http.https://github.com/acme/widgets.git.extraheader"
+        );
         let header = &pairs["GIT_CONFIG_VALUE_0"];
         let encoded = header
             .strip_prefix("AUTHORIZATION: basic ")
@@ -793,6 +1020,7 @@ mod tests {
         std::fs::write(sdir.join("a.txt"), "a\n").unwrap();
         run(sdir, &["add", "-A"]).await;
         commit(sdir, "init").await;
+        run(sdir, &["branch", "obsolete"]).await;
 
         // A bare clone of it acts as the clonable remote.
         let bare = tempfile::tempdir().unwrap();
@@ -822,7 +1050,10 @@ mod tests {
         std::fs::write(sdir.join("b.txt"), "b\n").unwrap();
         run(sdir, &["add", "-A"]).await;
         let second = commit(sdir, "second").await;
+        run(sdir, &["tag", "-a", "v2", "-m", "second release"]).await;
         run(sdir, &["push", "-q", &bare_url, "main"]).await;
+        run(sdir, &["push", "-q", &bare_url, "v2"]).await;
+        run(sdir, &["push", "-q", &bare_url, "--delete", "obsolete"]).await;
 
         // Idempotent: the second call fetches rather than erroring, and the new
         // commit is now reachable via origin.
@@ -831,6 +1062,126 @@ mod tests {
             revision_exists(&dest, &second).await,
             "fetch pulled the new remote commit into the existing clone"
         );
+        assert_eq!(run(&dest, &["rev-parse", "origin/main"]).await, second);
+        assert_eq!(run(&dest, &["rev-parse", "v2^{commit}"]).await, second);
+        assert!(!revision_exists(&dest, "origin/obsolete").await);
+    }
+
+    #[tokio::test]
+    async fn managed_refresh_accepts_an_empty_repository() {
+        let source = tempfile::tempdir().unwrap();
+        run(source.path(), &["init", "-q", "--bare"]).await;
+        let directory = tempfile::tempdir().unwrap();
+        let dest = directory.path().join("checkout");
+        let url = source.path().to_str().unwrap();
+        clone(url, &dest, None).await.unwrap();
+        clone(url, &dest, None).await.unwrap();
+        assert_eq!(
+            run(&dest, &["rev-parse", "--is-inside-work-tree"]).await,
+            "true"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_refresh_does_not_expose_credentials_to_checkout_configuration() {
+        let source = tempfile::tempdir().unwrap();
+        run(source.path(), &["init", "-q", "-b", "main"]).await;
+        run(source.path(), &["config", "user.email", "t@t.t"]).await;
+        run(source.path(), &["config", "user.name", "t"]).await;
+        commit(source.path(), "first").await;
+        run(source.path(), &["update-server-info"]).await;
+        let remote = http_git_remote(source.path().join(".git")).await;
+        let attacker = http_git_remote(source.path().join(".git")).await;
+        let directory = tempfile::tempdir().unwrap();
+        let dest = directory.path().join("checkout");
+        clone(&remote.url, &dest, Some("controller-token"))
+            .await
+            .unwrap();
+
+        run(&dest, &["remote", "set-url", "origin", &attacker.url]).await;
+        run(&dest, &["remote", "add", "attacker", &attacker.url]).await;
+        run(
+            &dest,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", attacker.url),
+                &remote.url,
+            ],
+        )
+        .await;
+        let hooks = directory.path().join("hooks");
+        std::fs::create_dir(&hooks).unwrap();
+        let stolen = directory.path().join("stolen");
+        let hook = hooks.join("reference-transaction");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$GIT_CONFIG_VALUE_0\" > '{}'\n",
+                stolen.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        run(
+            &dest,
+            &["config", "core.hooksPath", hooks.to_str().unwrap()],
+        )
+        .await;
+
+        let second = commit(source.path(), "second").await;
+        run(source.path(), &["tag", "v2"]).await;
+        run(source.path(), &["update-server-info"]).await;
+        clone(&remote.url, &dest, Some("controller-token"))
+            .await
+            .unwrap();
+
+        assert_eq!(run(&dest, &["rev-parse", "origin/main"]).await, second);
+        assert_eq!(run(&dest, &["rev-parse", "v2"]).await, second);
+        assert!(attacker.requests.lock().unwrap().is_empty());
+        assert!(!stolen.exists());
+        let authorization = format!(
+            "authorization: basic {}",
+            STANDARD
+                .encode("x-access-token:controller-token")
+                .to_lowercase()
+        );
+        assert!(remote
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|request| request.to_lowercase().contains(&authorization)));
+    }
+
+    #[tokio::test]
+    async fn managed_clone_and_refresh_refuse_http_redirects() {
+        let source = tempfile::tempdir().unwrap();
+        run(source.path(), &["init", "-q", "-b", "main"]).await;
+        run(source.path(), &["config", "user.email", "t@t.t"]).await;
+        run(source.path(), &["config", "user.name", "t"]).await;
+        let initial = commit(source.path(), "first").await;
+        run(source.path(), &["update-server-info"]).await;
+        let remote = http_git_remote(source.path().join(".git")).await;
+        let attacker = http_git_remote(source.path().join(".git")).await;
+        let directory = tempfile::tempdir().unwrap();
+        let dest = directory.path().join("checkout");
+        clone(&remote.url, &dest, Some("controller-token"))
+            .await
+            .unwrap();
+        *remote.redirect.lock().unwrap() = Some(attacker.url.clone());
+
+        assert!(clone(&remote.url, &dest, Some("controller-token"))
+            .await
+            .is_err());
+        assert!(clone(
+            &remote.url,
+            &directory.path().join("new"),
+            Some("controller-token")
+        )
+        .await
+        .is_err());
+        assert_eq!(run(&dest, &["rev-parse", "origin/main"]).await, initial);
+        assert!(attacker.requests.lock().unwrap().is_empty());
     }
 
     /// With no `origin` remote, the launch base degrades to the local current
