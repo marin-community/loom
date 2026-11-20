@@ -7,6 +7,16 @@ import type {
   ProfileEnv,
   ProfileInput,
 } from '../types';
+import { agentOptionsWithCurrent, isAgentAvailable } from '../lib/agentAvailability';
+import {
+  MODE_CHOICES,
+  effortChoices as effortFor,
+  fastChoices as fastChoicesFor,
+  modelById,
+  protocolChoices as protocolsFor,
+  clearedForAgentChange,
+  prunedForModelChange,
+} from '../lib/pickerChoices';
 import ModelCombobox from './ModelCombobox.vue';
 
 const props = withDefaults(
@@ -26,9 +36,23 @@ const envName = ref('');
 const envValue = ref('');
 const envKind = ref<'literal' | 'gcp_secret'>('literal');
 
+// The profile's own agent stays selectable even when its harness is missing,
+// so opening an existing profile never silently rewrites its agent.
+const agentOptions = computed(() => agentOptionsWithCurrent(props.agents, draft.value.agent_kind));
+const agentChoices = computed(() =>
+  agentOptions.value.map((agent) => ({
+    id: agent.kind,
+    label: `${agent.label}${isAgentAvailable(agent) ? '' : ' — unavailable'}`,
+  })),
+);
 const selectedAgent = computed(() =>
   props.agents.find((agent) => agent.kind === draft.value.agent_kind),
 );
+const selectedModel = computed(() => modelById(selectedAgent.value, draft.value.model));
+const effortChoices = computed(() => effortFor(selectedAgent.value, selectedModel.value));
+const modeChoices = MODE_CHOICES;
+const protocolChoices = computed(() => protocolsFor(selectedAgent.value));
+const fastChoices = computed(() => fastChoicesFor(selectedModel.value));
 const mcpGroups = computed(() => {
   const groups = new Map<string, boolean>();
   for (const set of props.mcpRegistry?.capability_sets ?? []) groups.set(set.group, true);
@@ -90,15 +114,8 @@ const selectedMcpSummary = computed(() => {
 
 function normalizeAgentChoices(metadata = selectedAgent.value) {
   if (!metadata) return;
-  if (
-    draft.value.model &&
-    !metadata.accepts_raw_model &&
-    !metadata.models.some((choice) => choice.id === draft.value.model)
-  ) {
-    draft.value.model = '';
-  }
-  if (draft.value.effort && !metadata.efforts.some((choice) => choice.id === draft.value.effort)) {
-    draft.value.effort = '';
+  if (draft.value.protocol === 'acp' && metadata.supports_acp === false) {
+    draft.value.protocol = '';
   }
 }
 
@@ -135,7 +152,30 @@ function setEnvironment() {
   envValue.value = '';
 }
 
-watch(selectedAgent, normalizeAgentChoices);
+watch(selectedAgent, () => normalizeAgentChoices());
+
+/// Prune an effort or fast value the newly chosen model does not offer, so a
+/// profile cannot save a selector its own model rejects.
+function onModelPick(modelId: string) {
+  draft.value.model = modelId;
+  Object.assign(
+    draft.value,
+    prunedForModelChange(modelById(selectedAgent.value, modelId), {
+      effort: draft.value.effort,
+      fast: draft.value.fast,
+    }),
+  );
+}
+
+function onAgentChange() {
+  Object.assign(draft.value, clearedForAgentChange());
+}
+
+function onAgentPick(kind: string) {
+  if (kind === draft.value.agent_kind) return;
+  draft.value.agent_kind = kind;
+  onAgentChange();
+}
 watch(
   () => draft.value.restricted,
   (restricted) => {
@@ -173,17 +213,16 @@ watch(
     </div>
     <div class="grid min-w-0 gap-1">
       <label class="text-xs" :for="`${uid}-agent`">Agent</label>
-      <select
+      <ModelCombobox
         :id="`${uid}-agent`"
-        v-model="draft.agent_kind"
-        data-testid="profile-agent"
+        :choices="agentChoices"
+        :model-value="draft.agent_kind"
         :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
-      >
-        <option v-for="agent in agents" :key="agent.kind" :value="agent.kind">
-          {{ agent.label }}
-        </option>
-      </select>
+        placeholder="Select an agent"
+        field-class="bg-input"
+        testid="profile-agent"
+        @update:model-value="onAgentPick"
+      />
     </div>
 
     <div class="grid min-w-0 gap-1 sm:col-span-2">
@@ -231,90 +270,86 @@ watch(
       </p>
     </div>
 
-    <div class="grid min-w-0 gap-1">
-      <label class="text-xs" :for="`${uid}-model`">Model</label>
-      <ModelCombobox
-        v-if="selectedAgent?.accepts_raw_model"
-        :id="`${uid}-model`"
-        v-model="draft.model"
-        :choices="selectedAgent.models"
-        :disabled="disabled"
-        field-class="bg-input"
-        testid="profile-model"
-      />
-      <select
-        v-else
-        :id="`${uid}-model`"
-        v-model="draft.model"
-        data-testid="profile-model"
-        :disabled="disabled"
-        class="min-w-0 w-full rounded bg-input px-2 py-1.5"
-      >
-        <option value="">Agent default</option>
-        <option v-for="model in selectedAgent?.models ?? []" :key="model.id" :value="model.id">
-          {{ model.label }}
-        </option>
-      </select>
-    </div>
-    <div class="grid min-w-0 gap-1">
-      <label class="text-xs" :for="`${uid}-effort`">Effort</label>
-      <select
-        :id="`${uid}-effort`"
-        v-model="draft.effort"
-        data-testid="profile-effort"
-        :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
-      >
-        <option value="">Agent default</option>
-        <option v-for="effort in selectedAgent?.efforts ?? []" :key="effort.id" :value="effort.id">
-          {{ effort.label }}
-        </option>
-      </select>
-    </div>
-
-    <div class="grid min-w-0 gap-1">
-      <label class="text-xs" :for="`${uid}-protocol`">Protocol</label>
-      <select
-        :id="`${uid}-protocol`"
-        v-model="draft.protocol"
-        :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
-      >
-        <option value="">Agent default</option>
-        <option value="acp">ACP</option>
-        <option value="terminal">Terminal</option>
-      </select>
-    </div>
-    <div class="grid min-w-0 gap-1">
-      <label class="text-xs" :for="`${uid}-mode`">Mode</label>
-      <select
-        :id="`${uid}-mode`"
-        v-model="draft.mode"
-        data-testid="profile-mode"
-        :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
-      >
-        <option
-          v-for="mode in ['auto', 'default', 'acceptEdits', 'plan', 'bypassPermissions']"
-          :key="mode"
+    <div class="grid min-w-0 gap-3 sm:col-span-2 sm:grid-cols-2" data-testid="profile-selectors">
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-model`">Model</label>
+        <ModelCombobox
+          :id="`${uid}-model`"
+          :choices="selectedAgent?.models ?? []"
+          :model-value="draft.model"
+          :disabled="disabled"
+          :allow-custom="selectedAgent?.accepts_raw_model === true"
+          empty-label="Agent default"
+          field-class="bg-input"
+          testid="profile-model"
+          @update:model-value="onModelPick"
+        />
+      </div>
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-effort`">Effort</label>
+        <ModelCombobox
+          :id="`${uid}-effort`"
+          :choices="effortChoices"
+          :model-value="draft.effort"
+          :disabled="disabled"
+          empty-label="Agent default"
+          field-class="bg-input"
+          testid="profile-effort"
+          @update:model-value="draft.effort = $event"
+        />
+      </div>
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-fast`">Fast</label>
+        <ModelCombobox
+          :id="`${uid}-fast`"
+          :choices="fastChoices"
+          :model-value="draft.fast"
+          :disabled="disabled"
+          empty-label="Agent default"
+          field-class="bg-input"
+          testid="profile-fast"
+          @update:model-value="draft.fast = $event"
+        />
+      </div>
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-mode`">Mode</label>
+        <ModelCombobox
+          :id="`${uid}-mode`"
+          :choices="modeChoices"
+          :model-value="draft.mode"
+          :disabled="disabled"
+          placeholder=""
+          field-class="bg-input"
+          testid="profile-mode"
+          @update:model-value="draft.mode = $event"
+        />
+      </div>
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-protocol`">Protocol</label>
+        <ModelCombobox
+          :id="`${uid}-protocol`"
+          :choices="protocolChoices"
+          :model-value="draft.protocol"
+          :disabled="disabled"
+          empty-label="Agent default"
+          field-class="bg-input"
+          @update:model-value="draft.protocol = $event"
+        />
+      </div>
+      <div class="grid min-w-0 gap-1">
+        <label class="text-xs" :for="`${uid}-class`">Class</label>
+        <select
+          :id="`${uid}-class`"
+          v-model="draft.class"
+          :disabled="disabled"
+          class="min-w-0 rounded bg-input px-2 py-1.5"
         >
-          {{ mode }}
-        </option>
-      </select>
+          <option value="interactive">Interactive</option>
+          <option value="automation">Automation</option>
+        </select>
+      </div>
     </div>
 
-    <div class="grid min-w-0 gap-1">
-      <label class="text-xs" :for="`${uid}-class`">Class</label>
-      <select
-        :id="`${uid}-class`"
-        v-model="draft.class"
-        :disabled="disabled"
-        class="min-w-0 rounded bg-input px-2 py-1.5"
-      >
-        <option value="interactive">Interactive</option>
-        <option value="automation">Automation</option>
-      </select>
-    </div>
     <div class="grid min-w-0 gap-1">
       <label class="text-xs" :for="`${uid}-prelude`">Prelude</label>
       <select

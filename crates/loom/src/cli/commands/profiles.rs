@@ -34,6 +34,8 @@ pub enum ProfileCmd {
         #[arg(long)]
         effort: Option<String>,
         #[arg(long)]
+        fast: Option<String>,
+        #[arg(long)]
         protocol: Option<String>,
         #[arg(long)]
         mode: Option<String>,
@@ -53,6 +55,8 @@ pub enum ProfileCmd {
         model: Option<String>,
         #[arg(long)]
         effort: Option<String>,
+        #[arg(long)]
+        fast: Option<String>,
         #[arg(long)]
         protocol: Option<String>,
         #[arg(long)]
@@ -92,6 +96,8 @@ pub struct ProfileAddOpts {
     model: String,
     #[arg(long, default_value = "")]
     effort: String,
+    #[arg(long, default_value = "")]
+    fast: String,
     #[arg(long, default_value = "")]
     protocol: String,
     #[arg(long, default_value = "auto")]
@@ -168,6 +174,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                     agent_kind: opts.agent.clone(),
                     model: opts.model.clone(),
                     effort: opts.effort.clone(),
+                    fast: opts.fast.clone(),
                     protocol: opts.protocol.clone(),
                     mode: opts.mode.clone(),
                     class: opts.class.clone(),
@@ -218,6 +225,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             agent,
             model,
             effort,
+            fast,
             protocol,
             mode,
             class,
@@ -230,6 +238,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                             agent,
                             model,
                             effort,
+                            fast,
                             protocol,
                             mode,
                             class,
@@ -249,6 +258,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
             agent,
             model,
             effort,
+            fast,
             protocol,
             mode,
             class,
@@ -261,6 +271,7 @@ pub async fn run_profile(cmd: ProfileCmd) -> Result<()> {
                 agent,
                 model,
                 effort,
+                fast,
                 protocol,
                 mode,
                 class,

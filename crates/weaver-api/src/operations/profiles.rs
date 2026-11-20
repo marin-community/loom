@@ -69,6 +69,9 @@ pub mod create {
         /// Blank uses the runtime's own default.
         #[operand(default = String::new())]
         pub effort: String,
+        /// Blank uses the runtime's own default. Canonical `true` or `false`.
+        #[operand(default = String::new())]
+        pub fast: String,
         /// Blank uses the runtime's own default.
         #[operand(default = String::new())]
         pub protocol: String,
@@ -241,6 +244,9 @@ pub mod update {
         /// Blank uses the runtime's own default.
         #[operand(default = String::new())]
         pub effort: String,
+        /// Blank uses the runtime's own default. Canonical `true` or `false`.
+        #[operand(default = String::new())]
+        pub fast: String,
         /// Blank uses the runtime's own default.
         #[operand(default = String::new())]
         pub protocol: String,

@@ -52,7 +52,9 @@ test.describe("settings · custom agents", () => {
     ).toBeVisible();
     // ...and becomes selectable by the default profile.
     const agent = page.getByTestId("profile-agent");
-    await expect(agent.locator("option", { hasText: "Aider" })).toHaveCount(1);
+    await agent.click();
+    await expect(page.getByRole("option", { name: "Aider", exact: true })).toHaveCount(1);
+    await page.keyboard.press("Escape");
 
     // Delete it through the shared confirmation; it leaves the list and picker.
     await panel
@@ -64,6 +66,8 @@ test.describe("settings · custom agents", () => {
     await expect(panel.locator("li").filter({ hasText: "Aider" })).toHaveCount(
       0,
     );
-    await expect(agent.locator("option", { hasText: "Aider" })).toHaveCount(0);
+    await agent.click();
+    await expect(page.getByRole("option", { name: "Aider", exact: true })).toHaveCount(0);
+    await page.keyboard.press("Escape");
   });
 });
