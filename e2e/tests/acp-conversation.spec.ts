@@ -84,8 +84,15 @@ async function launchAcpSession(
   // `protocol` axis marks it ACP rather than a PTY TUI (added by the lifecycle
   // phase; ignored by the current backend, which is exactly why the probe below
   // detects support).
-  const agent = opts.nativeQueue ? 'acp-fake-native-queue' : opts.steering ? 'acp-fake-steering' : 'acp-fake';
-  await defineFakeAcpAgent(weaver, agent, 'ACP fake', { steering: opts.steering, nativeQueue: opts.nativeQueue });
+  const agent = opts.nativeQueue
+    ? 'acp-fake-native-queue'
+    : opts.steering
+      ? 'acp-fake-steering'
+      : 'acp-fake';
+  await defineFakeAcpAgent(weaver, agent, 'ACP fake', {
+    steering: opts.steering,
+    nativeQueue: opts.nativeQueue,
+  });
 
   const res = await fetch(`${weaver.baseUrl}/api/sessions/launch`, {
     method: 'POST',
@@ -181,6 +188,219 @@ async function holdNextChatSnapshot(page: Page): Promise<{
 }
 
 test.describe('acp conversation', () => {
+  test('stored history renders while the live stream is still connecting', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await openAcp(page, weaver, {
+      goal: 'say:stored reply',
+      name: 'history-before-stream',
+    });
+    await expect(page.getByText('stored reply', { exact: true })).toBeVisible();
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>((resolve) => (releaseStream = resolve));
+    await page.route('**/api/events/stream?**', async (route) => {
+      await streamGate;
+      await route.continue();
+    });
+    // Pause timers so a delayed fallback cannot masquerade as an immediate read.
+    await page.clock.install();
+    await page.clock.pauseAt(new Date());
+    try {
+      await page.reload();
+      await expect(page.getByText('stored reply', { exact: true })).toBeVisible();
+      await expect(page.getByText('Loading conversation…', { exact: true })).toBeHidden();
+      await queueAcpPrompt(weaver, session, 'say:reply during the stream gap');
+      await expect
+        .poll(async () => {
+          const response = await fetch(`${weaver.baseUrl}/api/sessions/chat`, {
+            method: 'POST',
+            headers: HEADERS,
+            body: JSON.stringify({ session: session.id }),
+          });
+          const chat = await response.json();
+          return chat.blocks.some(
+            (block: { kind: string; payload: { text?: string } }) =>
+              block.kind === 'agent_message' &&
+              block.payload.text === 'reply during the stream gap',
+          );
+        })
+        .toBe(true);
+    } finally {
+      releaseStream();
+      await page.clock.resume();
+    }
+    await expect(page.getByText('reply during the stream gap', { exact: true })).toBeVisible();
+  });
+
+  test('reconciles a stream gap larger than the newest journal page', async ({
+    page,
+    weaver,
+  }) => {
+    const session = await launchAcpSession(weaver, {
+      goal: 'say:ready',
+      name: 'history-long-gap',
+    });
+    test.skip(session === null, SKIP_MSG);
+    let releaseStream!: () => void;
+    const streamGate = new Promise<void>(
+      (resolve) => (releaseStream = resolve),
+    );
+    await page.route('**/api/events/stream?**', async (route) => {
+      await streamGate;
+      await route.continue();
+    });
+    let newestReads = 0;
+    await page.route('**/api/sessions/chat', (route) => {
+      const request = route.request().postDataJSON() as { before_seq?: number };
+      const older = request.before_seq !== undefined;
+      if (!older) newestReads++;
+      const blocks = older
+        ? [
+            {
+              turn: 8,
+              seq: 0,
+              kind: 'agent_message',
+              payload: { text: 'known reply' },
+            },
+            {
+              turn: 8,
+              seq: 1,
+              kind: 'agent_message',
+              payload: { text: 'gap reply' },
+            },
+          ]
+        : newestReads === 1
+          ? [
+              {
+                turn: 8,
+                seq: 0,
+                kind: 'agent_message',
+                payload: { text: 'known reply' },
+              },
+            ]
+          : Array.from({ length: 200 }, (_, index) => ({
+              turn: 8,
+              seq: index + 2,
+              kind: 'agent_message',
+              payload: { text: `new reply ${index + 2}` },
+            }));
+      return route.fulfill({
+        json: {
+          blocks: blocks.map((block) => ({
+            ...block,
+            created_at: '2026-07-23T00:00:00Z',
+          })),
+          older_cursor: older
+            ? null
+            : newestReads === 1
+              ? null
+              : { turn: 8, seq: 2 },
+          live_turn: null,
+          effective_mode: null,
+          pending_inputs: [],
+          metadata: {
+            commands: [],
+            config_options: [],
+            modes: [],
+            steering_supported: false,
+          },
+        },
+      });
+    });
+    try {
+      await page.goto(`${weaver.baseUrl}/s/${session!.id}`);
+      await expect(
+        page.getByText('known reply', { exact: true }),
+      ).toBeVisible();
+    } finally {
+      releaseStream();
+    }
+    await expect(page.getByTestId('acp-conversation')).toContainText('gap reply');
+    await expect(page.getByTestId('acp-load-older')).toHaveCount(0);
+  });
+
+  test('a failed lag resync keeps history visible and offers retry', async ({
+    page,
+    weaver,
+  }) => {
+    await page.addInitScript(() => {
+      const NativeEventSource = window.EventSource;
+      window.EventSource = class extends NativeEventSource {
+        constructor(url: string | URL, options?: EventSourceInit) {
+          super(url, options);
+          Object.defineProperty(window, '__testEventSource', {
+            value: this,
+            configurable: true,
+          });
+        }
+      };
+    });
+    let failRefresh = false;
+    let reads = 0;
+    await page.route('**/api/sessions/chat', (route) => {
+      reads++;
+      return failRefresh
+        ? route.fulfill({ status: 503, json: { error: 'refresh unavailable' } })
+        : route.continue();
+    });
+    const session = await openAcp(page, weaver, {
+      goal: 'say:history survives',
+      name: 'history-resync-failure',
+    });
+    const reply = page.getByText('history survives', { exact: true });
+    await expect(reply).toBeVisible();
+    await expect.poll(() => reads).toBeGreaterThanOrEqual(2);
+    failRefresh = true;
+    await page.evaluate((id) => {
+      const source = (window as Window & { __testEventSource?: EventSource })
+        .__testEventSource;
+      if (!source) throw new Error('event stream was not opened');
+      source.dispatchEvent(
+        new MessageEvent('message', {
+          data: JSON.stringify({
+            topic: `chat:${id}`,
+            event: 'resync',
+            data: { skipped: 1 },
+          }),
+        }),
+      );
+    }, session.id);
+    const alert = page.getByRole('alert');
+    await expect(alert).toContainText('refresh unavailable');
+    await expect(reply).toBeVisible();
+    failRefresh = false;
+    await alert.getByRole('button', { name: 'Retry' }).click();
+    await expect(alert).toHaveCount(0);
+    await expect(reply).toBeVisible();
+  });
+
+  test('a stalled history read times out and can be retried', async ({ page, weaver }) => {
+    await openAcp(page, weaver, { goal: 'say:retry recovered', name: 'history-timeout' });
+    await expect(page.getByText('retry recovered', { exact: true })).toBeVisible();
+    // Keep SSE disconnected so it cannot reconcile over the stalled read.
+    await page.route('**/api/events/stream?**', (route) => route.abort());
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => (releaseRead = resolve));
+    let stalled = true;
+    await page.route('**/api/sessions/chat', async (route) => {
+      if (stalled) await readGate;
+      await route.continue();
+    });
+    try {
+      await page.reload();
+      // AbortSignal.timeout uses the browser's active-time clock, not JS timers.
+      await expect(page.getByRole('alert')).toContainText('timed out', { timeout: 20_000 });
+      stalled = false;
+      releaseRead();
+      await page.getByRole('button', { name: 'Retry', exact: true }).click();
+      await expect(page.getByText('retry recovered', { exact: true })).toBeVisible();
+      await expect(page.getByRole('alert')).toHaveCount(0);
+    } finally {
+      releaseRead();
+    }
+  });
+
   test('an unfinished reply survives reloads and resumed tabs', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:running checks|tool:execute|say:the checks already passed|wait:30000',
@@ -822,7 +1042,7 @@ test.describe('acp conversation', () => {
     });
   });
 
-  test('loads the journal tail once and pages older history on demand', async ({
+  test('reconciles the journal tail and pages older history on demand', async ({
     page,
     weaver,
   }) => {
@@ -871,12 +1091,12 @@ test.describe('acp conversation', () => {
     const conversation = page.getByTestId('acp-conversation');
     await expect(conversation.getByText('newest retained answer', { exact: true })).toBeVisible();
     await expect(conversation.getByText('oldest retained prompt', { exact: true })).toHaveCount(0);
-    expect(snapshots).toBe(1);
+    await expect.poll(() => snapshots).toBe(2);
 
     await page.getByTestId('acp-load-older').click();
     await expect(conversation.getByText('oldest retained prompt', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-load-older')).toHaveCount(0);
-    expect(snapshots).toBe(2);
+    expect(snapshots).toBe(3);
   });
 
   test('an artifact hard refresh does not load the hidden default conversation', async ({
@@ -1608,6 +1828,8 @@ test.describe('acp conversation', () => {
     const conv = page.getByTestId('acp-conversation');
     const link = conv.getByRole('link', { name: 'plan' }).first();
     await expect(link).toBeVisible({ timeout: 20_000 });
+    // Streaming markdown can replace the link before its durable block lands.
+    await expect(page.getByTestId('acp-working')).toBeHidden();
     await link.scrollIntoViewIfNeeded();
     // The link sits below the fold, so the reader is off the foot and the pin
     // has released — the state the return must preserve.

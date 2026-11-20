@@ -10,7 +10,7 @@ import {
   watch,
   nextTick,
 } from 'vue';
-import { getSession, invokeOperation, sendMessage } from '../api';
+import { getSession, getSessionConversation, sendMessage } from '../api';
 import type { IrisLog, IrisBlock, Session } from '../types';
 import { canSend, conversationState, effectiveAttention, TONE_TEXT } from '../lib/sessionState';
 import { draftStorage, restoreDraft, saveDraft } from '../lib/composerDraft';
@@ -100,7 +100,7 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     pinned.value = true;
   }
   try {
-    const data = await invokeOperation('sessions.conversation', { session: id.value });
+    const data = await getSessionConversation(id.value);
     if (seq !== loadSeq) return;
     log.value = data;
     state.value = data && data.messages.length ? 'ready' : 'empty';
@@ -112,7 +112,10 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     if (/not found|conversation/i.test(msg)) {
       state.value = 'empty';
     } else if (!preserve) {
-      errorMsg.value = msg;
+      errorMsg.value =
+        (e as Error).name === 'TimeoutError'
+          ? 'Loading the conversation timed out. Please retry.'
+          : msg;
       state.value = 'error';
     }
   }

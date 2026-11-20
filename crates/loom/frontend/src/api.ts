@@ -156,6 +156,13 @@ export const listSessionSummaries = (
 
 export const getSession = (id: string) => invokeOperation('sessions.get', { session: id });
 
+export const getSessionConversation = (id: string) =>
+  invokeOperation(
+    'sessions.conversation',
+    { session: id },
+    { signal: AbortSignal.timeout(15_000) },
+  );
+
 export const getSessionFile = (id: string, path: string) =>
   invokeOperation('sessions.file', { session: id, path });
 
@@ -746,11 +753,15 @@ import type { AcpMetadata, ChatSnapshot, PromptAck } from './types';
 /** A newest-first page of the journaled ACP conversation. The response is in
  * display order and carries an exclusive cursor for the next older page. */
 export const getSessionChat = (id: string, before?: { turn: number; seq: number } | null) =>
-  invokeOperation('sessions.chat', {
-    before_turn: before?.turn,
-    before_seq: before?.seq,
-    session: id,
-  });
+  invokeOperation(
+    'sessions.chat',
+    {
+      before_turn: before?.turn,
+      before_seq: before?.seq,
+      session: id,
+    },
+    { signal: AbortSignal.timeout(15_000) },
+  );
 
 // `sessions.prompt.create` serves both ACP prompt paths. It takes no `by`: the
 // legacy body's caller-supplied author is gone, and provenance is derived from
