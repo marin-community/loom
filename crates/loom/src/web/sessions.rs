@@ -1452,8 +1452,14 @@ async fn op_send(
             .bind(&key)
             .fetch_one(&st.db)
             .await?;
-            let turn: Option<i64> = sqlx::query_scalar("SELECT turn FROM chat_blocks WHERE session_id = ? AND json_extract(payload, '$.delivery_key') = ? ORDER BY turn DESC LIMIT 1")
-                .bind(&session.id).bind(&key).fetch_optional(&st.db).await?;
+            let turn: Option<i64> = sqlx::query_scalar(
+                "SELECT turn FROM chat_blocks WHERE session_id = ? AND delivery_key = ?
+                 ORDER BY turn DESC LIMIT 1",
+            )
+            .bind(&session.id)
+            .bind(&key)
+            .fetch_optional(&st.db)
+            .await?;
             return Ok(SessionSendResult {
                 sent: true,
                 submitted: true,

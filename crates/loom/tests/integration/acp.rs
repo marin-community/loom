@@ -2340,6 +2340,16 @@ async fn session_updates_use_authenticated_identity_and_preserve_stop() {
         .filter(|block| block["payload"]["source_session_id"] == id)
         .collect();
     assert_eq!(updates.len(), 1);
+    let delivered = send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(delivered["queued"], false);
+    assert_eq!(delivered["turn"], updates[0]["turn"]);
 }
 
 #[serial]

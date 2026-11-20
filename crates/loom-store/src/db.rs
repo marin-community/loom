@@ -201,6 +201,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "agent-input-delivery",
         include_str!("../migrations/0039_agent_input_delivery.sql"),
     ),
+    (
+        40,
+        "chat-block-delivery-key",
+        include_str!("../migrations/0040_chat_block_delivery_key.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);
@@ -667,6 +672,49 @@ mod tests {
                 "claim".into(),
                 "driver".into()
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_key_migration_covers_existing_blocks_and_old_writers() {
+        let db = core_connect_in_memory().await.unwrap();
+        migrate_through(&db, 39).await;
+        sqlx::query(
+            r#"INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, ref_id, created_at)
+               VALUES ('session', 1, 0, 'user_message', '{"delivery_key":"prompt:old"}', '', ''),
+                      ('session', 1, 1, 'user_message', '{"text":"manual"}', '', ''),
+                      ('session', 1, 2, 'user_message', '{"delivery_key":42}', '', ''),
+                      ('session', 1, 3, 'user_message', 'malformed', '', ''),
+                      ('session', 1, 4, 'tool_call', '{"delivery_key":"prompt:old"}', 'tool:1', '')"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+
+        migrate_loom(&db).await.unwrap();
+
+        sqlx::query(
+            r#"INSERT INTO chat_blocks (session_id, turn, seq, kind, payload, created_at)
+               VALUES ('session', 1, 5, 'user_message', '{"delivery_key":"prompt:new"}', '')"#,
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let keys: Vec<Option<String>> =
+            sqlx::query_scalar("SELECT delivery_key FROM chat_blocks ORDER BY seq")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            keys,
+            [
+                Some("prompt:old".into()),
+                None,
+                None,
+                None,
+                None,
+                Some("prompt:new".into())
+            ]
         );
     }
 
