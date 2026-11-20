@@ -3,6 +3,8 @@
 //! Every command here is host-local: it starts, stops, or points a browser at
 //! a process on this machine, and none of it is expressible as an operation.
 
+use std::{future::Future, pin::Pin};
+
 use crate::client;
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Subcommand;
@@ -58,7 +60,12 @@ pub(crate) fn nested_server_refusal(
 }
 
 /// Dispatch the `loom server <verb>` daemon-lifecycle subcommands.
-pub async fn run_server(cmd: ServerCmd) -> Result<()> {
+pub fn run_server(cmd: ServerCmd) -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    // The binary only needs to poll the server lifecycle, which compiles in libloom.
+    Box::pin(run_server_inner(cmd))
+}
+
+async fn run_server_inner(cmd: ServerCmd) -> Result<()> {
     if matches!(cmd, ServerCmd::Run { .. } | ServerCmd::Start) {
         if let Some(refusal) = nested_server_refusal(
             std::env::var("LOOM_SESSION_ID").ok().as_deref(),
