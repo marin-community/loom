@@ -841,6 +841,16 @@ async fn new_session_end_to_end() {
     })
     .await;
 
+    let sending = events
+        .iter()
+        .position(|e| e.event == "queue" && e.data["pending_inputs"][0]["state"] == "delivering")
+        .expect("claimed input is announced before its turn starts");
+    let opening = events
+        .iter()
+        .position(|e| e.event == "block" && e.data["kind"] == "user_message")
+        .expect("the user_message block");
+    assert!(sending < opening);
+
     assert!(
         events
             .iter()
@@ -2823,6 +2833,7 @@ async fn native_prompt_queue_preserves_work_and_survives_reattachment() {
         .unwrap();
     poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
         chat["pending_inputs"][0]["state"] == "delivering"
+            && chat["pending_inputs"][0]["input_method"] == "session/prompt"
     })
     .await;
     sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")
@@ -2883,6 +2894,7 @@ async fn delayed_steering_acknowledgement_survives_reattachment() {
         .unwrap();
     poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
         chat["pending_inputs"][0]["state"] == "delivering"
+            && chat["pending_inputs"][0]["input_method"] == "_session/steering"
     })
     .await;
     sqlx::query("UPDATE conversation_inbox SET interrupt_at = '2000-01-01T00:00:00.000Z' WHERE preferred_session_id = ?")

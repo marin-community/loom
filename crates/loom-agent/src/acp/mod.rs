@@ -3458,6 +3458,7 @@ impl Task {
             .await?;
             return Ok(false);
         }
+        self.emit_queue().await;
         if self.turn_live {
             if let Err(error) =
                 Box::pin(self.cancel_live_turn(TurnEndSource::UpdatePolicyCancellation)).await
@@ -3560,6 +3561,7 @@ impl Task {
             item,
             active_claim: Some(active_claim),
         });
+        self.emit_queue().await;
         if let Err(error) = self
             .stream
             .write(&wire::request_line(id, method, params))
@@ -3567,7 +3569,6 @@ impl Task {
         {
             tracing::warn!(session = %self.session_id, %error, "input write unconfirmed; retaining pending delivery");
         }
-        self.emit_queue().await;
         Ok(true)
     }
 

@@ -492,8 +492,14 @@ retain their immediate delivery path.
 
 The composer’s normal Send uses this agent-owned delivery policy. Stop & send is an
 explicit cancellation. Input ownership, method, and request IDs are persisted before
-the relay write and survive host reattachment. A pending acknowledgement is
-shown as sending, with editing and forced replay disabled. A missing response
+the relay write and survive host reattachment. The composer clears on submit
+and restores the draft if the request fails. It shows sending while waiting
+for Loom, then the durable queue exposes claimed input before its opening
+journal block exists. Pending input includes its `input_method`: a native
+`session/prompt` is shown as queueing in agent, while `_session/steering` is
+shown as steering until acknowledged. Editing and forced replay are disabled
+once input is claimed. An idle view says waiting to start rather than
+inferring that automatic delivery is paused. A missing response
 or ambiguous transport failure never triggers cancellation and retransmission:
 the adapter may already have accepted the input. An injected acknowledgement
 means the agent owns the message, not that the model has read it. It ends the

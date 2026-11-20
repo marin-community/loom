@@ -291,7 +291,7 @@ test.describe('acp conversation', () => {
     await page.reload();
     await expect(update).toHaveCount(1);
     await expect(page.getByTestId('acp-working')).toBeHidden();
-    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Auto-send paused');
+    await expect(update.getByTestId('acp-update-timeout')).toHaveText('Waiting to start');
     await expect(update.getByTestId('acp-force-update')).toHaveText('Send now');
     await page.screenshot({
       path: test.info().outputPath('session-update-queue.png'),
@@ -1071,6 +1071,64 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-recover')).toBeHidden();
   });
 
+  for (const stopAndSend of [false, true]) {
+    for (const accepted of [true, false]) {
+      test(`a slow ${stopAndSend ? 'Stop & send' : 'send'} shows progress and ${accepted ? 'delivers' : 'restores'} the draft`, async ({
+        page,
+        weaver,
+      }) => {
+        await openAcp(page, weaver, {
+          goal: stopAndSend ? 'wait:30000|say:original' : 'say:ready',
+          name: 'acp-slow-send',
+        });
+        if (stopAndSend) await expect(page.getByTestId('acp-working')).toBeVisible();
+        else await expect(page.getByTestId('acp-working')).toBeHidden();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        let acknowledge!: () => void;
+        const acknowledgement = new Promise<void>((resolve) => (acknowledge = resolve));
+        await page.route('**/api/sessions/prompt/create', async (route) => {
+          await gate;
+          if (accepted) {
+            const response = await route.fetch();
+            await acknowledgement;
+            await route.fulfill({ response });
+          } else await route.fulfill({ status: 409, json: { error: 'Send refused' } });
+        });
+        const input = page.getByTestId('acp-composer-input');
+        await input.fill('say:received');
+        if (stopAndSend) await page.getByTestId('acp-composer-stop-send').click();
+        else await input.press('Enter');
+        try {
+          if (stopAndSend) {
+            await expect(page.getByTestId('acp-composer-stop-send')).toHaveText('Sending…');
+          } else {
+            await expect(page.getByTestId('acp-optimistic')).toContainText(
+              'sending · waiting for Loom',
+            );
+          }
+          await expect(input).toHaveValue('');
+          await expect(page.getByTestId('acp-composer-send')).toBeDisabled();
+          release();
+          if (accepted) {
+            await expect(page.getByText('received', { exact: true })).toBeVisible();
+            await expect(input).toHaveValue('');
+            await expect(page.getByTestId('acp-composer-send')).toBeDisabled();
+          } else {
+            await expect(input).toHaveValue('say:received');
+            await expect(page.getByText('Send refused', { exact: true })).toBeVisible();
+            await expect(page.getByTestId('acp-composer-send')).toBeEnabled();
+          }
+        } finally {
+          release();
+          acknowledge();
+        }
+        await expect(page.getByTestId('acp-optimistic')).toBeHidden();
+        await expect(input).toBeEnabled();
+      });
+    }
+  }
+
   test('Send steers feedback into the live turn without cancelling its tool', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
       goal: 'say:ready',
@@ -1106,7 +1164,8 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-working')).toBeVisible();
     await input.fill('say:queued feedback');
     await input.press('Enter');
-    await expect(page.getByTestId('acp-queued')).toHaveText('sending');
+    await expect(page.getByTestId('acp-queued')).toHaveText('queueing in agent');
+    await expect(page.getByTestId('acp-update-timeout')).toHaveText('Waiting for current turn to finish');
     await expect(page.getByTestId('acp-edit-queued')).toBeHidden();
     await expect(page.getByTestId('acp-force-queued')).toBeHidden();
     await expect(page.getByTestId('acp-pending')).toBeHidden({ timeout: 15_000 });

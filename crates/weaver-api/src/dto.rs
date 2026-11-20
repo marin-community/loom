@@ -3044,6 +3044,8 @@ pub struct QueuedInputView {
     pub text: String,
     pub state: String,
     pub editable: bool,
+    /// ACP method used for input already handed to the adapter; null before dispatch.
+    pub input_method: Option<String>,
     /// Automatic interruption deadline; null for updates that wait for a turn boundary.
     pub interrupt_at: Option<String>,
 }
