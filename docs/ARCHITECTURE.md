@@ -499,8 +499,10 @@ the adapter may already have accepted the input. An injected acknowledgement
 means the agent owns the message, not that the model has read it. It ends the
 delivery timeout. Unexpected failure responses are shown as delivery unconfirmed
 and are not automatically replayed, since they may follow partial delivery.
-Explicit cancellation or agent exit also settles unacknowledged input as
-unconfirmed, preventing it from wedging later messages or being replayed blindly.
+Explicit cancellation, agent exit, or replacement of the adapter process also
+settles unacknowledged input as unconfirmed, preventing it from wedging later
+messages or being replayed blindly. Reattachment to the same surviving process
+keeps the pending request so its response can still be replayed.
 A prompt response racing a steer response is held unacknowledged
 until the steer settles, preserving the original turn’s completion boundary.
 

@@ -5061,6 +5061,88 @@ async fn recover_restarts_a_poisoned_live_acp_runtime() {
     );
 }
 
+/// A replacement adapter cannot acknowledge requests owned by the retired
+/// process. Recovery must settle them without replaying their input.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recover_settles_unacknowledged_agent_input() {
+    let ts = TestServer::start().await;
+    for native_queue in [false, true] {
+        let agent = format!("fake-recover-input-{native_queue}");
+        seed_acp_agent_with_launch(
+            &ts,
+            &agent,
+            format!(
+                "FAKE_ACP_STEERING=1 FAKE_ACP_STEERING_ACK_DELAY=30000 FAKE_ACP_PROMPT_QUEUEING={} {}",
+                u8::from(native_queue),
+                agent_cmd()
+            ),
+        )
+        .await;
+        let created = rest_create(&ts, &agent, "wait:30000|say:original").await;
+        let id = created["id"].as_str().unwrap();
+        ts.client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "say:pending feedback", "files": ["README.md"] }),
+            )
+            .await
+            .unwrap();
+        poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+            chat["pending_inputs"][0]["state"] == "delivering"
+        })
+        .await;
+
+        ts.client
+            .post("/api/sessions/recover", json!({ "session": id }))
+            .await
+            .expect("runtime recovery replaces the adapter");
+        let chat = poll_chat_state(&ts, id, Duration::from_secs(5), |chat| {
+            chat["pending_inputs"].as_array().unwrap().is_empty()
+        })
+        .await;
+        let blocks = chat["blocks"].as_array().unwrap();
+        let feedback: Vec<_> = blocks
+            .iter()
+            .filter(|b| {
+                b["kind"] == "user_message"
+                    && b["payload"]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with("say:pending feedback")
+            })
+            .collect();
+        assert_eq!(feedback.len(), 1, "input is journaled once: {chat}");
+        assert_eq!(feedback[0]["payload"]["delivery_uncertain"], true);
+        assert_eq!(feedback[0]["payload"]["resources"][0]["name"], "README.md");
+
+        ts.client
+            .post(
+                "/api/sessions/prompt/create",
+                json!({ "session": id, "text": "say:after recovery" }),
+            )
+            .await
+            .unwrap();
+        let chat = poll_chat_state(&ts, id, Duration::from_secs(10), |chat| {
+            chat["live_turn"].is_null()
+                && chat["blocks"].as_array().unwrap().iter().any(|b| {
+                    b["kind"] == "agent_message" && b["payload"]["text"] == "after recovery"
+                })
+        })
+        .await;
+        assert!(
+            chat["blocks"].as_array().unwrap().iter().all(|b| {
+                b["kind"] != "agent_message"
+                    || !b["payload"]["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("pending feedback")
+            }),
+            "uncertain input is not replayed: {chat}"
+        );
+    }
+}
+
 /// REST keeps failure semantics for non-browser callers, while returning the
 /// durable failed session id so the UI can navigate to its recovery controls.
 #[serial]

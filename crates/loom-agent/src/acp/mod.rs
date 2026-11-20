@@ -1901,6 +1901,37 @@ impl Task {
         stream: tapestry::RelayStream,
         events_tx: broadcast::Sender<SseEvent>,
     ) -> Result<Self> {
+        // A replacement process cannot answer the retired adapter's requests.
+        // Reattachment uses `recover` instead and keeps them replayable.
+        if let Some(item) =
+            crate::conversation_inbox::pending_input_delivery(&state.db, &session.id).await?
+        {
+            let turn = item.input_turn.context("pending input turn is missing")?;
+            let seq: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(MAX(seq) + 1, 0) FROM chat_blocks WHERE session_id = ? AND turn = ?",
+            )
+            .bind(&session.id)
+            .bind(turn)
+            .fetch_one(&state.db)
+            .await?;
+            let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
+            let mut payload = inbox_message_payload(&item, &resources);
+            payload["steered"] = json!(true);
+            payload["delivery_uncertain"] = json!(true);
+            let block = crate::conversation_inbox::record_input_delivery(
+                &state.db,
+                &item,
+                &session.id,
+                turn,
+                seq,
+                &payload,
+            )
+            .await?;
+            let _ = events_tx.send(SseEvent {
+                event: "block".to_string(),
+                data: serde_json::to_value(block)?,
+            });
+        }
         let cursor = chat::max_turn_seq(&state.db, &session.id).await?;
         let (current_turn, next_seq, turns_dispatched) = match cursor {
             Some((turn, seq)) => (turn, seq + 1, turn + 1),
