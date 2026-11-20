@@ -293,12 +293,10 @@ impl Stream {
                 stream = self.indicator_table,
                 "applying migration"
             );
-            for stmt in split_statements(sql) {
-                sqlx::query(&stmt)
-                    .execute(&mut *tx)
-                    .await
-                    .with_context(|| format!("migration {version} ({name}): {stmt}"))?;
-            }
+            sqlx::raw_sql(sql)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("migration {version} ({name})"))?;
             tx.commit().await?;
         }
         Ok(())

@@ -66,7 +66,7 @@ pub async fn pending_inputs(
            AND state IN ('queued', 'delivering')
            AND NOT EXISTS (SELECT 1 FROM chat_blocks
              WHERE session_id = conversation_inbox.preferred_session_id AND kind = 'user_message'
-               AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)
+               AND ref_id = conversation_inbox.delivery_key)
          ORDER BY created_at, rowid",
     )
     .bind(session)
@@ -367,7 +367,7 @@ pub async fn pending_input_delivery(
            AND input_request_id IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM chat_blocks
              WHERE session_id = conversation_inbox.claimed_session_id AND kind = 'user_message'
-               AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)",
+               AND ref_id = conversation_inbox.delivery_key)",
     )
     .bind(session)
     .fetch_optional(db)
@@ -802,7 +802,7 @@ pub async fn release_conversation_inbox(
          SET state = CASE WHEN review_id IS NULL AND EXISTS (
                  SELECT 1 FROM chat_blocks
                  WHERE session_id = conversation_inbox.claimed_session_id AND kind = 'user_message'
-                   AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key
+                   AND ref_id = conversation_inbox.delivery_key
              ) THEN 'consumed' ELSE 'queued' END, claimed_session_id = NULL,
              claim_token = NULL, claim_owner = NULL, claimed_at = NULL,
              input_request_id = NULL, input_turn = NULL, input_method = NULL
@@ -966,7 +966,7 @@ mod tests {
                 1,
                 0,
                 kind,
-                &json!({"delivery_key": key, "text": "hello"}),
+                &json!({"delivery_key": key, "tool_call_id": key, "text": "hello"}),
             )
             .await
             .unwrap();

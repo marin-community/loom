@@ -329,7 +329,8 @@ fn prefix_chars(text: &str, max_chars: usize) -> String {
 /// `ref_id` column at insert time. Replay idempotency asks about a block by this
 /// id rather than by `(turn, seq)`: a tool call's position is not stable across a
 /// restart but its adapter-assigned id is, and a permission is answered by
-/// request id. Every other kind has no such id and stores `''`.
+/// request id. The journal's insert trigger sets `ref_id` for user messages
+/// with a delivery key, including writes from an older server during restart.
 fn ref_id<'a>(kind: &str, payload: &'a Value) -> &'a str {
     let key = match kind {
         self::kind::TOOL_CALL => "tool_call_id",
