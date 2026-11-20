@@ -207,13 +207,37 @@ const errorMsg = ref('');
 const olderCursor = ref<{ turn: number; seq: number } | null>(null);
 const loadingOlder = ref(false);
 const olderError = ref('');
+const refreshError = ref('');
 const recovering = ref(false);
 const recoveryError = ref('');
 const recoveryNotice = ref('');
 
 let loadSeq = 0;
-async function load({ preserve = false }: { preserve?: boolean } = {}) {
+type ChatCursor = { turn: number; seq: number };
+function after(a: ChatCursor, b: ChatCursor): boolean {
+  return a.turn > b.turn || (a.turn === b.turn && a.seq > b.seq);
+}
+
+function newestBlock(): ChatCursor | null {
+  let newest: ChatCursor | null = null;
+  for (const block of blocks.values()) {
+    if (!newest || after(block, newest)) newest = block;
+  }
+  return newest;
+}
+
+// `undefined` means there is no trusted pre-gap snapshot; `null` means the
+// journal was known to be empty, so every page written during the gap matters.
+let gapAnchor: ChatCursor | null | undefined;
+async function load({
+  preserve = false,
+  bridgeTo,
+}: { preserve?: boolean; bridgeTo?: ChatCursor | null } = {}): Promise<
+  ChatCursor | null | undefined
+> {
   const seq = ++loadSeq;
+  const requestId = id.value;
+  refreshError.value = '';
   // A fresh load (mount / session switch) re-pins the view to the foot — a chat
   // opens at its newest exchange; a preserved refresh keeps the reader's pin.
   if (!preserve) {
@@ -230,8 +254,9 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
   const queueAt = queueRevision;
   const liveAt = liveRevision;
   try {
-    const snap = await getSessionChat(id.value);
+    const snap = await getSessionChat(requestId);
     if (seq !== loadSeq) return;
+    const firstTail = snap.blocks[snap.blocks.length - 1] ?? null;
     const accepted = journal.applySnapshot(journalRevision, snap.blocks);
     for (const b of accepted) settleDurableBlock(b);
     if (!preserve || state.value !== 'ready') olderCursor.value = snap.older_cursor;
@@ -245,21 +270,45 @@ async function load({ preserve = false }: { preserve?: boolean } = {}) {
     if (queueAt === queueRevision) applyQueue(snap.pending_inputs);
     applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
     state.value = 'ready';
+    // The first page can be wholly newer than the last block seen before SSE
+    // subscribed. Walk back to that block so a gap over 200 blocks is repaired.
+    // A preserved read keeps the user's older-page cursor in place.
+    let page = snap;
+    while (
+      bridgeTo !== undefined &&
+      page.older_cursor &&
+      (bridgeTo === null || (page.blocks[0] && after(page.blocks[0], bridgeTo)))
+    ) {
+      const nextRevision = journal.beginSnapshot();
+      page = await getSessionChat(requestId, page.older_cursor);
+      if (seq !== loadSeq) return;
+      const acceptedPage = journal.applySnapshot(nextRevision, page.blocks);
+      for (const block of acceptedPage) settleDurableBlock(block);
+    }
+    await nextTick();
+    if (seq !== loadSeq) return;
+    if (pinned.value) scrollToBottom();
+    updateActive();
+    return firstTail;
   } catch (e) {
     if (seq !== loadSeq) return;
-    if (state.value !== 'ready') {
-      errorMsg.value =
-        (e as Error).name === 'TimeoutError'
-          ? 'Loading the conversation timed out. Please retry.'
-          : ((e as Error).message ?? 'Failed to load conversation');
+    const message =
+      (e as Error).name === 'TimeoutError'
+        ? 'Loading the conversation timed out. Please retry.'
+        : ((e as Error).message ?? 'Failed to load conversation');
+    if (state.value === 'ready') refreshError.value = message;
+    else {
+      errorMsg.value = message;
       state.value = 'error';
     }
-    return;
   }
-  await nextTick();
-  if (seq !== loadSeq) return;
-  if (pinned.value) scrollToBottom();
-  updateActive();
+}
+
+function retryReconcile() {
+  const requestedSeq = loadSeq + 1;
+  void load({ preserve: true, bridgeTo: gapAnchor }).then((tail) => {
+    if (tail !== undefined && loadSeq === requestedSeq) gapAnchor = undefined;
+  });
 }
 
 /** Prepend one older DB page while keeping the same prose under the reader's
@@ -402,11 +451,17 @@ function openStream() {
   // Stored history must not wait for the live agent to accept a subscription.
   // Paint the initial page first, then repair any gap once SSE is subscribed.
   hasLiveSnapshot = false;
-  let initialLoad: Promise<void> | null = load({ preserve: state.value === 'ready' });
+  if (gapAnchor === undefined && state.value === 'ready') gapAnchor = newestBlock();
+  let initialLoad: Promise<ChatCursor | null | undefined> | null = load({
+    preserve: state.value === 'ready',
+    bridgeTo: gapAnchor,
+  });
   let reconcileAfterInitial = false;
-  initialLoad.finally(() => {
+  initialLoad.then((tail) => {
     initialLoad = null;
-    if (reconcileAfterInitial && source === topic) load({ preserve: true });
+    if (source !== topic) return;
+    if (tail !== undefined) gapAnchor = tail;
+    if (reconcileAfterInitial) retryReconcile();
   });
   topic.on('block', (d) => onBlock(d as ChatBlock));
   topic.on('snapshot', (d) => onSnapshot(d as SseSnapshot));
@@ -416,7 +471,6 @@ function openStream() {
   topic.on('queue', (d) => onQueue(d as SseQueue));
   topic.on('metadata', (d) => applyMetadata(d as AcpMetadata));
   topic.on('resync', () => {
-    state.value = 'loading';
     topic.refresh();
   });
   // A snapshot taken after subscription repairs the initial or reconnect gap,
@@ -425,7 +479,10 @@ function openStream() {
   topic.onOpen(() => {
     hasLiveSnapshot = false;
     if (initialLoad) reconcileAfterInitial = true;
-    else load({ preserve: true });
+    else {
+      if (gapAnchor === undefined) gapAnchor = newestBlock();
+      retryReconcile();
+    }
   });
   // The shared connection may still carry this topic from a previous visit.
   // Rebind so this subscriber receives the current live buffers as well.
@@ -452,6 +509,7 @@ onUnmounted(() => {
 });
 watch(id, () => {
   closeStream();
+  gapAnchor = undefined;
   state.value = 'loading';
   openStream();
 });
@@ -1738,6 +1796,10 @@ async function goToActivity(target: {
     </div>
 
     <template v-else>
+      <div v-if="refreshError" class="mb-2 text-sm text-block" role="alert">
+        {{ refreshError }}
+        <button type="button" class="btn-secondary ml-2" @click="retryReconcile">Retry</button>
+      </div>
       <div v-if="hasContext" class="mb-1 flex shrink-0 justify-end">
         <button
           ref="contextButton"

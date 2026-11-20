@@ -924,12 +924,14 @@ transcript on demand.
 The dashboard's **Conversation tab** reads ACP history through `sessions.chat`:
 the newest 200 journal blocks first, with older pages fetched on demand. The
 first read starts immediately, independently of the live agent's event-stream
-subscription. Once subscribed, the viewer reconciles another journal page to
-repair the gap, preserving blocks received over the stream and any older pages
-already loaded. Stream opens during the first read coalesce into one follow-up
-read so repeated reconnects cannot postpone the initial render. Conversation
-reads time out after 15 seconds; an initial failure offers Retry, while a failed
-background refresh preserves the visible history.
+subscription. Once subscribed, the viewer reconciles the newest journal page
+and reads back to the last block known before subscription, even when the gap
+spans more than one page. It preserves blocks received over the stream and any
+older pages already loaded. Stream opens during the first read coalesce into one
+follow-up read so repeated reconnects cannot postpone the initial render.
+Conversation reads time out after 15 seconds; an initial failure offers Retry,
+while a failed background refresh preserves the visible history and offers a
+retry there.
 
 Terminal sessions use `sessions.conversation` (`chatlog::conversation`): the
 live transcript when present, else the archived `chat.json`. The Vue viewer
