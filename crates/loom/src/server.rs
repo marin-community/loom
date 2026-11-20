@@ -99,6 +99,16 @@ pub async fn run(addr: &str) -> Result<()> {
     ensure_bootstrap_operator(&db).await?;
     runner::validate().await?;
     let trigger = crate::github_trigger::GithubTrigger::production(db.clone());
+    if !crate::auth::configured_github_organizations(&db)
+        .await?
+        .is_empty()
+    {
+        let auth_app = trigger
+            .auth_app()
+            .context("authentication App client is unavailable")?;
+        anyhow::ensure!(auth_app.is_configured().await,
+            "organization admission requires LOOM_GITHUB_AUTH_APP_ID and LOOM_GITHUB_AUTH_APP_PRIVATE_KEY; repository App credentials do not authorize membership checks");
+    }
     let state = AppState {
         ctx: Ctx {
             db,
@@ -450,7 +460,7 @@ pub async fn revalidate_github_authorizations_once(state: &AppState) {
     };
     for authorization in authorizations {
         let organizations = crate::auth::configured_github_organizations(&state.db).await;
-        let membership = match (state.trigger.app(), organizations.as_ref()) {
+        let membership = match (state.trigger.auth_app(), organizations.as_ref()) {
             (Some(app), Ok(organizations)) => {
                 app.active_organization_membership(organizations, authorization.github_user_id)
                     .await

@@ -312,7 +312,7 @@ mod tests {
                 addr: "127.0.0.1:0".to_string(),
             },
             ide: Arc::new(crate::ide::IdeManager::new(crate::ide::ide_home())),
-            trigger: crate::github_trigger::GithubTrigger::with_app(app),
+            trigger: crate::github_trigger::GithubTrigger::with_app(app, None),
             acp: crate::acp::AcpRegistry::new(),
             launch_gate: crate::launch_gate::RepoLaunchGate::default(),
         };

@@ -143,7 +143,7 @@ pub(super) async fn github_webhook(
     //    user knows to ask rather than assume loom is broken. The per-repo rate
     //    limit above bounds this against a trigger flood; the reply is spawned (a
     //    comment post is a round-trip) and tracked so the attempt shows on Debug.
-    if !github_trigger::authorize(&st.db, st.trigger.app(), &author, author_id).await {
+    if !github_trigger::authorize(&st.db, st.trigger.auth_app(), &author, author_id).await {
         if let Ok(Some(username)) =
             crate::auth::expired_github_organization_username(&st.db, author_id).await
         {

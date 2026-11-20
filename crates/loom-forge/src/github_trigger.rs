@@ -754,6 +754,7 @@ pub struct GithubTrigger {
     /// and server operations can mint credentials. Tests may pair a recording
     /// [`GithubApi`] fake with a configured App client.
     app: Option<Arc<crate::github_app::GithubApp>>,
+    auth_app: Option<Arc<crate::github_app::GithubApp>>,
     /// Per-repo trigger timestamps, pruned to [`RATE_WINDOW`] on each check.
     limiter: Mutex<HashMap<String, Vec<Instant>>>,
 }
@@ -762,10 +763,18 @@ impl GithubTrigger {
     /// The production trigger: a GitHub **App** gateway that mints short-lived
     /// installation tokens for the permission check and reply.
     pub fn production(db: crate::db::Db) -> Arc<Self> {
-        let app = Arc::new(crate::github_app::GithubApp::new(db));
+        let app = Arc::new(crate::github_app::GithubApp::new(
+            db.clone(),
+            crate::github_app::GithubAppPurpose::Repository,
+        ));
+        let auth_app = Arc::new(crate::github_app::GithubApp::new(
+            db,
+            crate::github_app::GithubAppPurpose::Authentication,
+        ));
         Arc::new(Self {
             gh: app.clone(),
             app: Some(app),
+            auth_app: Some(auth_app),
             limiter: Mutex::new(HashMap::new()),
         })
     }
@@ -777,15 +786,20 @@ impl GithubTrigger {
         Arc::new(Self {
             gh,
             app: None,
+            auth_app: None,
             limiter: Mutex::new(HashMap::new()),
         })
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn with_app(app: Arc<crate::github_app::GithubApp>) -> Arc<Self> {
+    pub fn with_app(
+        app: Arc<crate::github_app::GithubApp>,
+        auth_app: Option<Arc<crate::github_app::GithubApp>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             gh: app.clone(),
             app: Some(app),
+            auth_app,
             limiter: Mutex::new(HashMap::new()),
         })
     }
@@ -794,10 +808,12 @@ impl GithubTrigger {
     pub fn with_gateway_and_app(
         gh: Arc<dyn GithubApi>,
         app: Arc<crate::github_app::GithubApp>,
+        auth_app: Option<Arc<crate::github_app::GithubApp>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             gh,
             app: Some(app),
+            auth_app,
             limiter: Mutex::new(HashMap::new()),
         })
     }
@@ -812,6 +828,11 @@ impl GithubTrigger {
     /// unit tests may install only a fake gateway and expose no App client.
     pub fn app(&self) -> Option<&crate::github_app::GithubApp> {
         self.app.as_deref()
+    }
+
+    /// The independent App used for organization authorization checks.
+    pub fn auth_app(&self) -> Option<&crate::github_app::GithubApp> {
+        self.auth_app.as_deref()
     }
 
     /// Record a trigger attempt for `repo` and report whether it is within the
@@ -1185,7 +1206,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let app = crate::github_app::tests::configured_test_app(db.clone()).await;
+        let app = crate::github_app::tests::configured_test_auth_app(db.clone()).await;
         assert!(authorize(&db, Some(&app), "member", 404).await);
         assert!(auth::authorized_github_identity(&db, "member", 404)
             .await
