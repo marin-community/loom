@@ -1453,7 +1453,7 @@ async fn op_send(
             .fetch_one(&st.db)
             .await?;
             let turn: Option<i64> = sqlx::query_scalar(
-                "SELECT turn FROM chat_blocks WHERE session_id = ? AND delivery_key = ?
+                "SELECT turn FROM chat_blocks WHERE session_id = ? AND kind = 'user_message' AND ref_id = ?
                  ORDER BY turn DESC LIMIT 1",
             )
             .bind(&session.id)

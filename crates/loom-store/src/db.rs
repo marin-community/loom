@@ -444,9 +444,7 @@ mod tests {
     async fn migrate_through(db: &Db, count: usize) {
         LOOM_STREAM.ensure_indicator(db).await.unwrap();
         for (version, name, migration) in LOOM_MIGRATIONS.iter().take(count) {
-            for statement in split_statements(migration) {
-                sqlx::query(&statement).execute(db).await.unwrap();
-            }
+            sqlx::raw_sql(migration).execute(db).await.unwrap();
             LOOM_STREAM.stamp(db, *version, name).await.unwrap();
         }
     }
@@ -700,22 +698,11 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let keys: Vec<Option<String>> =
-            sqlx::query_scalar("SELECT delivery_key FROM chat_blocks ORDER BY seq")
-                .fetch_all(&db)
-                .await
-                .unwrap();
-        assert_eq!(
-            keys,
-            [
-                Some("prompt:old".into()),
-                None,
-                None,
-                None,
-                None,
-                Some("prompt:new".into())
-            ]
-        );
+        let keys: Vec<String> = sqlx::query_scalar("SELECT ref_id FROM chat_blocks ORDER BY seq")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+        assert_eq!(keys, ["prompt:old", "", "", "", "tool:1", "prompt:new"]);
     }
 
     #[tokio::test]
