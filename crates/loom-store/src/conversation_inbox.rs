@@ -65,7 +65,8 @@ pub async fn pending_inputs(
          WHERE preferred_session_id = ? AND review_id IS NULL
            AND state IN ('queued', 'delivering')
            AND NOT EXISTS (SELECT 1 FROM chat_blocks
-             WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)
+             WHERE session_id = conversation_inbox.preferred_session_id AND kind = 'user_message'
+               AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)
          ORDER BY created_at, rowid",
     )
     .bind(session)
@@ -365,7 +366,8 @@ pub async fn pending_input_delivery(
          WHERE claimed_session_id = ? AND state = 'delivering'
            AND input_request_id IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM chat_blocks
-             WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)",
+             WHERE session_id = conversation_inbox.claimed_session_id AND kind = 'user_message'
+               AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key)",
     )
     .bind(session)
     .fetch_optional(db)
@@ -798,7 +800,9 @@ pub async fn release_conversation_inbox(
     let released = sqlx::query(
         "UPDATE conversation_inbox
          SET state = CASE WHEN review_id IS NULL AND EXISTS (
-                 SELECT 1 FROM chat_blocks WHERE json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key
+                 SELECT 1 FROM chat_blocks
+                 WHERE session_id = conversation_inbox.claimed_session_id AND kind = 'user_message'
+                   AND json_extract(payload, '$.delivery_key') = conversation_inbox.delivery_key
              ) THEN 'consumed' ELSE 'queued' END, claimed_session_id = NULL,
              claim_token = NULL, claim_owner = NULL, claimed_at = NULL,
              input_request_id = NULL, input_turn = NULL, input_method = NULL
@@ -918,6 +922,74 @@ mod tests {
             .unwrap()
             .unwrap();
         (db, item)
+    }
+
+    #[tokio::test]
+    async fn input_delivery_requires_a_user_message_in_the_owning_session() {
+        for (journal_session, kind, delivered) in [
+            ("other", "user_message", false),
+            ("acp-review", "tool_call", false),
+            ("acp-review", "user_message", true),
+        ] {
+            let (db, _) = claimed_inbox().await;
+            let other_branch = weaver_core::branch::upsert(&db, "/repo", "weaver/other", "main")
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO sessions (id, branch_id, work_dir, term_session, status, protocol)
+                 VALUES ('other', ?, '/repo', 'other-relay', 'running', 'acp')",
+            )
+            .bind(&other_branch.id)
+            .execute(&db)
+            .await
+            .unwrap();
+            let key = enqueue_prompt(&db, "acp-review", "hello", Some("manual"), &[], true)
+                .await
+                .unwrap();
+            let branch: String =
+                sqlx::query_scalar("SELECT branch_id FROM sessions WHERE id = 'acp-review'")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+            let item = claim_input(&db, &branch, "acp-review", None, |_, _| false, false, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                prepare_input_delivery(&db, &item, "acp-review", 7, 1, "session/prompt")
+                    .await
+                    .unwrap()
+            );
+            crate::chat::insert(
+                &db,
+                journal_session,
+                1,
+                0,
+                kind,
+                &json!({"delivery_key": key, "text": "hello"}),
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                pending_inputs(&db, "acp-review").await.unwrap().is_empty(),
+                delivered
+            );
+            assert_eq!(
+                pending_input_delivery(&db, "acp-review")
+                    .await
+                    .unwrap()
+                    .is_none(),
+                delivered
+            );
+            assert!(release_conversation_inbox(&db, &key, &item.claim_token)
+                .await
+                .unwrap());
+            assert_eq!(
+                delivery_state(&db, &key).await.unwrap().as_deref(),
+                Some(if delivered { "consumed" } else { "queued" })
+            );
+        }
     }
 
     #[tokio::test]
