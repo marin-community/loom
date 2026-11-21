@@ -3200,7 +3200,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "vt100",
- "weaver-core",
+ "weaver-runtime",
 ]
 
 [[package]]
@@ -3851,6 +3851,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "weaver-runtime",
+]
+
+[[package]]
+name = "weaver-runtime"
+version = "0.2.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

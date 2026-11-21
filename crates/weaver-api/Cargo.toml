@@ -7,12 +7,16 @@ edition = "2021"
 name = "weaver_api"
 path = "src/lib.rs"
 
+[features]
+default = ["client"]
+client = ["dep:reqwest"]
+
 [dependencies]
 weaver-core = { path = "../weaver-core" }
 loom-api-macros = { path = "../loom-api-macros" }
 anyhow = "1"
 schemars = "1"
 percent-encoding = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

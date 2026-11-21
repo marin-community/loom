@@ -158,7 +158,7 @@ impl Client {
         // `send().await` back-pressures the socket (and thus the supervisor) when
         // the consumer is slow, mirroring the attach path.
         let (ev_tx, ev_rx) = mpsc::channel::<RelayEvent>(ATTACH_BUFFER);
-        weaver_core::spawn_boxed(Box::pin(async move {
+        weaver_runtime::spawn_boxed(Box::pin(async move {
             let mut rd = rd;
             loop {
                 match protocol::read_frame(&mut rd).await {
@@ -212,7 +212,7 @@ impl Client {
         // per-subscriber channel then fills and evicts only a genuinely wedged
         // client).
         let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(ATTACH_BUFFER);
-        weaver_core::spawn_boxed(Box::pin(async move {
+        weaver_runtime::spawn_boxed(Box::pin(async move {
             let mut rd = rd;
             loop {
                 match protocol::read_frame(&mut rd).await {

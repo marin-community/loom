@@ -12,14 +12,17 @@
 extern crate self as weaver_api;
 
 pub mod capability;
+#[cfg(feature = "client")]
 pub mod client;
 pub mod dto;
+#[cfg(feature = "client")]
 pub mod endpoint;
 pub mod operations;
 pub mod render;
 pub mod typescript;
 
 pub use capability::{require, CapabilityError};
+#[cfg(feature = "client")]
 pub use client::Client;
 pub use dto::*;
 pub use operations::{

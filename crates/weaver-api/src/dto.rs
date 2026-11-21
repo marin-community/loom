@@ -1,6 +1,5 @@
-//! The request and response (View) types the loom REST API speaks. The loom
-//! server serializes them, the typed [`crate::Client`] and the future Python
-//! binding deserialize them, and `frontend/types.ts` mirrors them by hand.
+//! Request and response types shared by the Loom REST server and its clients.
+//! The frontend generates TypeScript types from the operation registry.
 //!
 //! Response (`*View`) types carry `from_parts` constructors that build the
 //! response struct from `weaver-core` domain types (`Branch`, `Issue`,

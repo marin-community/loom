@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::{Mutex, MutexGuard};
 
+pub use weaver_runtime::weaver_home;
+
 pub type Db = SqlitePool;
 
 const MIGRATION_POOL_CONNECTIONS: u32 = 1;
@@ -116,15 +118,6 @@ impl ImmediateTransaction<'_> {
 /// A write transaction on [`Db`]. Callers hold this alias rather than naming
 /// the backend's transaction type themselves.
 pub type DbTransaction<'a> = ImmediateTransaction<'a>;
-/// Root directory for all weaver state on this machine.
-pub fn weaver_home() -> PathBuf {
-    if let Ok(p) = std::env::var("WEAVER_HOME") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".weaver")
-}
-
 /// Path to the single per-VM SQLite database.
 pub fn default_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("WEAVER_DB") {

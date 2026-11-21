@@ -244,13 +244,13 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
     {
         let cmd_tx = cmd_tx.clone();
         let environment = environment.clone();
-        weaver_core::spawn_boxed(Box::pin(async move {
+        weaver_runtime::spawn_boxed(Box::pin(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
                         let cmd_tx = cmd_tx.clone();
                         let environment = environment.clone();
-                        weaver_core::spawn_boxed(Box::pin(async move {
+                        weaver_runtime::spawn_boxed(Box::pin(async move {
                             if let Err(e) = handle_conn(stream, cmd_tx, environment).await {
                                 tracing::debug!(error = %e, "control connection ended");
                             }
@@ -268,7 +268,7 @@ async fn run_pty(cfg: SupervisorConfig) -> Result<()> {
     // Best-effort: a termination signal kills the child and tears down cleanly.
     {
         let cmd_tx = cmd_tx.clone();
-        weaver_core::spawn_boxed(Box::pin(async move {
+        weaver_runtime::spawn_boxed(Box::pin(async move {
             if let Ok(mut sig) =
                 tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             {
@@ -814,13 +814,13 @@ mod relay {
         {
             let cmd_tx = cmd_tx.clone();
             let environment = environment.clone();
-            weaver_core::spawn_boxed(Box::pin(async move {
+            weaver_runtime::spawn_boxed(Box::pin(async move {
                 loop {
                     match listener.accept().await {
                         Ok((stream, _)) => {
                             let cmd_tx = cmd_tx.clone();
                             let environment = environment.clone();
-                            weaver_core::spawn_boxed(Box::pin(async move {
+                            weaver_runtime::spawn_boxed(Box::pin(async move {
                                 if let Err(e) = handle_conn(stream, cmd_tx, environment).await {
                                     tracing::debug!(error = %e, "relay control connection ended");
                                 }
@@ -838,7 +838,7 @@ mod relay {
         // SIGTERM tears down (kills the child) like the PTY path.
         {
             let cmd_tx = cmd_tx.clone();
-            weaver_core::spawn_boxed(Box::pin(async move {
+            weaver_runtime::spawn_boxed(Box::pin(async move {
                 if let Ok(mut sig) =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                 {
@@ -1069,7 +1069,7 @@ mod relay {
         out_tx: mpsc::Sender<Out>,
         cmd_tx: mpsc::UnboundedSender<Cmd>,
     ) -> tokio::task::JoinHandle<()> {
-        weaver_core::spawn_boxed(Box::pin(async move {
+        weaver_runtime::spawn_boxed(Box::pin(async move {
             let mut delivered = true;
             'replay: for path in paths {
                 for (seq, body) in read_records(&path) {
