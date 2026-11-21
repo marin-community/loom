@@ -768,8 +768,9 @@ test.describe('durable session workbench', () => {
       await page.locator(`[data-session-id="${session.id}"]`).getByRole('checkbox').check();
     }
     await page.getByTestId('selection-toolbar').getByRole('button', { name: 'Archive' }).click();
-    await expect(page.getByTestId('confirm-dialog')).toContainText('2 selected sessions');
-    await page.getByTestId('confirm-dialog').getByTestId('confirm-dialog-confirm').click();
+    await expect(normalRow).toHaveCount(0);
+    await expect(automationRow).toHaveCount(0);
+    await expect(page.getByTestId('confirm-dialog')).toHaveCount(0);
 
     // Archived summaries never ride the recurring snapshot, but widened
     // server search can still render a cold result.
@@ -795,7 +796,8 @@ test.describe('durable session workbench', () => {
     const intervention = page.getByTestId('automation-run-only');
     await expect(intervention).toContainText('is not inside a git repository');
     await intervention.getByTestId('run-action-clear').click();
-    await page.getByTestId('confirm-dialog').getByTestId('confirm-dialog-confirm').click();
+    await expect(intervention).toHaveCount(0);
+    await expect(page.getByTestId('confirm-dialog')).toHaveCount(0);
     await page.getByTestId('history-view').click();
     const cancelled = page.getByTestId('automation-run-history').getByTestId('automation-run-only');
     await expect(cancelled).toContainText('Run cancelled');

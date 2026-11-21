@@ -146,27 +146,30 @@ export function useSessionActions(
 
   const archive = async () => {
     const id = getId();
+    const archiveWithChildren = async (children = false) => {
+      error.value = '';
+      notice.value = '';
+      const res = await archiveSession(id, children);
+      const base = res.children_archived
+        ? `Archived ${res.branch} and ${childSessionsPhrase(res.children_archived)}.`
+        : `Archived ${res.branch}.`;
+      notice.value = res.warnings.length
+        ? `${base} with warnings — ${res.warnings.join(' ')}`
+        : base;
+      await reload();
+    };
     const hasChildren = hasChildSessions(useFleet().sessions.value, id);
-    const checked = hasChildren ? await fetchArchiveChildrenDefault() : false;
+    if (!hasChildren) return act('archive', () => archiveWithChildren());
+    const checked = await fetchArchiveChildrenDefault();
     // A second click while the dialog is open just no-ops.
     return confirmAction({
       title: 'Archive this session?',
       description:
         'Its terminal and worktree will be removed. The branch, conversation, placement, and Loom history remain recoverable in History.',
       confirmLabel: 'Archive session',
-      danger: true,
-      option: hasChildren ? { label: 'Also archive child sessions', checked } : undefined,
+      option: { label: 'Also archive child sessions', checked },
       action: async ({ optionChecked }) => {
-        error.value = '';
-        notice.value = '';
-        const res = await archiveSession(id, optionChecked);
-        const base = res.children_archived
-          ? `Archived ${res.branch} and ${childSessionsPhrase(res.children_archived)}.`
-          : `Archived ${res.branch}.`;
-        notice.value = res.warnings.length
-          ? `${base} with warnings — ${res.warnings.join(' ')}`
-          : base;
-        await reload();
+        await archiveWithChildren(optionChecked);
       },
     }).catch(() => {});
   };

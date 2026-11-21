@@ -1040,9 +1040,6 @@ function moveGroupToSpace(group: SessionGroup) {
 }
 
 const archiveResult = ref('');
-// The one archive confirmation the app has (lib/confirmation, rendered by the
-// shell) also carries the optional add-on: children of the selected parents
-// can ride along, checked per dialog.
 function selectionHasChildren(ids: string[]): boolean {
   const live = sessions.value.filter((session) => session.status !== 'archived');
   const ancestry = sessionAncestry(live);
@@ -1052,15 +1049,17 @@ function selectionHasChildren(ids: string[]): boolean {
 async function requestBulkArchive() {
   const ids = [...selected.value];
   if (!ids.length) return;
-  const hasChildren = selectionHasChildren(ids);
-  const checked = hasChildren ? await fetchArchiveChildrenDefault() : false;
+  if (!selectionHasChildren(ids)) {
+    void archiveBatch(ids);
+    return;
+  }
+  const checked = await fetchArchiveChildrenDefault();
   void confirmAction({
     title: `Archive ${ids.length} selected session${ids.length === 1 ? '' : 's'}?`,
     description:
       'Their terminals and worktrees will be removed. Branches, conversations, placement, and Loom history remain recoverable in History. Failures remain selected so they can be retried.',
     confirmLabel: 'Archive selected',
-    danger: true,
-    option: hasChildren ? { label: 'Also archive child sessions', checked } : undefined,
+    option: { label: 'Also archive child sessions', checked },
     // The batch outlives the dialog: the server serializes teardowns behind
     // its lifecycle lock, so a large selection must not pin a modal. Confirm
     // resolves immediately and the archive-result banner reports the outcome.

@@ -74,8 +74,6 @@ test.describe('session lifecycle actions', () => {
     await page.goto(`${weaver.baseUrl}/s/${archived.id}`);
     await openMobileSessionDetails();
     await page.getByTestId('action-archive').scrollIntoViewIfNeeded();
-    await page.getByTestId('action-archive').click();
-    await expect(dialog).toContainText('branch, conversation, placement, and Loom history');
     const archivedResponse = page.waitForResponse(
       (response) =>
         response.ok() &&
@@ -83,8 +81,9 @@ test.describe('session lifecycle actions', () => {
         new URL(response.url()).pathname === '/api/sessions/archive' &&
         (response.request().postDataJSON() as { session?: string })?.session === archived.id,
     );
-    await confirm.click();
+    await page.getByTestId('action-archive').click();
     await archivedResponse;
+    await expect(dialog).toHaveCount(0);
     await expect(page.getByTestId('status-badge')).toHaveText(/archived/i);
     expect((await weaver.getSession(archived.id)).status).toBe('archived');
 
