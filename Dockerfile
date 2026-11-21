@@ -450,8 +450,8 @@ cat > /usr/local/bin/loom-entrypoint <<'SH'
 #!/bin/sh
 set -eu
 if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
-  claude_version="${CLAUDE_CODE_VERSION:-2.1.280}"
-  codex_version="${CODEX_CLI_VERSION:-0.159.1}"
+  claude_version="${CLAUDE_CODE_VERSION:-2.1.328}"
+  codex_version="${CODEX_CLI_VERSION:-0.171.0}"
   if [ "$("$HOME/.local/bin/claude" --version 2>/dev/null || true)" != "$claude_version (Claude Code)" ]; then
     echo "loom: installing Claude Code $claude_version into $HOME/.local ..." >&2
     curl -fsSL https://claude.ai/install.sh | bash -s -- "$claude_version"
@@ -472,31 +472,28 @@ if [ "${1:-}" = loom ] && [ "${2:-}" = server ]; then
     "$HOME/.local/bin/codex" features disable apps >/dev/null \
       || echo "loom: WARNING: could not disable Codex account-level apps" >&2
   fi
-  claude_acp_version="${CLAUDE_ACP_VERSION:-0.81.1}"
-  codex_acp_version="${CODEX_ACP_VERSION:-1.13.1}"
+  claude_acp_version="${CLAUDE_ACP_VERSION:-0.109.0}"
+  codex_acp_version="${CODEX_ACP_VERSION:-2.8.0}"
   if ! command -v claude-agent-acp >/dev/null 2>&1 \
     || ! command -v codex-acp >/dev/null 2>&1 \
     || ! npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
-    || ! npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; then
+    || ! npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; then
     echo "loom: installing pinned ACP adapters into $HOME/.npm-global ..." >&2
-    # The ACP adapters Loom's sessions speak through. Exact
-    # pins, not dist-tags: two upstream projects releasing weekly sit between
-    # loom and the agents, so the fleet moves versions only via a deliberate
-    # CLAUDE_ACP_VERSION / CODEX_ACP_VERSION bump. Pin @openai/codex too:
-    # codex-acp permits newer versions through its dependency range. Install
-    # them on the volume so they persist across recreates; loom's launch default (`npx --yes …`)
-    # resolves these installed bins from PATH without a network fetch.
+    # Persist the exact adapter versions on the volume so launching a session
+    # resolves them from PATH without a network fetch.
     npm install -g \
       "@agentclientprotocol/claude-agent-acp@$claude_acp_version" \
-      "@agentclientprotocol/codex-acp@$codex_acp_version" \
-      "@openai/codex@$codex_version"
+      "@agentclientprotocol/codex-acp@$codex_acp_version"
     { command -v claude-agent-acp >/dev/null 2>&1 \
       && command -v codex-acp >/dev/null 2>&1 \
       && npm list -g --depth=0 "@agentclientprotocol/claude-agent-acp@$claude_acp_version" >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1 \
-      && npm list -g --depth=0 "@openai/codex@$codex_version" >/dev/null 2>&1; } \
+      && npm list -g --depth=0 "@agentclientprotocol/codex-acp@$codex_acp_version" >/dev/null 2>&1; } \
       || { echo "loom: pinned ACP adapters are required" >&2; exit 1; }
+  fi
+  # The adapter's npm dependency can lag the native CLI's model catalog.
+  # Set CODEX_PATH in the launch command so env-cleared profiles use it too.
+  if [ -z "${WEAVER_CODEX_ACP_CMD:-}" ]; then
+    export WEAVER_CODEX_ACP_CMD='CODEX_PATH="${CODEX_PATH:-$HOME/.local/bin/codex}" exec codex-acp'
   fi
   # Optional, operator-supplied installs (see deploy/README.md "Optional tool
   # installs"). LOOM_INSTALL_CMD is arbitrary shell — the generic hook that
