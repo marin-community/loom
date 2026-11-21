@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
@@ -15,33 +15,64 @@ fn valid_revision(value: &str) -> bool {
     (7..=64).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn git_path(name: &str) -> Option<PathBuf> {
+    command_output("git", &["rev-parse", "--git-path", name]).map(PathBuf::from)
+}
+
+fn watch_git_revision() {
+    let watch = |path: &Path| println!("cargo:rerun-if-changed={}", path.display());
+    let Some(head) = git_path("HEAD").filter(|path| path.is_file()) else {
+        return;
+    };
+    watch(&head);
+
+    // A reftable worktree records HEAD in its own stack and branch refs in
+    // the common repository's stack.
+    if let Some(table) = git_path("reftable/tables.list").filter(|path| path.is_file()) {
+        watch(&table);
+        if let Some(common_table) = command_output("git", &["rev-parse", "--git-common-dir"])
+            .map(|dir| PathBuf::from(dir).join("reftable/tables.list"))
+            .filter(|path| path.is_file() && path != &table)
+        {
+            watch(&common_table);
+        }
+        return;
+    }
+
+    let Some(reference) =
+        command_output("git", &["symbolic-ref", "-q", "HEAD"]).and_then(|name| git_path(&name))
+    else {
+        return;
+    };
+    if reference.is_file() {
+        watch(&reference);
+        return;
+    }
+
+    // Cargo treats a missing watch path as perpetually stale. A packed ref
+    // can change in place or acquire a loose file when the branch advances.
+    if let Some(packed) = git_path("packed-refs").filter(|path| path.is_file()) {
+        watch(&packed);
+    }
+    if let Some(parent) = reference.ancestors().skip(1).find(|path| path.is_dir()) {
+        watch(parent);
+    }
+}
+
 /// Stamp the source revision into the binary. Local cargo builds discover it
 /// from git; immutable/container builders can supply `LOOM_BUILD_REVISION`
 /// when their source context intentionally omits `.git`.
 fn emit_build_identity() {
     println!("cargo:rerun-if-env-changed=LOOM_BUILD_REVISION");
 
-    // A commit moves without changing source-file mtimes when a cached target
-    // directory is reused. Watch HEAD, its loose ref, and packed refs so the
-    // embedded identity follows that move in ordinary repositories and
-    // worktrees.
-    for path in [
-        command_output("git", &["rev-parse", "--git-path", "HEAD"]),
-        command_output("git", &["rev-parse", "--git-path", "packed-refs"]),
-        command_output("git", &["symbolic-ref", "-q", "HEAD"])
-            .and_then(|reference| command_output("git", &["rev-parse", "--git-path", &reference])),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        println!("cargo:rerun-if-changed={path}");
-    }
-
     let revision = std::env::var("LOOM_BUILD_REVISION")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| valid_revision(value))
-        .or_else(|| command_output("git", &["rev-parse", "--verify", "HEAD"]))
+        .or_else(|| {
+            watch_git_revision();
+            command_output("git", &["rev-parse", "--verify", "HEAD"])
+        })
         .filter(|value| valid_revision(value))
         .unwrap_or_else(|| "unknown".to_string());
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
