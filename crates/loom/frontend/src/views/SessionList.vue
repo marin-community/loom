@@ -18,6 +18,7 @@ import SessionMailboxPreview from '../components/SessionMailboxPreview.vue';
 import SessionWorkbenchRow from '../components/SessionWorkbenchRow.vue';
 import {
   archiveSession,
+  clearRuns,
   clearSessionTag,
   createSessionGroup,
   createSessionSpace,
@@ -576,6 +577,27 @@ const historicalRuns = computed(() =>
   unmatchedRuns.value.filter((run) => unmatchedRunProjection(run) === 'history'),
 );
 const visibleInterventionRuns = computed(() => interventionRuns.value.filter(matchesRunCreator));
+const clearableRuns = computed(() =>
+  visibleInterventionRuns.value.filter(
+    (run) => run.status === 'failed' || run.status === 'waiting',
+  ),
+);
+const clearingRuns = ref(false);
+async function clearLaunchAttempts() {
+  clearingRuns.value = true;
+  error.value = '';
+  try {
+    const results = await clearRuns(clearableRuns.value.map((run) => run.id));
+    const warnings = results.flatMap((result) => result.warnings);
+    archiveResult.value = `Cleared ${results.length} launch attempts.`;
+    if (warnings.length) error.value = warnings.join(' ');
+    await refresh();
+  } catch (err) {
+    error.value = (err as Error).message;
+  } finally {
+    clearingRuns.value = false;
+  }
+}
 const visibleProvisioningRuns = computed(() => provisioningRuns.value.filter(matchesRunCreator));
 const visibleHistoricalRuns = computed(() => historicalRuns.value.filter(matchesRunCreator));
 const showInterventions = computed(
@@ -1672,6 +1694,17 @@ function scrollSpaces(direction: number) {
             <span class="rounded-full bg-block-soft px-1.5 font-mono text-2xs text-block">{{
               operationalRuns.length
             }}</span>
+            <button
+              v-if="clearableRuns.length"
+              type="button"
+              data-testid="clear-launch-attempts"
+              class="btn-secondary ml-auto px-2 py-1 text-xs"
+              title="Clear failed and waiting launches. Waiting launches will be cancelled."
+              :disabled="clearingRuns"
+              @click="clearLaunchAttempts"
+            >
+              {{ clearingRuns ? 'Clearing…' : `Clear all (${clearableRuns.length})` }}
+            </button>
           </div>
           <ul
             v-if="operationalRuns.length"

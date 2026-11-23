@@ -16,6 +16,7 @@ pub(super) fn bound_operations() -> Vec<Bound> {
         register::<run_operations::list::Op, _, _>(list_runs),
         register::<run_operations::get::Op, _, _>(get_run),
         register::<run_operations::create::Op, _, _>(create_run),
+        register::<run_operations::clear::Op, _, _>(clear_runs),
     ]
 }
 
@@ -552,6 +553,19 @@ pub(super) async fn get_run(
         .await?
         .ok_or_else(|| AppError::not_found("automation run"))?;
     Ok(run.into())
+}
+
+async fn clear_runs(
+    context: OperationContext,
+    input: run_operations::clear::Input,
+) -> ApiResult<run_operations::clear::Output> {
+    let runs = crate::runs::clear(&context.state.db, &input.ids).await?;
+    let mut results = Vec::new();
+    for run in runs {
+        results
+            .push(super::sessions::teardown_launch_attempt(&context.state, &run.session_id).await?);
+    }
+    Ok(results)
 }
 
 #[cfg(test)]

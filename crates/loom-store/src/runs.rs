@@ -443,6 +443,33 @@ pub async fn cancel_for_session_with_summary(
     .rows_affected())
 }
 
+/// Cancel selected failed or waiting reservations that still have no session.
+pub async fn clear(db: &Db, ids: &[String]) -> Result<Vec<Run>> {
+    let mut tx = weaver_core::db::begin_immediate(db).await?;
+    let mut cleared = Vec::new();
+    for id in ids {
+        let run = sqlx::query_as::<_, Run>(
+            "UPDATE automation_runs
+             SET status = 'cancelled', outcome = 'cancelled',
+                 summary = 'launch attempt archived by user', updated_at = ?
+             WHERE id = ? AND status IN ('failed', 'waiting')
+               AND NOT EXISTS (
+                   SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
+               )
+             RETURNING *",
+        )
+        .bind(now_iso())
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(run) = run {
+            cleared.push(run);
+        }
+    }
+    tx.commit().await?;
+    Ok(cleared)
+}
+
 /// Every run record for one reserved session id, newest first.
 pub async fn list_for_session(db: &Db, session_id: &str) -> Result<Vec<Run>> {
     Ok(sqlx::query_as::<_, Run>(

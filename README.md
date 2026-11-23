@@ -149,8 +149,10 @@ overwrite a newer label. Generated labels can be disabled per session.
 The dashboard presents the fleet as shared **Spaces → Groups → Sessions**.
 Attention, All, and History are smart views over that placement; successful
 automation is ordinary work in Ops, while failed reservations remain typed
-Interventions. Group rows show the unqualified task label and cross-group views
-compose `Group / Task`.
+Interventions. Use **Clear all** above Interventions to cancel the visible failed
+and waiting launch attempts in one action. Their records remain in History;
+attempts that have since acquired a session are skipped. Group rows show the
+unqualified task label and cross-group views compose `Group / Task`.
 
 A session opens on Conversation (or Agent for a terminal-backed runtime), with
 one Review pane for Artifacts and Changes. Details owns launch metadata,
