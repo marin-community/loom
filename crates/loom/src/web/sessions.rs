@@ -1865,9 +1865,16 @@ async fn op_archive_launch_attempt(
     crate::runs::cancel_for_session_with_summary(
         &st.db,
         session_id,
-        "launch attempt archived by user",
+        crate::runs::ARCHIVED_LAUNCH_SUMMARY,
     )
     .await?;
+    teardown_launch_attempt(st, session_id).await
+}
+
+pub(super) async fn teardown_launch_attempt(
+    st: &AppState,
+    session_id: &str,
+) -> ApiResult<SessionArchiveResult> {
     let warnings = crate::session_manager::teardown_reserved_runtime(session_id).await;
     st.ide.kill(session_id);
     crate::auth::revoke_session_tokens(&st.db, session_id)

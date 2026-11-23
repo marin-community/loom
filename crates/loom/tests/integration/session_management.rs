@@ -1,5 +1,6 @@
 //! Session ownership and the launch-attempt escape hatches.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use serde_json::json;
@@ -39,6 +40,83 @@ async fn wait_dead(name: &str) {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("supervisor {name} did not stop");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clearing_launch_attempts_preserves_promoted_and_provisioning_runs() {
+    let ts = TestServer::start().await;
+    let failed = reserve(&ts, "clear-failed").await;
+    runs::failed(&ts.state.db, &failed.id, "capacity exhausted")
+        .await
+        .unwrap();
+    let waiting = reserve(&ts, "clear-waiting").await;
+    runs::waiting(&ts.state.db, &waiting.id, "capacity exhausted")
+        .await
+        .unwrap();
+    let creating = reserve(&ts, "keep-creating").await;
+    let promoted = reserve(&ts, "keep-promoted").await;
+    let session = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({ "goal": "promoted launch", "cwd": ts.cwd(), "agent": "shell" }),
+        )
+        .await
+        .unwrap();
+    // A launch can acquire its session before its run row is promoted.
+    sqlx::query("UPDATE automation_runs SET status = 'waiting', session_id = ? WHERE id = ?")
+        .bind(session["id"].as_str().unwrap())
+        .bind(&promoted.id)
+        .execute(&ts.state.db)
+        .await
+        .unwrap();
+    let input =
+        json!({ "ids": [failed.id, waiting.id, creating.id, promoted.id, failed.id, "missing"] });
+    let result = ts
+        .client
+        .post("/api/runs/clear", input.clone())
+        .await
+        .unwrap();
+    let cleared: HashSet<_> = result
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["branch"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        cleared,
+        HashSet::from([failed.session_id.as_str(), waiting.session_id.as_str()])
+    );
+    for run in [&failed, &waiting] {
+        let saved = runs::get(&ts.state.db, &run.id).await.unwrap().unwrap();
+        assert_eq!(saved.status, "cancelled");
+        assert_eq!(saved.outcome.as_deref(), Some("cancelled"));
+        assert!(!runs::launched(&ts.state.db, &run.id, &run.session_id)
+            .await
+            .unwrap());
+    }
+    assert_eq!(
+        runs::get(&ts.state.db, &creating.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "creating"
+    );
+    assert_eq!(
+        runs::get(&ts.state.db, &promoted.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "waiting"
+    );
+    assert!(backend::has_session(session["term_session"].as_str().unwrap()).await);
+    assert_eq!(
+        ts.client.post("/api/runs/clear", input).await.unwrap(),
+        json!([])
+    );
 }
 
 #[serial]

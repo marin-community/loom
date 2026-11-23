@@ -5,7 +5,8 @@
 //! `POST /api/auth/automation-token`-minted credentials, tracked for
 //! idempotent redelivery and operator observability. `runs.create` is gated
 //! to the runtime (`actor = Internal`); the read side (`runs.get`,
-//! `runs.list`) is for operator diagnostics (`actor = User`).
+//! `runs.list`) and clearing launch attempts (`runs.clear`) are for operators
+//! (`actor = User`).
 
 use super::registry::OperationSpec;
 use super::OperationBundle;
@@ -75,7 +76,23 @@ pub mod list {
     pub type Output = Vec<RunView>;
 }
 
-static OPERATIONS: &[&OperationSpec] = &[list::SPEC, get::SPEC, create::SPEC];
+pub mod clear {
+    use super::prelude::*;
+
+    /// Clear selected failed or waiting launch attempts, preserving their history.
+    /// Attempts that have acquired a session or changed state are skipped.
+    #[operation(id = "runs.clear", actor = User, scope = Global, risk = Write,
+                cli = "runs clear")]
+    pub struct Input {
+        /// Run ids to clear. Waiting attempts are cancelled rather than retried.
+        #[operand(json)]
+        pub ids: Vec<String>,
+    }
+
+    pub type Output = Vec<SessionArchiveResult>;
+}
+
+static OPERATIONS: &[&OperationSpec] = &[list::SPEC, get::SPEC, create::SPEC, clear::SPEC];
 
 pub(super) const fn bundle() -> OperationBundle {
     OperationBundle {

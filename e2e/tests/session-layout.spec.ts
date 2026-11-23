@@ -710,6 +710,7 @@ test.describe('durable session workbench', () => {
     await expect(target.locator(`[data-session-id="${pointer.id}"]`)).toBeVisible();
 
     await target.getByRole('button', { name: 'Collapse Journey Focus' }).click();
+    await expect(target.getByRole('button', { name: 'Expand Journey Focus' })).toBeVisible();
     await page.reload();
     await expect(target.getByRole('button', { name: 'Expand Journey Focus' })).toBeVisible();
     await target.getByRole('button', { name: 'Expand Journey Focus' }).click();
@@ -806,5 +807,23 @@ test.describe('durable session workbench', () => {
     await cancelled.getByTestId('run-action-remove').click();
     await page.getByTestId('confirm-dialog').getByTestId('confirm-dialog-confirm').click();
     await expect(cancelled).toHaveCount(0);
+  });
+
+  test('clear all launch attempts keeps history and live sessions', async ({ page, weaver }) => {
+    const live = await weaver.seedSession({ goal: 'Keep running', name: 'keep-running' });
+    await createFailedRun(weaver.baseUrl);
+    await createFailedRun(weaver.baseUrl);
+    await page.goto(`${weaver.baseUrl}/?view=attention`);
+    await expect(page.getByTestId('automation-run-only')).toHaveCount(2);
+    await page.getByTestId('clear-launch-attempts').click();
+    await expect(page.getByTestId('automation-run-only')).toHaveCount(0);
+    await expect(page.getByTestId('clear-launch-attempts')).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByTestId('automation-run-only')).toHaveCount(0);
+    await page.getByTestId('history-view').click();
+    const history = page.getByTestId('automation-run-history').getByTestId('automation-run-only');
+    await expect(history).toHaveCount(2);
+    await expect(history.first()).toContainText('Run cancelled');
+    expect((await weaver.getSession(live.id)).status).toBe('running');
   });
 });

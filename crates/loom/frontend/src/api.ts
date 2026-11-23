@@ -208,6 +208,7 @@ export const decidePermissionRequest = (
 /** Durable automation launch reservations, including failures that never
  *  produced a usable session. */
 export const listRuns = () => invokeOperation('runs.list', {});
+export const clearRuns = (ids: string[]) => invokeOperation('runs.clear', { ids });
 /** Archive a session (tear down runtime, keep history). `children` also
  * archives its live descendants; omitted follows the setting. */
 export const archiveSession = (id: string, children?: boolean) =>
