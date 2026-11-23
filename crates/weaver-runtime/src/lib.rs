@@ -1,4 +1,6 @@
-//! Machine-local runtime helpers shared by Loom and Tapestry.
+//! Machine-local process and runtime helpers shared by Loom and Tapestry.
+
+pub mod process_identity;
 
 use std::{future::Future, path::PathBuf, pin::Pin};
 

@@ -23,4 +23,4 @@ pub mod watch;
 pub use db::Db;
 pub use weaver_runtime::{spawn_boxed, BoxFut};
 
-pub mod process_identity;
+pub use weaver_runtime::process_identity;

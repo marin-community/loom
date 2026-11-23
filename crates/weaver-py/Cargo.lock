@@ -1583,6 +1583,9 @@ dependencies = [
 name = "weaver-runtime"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
  "tokio",
 ]
 

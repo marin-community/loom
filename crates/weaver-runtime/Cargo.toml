@@ -4,4 +4,10 @@ version = "0.2.0"
 edition = "2021"
 
 [dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt"] }
+
+# libproc and sysctl stand in for Linux's /proc in process_identity.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

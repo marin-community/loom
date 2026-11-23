@@ -3842,7 +3842,6 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "croner",
- "libc",
  "rand 0.9.4",
  "schemars",
  "serde",
@@ -3858,6 +3857,9 @@ dependencies = [
 name = "weaver-runtime"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
  "tokio",
 ]
 
