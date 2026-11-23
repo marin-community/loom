@@ -8,6 +8,8 @@ use weaver_api::RunView;
 
 use crate::db::{now_iso, Db};
 
+pub const ARCHIVED_LAUNCH_SUMMARY: &str = "launch attempt archived by user";
+
 #[derive(Debug, Clone, FromRow)]
 pub struct Run {
     pub id: String,
@@ -451,13 +453,14 @@ pub async fn clear(db: &Db, ids: &[String]) -> Result<Vec<Run>> {
         let run = sqlx::query_as::<_, Run>(
             "UPDATE automation_runs
              SET status = 'cancelled', outcome = 'cancelled',
-                 summary = 'launch attempt archived by user', updated_at = ?
+                 summary = ?, updated_at = ?
              WHERE id = ? AND status IN ('failed', 'waiting')
                AND NOT EXISTS (
                    SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
                )
              RETURNING *",
         )
+        .bind(ARCHIVED_LAUNCH_SUMMARY)
         .bind(now_iso())
         .bind(id)
         .fetch_optional(&mut *tx)
@@ -522,13 +525,14 @@ pub async fn invalidate_sessions_from_cancelled_launches(db: &Db) -> Result<Vec<
                    WHERE r.id = sessions.automation_run_id
                      AND r.status = 'cancelled'
                      AND r.summary IN (
-                         'launch attempt archived by user',
+                         ?,
                          'launch attempt removed by user'
                      )
                )
            )
          RETURNING id",
     )
+    .bind(ARCHIVED_LAUNCH_SUMMARY)
     .fetch_all(db)
     .await?)
 }

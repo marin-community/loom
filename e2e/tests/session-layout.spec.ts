@@ -710,6 +710,7 @@ test.describe('durable session workbench', () => {
     await expect(target.locator(`[data-session-id="${pointer.id}"]`)).toBeVisible();
 
     await target.getByRole('button', { name: 'Collapse Journey Focus' }).click();
+    await expect(target.getByRole('button', { name: 'Expand Journey Focus' })).toBeVisible();
     await page.reload();
     await expect(target.getByRole('button', { name: 'Expand Journey Focus' })).toBeVisible();
     await target.getByRole('button', { name: 'Expand Journey Focus' }).click();

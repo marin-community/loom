@@ -1865,7 +1865,7 @@ async fn op_archive_launch_attempt(
     crate::runs::cancel_for_session_with_summary(
         &st.db,
         session_id,
-        "launch attempt archived by user",
+        crate::runs::ARCHIVED_LAUNCH_SUMMARY,
     )
     .await?;
     teardown_launch_attempt(st, session_id).await
