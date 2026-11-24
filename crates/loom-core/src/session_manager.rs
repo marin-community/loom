@@ -82,19 +82,21 @@ pub async fn reconcile_supervisors(
     db: &Db,
     acp: &crate::acp::AcpRegistry,
 ) -> Result<ReconcileReport> {
-    // Close the only crash window in cancellation-wins provisioning: a session
-    // row may have landed just before the request was cancelled, while the
-    // provisioning task died before it could perform its final ownership check.
-    // Keep the row visible for an operator, but make it terminal before runtime
-    // classification so its supervisor is removed below.
-    let invalidated: HashSet<String> = runs::invalidate_sessions_from_cancelled_launches(db)
+    let settled = runs::reconcile_missing_sessions(db).await?;
+    if settled > 0 {
+        tracing::warn!(settled, "settled automation runs without session records");
+    }
+    // A session can materialize as provisioning loses its reservation and
+    // the request can exit before the final ownership check. Keep the record
+    // inspectable and mark it terminal so reconciliation removes its supervisor.
+    let invalidated: HashSet<String> = runs::invalidate_sessions_from_lost_launches(db)
         .await?
         .into_iter()
         .collect();
     for id in &invalidated {
         tracing::warn!(
             session = id,
-            "session materialized after its launch attempt was cancelled; marked error"
+            "session materialized after losing its launch reservation; marked error"
         );
     }
 

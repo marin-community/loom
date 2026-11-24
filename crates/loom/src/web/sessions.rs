@@ -500,42 +500,36 @@ async fn op_tags_replace(
     session_view(&st.db, &session, &branch).await
 }
 
+pub(super) enum RemovalReason {
+    User,
+    LostLaunchReservation,
+}
+
 /// Fully remove one durable session and all resources it owns.
 ///
 /// Used by the operation handler and automation cancellation. External
 /// teardown is intentionally idempotent: a missing terminal/worktree is
 /// already removed, while failures are returned as warnings after the durable
 /// ownership rows have been released.
-pub(crate) async fn remove(
+pub(super) async fn remove(
     st: &AppState,
-    session: &Session,
-    _branch: &Branch,
+    session_id: &str,
     keep_branch: bool,
+    reason: RemovalReason,
 ) -> Result<Vec<String>, AppError> {
     let _lifecycle = crate::runtime::LIFECYCLE_LOCK.lock().await;
-    let Some((current_session, current_branch)) =
-        session_mod::with_branch(&st.db, &session.id).await?
-    else {
+    let Some((session, branch)) = session_mod::with_branch(&st.db, session_id).await? else {
         // A competing remove already achieved the requested end state.
         return Ok(Vec::new());
     };
-    remove_locked(st, &current_session, &current_branch, keep_branch).await
-}
-
-/// Shared deletion after the caller has acquired the runtime lifecycle lock and
-/// refreshed the session row.
-async fn remove_locked(
-    st: &AppState,
-    session: &Session,
-    branch: &Branch,
-    keep_branch: bool,
-) -> Result<Vec<String>, AppError> {
     tracing::info!(session = %session.id, branch = %branch.id, keep_branch, "deleting session");
     let mut warnings: Vec<String> = Vec::new();
 
-    // Cancellation is the durable boundary: an automation request that
-    // finishes provisioning after this point cannot promote itself.
-    crate::runs::cancel_for_session(&st.db, &session.id).await?;
+    // User removal fences unfinished provisioning. Late launch cleanup already
+    // has a terminal reservation, which retains its recorded failure.
+    if matches!(reason, RemovalReason::User) {
+        crate::runs::cancel_for_session(&st.db, &session.id).await?;
+    }
     if let Err(error) = backend::kill_session_and_wait(&session.term_session).await {
         warnings.push(format!("terminal remove: {error}"));
     }
@@ -2337,14 +2331,14 @@ async fn op_delete(
     input: ops::delete::Input,
 ) -> ApiResult<ops::delete::DeleteResult> {
     let st = &context.state;
-    let (session, branch) = match require_session(&st.db, &input.session).await {
+    let (session, _) = match require_session(&st.db, &input.session).await {
         Ok(found) => found,
         Err(error) if error.is_not_found() => {
             return op_delete_launch_attempt(st, &input.session).await;
         }
         Err(error) => return Err(error),
     };
-    let warnings = remove(st, &session, &branch, input.keep_branch).await?;
+    let warnings = remove(st, &session.id, input.keep_branch, RemovalReason::User).await?;
     Ok(ops::delete::DeleteResult {
         deleted: true,
         kind: "session".to_string(),

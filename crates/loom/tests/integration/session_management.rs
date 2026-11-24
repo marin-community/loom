@@ -236,13 +236,18 @@ async fn supervisor_reconciliation_removes_only_unowned_loom_resources() {
     );
     assert!(backend::has_session(unrelated).await);
 
-    runs::cancel_for_session(&ts.state.db, &active.session_id)
+    sqlx::query("UPDATE automation_runs SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = ?")
+        .bind(&active.id)
+        .execute(&ts.state.db)
         .await
         .unwrap();
     loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
         .await
         .unwrap();
     wait_dead(&owned).await;
+    let expired = runs::get(&ts.state.db, &active.id).await.unwrap().unwrap();
+    assert_eq!(expired.status, "failed");
+    assert!(expired.summary.contains("provisioning timed out"));
     drop(transient_lease);
     loom::session_manager::reconcile_supervisors(&ts.state.db, &ts.state.acp)
         .await

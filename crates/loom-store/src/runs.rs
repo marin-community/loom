@@ -8,6 +8,8 @@ use weaver_api::RunView;
 
 use crate::db::{now_iso, Db};
 
+const PROVISIONING_TIMEOUT: &str = "session provisioning timed out after five minutes";
+
 pub const ARCHIVED_LAUNCH_SUMMARY: &str = "launch attempt archived by user";
 
 #[derive(Debug, Clone, FromRow)]
@@ -509,7 +511,7 @@ pub async fn runtime_owner_ids(db: &Db) -> Result<HashSet<String>> {
 /// session creation and that check: the periodic resource reconciler marks the
 /// recorded session `error` and tears down its runtime, leaving a visible,
 /// removable DB record rather than an unowned agent.
-pub async fn invalidate_sessions_from_cancelled_launches(db: &Db) -> Result<Vec<String>> {
+pub async fn invalidate_sessions_from_lost_launches(db: &Db) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar::<_, String>(
         "UPDATE sessions
          SET status = 'error'
@@ -523,15 +525,15 @@ pub async fn invalidate_sessions_from_cancelled_launches(db: &Db) -> Result<Vec<
                OR EXISTS (
                    SELECT 1 FROM automation_runs r
                    WHERE r.id = sessions.automation_run_id
-                     AND r.status = 'cancelled'
-                     AND r.summary IN (
-                         ?,
-                         'launch attempt removed by user'
+                     AND (
+                         (r.status = 'failed' AND r.summary = ?)
+                         OR (r.status = 'cancelled' AND r.summary IN (?, 'launch attempt removed by user'))
                      )
                )
            )
          RETURNING id",
     )
+    .bind(PROVISIONING_TIMEOUT)
     .bind(ARCHIVED_LAUNCH_SUMMARY)
     .fetch_all(db)
     .await?)
@@ -565,21 +567,23 @@ pub async fn delete_for_session(db: &Db, session_id: &str) -> Result<u64> {
     Ok(deleted)
 }
 
-/// Repair reservations whose provisioning request or session disappeared.
-/// A fresh `creating` lease may still belong to an older server draining during
-/// a rolling restart, so only the same five-minute stale lease accepted by
-/// [`claim_stale`] is abandoned. A `running` run must already have inserted its
-/// session and is inconsistent immediately when that row is absent.
+/// Expire unmatched provisioning leases and repair runs missing their session.
+/// Leave fresh leases available to a live request or a server draining during
+/// a rollout. Once a session exists, its own lifecycle governs recovery.
+/// Scheduled watches settle on their occurrence deadline.
 pub async fn reconcile_missing_sessions(db: &Db) -> Result<u64> {
     Ok(sqlx::query(
         "UPDATE automation_runs
-         SET status = 'cancelled', outcome = 'cancelled',
-             summary = 'session provisioning was interrupted', updated_at = ?
+         SET status = CASE WHEN status = 'creating' THEN 'failed' ELSE 'cancelled' END,
+             outcome = CASE WHEN status = 'creating' THEN 'failed' ELSE 'cancelled' END,
+             summary = CASE WHEN status = 'creating' THEN ? ELSE 'session provisioning was interrupted' END,
+             updated_at = ?
          WHERE source != 'watch' AND (status = 'running' OR (status = 'creating' AND updated_at <= ?))
            AND NOT EXISTS (
                SELECT 1 FROM sessions WHERE sessions.id = automation_runs.session_id
            )",
     )
+    .bind(PROVISIONING_TIMEOUT)
     .bind(now_iso())
     .bind(stale_before())
     .execute(db)
@@ -999,7 +1003,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_preserves_fresh_creating_leases_but_cancels_stale_ones() {
+    async fn reconciliation_preserves_fresh_creating_leases_but_fails_stale_ones() {
         let db = crate::db::connect_in_memory().await.unwrap();
         let run = match reserve(
             &db,
@@ -1026,9 +1030,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reconcile_missing_sessions(&db).await.unwrap(), 1);
-        assert_eq!(
-            get(&db, &run.id).await.unwrap().unwrap().status,
-            "cancelled"
-        );
+        let expired = get(&db, &run.id).await.unwrap().unwrap();
+        assert_eq!(expired.status, "failed");
+        assert_eq!(expired.outcome.as_deref(), Some("failed"));
+        assert_eq!(expired.summary, PROVISIONING_TIMEOUT);
+        assert!(!launched(&db, &run.id, &run.session_id).await.unwrap());
     }
 }

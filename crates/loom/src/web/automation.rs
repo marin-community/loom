@@ -102,28 +102,21 @@ enum LaunchFailure {
 }
 
 /// Tear down a session that finished provisioning after its automation
-/// reservation was archived or removed. Cancellation wins: a late response may
-/// not resurrect the run or leave its worktree/supervisor detached from the
-/// operator-visible lifecycle record.
+/// reservation expired or was cancelled.
 async fn remove_late_session(st: &AppState, session_id: &str) {
-    let Ok(Some((session, branch))) = crate::session::with_branch(&st.db, session_id).await else {
-        return;
-    };
-    match super::sessions::remove(st, &session, &branch, false).await {
-        Ok(warnings) if !warnings.is_empty() => tracing::warn!(
-            session = session_id,
-            warnings = warnings.len(),
-            "late cancelled automation session removed with warnings"
-        ),
-        Ok(_) => tracing::info!(
-            session = session_id,
-            "removed session that completed after automation cancellation"
-        ),
-        Err(error) => tracing::warn!(
+    if let Err(error) = super::sessions::remove(
+        st,
+        session_id,
+        false,
+        super::sessions::RemovalReason::LostLaunchReservation,
+    )
+    .await
+    {
+        tracing::warn!(
             session = session_id,
             error = %error.message(),
-            "could not remove session that completed after automation cancellation"
-        ),
+            "could not remove session that completed after losing its launch reservation"
+        );
     }
 }
 
@@ -189,7 +182,7 @@ async fn launch_run(
             } else {
                 remove_late_session(st, &created.session.id).await;
                 Err(AppError::conflict(
-                    "automation launch was archived or removed while provisioning",
+                    "automation launch lost its reservation while provisioning",
                 ))
             }
         }
