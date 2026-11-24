@@ -26,8 +26,8 @@ export function firstLine(text: string): string {
   );
 }
 
-export function imageFilename(uri: string | null | undefined, title: string): string {
-  return (uri || title).split('/').pop() || title;
+export function fileName(path: string | null | undefined, title: string): string {
+  return path?.split('/').pop() || title;
 }
 
 export function toolLabel(tool: ToolCallPayload): string {
@@ -50,8 +50,8 @@ export function toolLabel(tool: ToolCallPayload): string {
   if (tool.name === 'view_image' || tool.content.some((content) => content.type === 'image')) {
     const image = tool.content.find((content) => content.type === 'image');
     const path = image?.type === 'image' ? image.uri : null;
-    const name = imageFilename(path || tool.locations[0]?.path, tool.title);
-    return name ? `View ${name}` : 'View image';
+    const name = fileName(path || tool.locations[0]?.path, '');
+    return name ? `View ${name}` : firstLine(tool.title) || 'View image';
   }
   return (
     firstLine(tool.title) ||
