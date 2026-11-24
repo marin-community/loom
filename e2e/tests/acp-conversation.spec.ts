@@ -635,24 +635,32 @@ test.describe('acp conversation', () => {
     await expect(expand).toBeFocused();
   });
 
-  test('keeps image evidence visible in a collapsed tool run and opens it from the keyboard', async ({
+  test('keeps viewed images and files visible in a collapsed tool run', async ({
     page,
     weaver,
   }) => {
     await openAcp(page, weaver, {
-      goal: 'tool:execute:Capture screenshots|image:View Image /tmp/before.png|image:View Image /tmp/after.png|say:images inspected',
+      goal: 'tool:read:Read source|image:View Image /tmp/before.png|image:View Image /tmp/after.png|say:files inspected',
     });
-    await expect(page.getByText('images inspected', { exact: true })).toBeVisible();
+    await expect(page.getByText('files inspected', { exact: true })).toBeVisible();
 
     const activity = page.getByTestId('acp-activity');
     await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
     await expect(activity.getByTestId('tool-image-preview')).toHaveCount(2);
+    const file = activity.getByTestId('tool-file-preview');
+    await expect(file).toContainText('file.rs');
+    await file.click();
+    const viewer = page.getByTestId('tool-detail-dialog');
+    await expect(viewer).toContainText('/w/file.rs');
+    await expect(viewer.locator('pre')).toHaveText('done');
+    await page.keyboard.press('Escape');
+    await expect(file).toBeFocused();
+
     const preview = activity.getByTestId('tool-image-preview').first();
     await expect(preview.locator('img')).toHaveAttribute('src', /^data:image\/png;base64,/);
     await preview.focus();
     await page.keyboard.press('Enter');
 
-    const viewer = page.getByTestId('tool-detail-dialog');
     await expect(viewer).toContainText('View screenshot.png');
     await expect(viewer).toContainText('file:///tmp/screenshot.png');
     await expect(page.getByTestId('tool-detail-image')).toHaveAttribute(
@@ -669,7 +677,13 @@ test.describe('acp conversation', () => {
 
     await page.reload();
     await expect(page.getByTestId('tool-image-preview')).toHaveCount(2);
+    await expect(page.getByTestId('tool-file-preview')).toHaveCount(1);
     await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const lastImage = activity.getByTestId('tool-image-preview').last();
+    await lastImage.focus();
+    await expect(lastImage).toBeInViewport({ ratio: 0.95 });
+    await page.screenshot({ path: test.info().outputPath('inline-previews-mobile.png') });
   });
 
   test('opens a solo image on a phone without expanding a tool row', async ({ page, weaver }) => {
@@ -896,19 +910,20 @@ test.describe('acp conversation', () => {
     await expect(page.getByRole('button', { name: 'Expand command' })).toBeFocused();
   });
 
-  test('a failed call opens its group and shows the failure', async ({ page, weaver }) => {
+  test('a failed call keeps its group and output folded during live activity', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
-      goal: 'tool:read:Read config|toolfail:cargo test|say:after',
+      goal: 'tool:read:Read config|toolfail:cargo test|toolwait:30000:cargo build',
     });
-    const conv = page.getByTestId('acp-conversation');
-    await expect(conv.getByText('after', { exact: true })).toBeVisible();
-
-    // The failure re-opens the fold by default: the badge, the failed line, and
-    // its output are all visible without a click.
-    await expect(page.getByTestId('acp-activity-failed')).toContainText('1 failed');
-    await expect(
-      page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' }),
-    ).toContainText('failed');
+    await expect(page.getByTestId('acp-working')).toContainText('cargo build');
+    const group = page.getByTestId('acp-activity-head');
+    await expect(group).toHaveAttribute('aria-expanded', 'false');
+    await expect(group.getByTestId('acp-activity-failed')).toContainText('1 failed');
+    await expect(page.getByTestId('acp-activity-item')).toHaveCount(0);
+    await group.click();
+    const failed = page.getByTestId('acp-activity-item').filter({ hasText: 'cargo test' }).getByRole('button');
+    await expect(failed).toHaveAttribute('aria-expanded', 'false');
+    await expect(page.getByTestId('acp-detail')).toHaveCount(0);
+    await failed.click();
     await expect(page.getByTestId('acp-detail')).toContainText('exit 1: boom');
     const cause = page.getByTestId('acp-tool-failure');
     await expect(cause).toBeVisible();
@@ -983,7 +998,7 @@ test.describe('acp conversation', () => {
       const response = await route.fetch();
       const chat = await response.json();
       for (const block of chat.blocks) {
-        // A failed read can have no detail button; the jump must still move focus.
+        // A failed read can have no output; the jump must still reveal the failure.
         if (block.kind === 'tool_call' && block.payload.status === 'failed') {
           block.payload.tool_kind = 'read';
           block.payload.content = [];
@@ -994,7 +1009,6 @@ test.describe('acp conversation', () => {
     await page.reload();
     await page.setViewportSize({ width: 390, height: 844 });
     const activity = page.getByTestId('acp-activity');
-    await activity.getByTestId('acp-activity-head').click();
     await expect(activity.getByTestId('acp-activity-item')).toHaveCount(0);
     const context = page.getByTestId('acp-context-toggle');
     await context.click();
@@ -1002,7 +1016,7 @@ test.describe('acp conversation', () => {
     await expect(page.getByTestId('acp-rail')).toHaveCount(0);
     await expect(activity.getByTestId('acp-activity-item')).toHaveCount(3);
     await expect(page.getByTestId('acp-tool-failure')).toBeVisible();
-    await expect(activity.getByTestId('acp-activity-item').last()).toBeFocused();
+    await expect(activity.getByTestId('acp-activity-item').last().getByRole('button')).toBeFocused();
     await context.click();
     await page.getByTestId('acp-context-images').getByRole('button').click();
     await expect(page.getByTestId('acp-rail')).toHaveCount(0);
@@ -1059,21 +1073,22 @@ test.describe('acp conversation', () => {
       };
       if (operands?.session !== s!.id) return route.fallback();
       snapshots += 1;
-      const older = operands.before_turn !== undefined;
+      const oldest = operands.before_turn === 4;
+      const reasoning = operands.before_turn === 8;
       return route.fulfill({
         json: {
           blocks: [
             {
-              turn: older ? 0 : 8,
+              turn: oldest ? 0 : reasoning ? 4 : 8,
               seq: 0,
-              kind: older ? 'user_message' : 'agent_message',
+              kind: oldest ? 'user_message' : reasoning ? 'thought' : 'agent_message',
               payload: {
-                text: older ? 'oldest retained prompt' : 'newest retained answer',
+                text: oldest ? 'oldest retained prompt' : reasoning ? 'reasoning only' : 'newest retained answer',
               },
               created_at: '2026-07-23T00:00:00Z',
             },
           ],
-          older_cursor: older ? null : { turn: 8, seq: 0 },
+          older_cursor: oldest ? null : { turn: reasoning ? 4 : 8, seq: 0 },
           live_turn: null,
           effective_mode: null,
           pending_inputs: [],
@@ -1096,7 +1111,23 @@ test.describe('acp conversation', () => {
     await page.getByTestId('acp-load-older').click();
     await expect(conversation.getByText('oldest retained prompt', { exact: true })).toBeVisible();
     await expect(page.getByTestId('acp-load-older')).toHaveCount(0);
-    expect(snapshots).toBe(3);
+    expect(snapshots).toBe(4);
+  });
+
+  test('loads the latest prompt behind several pages of tools on reload', async ({ page, weaver }) => {
+    const session = await openAcp(page, weaver, { goal: 'say:older reply' });
+    await expect(page.getByText('older reply', { exact: true })).toBeVisible();
+
+    await queueAcpPrompt(weaver, session, 'toolburst:405');
+    await expect(page.getByTestId('acp-turn-rule')).toHaveCount(2);
+    await page.reload();
+
+    const conversation = page.getByTestId('acp-conversation');
+    await expect(conversation.getByText('toolburst:405', { exact: true })).toBeInViewport();
+    const group = conversation.getByTestId('acp-activity-head');
+    await expect(group).toContainText('405 actions');
+    await expect(group).toHaveAttribute('aria-expanded', 'false');
+    await expect(conversation.getByTestId('acp-activity-item')).toHaveCount(0);
   });
 
   test('an artifact hard refresh does not load the hidden default conversation', async ({
@@ -1781,9 +1812,9 @@ test.describe('acp conversation', () => {
     await openAcp(page, weaver, {
       goal: 'think:reasoning|tool:read:Read config|tool:search:Grep routes|tool:edit:Edit web.rs|say:All wired up.|toolfail:cargo test|plan|usage:41000:200000',
     });
-    // The grouped run + the auto-opened failure are both on screen; expand the
-    // group and one diff so the screenshot shows every fold state.
-    await expect(page.getByTestId('acp-detail')).toBeVisible();
+    // Capture an open diff alongside a collapsed failed call.
+    await expect(page.getByTestId('acp-activity-failed')).toBeVisible();
+    await expect(page.getByTestId('acp-detail')).toHaveCount(0);
     await page.getByTestId('acp-activity-head').first().click();
     await page
       .getByTestId('acp-activity-item')

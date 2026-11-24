@@ -2,12 +2,13 @@
 import { computed, nextTick, onBeforeUnmount, ref, useId, watch } from 'vue';
 import type { ToolContent } from '../types';
 import { changedDiffLines } from '../lib/toolDiff';
-import { imageFilename } from '../lib/toolPresentation';
+import { fileName } from '../lib/toolPresentation';
 
 const props = defineProps<{
   content: ToolContent;
   title: string;
   thumbnail?: boolean;
+  filePath?: string;
   textLabel?: 'command' | 'output';
 }>();
 
@@ -21,14 +22,12 @@ const imageSrc = computed(() => {
   return `data:${props.content.mime_type};base64,${props.content.data}`;
 });
 const detailLabel = computed(() => {
+  if (props.filePath) return props.filePath;
   if (props.content.type === 'diff') return props.content.path;
   if (props.content.type === 'image') return props.content.uri ?? props.content.mime_type;
   return props.textLabel === 'command' ? 'Command' : 'Command output';
 });
-const imageName = computed(() => {
-  if (props.content.type !== 'image') return '';
-  return imageFilename(props.content.uri, props.title);
-});
+const previewName = computed(() => fileName(props.filePath, props.title));
 
 const expanded = ref(false);
 const actualSize = ref(false);
@@ -89,17 +88,20 @@ onBeforeUnmount(() => {
 <template>
   <div class="tool-preview" :class="{ 'tool-preview-thumbnail': thumbnail }">
     <button
-      v-if="content.type === 'image' && imageSrc"
+      v-if="imageSrc || (thumbnail && content.type === 'text')"
       type="button"
-      class="tool-image-preview"
-      data-testid="tool-image-preview"
-      :aria-label="`Open full-size preview of ${title}`"
+      class="tool-media-preview"
+      :data-testid="imageSrc ? 'tool-image-preview' : 'tool-file-preview'"
+      :aria-label="`Open preview of ${previewName}`"
       :title="detailLabel"
       @click="openViewer"
     >
-      <img :src="imageSrc" :alt="title" />
-      <span v-if="thumbnail" class="tool-image-caption">
-        <span>{{ imageName }}</span
+      <img v-if="imageSrc" :src="imageSrc" :alt="title" :loading="thumbnail ? 'lazy' : 'eager'" />
+      <span v-else-if="content.type === 'text'" class="tool-file-snippet" aria-hidden="true">{{
+        content.text.slice(0, 240)
+      }}</span>
+      <span v-if="thumbnail" class="tool-preview-caption">
+        <span>{{ previewName }}</span
         ><span aria-hidden="true">↗</span>
       </span>
       <span v-else class="tool-preview-action">
@@ -210,7 +212,7 @@ onBeforeUnmount(() => {
 .tool-preview {
   min-width: 0;
 }
-.tool-image-preview,
+.tool-media-preview,
 .tool-code-preview {
   position: relative;
   width: 100%;
@@ -219,19 +221,19 @@ onBeforeUnmount(() => {
   border-radius: 0.3rem;
   background: var(--code);
 }
-.tool-image-preview {
+.tool-media-preview {
   display: flex;
   min-height: 7rem;
   max-height: 18rem;
-  cursor: zoom-in;
+  cursor: pointer;
   align-items: center;
   justify-content: center;
 }
-.tool-image-preview:hover,
-.tool-image-preview:focus-visible {
+.tool-media-preview:hover,
+.tool-media-preview:focus-visible {
   border-color: var(--accent);
 }
-.tool-image-preview img {
+.tool-media-preview img {
   display: block;
   width: 100%;
   max-height: 18rem;
@@ -243,15 +245,26 @@ onBeforeUnmount(() => {
   max-width: 100%;
   flex: none;
 }
-.tool-preview-thumbnail .tool-image-preview {
+.tool-preview-thumbnail .tool-media-preview {
   flex-direction: column;
   min-height: 0;
   max-height: none;
 }
-.tool-preview-thumbnail img {
+.tool-preview-thumbnail img,
+.tool-file-snippet {
   height: 5.5rem;
 }
-.tool-image-caption {
+.tool-file-snippet {
+  width: 100%;
+  overflow: hidden;
+  padding: 0.4rem;
+  color: var(--code-fg);
+  font: 0.625rem/0.9375rem var(--font-mono);
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.tool-preview-caption {
   display: flex;
   width: 100%;
   align-items: center;
@@ -263,7 +276,7 @@ onBeforeUnmount(() => {
   font-size: 0.6875rem;
   line-height: 1rem;
 }
-.tool-image-caption span:first-child {
+.tool-preview-caption span:first-child {
   min-width: 0;
   flex: 1;
   overflow: hidden;
@@ -284,7 +297,7 @@ onBeforeUnmount(() => {
   font-size: 0.6875rem;
   line-height: 1rem;
 }
-.tool-image-preview .tool-preview-action {
+.tool-media-preview .tool-preview-action {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -295,7 +308,7 @@ onBeforeUnmount(() => {
 }
 button.tool-preview-action:hover,
 button.tool-preview-action:focus-visible,
-.tool-image-preview:hover .tool-preview-action {
+.tool-media-preview:hover .tool-preview-action {
   color: var(--fg);
 }
 .tool-preview-unsupported {

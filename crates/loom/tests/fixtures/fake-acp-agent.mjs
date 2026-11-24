@@ -15,6 +15,7 @@
 //   tool:edit[:title]    a tool_call (in_progress) then tool_call_update (completed);
 //                        an `edit` kind carries a diff, others a text content block
 //   toolwait:MS[:title]  an in-progress execute tool that waits until MS or cancellation
+//   toolburst:COUNT      consecutive completed tools without any dialogue
 //   image[:title]        a read tool whose result is an ACP image content block
 //   image-file:PATH      a completed read with a resource_link, as Codex emits
 //   toolfail[:title]     a tool_call that ends with status `failed`
@@ -247,6 +248,17 @@ async function runToken(tok) {
     notify({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: tok.slice(6) } });
   } else if (tok.startsWith("echo:")) {
     notify({ sessionUpdate: "user_message_chunk", content: { type: "text", text: tok.slice(5) } });
+  } else if (tok.startsWith("toolburst:")) {
+    const count = Number(tok.slice("toolburst:".length));
+    for (let i = 0; i < count; i++) {
+      notify({
+        sessionUpdate: "tool_call",
+        toolCallId: `burst-${promptEpoch}-${i}`,
+        title: "Inspect source",
+        kind: "execute",
+        status: "completed",
+      });
+    }
   } else if (tok.startsWith("toolwait:")) {
     const [, delay, ...titleParts] = tok.split(":");
     const toolCallId = "call-wait-" + Math.floor(Math.random() * 100000);

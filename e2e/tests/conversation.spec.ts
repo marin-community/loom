@@ -134,7 +134,7 @@ function linkedLog(sessionId: string) {
 async function openConversation(
   page: Page,
   weaver: WeaverFixture,
-  opts?: { name: string; log: unknown },
+  opts?: { name: string; log?: unknown },
 ) {
   const s = await weaver.seedSession({
     goal: 'demo',

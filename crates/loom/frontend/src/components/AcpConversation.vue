@@ -36,6 +36,8 @@ import type {
   AgentMessagePayload,
   ThoughtPayload,
   ToolCallPayload,
+  ToolImageContent,
+  ToolTextContent,
   PlanEntry,
   PlanPayload,
   PermissionPayload,
@@ -57,13 +59,7 @@ import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import { localTime } from '../lib/time';
-import {
-  firstLine,
-  imageFilename,
-  toolCommand,
-  toolFailure,
-  toolLabel,
-} from '../lib/toolPresentation';
+import { firstLine, fileName, toolCommand, toolFailure, toolLabel } from '../lib/toolPresentation';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import TransitionProgressStrip from './TransitionProgressStrip.vue';
@@ -73,8 +69,8 @@ import ScrollToEndButton from './ScrollToEndButton.vue';
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
 // dialogue, not chat bubbles. Serif prose for the humans and the agent; the
 // machine's apparatus recedes — every run of tool calls folds to one quiet
-// activity line (closed by default, a failure re-opens it), and the in-flight
-// turn reads as a live status line at the transcript's tail (the current tool,
+// activity line (closed by default). An in-flight turn has a live status line
+// at the transcript's tail (the current tool,
 // "Thinking…" while reasoning streams) rather than bare card churn.
 //
 // Its data source is the durable chat journal: it paints the `GET /chat`
@@ -185,7 +181,9 @@ function restoreLiveTiming(turn: number | null, preserveObserved = false) {
     lastProgressAt.value = null;
     return;
   }
-  const current = [...blocks.values()].filter((block) => block.turn === turn);
+  const current = [...blocks.values()]
+    .filter((block) => block.turn === turn)
+    .sort((a, b) => a.seq - b.seq);
   const opening = current.find((block) => block.kind === 'user_message') ?? current[0];
   const restoredStart = timeOf(opening?.created_at) ?? Date.now();
   const restoredProgress =
@@ -246,6 +244,7 @@ async function load({
     journal.reset();
     shadows.clear();
     liveTools.clear();
+    openFolds.clear();
     olderCursor.value = null;
     olderError.value = '';
     pendingInputs.value = [];
@@ -253,38 +252,40 @@ async function load({
   const journalRevision = journal.beginSnapshot();
   const queueAt = queueRevision;
   const liveAt = liveRevision;
+  const needsDialogue = state.value !== 'ready';
   try {
     const snap = await getSessionChat(requestId);
     if (seq !== loadSeq) return;
     const firstTail = snap.blocks[snap.blocks.length - 1] ?? null;
     const accepted = journal.applySnapshot(journalRevision, snap.blocks);
     for (const b of accepted) settleDurableBlock(b);
-    if (!preserve || state.value !== 'ready') olderCursor.value = snap.older_cursor;
     if (!hasLiveSnapshot && liveAt === liveRevision) {
       liveTurnNo.value = snap.live_turn;
       turnLive.value = snap.live_turn != null;
       effectiveMode.value = snap.effective_mode ?? null;
     }
-    restoreLiveTiming(liveTurnNo.value, preserve);
     // A queue event received during this request is newer than its snapshot.
     if (queueAt === queueRevision) applyQueue(snap.pending_inputs);
     applyMetadata(snap.metadata ? decodeMetadata(snap.metadata) : emptyMetadata());
-    state.value = 'ready';
-    // The first page can be wholly newer than the last block seen before SSE
-    // subscribed. Walk back to that block so a gap over 200 blocks is repaired.
-    // A preserved read keeps the user's older-page cursor in place.
+    // Keep each response bounded, even when one run of tools spans many pages.
+    // Open on dialogue, and on reconnect walk back to the known stream tail.
     let page = snap;
+    let hasDialogue = snap.blocks.some(isDialogue);
     while (
-      bridgeTo !== undefined &&
       page.older_cursor &&
-      (bridgeTo === null || (page.blocks[0] && after(page.blocks[0], bridgeTo)))
+      ((needsDialogue && !hasDialogue) ||
+        bridgeTo === null ||
+        (bridgeTo && page.blocks[0] && after(page.blocks[0], bridgeTo)))
     ) {
       const nextRevision = journal.beginSnapshot();
       page = await getSessionChat(requestId, page.older_cursor);
       if (seq !== loadSeq) return;
-      const acceptedPage = journal.applySnapshot(nextRevision, page.blocks);
-      for (const block of acceptedPage) settleDurableBlock(block);
+      journal.applySnapshot(nextRevision, page.blocks);
+      hasDialogue ||= page.blocks.some(isDialogue);
     }
+    if (needsDialogue) olderCursor.value = page.older_cursor;
+    restoreLiveTiming(liveTurnNo.value, preserve || liveAt !== liveRevision);
+    state.value = 'ready';
     await nextTick();
     if (seq !== loadSeq) return;
     if (pinned.value) scrollToBottom();
@@ -304,6 +305,13 @@ async function load({
   }
 }
 
+function isDialogue(block: ChatBlock): boolean {
+  return (
+    (block.kind === 'user_message' || block.kind === 'agent_message') &&
+    !!(block.payload as unknown as UserMessagePayload | AgentMessagePayload)?.text?.trim()
+  );
+}
+
 function retryReconcile() {
   const requestedSeq = loadSeq + 1;
   void load({ preserve: true, bridgeTo: gapAnchor }).then((tail) => {
@@ -311,7 +319,7 @@ function retryReconcile() {
   });
 }
 
-/** Prepend one older DB page while keeping the same prose under the reader's
+/** Prepend older dialogue while keeping the same prose under the reader's
  * eyes. The live stream continues applying tail blocks during this request. */
 async function loadOlder() {
   const cursor = olderCursor.value;
@@ -320,20 +328,27 @@ async function loadOlder() {
   const requestLoadSeq = loadSeq;
   loadingOlder.value = true;
   olderError.value = '';
-  const root = convScroll.value;
-  const oldHeight = root?.scrollHeight ?? 0;
-  const oldTop = root?.scrollTop ?? 0;
   const journalRevision = journal.beginSnapshot();
   try {
-    const snap = await getSessionChat(requestId, cursor);
-    if (requestId !== id.value || requestLoadSeq !== loadSeq) return;
-    const accepted = journal.applySnapshot(journalRevision, snap.blocks);
-    for (const b of accepted) settleDurableBlock(b);
-    olderCursor.value = snap.older_cursor;
+    const olderBlocks: ChatBlock[] = [];
+    let before: ChatCursor | null = cursor;
+    while (before) {
+      const page = await getSessionChat(requestId, before);
+      if (requestId !== id.value || requestLoadSeq !== loadSeq) return;
+      olderBlocks.push(...page.blocks);
+      before = page.older_cursor;
+      if (page.blocks.some(isDialogue)) break;
+    }
+    const root = convScroll.value;
+    const oldHeight = root?.scrollHeight ?? 0;
+    const oldTop = root?.scrollTop ?? 0;
+    journal.applySnapshot(journalRevision, olderBlocks);
+    olderCursor.value = before;
     await nextTick();
     if (root) root.scrollTop = oldTop + (root.scrollHeight - oldHeight);
     updateActive();
   } catch (e) {
+    if (requestId !== id.value || requestLoadSeq !== loadSeq) return;
     olderError.value = (e as Error).message ?? 'Failed to load earlier conversation';
   } finally {
     loadingOlder.value = false;
@@ -1163,8 +1178,7 @@ async function answer(perm: PermissionPayload, optionId: string) {
 // Agents frequently alternate a tiny thought with every command; rendering
 // those as separate folds turns one investigation into a wall of “thinking”.
 // Keep their order in the expanded view, but give the collapsed transcript one
-// honest summary. A group holding a failed call opens by default (and the failed
-// call's output with it). A live (non-terminal) tool never renders as a row: it
+// summary, with failure counts and previews still visible. A live tool
 // drives the status line until its terminal block journals into the group.
 
 interface ActivityItem {
@@ -1177,6 +1191,13 @@ interface ThoughtItem {
 }
 type ActivityEntry =
   { type: 'thought'; thought: ThoughtItem } | { type: 'tool'; item: ActivityItem };
+
+interface ActivityPreview {
+  key: string;
+  title: string;
+  path?: string;
+  content: ToolImageContent | ToolTextContent;
+}
 
 type Row =
   | {
@@ -1218,6 +1239,7 @@ type Row =
       items: ActivityItem[];
       thoughts: ThoughtItem[];
       failures: number;
+      previews: ActivityPreview[];
       turn: number;
     }
   | { type: 'permission'; key: string; perm: PermissionPayload }
@@ -1294,13 +1316,15 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
   let agentSpoke = false;
   const flushActivity = () => {
     if (!activity.length) return;
+    const items = activity.flatMap((entry) => (entry.type === 'tool' ? [entry.item] : []));
     rows.push({
       type: 'activity',
       key: activityKey,
       entries: activity,
-      items: activity.flatMap((entry) => (entry.type === 'tool' ? [entry.item] : [])),
+      items,
       thoughts: activity.flatMap((entry) => (entry.type === 'thought' ? [entry.thought] : [])),
-      failures: activity.filter((entry) => entry.type === 'tool' && entry.item.failed).length,
+      failures: items.filter((item) => item.failed).length,
+      previews: items.flatMap(({ tool }) => toolPreviews(tool)),
       turn: activityTurn,
     });
     activity = [];
@@ -1335,9 +1359,9 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       }
       case 'agent_message': {
-        flushActivity();
         const text = (b.payload as unknown as AgentMessagePayload).text ?? '';
         if (!text.trim()) break;
+        flushActivity();
         const previous = rows[rows.length - 1];
         if (previous?.type === 'agent') {
           // Metadata updates can split one streamed answer into multiple durable
@@ -1479,13 +1503,14 @@ const contextActivities = computed(() =>
 );
 const contextImages = computed(() =>
   contextActivities.value.flatMap((row) =>
-    activityImages(row).map((image) => ({
-      key: image.key,
-      activityKey: row.key,
-      toolId: image.toolId,
-      kind: 'image' as const,
-      label: imageFilename(image.content.uri, image.title),
-    })),
+    row.previews
+      .filter((preview) => preview.content.type === 'image')
+      .map((image) => ({
+        key: image.key,
+        activityKey: row.key,
+        kind: 'image' as const,
+        label: fileName(image.path, image.title),
+      })),
   ),
 );
 const contextFailures = computed(() =>
@@ -1495,7 +1520,6 @@ const contextFailures = computed(() =>
       .map(({ tool }) => ({
         key: tool.tool_call_id,
         activityKey: row.key,
-        toolId: tool.tool_call_id,
         kind: 'failure' as const,
         label: toolLabel(tool),
       })),
@@ -1516,13 +1540,13 @@ const isEmpty = computed(
 // ── Live status line ─────────────────────────────────────────────────────────
 // What the agent is doing right now, named: the newest live tool's title, else
 // "Thinking…" / "Writing…" while a thought / message streams, else "Working…".
+const activeTools = computed(() =>
+  [...liveTools.values()].filter((tool) => tool.turn === liveTurnNo.value),
+);
 const statusLabel = computed(() => {
   const lt = liveTurnNo.value;
   if (lt == null) return 'Working';
-  let tool: SseTool | null = null;
-  for (const t of liveTools.values()) {
-    if (t.turn === lt) tool = t;
-  }
+  const tool = activeTools.value.at(-1);
   if (tool) return toolLabel(tool);
   if (shadows.get(`${lt}:agent_message`)?.text) return 'Writing';
   if (shadows.get(`${lt}:thought`)?.text) return 'Thinking';
@@ -1577,8 +1601,8 @@ function activitySummary(row: Extract<Row, { type: 'activity' }>): string {
   if (row.items.length) {
     parts.push(`${row.items.length} ${row.items.length === 1 ? 'action' : 'actions'}`);
   }
-  const images = activityImages(row).length;
-  if (images) parts.push(`${images} ${images === 1 ? 'image' : 'images'}`);
+  const previews = row.previews.length;
+  if (previews) parts.push(`${previews} ${previews === 1 ? 'preview' : 'previews'}`);
   return parts.join(' · ') || 'Reasoning';
 }
 // Whether a call carries anything worth expanding.
@@ -1587,22 +1611,39 @@ function hasDetail(t: ToolCallPayload): boolean {
     (content) => content.type === 'diff' || (content.type === 'text' && !!content.text),
   );
 }
-// Images remain discoverable even when the surrounding tool run is folded.
-function activityImages(row: Extract<Row, { type: 'activity' }>) {
-  return row.items.flatMap(({ tool }) =>
-    tool.content.flatMap((content, index) =>
-      content.type === 'image'
-        ? [
-            {
-              key: `${tool.tool_call_id}-${index}`,
-              content,
-              title: toolLabel(tool),
-              toolId: tool.tool_call_id,
-            },
-          ]
-        : [],
-    ),
+function toolPreviews(tool: ToolCallPayload): ActivityPreview[] {
+  const toolId = tool.tool_call_id;
+  const images = tool.content.flatMap((content, index) =>
+    content.type === 'image'
+      ? [
+          {
+            key: `${toolId}-${index}`,
+            content,
+            title: toolLabel(tool),
+            path: content.uri || tool.locations[0]?.path,
+          },
+        ]
+      : [],
   );
+  if (images.length || tool.tool_kind !== 'read' || tool.status !== 'completed') return images;
+  // A read's journaled output is the version the agent saw, even if the file
+  // has since changed. Only label it with a path when the read identified one file.
+  const paths = new Set(tool.locations.map((location) => location.path));
+  const path = tool.locations[0]?.path;
+  if (!path || paths.size !== 1) return [];
+  const text = tool.content
+    .flatMap((content) => (content.type === 'text' && content.text.trim() ? [content.text] : []))
+    .join('\n');
+  return text
+    ? [
+        {
+          key: toolId,
+          title: fileName(path, tool.title),
+          path,
+          content: { type: 'text', text },
+        },
+      ]
+    : [];
 }
 function toolDetails(t: ToolCallPayload) {
   return t.content.filter((content) => content.type !== 'image');
@@ -1611,7 +1652,7 @@ function toolDetails(t: ToolCallPayload) {
 // activity list, but always let the operator disclose the complete command even
 // when the call produced no output to use as a detail panel.
 function canExpandTool(t: ToolCallPayload): boolean {
-  return !!toolCommand(t) || hasDetail(t);
+  return t.status === 'failed' || !!toolCommand(t) || hasDetail(t);
 }
 function planGlyph(status: string): string {
   return status === 'completed' ? '✓' : status === 'in_progress' ? '▸' : '○';
@@ -1628,41 +1669,21 @@ function isAllow(kind: string): boolean {
 }
 
 // ── Folds ────────────────────────────────────────────────────────────────────
-// A fold's default is contextual (a failed activity group / failed call opens by
-// default; everything else closes); an explicit toggle overrides the default.
-const folds = ref(new Map<string, boolean>());
-function foldOpen(key: string, dflt = false): boolean {
-  return folds.value.get(key) ?? dflt;
+const openFolds = reactive(new Set<string>());
+function toggleFold(key: string) {
+  if (!openFolds.delete(key)) openFolds.add(key);
 }
-function toggleFold(key: string, dflt = false) {
-  const m = new Map(folds.value);
-  m.set(key, !foldOpen(key, dflt));
-  folds.value = m;
-}
-function activityItemOpen(item: ActivityItem): boolean {
-  return foldOpen(`tool-${item.tool.tool_call_id}`, item.failed);
-}
-function toggleActivityItem(item: ActivityItem) {
-  toggleFold(`tool-${item.tool.tool_call_id}`, item.failed);
+function toolFoldKey(tool: ToolCallPayload): string {
+  return `tool-${tool.tool_call_id}`;
 }
 function isSoloToolActivity(row: Extract<Row, { type: 'activity' }>): boolean {
   return row.entries.length === 1 && row.items.length === 1;
 }
-function isSoloExpandableActivity(row: Extract<Row, { type: 'activity' }>): boolean {
-  return isSoloToolActivity(row) && canExpandTool(row.items[0].tool);
+function canExpandActivity(row: Extract<Row, { type: 'activity' }>): boolean {
+  return !isSoloToolActivity(row) || canExpandTool(row.items[0].tool);
 }
-function activityRowOpen(row: Extract<Row, { type: 'activity' }>): boolean {
-  if (isSoloExpandableActivity(row)) {
-    return activityItemOpen(row.items[0]);
-  }
-  return foldOpen(row.key, row.failures > 0);
-}
-function toggleActivityRow(row: Extract<Row, { type: 'activity' }>) {
-  if (isSoloExpandableActivity(row)) {
-    toggleActivityItem(row.items[0]);
-  } else {
-    toggleFold(row.key, row.failures > 0);
-  }
+function activityFoldKey(row: Extract<Row, { type: 'activity' }>): string {
+  return isSoloToolActivity(row) ? toolFoldKey(row.items[0].tool) : row.key;
 }
 
 // ── Working timer (elapsed + time since observable progress) ─────────────────
@@ -1762,28 +1783,32 @@ async function goTo(anchor: string) {
   element?.focus({ preventScroll: true });
 }
 
+function revealPreview(event: FocusEvent) {
+  (event.target as HTMLElement).scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
 async function goToActivity(target: {
+  key: string;
   activityKey: string;
-  toolId: string;
   kind: 'image' | 'failure';
 }) {
   if (target.kind === 'failure') {
-    const next = new Map(folds.value);
-    next.set(target.activityKey, true);
-    next.set(`tool-${target.toolId}`, true);
-    folds.value = next;
+    openFolds.add(target.activityKey);
+    openFolds.add(`tool-${target.key}`);
   }
   if (window.matchMedia(CONTEXT_OVERLAY_QUERY).matches) contextOpen.value = false;
   await nextTick();
   const group = convScroll.value?.querySelector<HTMLElement>(
     `[data-activity-anchor="${CSS.escape(target.activityKey)}"]`,
   );
-  const selector = `${target.kind === 'failure' ? 'li' : ''}[data-tool-id="${CSS.escape(target.toolId)}"]`;
+  const key = CSS.escape(target.key);
+  const selector =
+    target.kind === 'failure' ? `[data-tool-id="${key}"]` : `[data-preview-key="${key}"]`;
   const element = group?.querySelector<HTMLElement>(selector) || group;
-  element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   (element?.querySelector<HTMLButtonElement>('button:not(:disabled)') ?? element)?.focus({
     preventScroll: true,
   });
+  element?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 </script>
 
@@ -1956,18 +1981,16 @@ async function goToActivity(target: {
                   type="button"
                   class="acp-fold-head"
                   data-testid="acp-activity-head"
-                  :disabled="isSoloToolActivity(row) && !canExpandTool(row.items[0].tool)"
+                  :disabled="!canExpandActivity(row)"
                   :aria-expanded="
-                    !isSoloToolActivity(row) || isSoloExpandableActivity(row)
-                      ? activityRowOpen(row)
-                      : undefined
+                    canExpandActivity(row) ? openFolds.has(activityFoldKey(row)) : undefined
                   "
-                  @click="toggleActivityRow(row)"
+                  @click="toggleFold(activityFoldKey(row))"
                 >
                   <span
-                    v-if="!isSoloToolActivity(row) || isSoloExpandableActivity(row)"
+                    v-if="canExpandActivity(row)"
                     class="chev"
-                    :class="{ open: activityRowOpen(row) }"
+                    :class="{ open: openFolds.has(activityFoldKey(row)) }"
                     >▸</span
                   >
                   <span v-if="isSoloToolActivity(row)" class="acp-activity-solo">
@@ -1989,32 +2012,40 @@ async function goToActivity(target: {
                     >{{ row.failures }} failed</span
                   >
                 </button>
-                <p
-                  v-if="isSoloToolActivity(row) && row.items[0].failed"
-                  class="acp-tool-error"
-                  data-testid="acp-tool-failure"
+                <div
+                  v-if="row.previews.length"
+                  class="acp-activity-previews"
+                  @focusin="revealPreview"
                 >
-                  {{ toolFailure(row.items[0].tool) }}
-                </p>
-                <div class="acp-activity-images" data-testid="acp-activity-images">
                   <div
-                    v-for="image in activityImages(row)"
-                    :key="image.key"
-                    :data-tool-id="image.toolId"
-                    tabindex="-1"
+                    v-for="preview in row.previews"
+                    :key="preview.key"
+                    :data-preview-key="preview.key"
                   >
-                    <ToolContentPreview :content="image.content" :title="image.title" thumbnail />
+                    <ToolContentPreview
+                      :content="preview.content"
+                      :title="preview.title"
+                      :file-path="preview.path"
+                      thumbnail
+                    />
                   </div>
                 </div>
                 <div
                   v-if="
                     isSoloToolActivity(row) &&
                     canExpandTool(row.items[0].tool) &&
-                    activityItemOpen(row.items[0])
+                    openFolds.has(activityFoldKey(row))
                   "
                   class="acp-detail acp-detail-solo"
                   data-testid="acp-detail"
                 >
+                  <p
+                    v-if="row.items[0].failed"
+                    class="acp-tool-error"
+                    data-testid="acp-tool-failure"
+                  >
+                    {{ toolFailure(row.items[0].tool) }}
+                  </p>
                   <div v-if="toolCommand(row.items[0].tool)" class="acp-command-detail">
                     <h3>Command</h3>
                     <ToolContentPreview
@@ -2030,7 +2061,7 @@ async function goToActivity(target: {
                     :title="toolLabel(row.items[0].tool)"
                   />
                 </div>
-                <div v-else-if="!isSoloToolActivity(row) && foldOpen(row.key, row.failures > 0)">
+                <div v-else-if="!isSoloToolActivity(row) && openFolds.has(row.key)">
                   <p class="acp-activity-breakdown">
                     {{ activityBreakdown(row) }}
                   </p>
@@ -2059,10 +2090,10 @@ async function goToActivity(target: {
                           :disabled="!canExpandTool(entry.item.tool)"
                           :aria-expanded="
                             canExpandTool(entry.item.tool)
-                              ? activityItemOpen(entry.item)
+                              ? openFolds.has(toolFoldKey(entry.item.tool))
                               : undefined
                           "
-                          @click="toggleActivityItem(entry.item)"
+                          @click="toggleFold(toolFoldKey(entry.item.tool))"
                         >
                           <span class="acp-tool-glyph" aria-hidden="true">{{
                             toolGlyph(entry.item.tool.tool_kind)
@@ -2077,26 +2108,29 @@ async function goToActivity(target: {
                             >failed</span
                           >
                           <span
-                            v-else-if="canExpandTool(entry.item.tool)"
+                            v-if="canExpandTool(entry.item.tool)"
                             class="chev sm"
                             :class="{
-                              open: activityItemOpen(entry.item),
+                              open: openFolds.has(toolFoldKey(entry.item.tool)),
                             }"
                             >▸</span
                           >
                         </button>
-                        <p
-                          v-if="entry.item.failed"
-                          class="acp-tool-error"
-                          data-testid="acp-tool-failure"
-                        >
-                          {{ toolFailure(entry.item.tool) }}
-                        </p>
                         <div
-                          v-if="canExpandTool(entry.item.tool) && activityItemOpen(entry.item)"
+                          v-if="
+                            canExpandTool(entry.item.tool) &&
+                            openFolds.has(toolFoldKey(entry.item.tool))
+                          "
                           class="acp-detail"
                           data-testid="acp-detail"
                         >
+                          <p
+                            v-if="entry.item.failed"
+                            class="acp-tool-error"
+                            data-testid="acp-tool-failure"
+                          >
+                            {{ toolFailure(entry.item.tool) }}
+                          </p>
                           <div v-if="toolCommand(entry.item.tool)" class="acp-command-detail">
                             <h3>Command</h3>
                             <ToolContentPreview
@@ -2269,8 +2303,10 @@ async function goToActivity(target: {
               aria-live="polite"
               title="Update age measures visible agent output and tool activity; silence alone does not prove the agent is stuck."
             >
-              <span class="acp-live-label">{{ statusLabel }}…</span>
+              <span class="acp-live-label" :title="statusLabel">{{ statusLabel }}…</span>
               <span class="acp-status-meta"
+                ><template v-if="activeTools.length > 1"
+                  >{{ activeTools.length }} tools active · </template
                 >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed ·
                 {{ progressLabel }}</span
               >
@@ -2809,13 +2845,15 @@ async function goToActivity(target: {
   gap: 0.45rem;
   min-width: 0;
 }
-.acp-activity-images {
+.acp-activity-previews {
   display: flex;
-  flex-wrap: wrap;
   gap: 0.5rem;
+  overflow-x: auto;
+  margin: 0.25rem 0 0.25rem 1rem;
+  padding: 0.15rem;
 }
-.acp-activity-images:not(:empty) {
-  margin: 0.4rem 0 0.4rem 1.15rem;
+.acp-activity-previews > div {
+  flex: none;
 }
 .acp-activity-breakdown {
   margin: 0.3rem 0 0.2rem 1.15rem;
@@ -2828,7 +2866,7 @@ async function goToActivity(target: {
   padding-left: 0.5rem;
 }
 .acp-tool-error {
-  margin: 0.25rem 0 0.4rem 1.15rem;
+  margin: 0.25rem 0 0.4rem;
   color: var(--block);
   font-family: var(--font-sans);
   font-size: 0.8125rem;
@@ -3013,11 +3051,16 @@ async function goToActivity(target: {
 .acp-status {
   margin-top: 0.75rem;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 0.6rem;
+  gap: 0.15rem 0.6rem;
   font-size: 0.8125rem;
 }
 .acp-live-label {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: var(--font-sans);
   font-size: 0.8125rem;
   color: var(--muted);
