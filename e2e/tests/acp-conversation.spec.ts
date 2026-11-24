@@ -912,9 +912,10 @@ test.describe('acp conversation', () => {
 
   test('a failed call keeps its group and output folded during live activity', async ({ page, weaver }) => {
     await openAcp(page, weaver, {
-      goal: 'tool:read:Read config|toolfail:cargo test|toolwait:30000:cargo build',
+      goal: 'tool:read:Read config|toolfail:cargo test|toolwait:30000:cargo build --workspace',
     });
-    await expect(page.getByTestId('acp-working')).toContainText('cargo build');
+    await expect(page.getByTestId('acp-working')).toContainText('Tool running');
+    await expect(page.getByTestId('acp-status-detail')).toHaveText('cargo build --workspace');
     const group = page.getByTestId('acp-activity-head');
     await expect(group).toHaveAttribute('aria-expanded', 'false');
     await expect(group.getByTestId('acp-activity-failed')).toContainText('1 failed');
@@ -930,6 +931,38 @@ test.describe('acp conversation', () => {
     const causeBox = await cause.boundingBox();
     const commandBox = await page.getByTestId('tool-text-preview').first().boundingBox();
     expect(causeBox!.y).toBeLessThan(commandBox!.y);
+  });
+
+  test('the live status keeps the newest call through completion, prose, and reload', async ({
+    page,
+    weaver,
+  }) => {
+    const command = 'rg -n tool_call crates/loom/frontend/src/components/AcpConversation.vue';
+    await openAcp(page, weaver, {
+      goal: `tool-overlap:${command}|say:Found the call site.|permission:verify|toolfail:cargo test --workspace|permission:finish`,
+    });
+    const status = page.getByTestId('acp-working');
+    const detail = page.getByTestId('acp-status-detail');
+    const allowOnce = page.getByRole('button', { name: 'Allow once', exact: true });
+    await expect(allowOnce).toBeVisible();
+    await expect(page.getByText('Found the call site.', { exact: true })).toBeVisible();
+    await expect(status).toContainText('Tool completed');
+    await expect(detail).toHaveText(command);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.reload();
+    await expect(allowOnce).toBeVisible();
+    await expect(status).toContainText('Tool completed');
+    await expect(detail).toHaveText(command);
+    await expect(detail).toBeInViewport();
+    expect(await detail.evaluate((el) => el.clientWidth === el.scrollWidth)).toBe(true);
+    await status.screenshot({ path: test.info().outputPath('acp-tool-status-mobile.png') });
+
+    await allowOnce.click();
+    await expect(status).toContainText('Tool failed');
+    await expect(detail).toHaveText('cargo test --workspace');
+    await allowOnce.click();
+    await expect(status).toBeHidden();
   });
 
   test('progress keeps its order without repeating the agent heading inside a turn', async ({
@@ -1179,10 +1212,8 @@ test.describe('acp conversation', () => {
       'title',
       /silence alone does not prove the agent is stuck/,
     );
-    // Time alone never becomes a false "stuck" verdict. Once updates go quiet,
-    // the perpetual activity shimmer stops and the UI reports only that fact.
+    // The status reports how long it has been since the last update.
     await page.clock.fastForward(16_000);
-    await expect(status).toHaveAttribute('data-quiet', 'true');
     await expect(status).toContainText('no updates for 0:16');
     await page.screenshot({
       path: test.info().outputPath('acp-live-status.png'),

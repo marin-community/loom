@@ -109,8 +109,10 @@ Loom loads earlier journal pages until it reaches dialogue or the beginning of
 the conversation. ACP tool runs stay collapsed by default and show counts for
 actions, previews, and failures. Open a run to see its ordered reasoning and tool
 calls. Each failed call shows its error ahead of the command and output when
-opened. During a live turn, the status line names the current tool. Progress
-within one turn keeps its order without repeating the Agent heading.
+opened. During a live turn, the status shows the newest tool's command or
+target and its state. The tool stays visible after completion until another
+call starts or the turn ends. Progress within one turn keeps its order without
+repeating the Agent heading.
 
 The composer starts at two lines and grows with the draft. **Settings** groups
 agent-owned model, effort, permissions, and other runtime controls. The current

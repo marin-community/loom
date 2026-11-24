@@ -15,6 +15,7 @@
 //   tool:edit[:title]    a tool_call (in_progress) then tool_call_update (completed);
 //                        an `edit` kind carries a diff, others a text content block
 //   toolwait:MS[:title]  an in-progress execute tool that waits until MS or cancellation
+//   tool-overlap:TITLE  two execute calls that finish in reverse order
 //   toolburst:COUNT      consecutive completed tools without any dialogue
 //   image[:title]        a read tool whose result is an ACP image content block
 //   image-file:PATH      a completed read with a resource_link, as Codex emits
@@ -259,6 +260,13 @@ async function runToken(tok) {
         status: "completed",
       });
     }
+  } else if (tok.startsWith("tool-overlap:")) {
+    const older = `overlap-older-${promptEpoch}`;
+    const newer = `overlap-newer-${promptEpoch}`;
+    notify({ sessionUpdate: "tool_call", toolCallId: older, kind: "execute", title: "git status --short", status: "in_progress" });
+    notify({ sessionUpdate: "tool_call", toolCallId: newer, kind: "execute", title: tok.slice("tool-overlap:".length), status: "in_progress" });
+    notify({ sessionUpdate: "tool_call_update", toolCallId: newer, status: "completed" });
+    notify({ sessionUpdate: "tool_call_update", toolCallId: older, status: "completed" });
   } else if (tok.startsWith("toolwait:")) {
     const [, delay, ...titleParts] = tok.split(":");
     const toolCallId = "call-wait-" + Math.floor(Math.random() * 100000);

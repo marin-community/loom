@@ -70,6 +70,17 @@ export function toolLabel(tool: ToolCallPayload): string {
   );
 }
 
+export function toolStatusDetail(tool: ToolCallPayload): string {
+  const command = firstLine(toolCommand(tool) ?? '');
+  if (command) return command;
+
+  const label = toolLabel(tool);
+  const location = tool.locations[0];
+  if (!location || label.includes(location.path)) return label;
+  const line = location.line == null ? '' : `:${location.line}`;
+  return `${label} · ${location.path}${line}`;
+}
+
 export function toolFailure(tool: ToolCallPayload): string | null {
   if (tool.status !== 'failed') return null;
   const lines = tool.content

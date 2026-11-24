@@ -1702,6 +1702,7 @@ impl LiveTool {
     fn block_payload(&self) -> Value {
         json!({
             "tool_call_id": self.id.clone(),
+            "first_seq": self.first_seq,
             "title": self.title.clone().unwrap_or_default(),
             "name": self.name.clone(),
             "input": self.input.clone(),
@@ -1716,6 +1717,7 @@ impl LiveTool {
         json!({
             "turn": turn,
             "tool_call_id": self.id.clone(),
+            "first_seq": self.first_seq,
             "title": self.title.clone().unwrap_or_default(),
             "name": self.name.clone(),
             "input": self.input.clone(),

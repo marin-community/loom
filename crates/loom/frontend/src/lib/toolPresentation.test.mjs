@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { toolCommand, toolFailure, toolLabel } from './toolPresentation.ts';
+import { toolCommand, toolFailure, toolLabel, toolStatusDetail } from './toolPresentation.ts';
 
 function tool(fields = {}) {
   return {
@@ -41,8 +41,19 @@ test('long shell bodies do not enter the action label', () => {
     input: { command: 'uv run --no-sync python - <<\'PY\'\nprint("large body")\nPY' },
   });
   assert.equal(toolLabel(call), 'uv run');
+  assert.equal(toolStatusDetail(call), "uv run --no-sync python - <<'PY'");
   assert.ok(!toolLabel(call).includes('large body'));
   assert.equal(toolLabel(tool({ title: 'KEY=value cargo test' })), 'Run command');
+});
+
+test('live status adds a file location when the title omits it', () => {
+  const call = tool({
+    tool_kind: 'read',
+    title: 'Read source',
+    locations: [{ path: 'src/main.rs', line: 12 }],
+  });
+  assert.equal(toolStatusDetail(call), 'Read source · src/main.rs:12');
+  assert.equal(toolStatusDetail({ ...call, title: 'Read src/main.rs:12' }), 'Read src/main.rs:12');
 });
 
 test('failure summaries select the error without turning successful stderr into a failure', () => {
