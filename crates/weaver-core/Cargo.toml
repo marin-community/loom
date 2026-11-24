@@ -20,7 +20,8 @@ rand = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
-tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync", "io-util"] }
 tracing = "0.1"
 
 # libproc and sysctl, which stand in for Linux's /proc in process_identity.
@@ -28,5 +29,4 @@ tracing = "0.1"
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
-tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync", "rt-multi-thread", "net", "io-util"] }
