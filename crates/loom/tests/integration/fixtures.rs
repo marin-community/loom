@@ -117,7 +117,7 @@ pub struct TestServer {
 enum GithubFixture {
     Production,
     Gateway(std::sync::Arc<dyn loom::github_trigger::GithubApi>),
-    ConfiguredApp,
+    ConfiguredApp(Option<serde_json::Value>),
 }
 
 /// Per-test timeout.
@@ -210,7 +210,11 @@ impl TestServer {
     /// Boot with a configured App client pointed at Loom's mock GitHub REST
     /// service. Used by journeys that exercise App-owned server operations.
     pub async fn start_with_app() -> Self {
-        Self::start_inner(GithubFixture::ConfiguredApp, true).await
+        Self::start_inner(GithubFixture::ConfiguredApp(None), true).await
+    }
+
+    pub async fn start_with_review_app(pull: serde_json::Value) -> Self {
+        Self::start_inner(GithubFixture::ConfiguredApp(Some(pull)), false).await
     }
 
     async fn start_inner(github: GithubFixture, initialize_repo: bool) -> Self {
@@ -252,8 +256,9 @@ impl TestServer {
                     std::sync::Arc::new(app),
                 )
             }
-            GithubFixture::ConfiguredApp => {
-                let app = loom::github_app::tests::configured_test_app(pool.clone()).await;
+            GithubFixture::ConfiguredApp(pull) => {
+                let app =
+                    loom::github_app::tests::configured_review_test_app(pool.clone(), pull).await;
                 loom::github_trigger::GithubTrigger::with_app(std::sync::Arc::new(app))
             }
             GithubFixture::Production => {

@@ -94,6 +94,7 @@ mod encodings;
 mod env;
 mod eventmux;
 mod github_access;
+pub(crate) mod github_reviews;
 mod issues;
 mod launches;
 mod logview;

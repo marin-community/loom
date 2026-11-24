@@ -187,7 +187,8 @@ Add a webhook on the repo or org (**Settings → Webhooks → Add webhook**):
 - **Content type** — `application/json`.
 - **Secret** — the same value as `LOOM_GITHUB_WEBHOOK_SECRET`.
 - **Events** — "Let me select individual events" → **Issues**, **Issue
-  comments**, and **Pull request reviews**.
+  comments**, and **Pull request reviews**. Add **Pull requests** for
+  [automatic reviews](#automatic-reviews).
 
 Until `LOOM_GITHUB_WEBHOOK_SECRET` is set the endpoint rejects every delivery
 (it cannot verify a signature without it).
@@ -227,6 +228,75 @@ launches nothing.
   github.trigger_phrase "…"`.
 - `github.bot_login` (or `LOOM_GITHUB_BOT_LOGIN`) — a GitHub login whose own
   requests are ignored, so a bot account can post without re-triggering itself.
+
+## Automatic reviews
+
+Loom can launch review profiles directly on signed `pull_request` deliveries.
+Enable **Pull requests** on the GitHub App and set `github.review_routes` in
+the deployment manifest's `settings` or in Loom Settings → GitHub. The setting
+is a JSON-encoded string that defaults to `[]`. In a YAML manifest, use a
+folded scalar (`>-`) followed by the indented JSON.
+
+Each entry names a numeric GitHub repository ID and a Loom GitHub federation
+for that repository. The federation must select one strict automation profile
+and bind `pull_request_target` on a workflow in the same repository. Loom uses
+its profile, service tag, and workload identity so the webhook and the Actions
+workflow share run reservations and a conversation during rollout. This
+requires GitHub's default OIDC subject for pull requests and the corresponding
+workflow key pattern below. The dispatch goal names the PR and exact head
+commit. Put review instructions in the profile.
+
+The following configuration uses the review profiles already declared by Marin.
+
+```json
+[
+  {
+    "repository_id": 775839592,
+    "federation": "pr-review",
+    "allowed_bots": ["marin-ops-agent[bot]"],
+    "policy": {"kind": "correctness"}
+  },
+  {
+    "repository_id": 775839592,
+    "federation": "pr-holistic-review",
+    "allowed_bots": ["marin-ops-agent[bot]", "loom-oa-dev[bot]"],
+    "policy": {
+      "kind": "holistic",
+      "changed_lines": 250,
+      "push_changed_lines": 100,
+      "abstraction_paths": ["lib/*/src", "experiments"]
+    }
+  },
+  {
+    "repository_id": 775839592,
+    "federation": "agentic-lint",
+    "allowed_bots": ["marin-ops-agent[bot]"],
+    "policy": {"kind": "agentic_lint"}
+  }
+]
+```
+
+All policies accept opened, ready-for-review, and reopened events. Loom
+fetches the current PR and checks that it is open, out of draft, and in the
+same repository. The author must have repository write access or be listed
+in the route's `allowed_bots`.
+
+- Correctness reserves `pr-review:<number>` once per PR.
+- Holistic review reserves `pr-holistic:<number>:initial` when the PR meets
+  `changed_lines` or adds a class or dataclass under an `abstraction_paths`
+  directory. A `*` matches one directory component. The
+  `pr-holistic:<number>:followup` reservation is for synchronize events and
+  also requires the current head commit to exceed `push_changed_lines`.
+  Both use channel `pr-holistic:<number>`.
+- Agentic lint reserves `agentic-lint:<number>:<head-sha>` when the PR lacks
+  the `agentic-lint` label. Removing that label also triggers evaluation.
+
+GitHub receives a success response after Loom stores the delivery. Background
+dispatch survives a server restart and retries transient dispatch failures.
+Use the App's delivery log to redeliver requests that failed to reach Loom.
+Use Loom's logs and automation runs to verify a launch before disabling its
+Actions workflow. Keep the named federation mappings while the webhook
+routes use them.
 
 ## The GitHub App
 
@@ -291,8 +361,8 @@ Apps → New GitHub App**:
 - **Organization permissions:**
   - **Members** — Read-only (verify active membership when
     `auth.github_organizations` is set).
-- **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
-  review**.
+- **Subscribe to events** — **Issues**, **Issue comment**, **Pull request
+  review**, and **Pull requests**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.
 

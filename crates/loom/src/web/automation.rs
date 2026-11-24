@@ -31,7 +31,12 @@ fn github_idempotency_key(
             context.repository_id, context.run_id, context.run_attempt
         ));
     }
-    if requested.len() > 128
+    github_caller_key(&context.repository_id, requested)
+}
+
+fn github_caller_key(repository_id: &str, requested: &str) -> ApiResult<String> {
+    if requested.is_empty()
+        || requested.len() > 128
         || !requested
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
@@ -40,10 +45,7 @@ fn github_idempotency_key(
             "GitHub idempotency_key must be 1-128 ASCII letters, digits, '.', '_', ':', or '-'",
         ));
     }
-    Ok(format!(
-        "github-caller:{}:{}",
-        context.repository_id, requested
-    ))
+    Ok(format!("github-caller:{repository_id}:{requested}"))
 }
 
 pub(super) async fn federate(
@@ -336,16 +338,25 @@ async fn dispatch_channel_run(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum RunCaller<'a> {
+    Api(&'a Principal),
+    Watch,
+    GithubReview {
+        repository_id: &'a str,
+        service_tag: &'a str,
+    },
+}
+
 /// Everything after identity resolution for `runs.create`.
 pub(super) async fn create_run_core(
     st: &AppState,
-    principal: &Principal,
     mut req: run_operations::create::Input,
     subject: String,
     profiles: Vec<String>,
-    scheduler: bool,
+    caller: RunCaller<'_>,
 ) -> ApiResult<RunView> {
-    if req.source == "watch" && !scheduler {
+    if req.source == "watch" && !matches!(caller, RunCaller::Watch) {
         return Err(AppError::bad_request(
             "watch source is reserved for the scheduler",
         ));
@@ -397,8 +408,15 @@ pub(super) async fn create_run_core(
         None => None,
     };
 
-    let idempotency_key = match &principal.automation_context {
-        Some(context) if context.provider == "github" => {
+    let federation = match caller {
+        RunCaller::Api(principal) => principal.automation_context.as_ref(),
+        _ => None,
+    };
+    let idempotency_key = match (caller, federation) {
+        (RunCaller::GithubReview { repository_id, .. }, _) => {
+            github_caller_key(repository_id, &req.idempotency_key)?
+        }
+        (_, Some(context)) if context.provider == "github" => {
             let context = context.github.as_ref().ok_or_else(|| {
                 AppError::new(
                     StatusCode::UNAUTHORIZED,
@@ -430,11 +448,12 @@ pub(super) async fn create_run_core(
         }
     };
     let request_json = serde_json::to_string(&req)?;
-    let service_tag = principal
-        .automation_context
-        .as_ref()
-        .map(|context| context.service_tag.as_str())
-        .unwrap_or(req.source.as_str());
+    let service_tag = match caller {
+        RunCaller::GithubReview { service_tag, .. } => service_tag,
+        _ => federation
+            .map(|context| context.service_tag.as_str())
+            .unwrap_or(req.source.as_str()),
+    };
     let reservation = crate::runs::reserve(
         &st.db,
         crate::runs::NewRun {
@@ -519,11 +538,10 @@ pub(super) async fn create_run(
     let (subject, profiles) = run_identity(&context.principal, &profile)?;
     create_run_core(
         &context.state,
-        &context.principal,
         input,
         subject,
         profiles,
-        false,
+        RunCaller::Api(&context.principal),
     )
     .await
 }

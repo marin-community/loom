@@ -35,6 +35,8 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 /// Immutable GitHub user ids allowed to trigger Loom without a Loom account.
 pub const GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY: &str = "github.trigger_allowed_user_ids";
+pub const GITHUB_REVIEW_ROUTES_KEY: &str = "github.review_routes";
+pub const DEFAULT_GITHUB_REVIEW_ROUTES: &str = "[]";
 /// Named launch profile selected by GitHub-triggered sessions.
 pub const DEFAULT_GITHUB_PROFILE: &str = "default";
 /// GitHub organizations whose active members receive renewable Loom access.
@@ -231,6 +233,15 @@ pub const REGISTRY: &[SettingSpec] = &[
             applied together. The profile must exist when a trigger launches.",
         kind: SettingKind::String,
         default: DEFAULT_GITHUB_PROFILE,
+        group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: GITHUB_REVIEW_ROUTES_KEY,
+        label: "GitHub automatic review routes",
+        description: "JSON array of pull request review routes. Each route binds a GitHub repository ID, a launch federation, and one review policy. An empty array disables automatic webhook reviews.",
+        kind: SettingKind::Text,
+        default: DEFAULT_GITHUB_REVIEW_ROUTES,
         group: "GitHub",
         options: &[],
     },
@@ -855,6 +866,60 @@ pub fn parse_github_trigger_allowed_user_ids(value: &str) -> std::result::Result
     Ok(ids)
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubReviewRoute {
+    pub repository_id: i64,
+    pub federation: String,
+    #[serde(default)]
+    pub allowed_bots: Vec<String>,
+    pub policy: GithubReviewPolicy,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GithubReviewPolicy {
+    Correctness,
+    Holistic {
+        changed_lines: u64,
+        push_changed_lines: u64,
+        #[serde(default)]
+        abstraction_paths: Vec<String>,
+    },
+    AgenticLint,
+}
+
+pub fn parse_github_review_routes(
+    value: &str,
+) -> std::result::Result<Vec<GithubReviewRoute>, String> {
+    let routes: Vec<GithubReviewRoute> =
+        serde_json::from_str(value).map_err(|error| error.to_string())?;
+    let mut policies = std::collections::HashSet::new();
+    for route in &routes {
+        if route.repository_id <= 0 || route.federation.trim().is_empty() {
+            return Err(
+                "each review route requires a positive repository_id and a federation".into(),
+            );
+        }
+        if !policies.insert((route.repository_id, std::mem::discriminant(&route.policy))) {
+            return Err("each repository may configure each review policy once".into());
+        }
+        if let GithubReviewPolicy::Holistic {
+            abstraction_paths, ..
+        } = &route.policy
+        {
+            let invalid = abstraction_paths.iter().any(|path| {
+                path.split('/')
+                    .any(|part| part.is_empty() || (part.contains('*') && part != "*"))
+            });
+            if invalid {
+                return Err("abstraction_paths must be relative directory paths with '*' as a whole component".into());
+            }
+        }
+    }
+    Ok(routes)
+}
+
 /// Check that `value` is acceptable for `key`. Unregistered keys accept any
 /// value; registered keys are checked against their [`SettingKind`]. The error
 /// is a key-free reason (e.g. `expects an integer, got 'soon'`) so callers can
@@ -869,6 +934,9 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         }
         GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY => {
             parse_github_trigger_allowed_user_ids(value).map(|_| ())?;
+        }
+        GITHUB_REVIEW_ROUTES_KEY => {
+            parse_github_review_routes(value).map(|_| ())?;
         }
         "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
             return Err(format!(

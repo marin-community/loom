@@ -206,6 +206,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "chat-block-delivery-key",
         include_str!("../migrations/0040_chat_block_delivery_key.sql"),
     ),
+    (
+        41,
+        "github-review-deliveries",
+        include_str!("../migrations/0041_github_review_deliveries.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

@@ -403,6 +403,7 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
     // setting and on `gh` being available, so it idles cheaply when GitHub
     // integration is off or unavailable.
     weaver_core::spawn_boxed(Box::pin(github::poll(state.clone())));
+    weaver_core::spawn_boxed(Box::pin(web::github_reviews::run(state.clone())));
     // The Watch engine (timer + dispatcher). Always spawned; it self-gates
     // on the `watch.enabled` master switch, which is on by default, so a
     // default loom runs it. Turning the switch off idles it cheaply.
