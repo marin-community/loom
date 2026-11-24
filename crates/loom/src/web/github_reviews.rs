@@ -17,7 +17,10 @@ use weaver_core::{
 
 use crate::{
     automation::{federation_get, github_automation_subject},
-    github_app::{GithubApp, ReviewHead, ReviewLabel, ReviewPullRequest, ReviewRepository},
+    github_app::{
+        GithubApp, ReviewHead, ReviewLabel, ReviewPullRequest, ReviewRepository,
+        PULL_REQUEST_FILES_MAX_PAGES, PULL_REQUEST_FILES_PAGE_SIZE,
+    },
     repo::{parse_slug, RepoSlug},
 };
 
@@ -81,8 +84,7 @@ async fn routes(db: &Db) -> Result<Vec<GithubReviewRoute>> {
         .map_err(anyhow::Error::msg)
 }
 
-/// Keep only the data needed to resolve the current PR. GitHub content such as
-/// titles, descriptions and comments never becomes part of the launch goal.
+/// Store the PR identity and event action needed to resolve the current head.
 pub(super) async fn enqueue(db: &Db, id: &str, body: &[u8]) -> Result<bool> {
     #[derive(Deserialize)]
     struct Payload {
@@ -335,8 +337,7 @@ async fn qualifies(
             if abstraction_paths.is_empty() {
                 return Ok(false);
             }
-            // The GitHub files endpoint returns at most 3,000 files.
-            for page in 1..=30 {
+            for page in 1..=PULL_REQUEST_FILES_MAX_PAGES {
                 let files = app.review_file_page(slug, delivery.number, page).await?;
                 if files.iter().any(|file| {
                     abstraction_in_patch(
@@ -347,7 +348,7 @@ async fn qualifies(
                 }) {
                     return Ok(true);
                 }
-                if files.len() < 100 {
+                if files.len() < PULL_REQUEST_FILES_PAGE_SIZE {
                     break;
                 }
             }
@@ -387,7 +388,8 @@ fn review_run(
     Ok(Input {
         profile,
         idempotency_key: key,
-        // Reuse the workflow's channel identity and reservations during rollout.
+        // Channel lookup includes the run source. Preserve the workflow source
+        // so follow-ups can reach sessions opened before webhooks were enabled.
         source: "actions".to_string(),
         watch_id: None,
         channel,

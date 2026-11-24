@@ -233,6 +233,9 @@ pub struct ReviewFile {
     pub patch: Option<String>,
 }
 
+pub const PULL_REQUEST_FILES_PAGE_SIZE: usize = 100;
+pub const PULL_REQUEST_FILES_MAX_PAGES: usize = 3_000 / PULL_REQUEST_FILES_PAGE_SIZE;
+
 impl GithubThreadKind {
     fn resource(self) -> &'static str {
         match self {
@@ -435,12 +438,12 @@ impl GithubApp {
         &self,
         repo: &RepoSlug,
         number: i64,
-        page: u64,
+        page: usize,
     ) -> Result<Vec<ReviewFile>> {
         self.repo_request(
             repo,
             reqwest::Method::GET,
-            &format!("pulls/{number}/files?per_page=100&page={page}"),
+            &format!("pulls/{number}/files?per_page={PULL_REQUEST_FILES_PAGE_SIZE}&page={page}"),
             None,
             "fetching pull request patches",
         )

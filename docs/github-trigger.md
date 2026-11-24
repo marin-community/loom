@@ -243,8 +243,10 @@ and bind `pull_request_target` on a workflow in the same repository. Loom uses
 its profile, service tag, and workload identity so the webhook and the Actions
 workflow share run reservations and a conversation during rollout. This
 requires GitHub's default OIDC subject for pull requests and the corresponding
-workflow key pattern below. The dispatch goal names the PR and exact head
-commit. Put review instructions in the profile.
+workflow key pattern below. Run records keep the Actions source so follow-ups
+can reach conversations opened before the webhook was enabled. The dispatch
+goal names the PR and exact head commit. Put review instructions in the
+profile.
 
 The following configuration uses the review profiles already declared by Marin.
 

@@ -60,9 +60,6 @@ pub(super) async fn github_webhook(
         return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
     }
 
-    // The body is now trusted (GitHub-signed). Every *business-logic* outcome
-    // past here is a 200 no-op via `ok()`; the only non-2xx exceptions below are
-    // a malformed delivery (no GUID → 400) and a transient store error (→ 5xx).
     let ok = || (StatusCode::OK, "ok").into_response();
 
     // 2. Idempotency: dedupe on the delivery GUID. A genuine GitHub delivery
