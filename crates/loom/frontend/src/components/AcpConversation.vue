@@ -1673,8 +1673,8 @@ const openFolds = reactive(new Set<string>());
 function toggleFold(key: string) {
   if (!openFolds.delete(key)) openFolds.add(key);
 }
-function toolFoldKey(tool: ToolCallPayload): string {
-  return `tool-${tool.tool_call_id}`;
+function toolFoldKey(toolId: string): string {
+  return `tool-${toolId}`;
 }
 function isSoloToolActivity(row: Extract<Row, { type: 'activity' }>): boolean {
   return row.entries.length === 1 && row.items.length === 1;
@@ -1683,7 +1683,7 @@ function canExpandActivity(row: Extract<Row, { type: 'activity' }>): boolean {
   return !isSoloToolActivity(row) || canExpandTool(row.items[0].tool);
 }
 function activityFoldKey(row: Extract<Row, { type: 'activity' }>): string {
-  return isSoloToolActivity(row) ? toolFoldKey(row.items[0].tool) : row.key;
+  return isSoloToolActivity(row) ? toolFoldKey(row.items[0].tool.tool_call_id) : row.key;
 }
 
 // ── Working timer (elapsed + time since observable progress) ─────────────────
@@ -1794,7 +1794,7 @@ async function goToActivity(target: {
 }) {
   if (target.kind === 'failure') {
     openFolds.add(target.activityKey);
-    openFolds.add(`tool-${target.key}`);
+    openFolds.add(toolFoldKey(target.key));
   }
   if (window.matchMedia(CONTEXT_OVERLAY_QUERY).matches) contextOpen.value = false;
   await nextTick();
@@ -2090,10 +2090,10 @@ async function goToActivity(target: {
                           :disabled="!canExpandTool(entry.item.tool)"
                           :aria-expanded="
                             canExpandTool(entry.item.tool)
-                              ? openFolds.has(toolFoldKey(entry.item.tool))
+                              ? openFolds.has(toolFoldKey(entry.item.tool.tool_call_id))
                               : undefined
                           "
-                          @click="toggleFold(toolFoldKey(entry.item.tool))"
+                          @click="toggleFold(toolFoldKey(entry.item.tool.tool_call_id))"
                         >
                           <span class="acp-tool-glyph" aria-hidden="true">{{
                             toolGlyph(entry.item.tool.tool_kind)
@@ -2111,7 +2111,7 @@ async function goToActivity(target: {
                             v-if="canExpandTool(entry.item.tool)"
                             class="chev sm"
                             :class="{
-                              open: openFolds.has(toolFoldKey(entry.item.tool)),
+                              open: openFolds.has(toolFoldKey(entry.item.tool.tool_call_id)),
                             }"
                             >▸</span
                           >
@@ -2119,7 +2119,7 @@ async function goToActivity(target: {
                         <div
                           v-if="
                             canExpandTool(entry.item.tool) &&
-                            openFolds.has(toolFoldKey(entry.item.tool))
+                            openFolds.has(toolFoldKey(entry.item.tool.tool_call_id))
                           "
                           class="acp-detail"
                           data-testid="acp-detail"
