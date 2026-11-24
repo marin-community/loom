@@ -59,7 +59,14 @@ import { chatBlockKey, ChatJournalReconciler } from '../lib/chatJournal';
 import { useFollowFoot } from '../lib/followFoot';
 import { formatTokens } from '../lib/usage';
 import { localTime } from '../lib/time';
-import { firstLine, fileName, toolCommand, toolFailure, toolLabel } from '../lib/toolPresentation';
+import {
+  firstLine,
+  fileName,
+  toolCommand,
+  toolFailure,
+  toolLabel,
+  toolStatusDetail,
+} from '../lib/toolPresentation';
 import MarkdownView from './MarkdownView.vue';
 import AgentUsage from './AgentUsage.vue';
 import TransitionProgressStrip from './TransitionProgressStrip.vue';
@@ -69,9 +76,8 @@ import ScrollToEndButton from './ScrollToEndButton.vue';
 // The Conversation surface for an *ACP* session (`protocol='acp'`): typeset
 // dialogue, not chat bubbles. Serif prose for the humans and the agent; the
 // machine's apparatus recedes — every run of tool calls folds to one quiet
-// activity line (closed by default). An in-flight turn has a live status line
-// at the transcript's tail (the current tool,
-// "Thinking…" while reasoning streams) rather than bare card churn.
+// activity line (closed by default). During a turn, the status at the
+// transcript's tail follows the newest tool through completion.
 //
 // Its data source is the durable chat journal: it paints the `GET /chat`
 // snapshot, then applies the `sessions.chat.stream` SSE tail in place — `block` upserts
@@ -1302,13 +1308,27 @@ function closeContext() {
   void nextTick(() => contextButton.value?.focus());
 }
 
-const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(() => {
+// Calls can finish out of order. Use their first frame when available, and
+// journal order for older entries without a first_seq.
+function latestTool(previous: ToolCallPayload | null, next: ToolCallPayload): ToolCallPayload {
+  if (
+    previous?.first_seq != null &&
+    next.first_seq != null &&
+    previous.first_seq > next.first_seq
+  ) {
+    return previous;
+  }
+  return next;
+}
+
+const model = computed(() => {
   const rows: Row[] = [];
   const toc: TocItem[] = [];
 
   const sorted = [...blocks.values()].sort((a, b) => a.turn - b.turn || a.seq - b.seq);
 
   let currentUsage: AcpUsage | null = null;
+  let lastTool: ToolCallPayload | null = null;
 
   let activity: ActivityEntry[] = [];
   let activityKey = '';
@@ -1393,6 +1413,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
         break;
       case 'tool_call': {
         const tool = b.payload as unknown as ToolCallPayload;
+        if (b.turn === liveTurnNo.value) lastTool = latestTool(lastTool, tool);
         if (!activity.length) {
           activityKey = `act-${k}`;
           activityTurn = b.turn;
@@ -1486,7 +1507,7 @@ const model = computed<{ rows: Row[]; toc: TocItem[]; usage: AcpUsage | null }>(
     }
   }
 
-  return { rows, toc, usage: currentUsage };
+  return { rows, toc, usage: currentUsage, lastTool };
 });
 const hasContext = computed(() => model.value.toc.length > 0 || latestPlan.value.length > 0);
 const contextTurn = computed(
@@ -1538,19 +1559,37 @@ const isEmpty = computed(
 );
 
 // ── Live status line ─────────────────────────────────────────────────────────
-// What the agent is doing right now, named: the newest live tool's title, else
-// "Thinking…" / "Writing…" while a thought / message streams, else "Working…".
-const activeTools = computed(() =>
+const turnTools = computed(() =>
   [...liveTools.values()].filter((tool) => tool.turn === liveTurnNo.value),
 );
+const currentTool = computed(() =>
+  turnTools.value.reduce<ToolCallPayload | null>(latestTool, model.value.lastTool),
+);
+function isActiveTool(tool: ToolCallPayload): boolean {
+  return !['completed', 'failed', 'cancelled'].includes(tool.status);
+}
+const activeToolCount = computed(() => turnTools.value.filter(isActiveTool).length);
+const statusDetail = computed(() => (currentTool.value ? toolStatusDetail(currentTool.value) : ''));
 const statusLabel = computed(() => {
+  const tool = currentTool.value;
+  if (tool) {
+    switch (tool.status) {
+      case 'pending':
+        return 'Tool pending';
+      case 'completed':
+        return 'Tool completed';
+      case 'failed':
+        return 'Tool failed';
+      case 'cancelled':
+        return 'Tool cancelled';
+      default:
+        return 'Tool running';
+    }
+  }
   const lt = liveTurnNo.value;
-  if (lt == null) return 'Working';
-  const tool = activeTools.value.at(-1);
-  if (tool) return toolLabel(tool);
-  if (shadows.get(`${lt}:agent_message`)?.text) return 'Writing';
-  if (shadows.get(`${lt}:thought`)?.text) return 'Thinking';
-  return 'Working';
+  if (shadows.get(`${lt}:agent_message`)?.text) return 'Writing…';
+  if (shadows.get(`${lt}:thought`)?.text) return 'Thinking…';
+  return 'Working…';
 });
 
 // ── Presentational helpers ───────────────────────────────────────────────────
@@ -2297,19 +2336,33 @@ async function goToActivity(target: {
             <div
               v-if="turnLive"
               class="acp-status"
-              :data-quiet="visiblyQuiet"
               data-testid="acp-working"
-              role="status"
-              aria-live="polite"
               title="Update age measures visible agent output and tool activity; silence alone does not prove the agent is stuck."
             >
-              <span class="acp-live-label" :title="statusLabel">{{ statusLabel }}…</span>
-              <span class="acp-status-meta"
-                ><template v-if="activeTools.length > 1"
-                  >{{ activeTools.length }} tools active · </template
-                >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed ·
-                {{ progressLabel }}</span
-              >
+              <div class="acp-status-activity" role="status">
+                <span
+                  class="acp-live-label"
+                  :class="{ 'text-block': currentTool?.status === 'failed' }"
+                  >{{ statusLabel }}</span
+                >
+                <span
+                  v-if="statusDetail"
+                  class="acp-live-detail"
+                  :class="{ 'font-mono': currentTool?.tool_kind === 'execute' }"
+                  :title="statusDetail"
+                  data-testid="acp-status-detail"
+                  >{{ statusDetail }}</span
+                >
+              </div>
+              <div class="acp-status-meta">
+                <template
+                  v-if="
+                    activeToolCount > 1 ||
+                    (activeToolCount === 1 && currentTool && !isActiveTool(currentTool))
+                  "
+                  >{{ activeToolCount }} {{ activeToolCount === 1 ? 'tool' : 'tools' }} active · </template
+                >turn {{ (liveTurnNo ?? 0) + 1 }} · {{ elapsedLabel }} elapsed · {{ progressLabel }}
+              </div>
             </div>
           </div>
           <ScrollToEndButton :visible="!pinned" @click="jumpToEnd" />
@@ -3046,52 +3099,30 @@ async function goToActivity(target: {
   margin-top: 0.25rem;
 }
 
-/* Live status — the one animated element: a soft shimmer naming the agent's
-   current activity while a turn runs. */
 .acp-status {
   margin-top: 0.75rem;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.15rem 0.6rem;
+  display: grid;
+  gap: 0.15rem;
   font-size: 0.8125rem;
+}
+.acp-status-activity {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  min-width: 0;
 }
 .acp-live-label {
-  max-width: 100%;
+  flex: none;
+  font-weight: 600;
+}
+.acp-live-detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-sans);
-  font-size: 0.8125rem;
-  color: var(--muted);
-  background: linear-gradient(90deg, var(--muted) 30%, var(--fg) 50%, var(--muted) 70%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: acp-shimmer 2.2s linear infinite;
-}
-.acp-status[data-quiet='true'] .acp-live-label {
-  animation: none;
-  background: none;
-  -webkit-text-fill-color: currentColor;
-  color: var(--muted);
-}
-@keyframes acp-shimmer {
-  from {
-    background-position: 200% 0;
-  }
-  to {
-    background-position: -200% 0;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .acp-live-label {
-    animation: none;
-    background: none;
-    -webkit-text-fill-color: currentColor;
-    color: var(--muted);
-  }
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 .acp-status-meta {
   font-family: var(--font-mono);

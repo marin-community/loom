@@ -255,6 +255,8 @@ export interface ToolLocation {
 }
 export interface ToolCallPayload {
   tool_call_id: string;
+  /** Adapter frame that introduced the call. Older journal entries omit it. */
+  first_seq?: number;
   title: string;
   name?: string | null;
   input?: unknown;
