@@ -106,10 +106,17 @@ enum LaunchFailure {
 /// not resurrect the run or leave its worktree/supervisor detached from the
 /// operator-visible lifecycle record.
 async fn remove_late_session(st: &AppState, session_id: &str) {
-    let Ok(Some((session, branch))) = crate::session::with_branch(&st.db, session_id).await else {
+    let Ok(Some(_)) = crate::session::get(&st.db, session_id).await else {
         return;
     };
-    match super::sessions::remove(st, &session, &branch, false).await {
+    match super::sessions::remove(
+        st,
+        session_id,
+        false,
+        super::sessions::RemovalReason::LostLaunchReservation,
+    )
+    .await
+    {
         Ok(warnings) if !warnings.is_empty() => tracing::warn!(
             session = session_id,
             warnings = warnings.len(),
@@ -189,7 +196,7 @@ async fn launch_run(
             } else {
                 remove_late_session(st, &created.session.id).await;
                 Err(AppError::conflict(
-                    "automation launch was archived or removed while provisioning",
+                    "automation launch lost its reservation while provisioning",
                 ))
             }
         }

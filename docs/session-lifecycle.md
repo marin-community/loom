@@ -12,6 +12,9 @@ reserved id too, so an early failure is never an unactionable pseudo-session.
 Retryable channel failures remain `waiting` with their latest launch error. A
 redelivery clears that error when it claims a fresh provisioning attempt; the
 dashboard's Clear action archives an attempt that should no longer be retried.
+The server checks for unmatched automation launch attempts every 30 seconds.
+An attempt that still has no session after its five-minute lease appears as
+failed in the dashboard. Scheduled watches use their occurrence deadlines.
 
 ## State transitions
 
