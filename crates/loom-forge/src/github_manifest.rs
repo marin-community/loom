@@ -1,37 +1,10 @@
-//! GitHub App creation via the **manifest flow** — the engine behind
-//! `loom setup github-app`.
-//!
-//! Registering the App loom needs (webhook receiver + issue-comment/collaborator
-//! REST identity, §6.3 of the shared-loom design; see [`crate::github_app`]) is
-//! normally a manual, multi-screen "New GitHub App" form
-//! ([`docs/github-trigger.md`](../../../docs/github-trigger.md)). GitHub's
-//! [manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest)
-//! collapses that to one confirmation click:
-//!
-//! 1. loom builds a manifest JSON ([`manifest_json`]) describing the App —
-//!    name, homepage, webhook URL, and (via `callback_urls`) the "Sign in with
-//!    GitHub" callback, so the App's own OAuth client doubles as loom's login
-//!    app (collapsing what would otherwise be two separate GitHub
-//!    registrations into one).
-//! 2. A local HTML page ([`submission_html`], served at `/` by
-//!    [`run_local_server`]) auto-POSTs that manifest to GitHub ([`create_url`]);
-//!    the operator's only action is GitHub's own "Create GitHub App"
-//!    confirmation.
-//! 3. GitHub redirects the browser back to a `redirect_url` loom is listening
-//!    on ([`run_local_server`]'s `/callback`) with a one-time `code`.
-//! 4. loom exchanges that code for the full credential set — App id, RSA
-//!    private key, webhook secret, OAuth client id/secret — via
-//!    [`convert`]/`POST /app-manifests/{code}/conversions`, which needs **no
-//!    prior authentication**: possessing the code (proof the operator just
-//!    confirmed creation in their own browser) is the credential.
-//!
-//! This module only builds the manifest, drives the local HTTP round-trip, and
-//! parses GitHub's response — it does not know where the resulting credentials
-//! are stored (the `loom setup github-app` command in `bin/loom.rs` writes them
-//! straight into the settings table `env_or_setting` already reads, so they take
-//! effect on the *running* daemon with no restart).
+//! Register private Apps for repository access or human authentication through
+//! GitHub's browser-confirmed manifest flow. Each purpose has its own permissions
+//! and credential namespace, so registering one never replaces the other.
 
+use crate::github_app::GithubAppPurpose;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,6 +36,7 @@ pub struct ManifestInput<'a> {
     /// The App's display name. Must be globally unique across GitHub; GitHub
     /// rejects the submission (back on its own form) if it collides.
     pub name: &'a str,
+    pub purpose: GithubAppPurpose,
     /// loom's public base URL (e.g. `https://loom.team.dev`) — becomes the
     /// App's homepage and the base of its webhook and OAuth-callback URLs.
     pub base_url: &'a str,
@@ -71,36 +45,34 @@ pub struct ManifestInput<'a> {
     pub redirect_url: &'a str,
 }
 
-/// Build the manifest JSON GitHub's manifest flow expects. Mirrors the
-/// hand-registration steps in `docs/github-trigger.md` "Create the App":
-/// webhook URL + secret placeholder (GitHub mints the secret itself and
-/// returns it in the conversion — no `hook_attributes.secret` needed),
-/// Issues/Contents write + Metadata read, subscribed to `issue_comment`,
-/// `issues`, and `pull_request_review`, plus `callback_urls` so the App's own
-/// client id/secret also serves loom's "Sign in with GitHub" login — the same
-/// `/login/oauth/authorize` and `/login/oauth/access_token` endpoints
-/// [`crate::auth::github_oauth`] already speaks work unchanged for a GitHub
-/// App's user-to-server OAuth.
+/// Build a private App manifest with permissions restricted to its purpose.
 pub fn manifest_json(input: &ManifestInput) -> Value {
     let base = input.base_url.trim_end_matches('/');
-    json!({
+    let mut manifest = json!({
         "name": input.name,
         "url": input.base_url,
-        "hook_attributes": { "url": format!("{base}/api/github/webhook") },
         "redirect_url": input.redirect_url,
-        "callback_urls": [format!("{base}/api/auth/github/callback")],
         "public": false,
-        "default_events": ["issue_comment", "issues", "pull_request_review"],
-        "default_permissions": {
-            "actions": "write",
-            "contents": "write",
-            "issues": "write",
-            "members": "read",
-            "metadata": "read",
-            "pull_requests": "write",
-            "workflows": "write"
+    });
+    match input.purpose {
+        GithubAppPurpose::Repository => {
+            manifest["hook_attributes"] = json!({ "url": format!("{base}/api/github/webhook") });
+            manifest["default_events"] = json!(["issue_comment", "issues", "pull_request_review"]);
+            manifest["default_permissions"] = json!({
+                "actions": "write", "contents": "write", "issues": "write",
+                "metadata": "read", "pull_requests": "write", "workflows": "write"
+            });
         }
-    })
+        GithubAppPurpose::Authentication => {
+            // GitHub's manifest schema requires a URL even for an inactive webhook.
+            manifest["hook_attributes"] = json!({
+                "url": format!("{base}/api/github/webhook"), "active": false
+            });
+            manifest["callback_urls"] = json!([format!("{base}/api/auth/github/callback")]);
+            manifest["default_permissions"] = json!({ "members": "read" });
+        }
+    }
+    manifest
 }
 
 /// Where the browser is sent to confirm App creation: the org-scoped form when
@@ -269,7 +241,7 @@ pub struct AppManifestConversion {
     pub html_url: String,
     pub client_id: String,
     pub client_secret: String,
-    pub webhook_secret: String,
+    pub webhook_secret: Option<String>,
     pub pem: String,
     pub owner: Owner,
 }
@@ -278,6 +250,67 @@ pub struct AppManifestConversion {
 pub struct Owner {
     pub login: String,
     pub id: i64,
+}
+
+/// Store one App's credentials without changing the other App or its OAuth client.
+pub async fn store_app_credentials(
+    db: &crate::db::Db,
+    config_path: &Path,
+    purpose: GithubAppPurpose,
+    conversion: &AppManifestConversion,
+    organization: Option<&str>,
+) -> Result<()> {
+    let settings = purpose.settings();
+    let app_id = conversion.id.to_string();
+    let mut stored = vec![
+        (settings.id, app_id.as_str()),
+        (settings.private_key, conversion.pem.as_str()),
+        (settings.slug, conversion.slug.as_str()),
+        (settings.owner, organization.unwrap_or_default()),
+    ];
+    let mut exported = vec![
+        (settings.id_env, app_id.as_str()),
+        (settings.private_key_env, conversion.pem.as_str()),
+        (settings.slug_env, conversion.slug.as_str()),
+    ];
+    match purpose {
+        GithubAppPurpose::Repository => {
+            let webhook_secret = conversion
+                .webhook_secret
+                .as_deref()
+                .context("repository App conversion omitted its webhook secret")?;
+            stored.push((crate::github_trigger::WEBHOOK_SECRET_KEY, webhook_secret));
+            exported.push(("LOOM_GITHUB_WEBHOOK_SECRET", webhook_secret));
+        }
+        GithubAppPurpose::Authentication => {
+            stored.extend([
+                (crate::auth::GH_CLIENT_ID_KEY, conversion.client_id.as_str()),
+                (
+                    crate::auth::GH_CLIENT_SECRET_KEY,
+                    conversion.client_secret.as_str(),
+                ),
+            ]);
+            exported.extend([
+                ("LOOM_GITHUB_CLIENT_ID", conversion.client_id.as_str()),
+                (
+                    "LOOM_GITHUB_CLIENT_SECRET",
+                    conversion.client_secret.as_str(),
+                ),
+            ]);
+        }
+    }
+    weaver_core::config::apply(
+        db,
+        &stored
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), Some(value.to_string())))
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .context("storing GitHub App credentials")?;
+    crate::loom_config::upsert(config_path, &exported)
+        .context("writing GitHub App credentials to loom.toml")?;
+    Ok(())
 }
 
 /// Exchange a manifest-flow `code` for the App's full credential set via the
@@ -335,6 +368,7 @@ mod tests {
     fn input(redirect_url: &str) -> ManifestInput<'static> {
         ManifestInput {
             name: "loom-acme",
+            purpose: GithubAppPurpose::Repository,
             base_url: "https://loom.acme.dev",
             redirect_url: Box::leak(redirect_url.to_string().into_boxed_str()),
         }
@@ -343,7 +377,7 @@ mod tests {
     // -- manifest shape -------------------------------------------------
 
     #[test]
-    fn manifest_wires_the_webhook_login_and_least_privilege_permissions() {
+    fn repository_manifest_requests_webhooks_without_login_or_membership() {
         let m = manifest_json(&input("http://127.0.0.1:9999/callback"));
         assert_eq!(m["name"], "loom-acme");
         assert_eq!(m["url"], "https://loom.acme.dev");
@@ -352,10 +386,7 @@ mod tests {
             "https://loom.acme.dev/api/github/webhook"
         );
         assert_eq!(m["redirect_url"], "http://127.0.0.1:9999/callback");
-        assert_eq!(
-            m["callback_urls"][0],
-            "https://loom.acme.dev/api/auth/github/callback"
-        );
+        assert!(m.get("callback_urls").is_none());
         assert_eq!(m["public"], false);
         assert_eq!(
             m["default_events"],
@@ -367,12 +398,117 @@ mod tests {
                 "actions": "write",
                 "contents": "write",
                 "issues": "write",
-                "members": "read",
                 "metadata": "read",
                 "pull_requests": "write",
                 "workflows": "write"
             })
         );
+    }
+
+    #[test]
+    fn authentication_manifest_requests_only_membership_and_login() {
+        let mut i = input("http://127.0.0.1:9999/callback");
+        i.purpose = GithubAppPurpose::Authentication;
+        let m = manifest_json(&i);
+        assert_eq!(m["public"], false);
+        assert_eq!(
+            m["hook_attributes"],
+            json!({ "url": "https://loom.acme.dev/api/github/webhook", "active": false })
+        );
+        assert_eq!(
+            m["callback_urls"],
+            json!(["https://loom.acme.dev/api/auth/github/callback"])
+        );
+        assert_eq!(m["default_permissions"], json!({ "members": "read" }));
+        assert!(m.get("default_events").is_none());
+    }
+
+    #[tokio::test]
+    async fn registering_either_app_preserves_the_other_apps_credentials() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loom.toml");
+        let repository = AppManifestConversion {
+            id: 101,
+            slug: "repository-app".to_string(),
+            html_url: "https://github.com/apps/repository-app".to_string(),
+            client_id: "repository-client".to_string(),
+            client_secret: "repository-client-secret".to_string(),
+            webhook_secret: Some("repository-webhook".to_string()),
+            pem: "repository-key".to_string(),
+            owner: Owner {
+                login: "code-org".to_string(),
+                id: 1,
+            },
+        };
+        let authentication = AppManifestConversion {
+            id: 202,
+            slug: "login-app".to_string(),
+            client_id: "login-client".to_string(),
+            client_secret: "login-client-secret".to_string(),
+            webhook_secret: None,
+            pem: "login-key".to_string(),
+            ..repository.clone()
+        };
+        store_app_credentials(
+            &db,
+            &path,
+            GithubAppPurpose::Repository,
+            &repository,
+            Some("code-org"),
+        )
+        .await
+        .unwrap();
+        store_app_credentials(
+            &db,
+            &path,
+            GithubAppPurpose::Authentication,
+            &authentication,
+            Some("people-org"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            crate::github_app::private_key(&db, GithubAppPurpose::Repository)
+                .await
+                .as_deref(),
+            Some("repository-key")
+        );
+        assert_eq!(
+            crate::github_trigger::webhook_secret(&db).await,
+            "repository-webhook"
+        );
+
+        let replacement = AppManifestConversion {
+            id: 303,
+            pem: "replacement-repository-key".to_string(),
+            ..repository
+        };
+        store_app_credentials(
+            &db,
+            &path,
+            GithubAppPurpose::Repository,
+            &replacement,
+            Some("code-org"),
+        )
+        .await
+        .unwrap();
+        let oauth = crate::auth::github_oauth(&db).await.unwrap();
+        assert_eq!(oauth.client_id, "login-client");
+        assert_eq!(oauth.client_secret, "login-client-secret");
+        let config = crate::loom_config::load(&path).unwrap();
+        assert_eq!(
+            config.github_app_private_key.as_deref(),
+            Some("replacement-repository-key")
+        );
+        assert_eq!(
+            config.github_auth_app_private_key.as_deref(),
+            Some("login-key")
+        );
+        assert_eq!(config.github_client_id.as_deref(), Some("login-client"));
+        let auth_app = crate::github_app::GithubApp::new(db, GithubAppPurpose::Authentication);
+        assert_eq!(auth_app.app_id().await, Some(202));
+        assert_eq!(auth_app.private_key().await.as_deref(), Some("login-key"));
     }
 
     #[test]
@@ -561,7 +697,7 @@ mod tests {
         assert_eq!(conv.slug, "loom-acme");
         assert_eq!(conv.client_id, "Iv1.abc123");
         assert_eq!(conv.client_secret, "secret-client");
-        assert_eq!(conv.webhook_secret, "secret-webhook");
+        assert_eq!(conv.webhook_secret.as_deref(), Some("secret-webhook"));
         assert!(conv.pem.contains("BEGIN RSA PRIVATE KEY"));
         assert_eq!(conv.owner.login, "acme");
     }

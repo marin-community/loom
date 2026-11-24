@@ -52,6 +52,12 @@ pub struct LoomConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_webhook_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_auth_app_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_auth_app_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_auth_app_private_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_client_secret: Option<String>,
@@ -165,6 +171,24 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: true,
         get_fn: |c| c.github_webhook_secret.as_deref(),
         set_fn: |c, v| c.github_webhook_secret = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_GITHUB_AUTH_APP_ID",
+        secret: false,
+        get_fn: |c| c.github_auth_app_id.as_deref(),
+        set_fn: |c, v| c.github_auth_app_id = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_GITHUB_AUTH_APP_SLUG",
+        secret: false,
+        get_fn: |c| c.github_auth_app_slug.as_deref(),
+        set_fn: |c, v| c.github_auth_app_slug = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_GITHUB_AUTH_APP_PRIVATE_KEY",
+        secret: true,
+        get_fn: |c| c.github_auth_app_private_key.as_deref(),
+        set_fn: |c, v| c.github_auth_app_private_key = Some(v),
     },
     FieldSpec {
         env_name: "LOOM_GITHUB_CLIENT_ID",
@@ -472,6 +496,7 @@ mod tests {
             vec![
                 "LOOM_GITHUB_APP_PRIVATE_KEY",
                 "LOOM_GITHUB_WEBHOOK_SECRET",
+                "LOOM_GITHUB_AUTH_APP_PRIVATE_KEY",
                 "LOOM_GITHUB_CLIENT_SECRET",
                 "ANTHROPIC_API_KEY",
                 "OPENAI_API_KEY",

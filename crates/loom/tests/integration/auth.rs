@@ -87,6 +87,20 @@ async fn forwarded_request_cannot_use_general_loopback_trust() {
 #[serial]
 async fn organization_revalidation_renews_only_active_members() {
     let ts = TestServer::start_with_app().await;
+    let repository_key =
+        loom::github_app::private_key(&ts.state.db, loom::github_app::GithubAppPurpose::Repository)
+            .await
+            .unwrap();
+    // A valid authentication App must renew access even when repository signing fails.
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[(
+            loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+            Some("invalid-repository-key".to_string()),
+        )],
+    )
+    .await
+    .unwrap();
     weaver_core::config::apply(
         &ts.state.db,
         &[(
@@ -141,6 +155,31 @@ async fn organization_revalidation_renews_only_active_members() {
         .unwrap()
         .unwrap();
     assert!(inactive.authorization_valid_until.as_deref().unwrap() <= now.as_str());
+
+    // Restoring repository credentials must not rescue missing authentication credentials.
+    weaver_core::config::apply(
+        &ts.state.db,
+        &[
+            (
+                loom::github_app::APP_PRIVATE_KEY_KEY.to_string(),
+                Some(repository_key),
+            ),
+            (loom::github_app::AUTH_APP_PRIVATE_KEY_KEY.to_string(), None),
+        ],
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE users SET authorization_valid_until = '2000-01-01T00:00:00.000Z' WHERE username = 'renamed-account'")
+        .execute(&ts.state.db).await.unwrap();
+    loom::server::revalidate_github_authorizations_once(&ts.state).await;
+    let expired = loom::auth::get_user(&ts.state.db, "renamed-account")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        expired.authorization_valid_until.as_deref().unwrap()
+            <= weaver_core::db::now_iso().as_str()
+    );
 }
 
 #[tokio::test]

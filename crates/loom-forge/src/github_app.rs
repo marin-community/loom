@@ -51,6 +51,53 @@ pub const APP_SLUG_KEY: &str = "github.app_slug";
 /// right (org vs personal) GitHub settings URL for the update flow.
 pub const APP_OWNER_KEY: &str = "github.app_owner";
 
+pub const AUTH_APP_ID_KEY: &str = "auth.github.app_id";
+pub const AUTH_APP_PRIVATE_KEY_KEY: &str = "auth.github.app_private_key";
+pub const AUTH_APP_SLUG_KEY: &str = "auth.github.app_slug";
+pub const AUTH_APP_OWNER_KEY: &str = "auth.github.app_owner";
+
+/// Repository access and human authentication use independent App credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GithubAppPurpose {
+    Repository,
+    Authentication,
+}
+
+pub struct GithubAppSettings {
+    pub id: &'static str,
+    pub private_key: &'static str,
+    pub slug: &'static str,
+    pub owner: &'static str,
+    pub id_env: &'static str,
+    pub private_key_env: &'static str,
+    pub slug_env: &'static str,
+}
+
+impl GithubAppPurpose {
+    pub fn settings(self) -> GithubAppSettings {
+        match self {
+            Self::Repository => GithubAppSettings {
+                id: APP_ID_KEY,
+                private_key: APP_PRIVATE_KEY_KEY,
+                slug: APP_SLUG_KEY,
+                owner: APP_OWNER_KEY,
+                id_env: "LOOM_GITHUB_APP_ID",
+                private_key_env: "LOOM_GITHUB_APP_PRIVATE_KEY",
+                slug_env: "LOOM_GITHUB_APP_SLUG",
+            },
+            Self::Authentication => GithubAppSettings {
+                id: AUTH_APP_ID_KEY,
+                private_key: AUTH_APP_PRIVATE_KEY_KEY,
+                slug: AUTH_APP_SLUG_KEY,
+                owner: AUTH_APP_OWNER_KEY,
+                id_env: "LOOM_GITHUB_AUTH_APP_ID",
+                private_key_env: "LOOM_GITHUB_AUTH_APP_PRIVATE_KEY",
+                slug_env: "LOOM_GITHUB_AUTH_APP_SLUG",
+            },
+        }
+    }
+}
+
 /// The production GitHub REST base. Overridable per-instance only for tests.
 const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// GitHub requires a `User-Agent`; identify loom's App client.
@@ -131,32 +178,30 @@ impl CachedToken {
 // ([`crate::web`]), so both agree on what the trigger will actually use.
 // ---------------------------------------------------------------------------
 
-/// The App id from `LOOM_GITHUB_APP_ID`, else the `github.app_id` setting;
-/// `None` when unset or non-numeric.
-pub async fn app_id(db: &Db) -> Option<i64> {
-    config_value(db, "LOOM_GITHUB_APP_ID", APP_ID_KEY)
+/// Resolve the selected App's numeric identity from its env/settings namespace.
+pub async fn app_id(db: &Db, purpose: GithubAppPurpose) -> Option<i64> {
+    let settings = purpose.settings();
+    config_value(db, settings.id_env, settings.id)
         .await?
         .parse()
         .ok()
 }
 
-/// The App private key PEM from `LOOM_GITHUB_APP_PRIVATE_KEY`, else the
-/// `github.app_private_key` setting; `None` when unset.
-pub async fn private_key(db: &Db) -> Option<String> {
-    config_value(db, "LOOM_GITHUB_APP_PRIVATE_KEY", APP_PRIVATE_KEY_KEY).await
+/// Resolve the selected App's private key from its env/settings namespace.
+pub async fn private_key(db: &Db, purpose: GithubAppPurpose) -> Option<String> {
+    let settings = purpose.settings();
+    config_value(db, settings.private_key_env, settings.private_key).await
 }
 
-/// The App slug from `LOOM_GITHUB_APP_SLUG`, else the `github.app_slug` setting;
-/// `None` when unset. Only `loom setup github-app` records it, so a
-/// hand-configured App may have the id and key set but no slug — callers fall
-/// back to the id.
-pub async fn app_slug(db: &Db) -> Option<String> {
-    config_value(db, "LOOM_GITHUB_APP_SLUG", APP_SLUG_KEY).await
+/// Resolve the selected App's non-secret GitHub URL slug.
+pub async fn app_slug(db: &Db, purpose: GithubAppPurpose) -> Option<String> {
+    let settings = purpose.settings();
+    config_value(db, settings.slug_env, settings.slug).await
 }
 
-/// Whether the App is fully configured (both id and private key present).
-pub async fn is_configured(db: &Db) -> bool {
-    app_id(db).await.is_some() && private_key(db).await.is_some()
+/// Whether the selected App has both an ID and private key configured.
+pub async fn is_configured(db: &Db, purpose: GithubAppPurpose) -> bool {
+    app_id(db, purpose).await.is_some() && private_key(db, purpose).await.is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -165,9 +210,10 @@ pub async fn is_configured(db: &Db) -> bool {
 
 /// loom's GitHub App client: mints App JWTs, exchanges them for per-installation
 /// access tokens (cached until expiry), and performs the trigger's GitHub calls
-/// over REST with those tokens. One instance per server, shared behind an `Arc`.
+/// over REST with those tokens. Each purpose has a separate client and token cache.
 pub struct GithubApp {
     db: Db,
+    purpose: GithubAppPurpose,
     http: reqwest::Client,
     /// REST base (no trailing slash). `https://api.github.com` in production.
     api_base: String,
@@ -201,7 +247,7 @@ impl GithubThreadKind {
 
 impl GithubApp {
     /// The production client for the real GitHub API.
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Db, purpose: GithubAppPurpose) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -209,6 +255,7 @@ impl GithubApp {
             .expect("building the GitHub App HTTP client");
         Self {
             db,
+            purpose,
             http,
             api_base: DEFAULT_API_BASE.to_string(),
             tokens: Mutex::new(HashMap::new()),
@@ -217,7 +264,7 @@ impl GithubApp {
 
     /// Construct with an explicit API base for mock GitHub tests.
     #[cfg(any(test, feature = "test-support"))]
-    fn with_parts(db: Db, api_base: String) -> Self {
+    fn with_parts(db: Db, api_base: String, purpose: GithubAppPurpose) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -225,6 +272,7 @@ impl GithubApp {
             .expect("building the GitHub App HTTP client");
         Self {
             db,
+            purpose,
             http,
             api_base: api_base.trim_end_matches('/').to_string(),
             tokens: Mutex::new(HashMap::new()),
@@ -233,21 +281,19 @@ impl GithubApp {
 
     // -- configuration ------------------------------------------------------
 
-    /// The App id: `LOOM_GITHUB_APP_ID`, else the `github.app_id` setting; `None`
-    /// when unset or non-numeric.
+    /// The selected App's numeric identity.
     pub async fn app_id(&self) -> Option<i64> {
-        app_id(&self.db).await
+        app_id(&self.db, self.purpose).await
     }
 
-    /// The App private key PEM: `LOOM_GITHUB_APP_PRIVATE_KEY`, else the
-    /// `github.app_private_key` setting; `None` when unset.
+    /// The selected App's private key.
     pub async fn private_key(&self) -> Option<String> {
-        private_key(&self.db).await
+        private_key(&self.db, self.purpose).await
     }
 
-    /// Whether the App is fully configured (both id and private key present).
+    /// Whether both credentials for the selected purpose are configured.
     pub async fn is_configured(&self) -> bool {
-        is_configured(&self.db).await
+        is_configured(&self.db, self.purpose).await
     }
 
     /// Execute a GraphQL query as the App installation for `repo`.
@@ -402,11 +448,13 @@ impl GithubApp {
         let app_id = self
             .app_id()
             .await
-            .ok_or_else(|| anyhow!("GitHub App id is not configured"))?;
-        let pem = self
-            .private_key()
-            .await
-            .ok_or_else(|| anyhow!("GitHub App private key is not configured"))?;
+            .ok_or_else(|| anyhow!("{:?} GitHub App id is not configured", self.purpose))?;
+        let pem = self.private_key().await.ok_or_else(|| {
+            anyhow!(
+                "{:?} GitHub App private key is not configured",
+                self.purpose
+            )
+        })?;
         tracing::debug!(app_id, "minting app jwt");
         build_app_jwt(app_id, &pem, Utc::now().timestamp())
     }
@@ -1360,28 +1408,38 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     /// tests stay parallel-safe.
     async fn configured_app(api_base: String) -> GithubApp {
         let db = crate::db::connect_in_memory().await.unwrap();
-        configured_app_for_db(db, api_base).await
+        configured_app_for_db(db, api_base, GithubAppPurpose::Repository).await
     }
 
-    async fn configured_app_for_db(db: Db, api_base: String) -> GithubApp {
+    async fn configured_app_for_db(
+        db: Db,
+        api_base: String,
+        purpose: GithubAppPurpose,
+    ) -> GithubApp {
+        let settings = purpose.settings();
         weaver_core::config::apply(
             &db,
             &[
-                (APP_ID_KEY.to_string(), Some(TEST_APP_ID.to_string())),
+                (settings.id.to_string(), Some(TEST_APP_ID.to_string())),
                 (
-                    APP_PRIVATE_KEY_KEY.to_string(),
+                    settings.private_key.to_string(),
                     Some(TEST_PRIVATE_KEY.to_string()),
                 ),
             ],
         )
         .await
         .unwrap();
-        GithubApp::with_parts(db, api_base)
+        GithubApp::with_parts(db, api_base, purpose)
     }
 
     pub async fn configured_test_app(db: Db) -> GithubApp {
         let base = spawn_mock(MockState::new(3600)).await;
-        configured_app_for_db(db, base).await
+        configured_app_for_db(db, base, GithubAppPurpose::Repository).await
+    }
+
+    pub async fn configured_test_auth_app(db: Db) -> GithubApp {
+        let base = spawn_mock(MockState::new(3600)).await;
+        configured_app_for_db(db, base, GithubAppPurpose::Authentication).await
     }
 
     // -- installation token exchange + caching ------------------------------
@@ -1657,7 +1715,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let db = crate::db::connect_in_memory().await.unwrap();
-        let app = GithubApp::with_parts(db, base);
+        let app = GithubApp::with_parts(db, base, GithubAppPurpose::Repository);
 
         let slug = crate::repo::parse_slug("acme/widgets").unwrap();
         app.ensure_installed_repo_registered(&slug).await;
@@ -1679,7 +1737,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         let mock = MockState::new(3600);
         let base = spawn_mock(mock.clone()).await;
         let db = crate::db::connect_in_memory().await.unwrap();
-        let app = GithubApp::with_parts(db, base);
+        let app = GithubApp::with_parts(db, base, GithubAppPurpose::Repository);
 
         assert!(!app.is_configured().await);
         let error = app
