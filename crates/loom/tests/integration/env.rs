@@ -94,3 +94,147 @@ async fn profile_revision(client: &weaver_api::Client, name: &str) -> i64 {
         .as_i64()
         .unwrap()
 }
+
+/// Opencode's configuration travels in `OPENCODE_CONFIG_CONTENT` — the
+/// environment variable opencode itself reads — so it is an ordinary profile
+/// variable: the value stored through either env API is exactly what the next
+/// probe and launch export, and a non-default profile can carry its own.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opencode_config_content_is_an_ordinary_profile_variable() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // The settings facade stores it on the default profile, value visible.
+    let env = client
+        .post(
+            "/api/settings/env/set",
+            json!({
+                "name": "OPENCODE_CONFIG_CONTENT",
+                "value": r#"{"provider":{"lunaroute":{"options":{"apiKey":"{env:OPENCODE_API_KEY}"}}}}"#
+            }),
+        )
+        .await
+        .unwrap();
+    let list = env.as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["name"], "OPENCODE_CONFIG_CONTENT");
+    assert!(list[0]["value"].as_str().unwrap().contains("lunaroute"));
+
+    // And a second profile can carry its own configuration — credentials are
+    // per-profile, not a shared file only the default profile may own.
+    client
+        .post(
+            "/api/profiles/create",
+            json!({
+                "name": "second",
+                "agent_kind": "opencode",
+                "ambient_allowlist": [],
+                "github_repositories": []
+            }),
+        )
+        .await
+        .unwrap();
+    client
+        .post(
+            "/api/profiles/env/set",
+            json!({
+                "profile": "second",
+                "name": "OPENCODE_CONFIG_CONTENT",
+                "value": r#"{"provider":{"lunaroute":{"options":{"apiKey":"sk-other"}}}}"#
+            }),
+        )
+        .await
+        .expect("a non-default profile may carry its own Opencode config");
+
+    // Deleting the default profile's value leaves the second profile's intact.
+    let env = client
+        .post(
+            "/api/settings/env/delete",
+            json!({ "name": "OPENCODE_CONFIG_CONTENT" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(env.as_array().unwrap().len(), 0);
+    let profile = client
+        .post("/api/profiles/get", json!({ "name": "second" }))
+        .await
+        .unwrap();
+    let names: Vec<&str> = profile["env"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect();
+    assert!(names.contains(&"OPENCODE_CONFIG_CONTENT"));
+}
+
+/// `OPENCODE_CREDENTIALS_JSON` is a boot input the server imports into
+/// Opencode's shared store — it must never become a session variable, whose
+/// value would be exported into every launched session.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opencode_credentials_json_is_rejected_as_a_profile_variable() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    let err = client
+        .post(
+            "/api/settings/env/set",
+            json!({ "name": "OPENCODE_CREDENTIALS_JSON", "value": "[]" }),
+        )
+        .await
+        .expect_err("the boot-only credential must not become a session variable");
+    assert!(
+        err.to_string()
+            .contains("can only be set for Loom's own boot provisioning"),
+        "unexpected error: {err}"
+    );
+
+    client
+        .post(
+            "/api/profiles/create",
+            json!({
+                "name": "second",
+                "agent_kind": "opencode",
+                "ambient_allowlist": [],
+                "github_repositories": []
+            }),
+        )
+        .await
+        .unwrap();
+    let err = client
+        .post(
+            "/api/profiles/env/set",
+            json!({
+                "profile": "second",
+                "name": "OPENCODE_CREDENTIALS_JSON",
+                "value": "[]",
+            }),
+        )
+        .await
+        .expect_err("the boot-only credential must not become a profile variable");
+    assert!(
+        err.to_string()
+            .contains("can only be set for Loom's own boot provisioning"),
+        "unexpected error: {err}"
+    );
+
+    // The repository-scoped env API is a third way into a session environment.
+    let err = client
+        .post(
+            "/api/repos/env/set",
+            json!({
+                "name": "OPENCODE_CREDENTIALS_JSON",
+                "value": "[]",
+                "cwd": ts.cwd(),
+            }),
+        )
+        .await
+        .expect_err("the boot-only credential must not become a repo variable");
+    assert!(
+        err.to_string()
+            .contains("can only be set for Loom's own boot provisioning"),
+        "unexpected error: {err}"
+    );
+}

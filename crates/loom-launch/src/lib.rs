@@ -7,11 +7,11 @@ pub mod provision;
 pub use loom_forge::AppState;
 pub use loom_forge::{
     acp, agent, agent_env, agent_kind, auth, automation, backend, changes, channels, chat, chatlog,
-    client_context, conversation_inbox, ctx, custom_agents, custom_mcp, db, envfile, github,
-    github_app, github_manifest, github_trigger, history, ide, launch, launch_gate, lifecycle,
-    links, logs, loom_config, mcp, paths, profile, profile_data, remote_mcp, repo, repo_env,
-    runner, runs, runtime, scratch, session, session_layout, session_manager, shell, slack_routes,
-    status, terminal, user_token, Ctx, EditorState,
+    client_context, conversation_inbox, ctx, custom_agents, custom_mcp, db, env_policy, envfile,
+    github, github_app, github_manifest, github_trigger, history, ide, launch, launch_gate,
+    lifecycle, links, logs, loom_config, mcp, paths, profile, profile_data, remote_mcp, repo,
+    repo_env, runner, runs, runtime, scratch, session, session_layout, session_manager, shell,
+    slack_routes, status, terminal, user_token, Ctx, EditorState,
 };
 
 pub(crate) use weaver_core::db::Db;

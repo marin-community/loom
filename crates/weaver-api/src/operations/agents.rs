@@ -117,6 +117,25 @@ pub mod list {
     pub type Output = AgentsView;
 }
 
+pub mod catalog_refresh {
+    use super::prelude::*;
+
+    /// Re-fetch every installed harness's model options, or one harness when
+    /// named. Runs in the background; the picker keeps serving the stored rows.
+    #[operation(id = "agents.catalog.refresh", actor = Admin, scope = Global, risk = Write,
+                cli = "agents catalog refresh")]
+    pub struct Input {
+        /// A builtin harness id. Empty refreshes every harness that is on PATH.
+        #[operand(default = String::new())]
+        pub harness: String,
+    }
+
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+    pub struct Output {
+        pub started: bool,
+    }
+}
+
 pub mod oneshot {
     use super::prelude::*;
 
@@ -156,6 +175,7 @@ static OPERATIONS: &[&OperationSpec] = &[
     custom::create::SPEC,
     custom::update::SPEC,
     custom::delete::SPEC,
+    catalog_refresh::SPEC,
     oneshot::SPEC,
 ];
 

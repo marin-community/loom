@@ -39,6 +39,50 @@ async fn agents_list_merges_builtins_and_custom() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_refresh_reports_whether_it_started() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // The fixture disables catalogue probing, so a valid request is accepted and
+    // reports that no probe was started rather than claiming one runs.
+    let res = client
+        .post(
+            "/api/agents/catalog/refresh",
+            json!({ "harness": "cursor-agent" }),
+        )
+        .await
+        .expect("catalog refresh");
+    assert_eq!(res["started"], false);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn catalog_refresh_rejects_an_unknown_harness() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // A typo would otherwise queue a probe of a harness that cannot exist and
+    // report success, which reads like a completed refresh.
+    let err = client
+        .post(
+            "/api/agents/catalog/refresh",
+            json!({ "harness": "curser-agent" }),
+        )
+        .await
+        .expect_err("an unknown harness is rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("unknown harness 'curser-agent'"),
+        "unexpected error: {message}"
+    );
+    assert!(
+        message.contains("cursor-agent"),
+        "unexpected error: {message}"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn custom_agent_crud_and_validation() {
     let ts = TestServer::start().await;
     let client = &ts.client;
@@ -321,4 +365,129 @@ async fn canonical_launch_executes_the_reviewed_custom_agent_snapshot() {
         )
         .await
         .unwrap();
+}
+
+/// A model, effort, fast and mode the picker offers for one harness have to
+/// survive the whole path: the `agents.list` catalogue, a profile save, and the
+/// launch resolver. Each tier used to validate against a different list.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalogued_model_effort_and_mode_save_and_resolve() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // Seed what a probe would have written: a Codex model outside the static
+    // list, carrying per-model effort and fast choices.
+    sqlx::query(
+        "INSERT INTO harness_model_catalog
+            (harness, model_id, label, options_json, adapter_version,
+             credential_fingerprint, fetched_at)
+         VALUES ('codex', 'gpt-7-nova', 'GPT-7 Nova', ?, '9.9.9', 'fp', '2026-01-01T00:00:00Z')",
+    )
+    .bind(
+        json!([
+            { "id": "model", "category": "model", "currentValue": "gpt-7-nova" },
+            { "id": "reasoning", "category": "thought_level", "options": [
+                { "value": "high", "name": "High" }
+            ] },
+            { "id": "fast-mode", "category": "model_config", "type": "boolean" }
+        ])
+        .to_string(),
+    )
+    .execute(&ts.state.db)
+    .await
+    .unwrap();
+
+    // The picker now serves that model with its scoped choices.
+    let agents = client.post("/api/agents/list", json!({})).await.unwrap();
+    let codex = find(&agents["agents"], "codex").expect("codex is builtin");
+    let nova = codex["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "gpt-7-nova")
+        .expect("the catalogued model reaches the picker");
+    assert_eq!(nova["efforts"][0]["id"], "high");
+    assert_eq!(nova["fast"][0]["id"], "true");
+    // Modes travel with the harness, so the picker offers only what it honours.
+    assert!(codex["modes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m == "plan"));
+
+    // Saving a profile that selects it must not reject the id.
+    let saved = client
+        .post(
+            "/api/profiles/create",
+            json!({
+                "name": "novel",
+                "agent_kind": "codex",
+                "model": "gpt-7-nova",
+                "effort": "high",
+                "fast": "true",
+                "mode": "plan",
+                "protocol": "acp",
+                "ambient_allowlist": [],
+                "github_repositories": []
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved["model"], "gpt-7-nova");
+    assert_eq!(saved["mode"], "plan");
+
+    // And the launch resolver reaches the same conclusion.
+    let resolved = client
+        .post(
+            "/api/sessions/launches/resolve",
+            json!({ "selection": { "profile": "novel" } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resolved["model"], "gpt-7-nova");
+    assert_eq!(resolved["effort"], "high");
+    assert_eq!(resolved["fast"], "true");
+    assert_eq!(resolved["mode"], "plan");
+
+    // A model the catalogue does not list is still rejected.
+    let err = client
+        .post(
+            "/api/profiles/create",
+            json!({
+                "name": "unknown-model",
+                "agent_kind": "codex",
+                "model": "gpt-99-imaginary",
+                "protocol": "acp",
+                "ambient_allowlist": [],
+                "github_repositories": []
+            }),
+        )
+        .await
+        .expect_err("an unknown model is rejected");
+    assert!(
+        err.to_string().contains("unknown model 'gpt-99-imaginary'"),
+        "unexpected error: {err}"
+    );
+
+    // A posture the harness cannot express is rejected too, rather than saved
+    // and then silently ignored by the launch.
+    let err = client
+        .post(
+            "/api/profiles/create",
+            json!({
+                "name": "bad-mode",
+                "agent_kind": "opencode",
+                "mode": "bypassPermissions",
+                "protocol": "acp",
+                "ambient_allowlist": [],
+                "github_repositories": []
+            }),
+        )
+        .await
+        .expect_err("opencode has no bypass posture");
+    assert!(
+        err.to_string().contains("has no 'bypassPermissions' mode"),
+        "unexpected error: {err}"
+    );
 }

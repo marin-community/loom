@@ -2,7 +2,7 @@
 //! and fresh ACP one-shot judgement calls.
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use crate::acp::{AcpLaunch, NewOrLoad};
 use crate::backend;
+pub use crate::catalog::model_successor;
 use crate::custom_agents::CustomAgent;
 use crate::db::Db;
 use weaver_core::agent::{hooks_json, HookMode};
@@ -21,18 +22,34 @@ use weaver_core::BoxFut;
 pub struct AgentChoice {
     pub id: String,
     pub label: String,
+    /// For a model choice: the effort levels valid for *this* model, in the
+    /// order the harness presents them. Empty for an effort choice, and for a
+    /// model whose harness does not scope effort per model or whose options
+    /// have not been fetched (the picker then uses the agent's global list).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub efforts: Vec<AgentChoice>,
+    /// Canonical fast choices for this model (`true` / `false`). Empty when
+    /// the model has no fast option or its options have not been fetched.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fast: Vec<AgentChoice>,
 }
 
 impl AgentChoice {
+    pub(crate) fn leaf(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            efforts: Vec::new(),
+            fast: Vec::new(),
+        }
+    }
+
     /// Materialize a builtin's static `(id, label)` table into the owned choices
     /// the metadata carries.
     fn list(pairs: &[(&str, &str)]) -> Vec<AgentChoice> {
         pairs
             .iter()
-            .map(|(id, label)| AgentChoice {
-                id: (*id).to_string(),
-                label: (*label).to_string(),
-            })
+            .map(|(id, label)| Self::leaf(*id, *label))
             .collect()
     }
 }
@@ -60,6 +77,14 @@ pub struct AgentMetadata {
     /// A create request may override a builtin's default (`--protocol
     /// terminal` keeps the PTY); see [`resolve_protocol`].
     pub protocol: String,
+    /// Whether the agent binary is available on the system PATH. Used by the
+    /// UI to hide unavailable agent harnesses (e.g. when `codex` is not
+    /// installed).
+    pub available: Option<bool>,
+    /// The launch modes this agent can honour. A builtin lists the Loom modes
+    /// it has an adapter mode for; a custom agent states none, and accepts
+    /// whatever its own command understands.
+    pub modes: Vec<String>,
 }
 
 pub struct AgentInstance {
@@ -71,18 +96,14 @@ pub type AgentFuture<'a> = Pin<Box<dyn Future<Output = Result<AgentInstance>> + 
 pub trait AgentType: Sync {
     fn metadata(&self) -> AgentMetadata;
 
-    fn validate(&self, model: &str, effort: &str) -> Result<(), String> {
-        let metadata = self.metadata();
-        validate_model(&metadata, model)?;
-        validate_effort(&metadata, effort)
-    }
-
     fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a>;
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a>;
 }
 
 pub struct ClaudeAgentType;
 pub struct CodexAgentType;
+pub struct OpenCodeAgentType;
+pub struct CursorAgentType;
 
 /// A [`CustomAgent`] row wrapped as an [`AgentType`]: its stages drive the launch
 /// script, and its metadata is derived from the stored fields.
@@ -125,7 +146,7 @@ const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
 ];
 
 pub use crate::agent_kind::{
-    auto_approves_permissions, BuiltinAgentKind, CODEX_AGENT_MODE, DEFAULT_ACP_MODE,
+    acp_mode_for, auto_approves_permissions, BuiltinAgentKind, CODEX_AGENT_MODE, DEFAULT_ACP_MODE,
 };
 
 const EFFORT_CHOICES: &[(&str, &str)] = &[
@@ -145,113 +166,112 @@ const CODEX_EFFORT_CHOICES: &[(&str, &str)] = &[
 
 static CLAUDE_AGENT_TYPE: ClaudeAgentType = ClaudeAgentType;
 static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
+static OPENCODE_AGENT_TYPE: OpenCodeAgentType = OpenCodeAgentType;
+static CURSOR_AGENT_TYPE: CursorAgentType = CursorAgentType;
 
-/// The builtin agent for `kind`, if it names one (`claude`/`codex`). Custom
-/// agents live in the database and are resolved by [`resolve`]; this covers only
-/// the code-shipped runtimes, which need no DB lookup.
-pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
-    match BuiltinAgentKind::parse(kind)? {
-        BuiltinAgentKind::Claude => Some(&CLAUDE_AGENT_TYPE),
-        BuiltinAgentKind::Codex => Some(&CODEX_AGENT_TYPE),
+/// The `AgentType` for a builtin kind. Exhaustive, so a new [`BuiltinAgentKind`]
+/// variant forces an arm here.
+fn builtin_agent_type_for(kind: BuiltinAgentKind) -> &'static dyn AgentType {
+    match kind {
+        BuiltinAgentKind::Claude => &CLAUDE_AGENT_TYPE,
+        BuiltinAgentKind::Codex => &CODEX_AGENT_TYPE,
+        BuiltinAgentKind::OpenCode => &OPENCODE_AGENT_TYPE,
+        BuiltinAgentKind::CursorAgent => &CURSOR_AGENT_TYPE,
     }
+}
+
+/// The builtin agent for `kind`, if it names one. Custom agents live in the
+/// database and are resolved by [`resolve`]; this covers only the code-shipped
+/// runtimes, which need no DB lookup.
+pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
+    Some(builtin_agent_type_for(BuiltinAgentKind::parse(kind)?))
 }
 
 /// The builtin agents' metadata, in picker order.
 pub fn builtin_metadata() -> Vec<AgentMetadata> {
-    [&CLAUDE_AGENT_TYPE as &dyn AgentType, &CODEX_AGENT_TYPE]
+    BuiltinAgentKind::ALL
         .into_iter()
-        .map(AgentType::metadata)
+        .map(|kind| builtin_agent_type_for(kind).metadata())
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexModelCatalog {
-    #[serde(default)]
-    models: Vec<CodexCatalogModel>,
+pub async fn is_claude_available() -> bool {
+    binary_on_path("claude").await
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexCatalogModel {
-    slug: String,
-    display_name: String,
-    #[serde(default)]
-    visibility: String,
-    #[serde(default)]
-    supported_reasoning_levels: Vec<CodexReasoningLevel>,
+pub async fn is_codex_available() -> bool {
+    binary_on_path("codex").await
 }
 
-#[derive(Debug, Deserialize)]
-struct CodexReasoningLevel {
-    effort: String,
+pub async fn is_opencode_available() -> bool {
+    binary_on_path("opencode").await
 }
 
-/// Ask the installed Codex binary for its bundled model catalogue. This is a
-/// stateless local query (`--bundled` forbids a network refresh), so Settings
-/// reflects the version installed on the loom host without launching a
-/// throwaway agent session. Older CLIs without `debug models` and malformed
-/// catalogues retain the code-shipped fallback above.
-async fn refresh_codex_metadata(metadata: &mut AgentMetadata) {
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::process::Command::new("codex")
-            .args(["debug", "models", "--bundled"])
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
-    let Ok(Ok(output)) = output else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    apply_codex_catalog(metadata, &output.stdout);
+pub async fn is_cursor_agent_available() -> bool {
+    cursor_agent_bin().await.is_some()
 }
 
-fn apply_codex_catalog(metadata: &mut AgentMetadata, bytes: &[u8]) {
-    let Ok(catalog) = serde_json::from_slice::<CodexModelCatalog>(bytes) else {
-        return;
-    };
-
-    let mut models = Vec::new();
-    let mut efforts = Vec::new();
-    let mut seen_models = HashSet::new();
-    let mut seen_efforts = HashSet::new();
-    for model in catalog.models {
-        if model.visibility != "list" || !seen_models.insert(model.slug.clone()) {
-            continue;
-        }
-        models.push(AgentChoice {
-            id: model.slug,
-            label: model.display_name,
-        });
-        for level in model.supported_reasoning_levels {
-            if seen_efforts.insert(level.effort.clone()) {
-                efforts.push(AgentChoice {
-                    label: effort_label(&level.effort),
-                    id: level.effort,
-                });
-            }
-        }
-    }
-    if !models.is_empty() {
-        metadata.models = models;
-    }
-    if !efforts.is_empty() {
-        metadata.efforts = efforts;
+/// How to invoke Cursor's CLI agent: the Homebrew `cursor-agent` binary when
+/// present, else the `cursor agent` subcommand. `None` when neither is on
+/// `PATH`.
+async fn cursor_agent_bin() -> Option<&'static str> {
+    if binary_on_path("cursor-agent").await {
+        Some("cursor-agent")
+    } else if binary_on_path("cursor").await {
+        Some("cursor agent")
+    } else {
+        None
     }
 }
 
-fn effort_label(effort: &str) -> String {
-    match effort {
-        "xhigh" => "X-High".to_string(),
-        other => {
-            let mut chars = other.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                .unwrap_or_default()
-        }
+/// Whether `bin` resolves to an executable file on `PATH`.
+///
+/// Reports presence, not health: a binary that exists but misbehaves still
+/// counts as available. On Windows every `PATHEXT` suffix is tried, since an
+/// npm-installed CLI ships as `bin.cmd`/`bin.ps1` and never `bin.exe`;
+/// elsewhere the file must be a regular file with an execute bit. The
+/// filesystem walk runs on a blocking thread so a slow `PATH` entry cannot
+/// stall the async runtime.
+async fn binary_on_path(bin: &str) -> bool {
+    let bin = bin.to_string();
+    tokio::task::spawn_blocking(move || {
+        let Some(path) = std::env::var_os("PATH") else {
+            return false;
+        };
+        let names = candidate_names(&bin);
+        std::env::split_paths(&path)
+            .any(|dir| names.iter().any(|name| is_executable_file(&dir.join(name))))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn candidate_names(bin: &str) -> Vec<String> {
+    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut names = vec![bin.to_string()];
+    for ext in exts.split(';').filter(|ext| !ext.is_empty()) {
+        names.push(format!("{bin}{}", ext.to_ascii_lowercase()));
+    }
+    names
+}
+
+#[cfg(not(windows))]
+fn candidate_names(bin: &str) -> [String; 1] {
+    [bin.to_string()]
+}
+
+#[cfg(windows)]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
+#[cfg(not(windows))]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
     }
 }
 
@@ -285,25 +305,54 @@ pub async fn resolve(db: &Db, kind: &str) -> Result<Option<ResolvedAgent>> {
 /// Every agent's metadata — the builtins followed by the operator's custom agents
 /// (name order). What `GET /api/agents` lists and the picker renders.
 pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
-    let mut out = builtin_metadata();
-    if let Some(codex) = out.iter_mut().find(|meta| meta.kind == "codex") {
-        refresh_codex_metadata(codex).await;
+    let mut out = Vec::new();
+    for mut meta in builtin_metadata() {
+        let kind = BuiltinAgentKind::parse(&meta.kind);
+        meta.available = Some(match kind {
+            Some(kind) => builtin_available_kind(kind).await,
+            None => true,
+        });
+        crate::catalog::apply_stored(db, &meta.kind, &mut meta.models, &mut meta.efforts).await;
+        out.push(meta);
     }
     for a in crate::custom_agents::list(db).await? {
-        out.push(CustomAgentType::new(a).metadata());
+        let mut meta = CustomAgentType::new(a).metadata();
+        // A custom agent is an operator-defined command, not a binary loom probes.
+        meta.available = Some(true);
+        out.push(meta);
     }
     Ok(out)
 }
 
+/// Whether a code-shipped harness binary is on `PATH`.
+pub async fn builtin_available_kind(kind: BuiltinAgentKind) -> bool {
+    match kind {
+        BuiltinAgentKind::Claude => is_claude_available().await,
+        BuiltinAgentKind::Codex => is_codex_available().await,
+        BuiltinAgentKind::OpenCode => is_opencode_available().await,
+        BuiltinAgentKind::CursorAgent => is_cursor_agent_available().await,
+    }
+}
+
+/// The ACP adapter command for a builtin harness, using the same override
+/// precedence as a live launch.
+pub async fn acp_command_for(db: &Db, kind: &str) -> Option<String> {
+    match BuiltinAgentKind::parse(kind)? {
+        BuiltinAgentKind::Claude => Some(claude_acp_cmd(db).await),
+        BuiltinAgentKind::Codex => Some(codex_acp_cmd(db).await),
+        BuiltinAgentKind::OpenCode => Some(opencode_acp_cmd(db).await),
+        BuiltinAgentKind::CursorAgent => Some(cursor_agent_acp_cmd(db).await),
+    }
+}
 /// The metadata for one agent kind, or `None` when it names no agent.
 pub async fn metadata_for(db: &Db, kind: &str) -> Result<Option<AgentMetadata>> {
     let Some(resolved) = resolve(db, kind).await? else {
         return Ok(None);
     };
-    let mut metadata = resolved.as_type().metadata();
-    if metadata.kind == "codex" {
-        refresh_codex_metadata(&mut metadata).await;
-    }
+    let metadata = resolved.as_type().metadata();
+    // Leave the stored catalogue off this snapshot. `available` and the
+    // catalogue both feed the resolver-revision hash, and a refresh or a
+    // launch write-through must not invalidate a preview that already passed.
     Ok(Some(metadata))
 }
 
@@ -319,32 +368,73 @@ pub async fn initial_status(_db: &Db, _runtime: &str) -> &'static str {
     "running"
 }
 
-/// Check that `model` is one of `metadata`'s offered choices, or any explicit
-/// model name when the agent accepts raw values. Blank always means the agent's
-/// own default. A key-free reason on mismatch.
+/// Blank always means the agent's own default. A harness that accepts a raw
+/// model id skips the list; the live session is the authority for those.
+/// Everyone else, including a builtin with a fixed list, has to name a choice
+/// the picker currently offers.
 pub fn validate_model(metadata: &AgentMetadata, model: &str) -> Result<(), String> {
     let model = model.trim();
-    if model.is_empty() {
+    if model.is_empty() || metadata.accepts_raw_model {
         return Ok(());
     }
-    if metadata.accepts_raw_model || metadata.models.iter().any(|choice| choice.id == model) {
+    if metadata.models.iter().any(|choice| choice.id == model) {
         Ok(())
     } else {
         Err(format!("unknown model '{model}' for {}", metadata.kind))
     }
 }
 
-/// Check that `effort` is one of `metadata`'s offered choices (blank is always
-/// allowed — the agent's own default). A key-free reason on mismatch.
-pub fn validate_effort(metadata: &AgentMetadata, effort: &str) -> Result<(), String> {
+/// [`validate_model`] against everything the picker offers, including the
+/// models a catalogue probe has stored for a builtin harness.
+///
+/// `metadata_for` deliberately leaves the stored catalogue out of the resolver
+/// snapshot, so a fixed-list harness has to consult the store here or an
+/// ACP-discovered model could be selected in the picker and then rejected on
+/// save and launch.
+pub async fn validate_model_of(
+    db: &Db,
+    metadata: &AgentMetadata,
+    model: &str,
+) -> Result<(), String> {
+    let model = model.trim();
+    if model.is_empty() || metadata.accepts_raw_model || !metadata.builtin {
+        return validate_model(metadata, model);
+    }
+    if validate_model(metadata, model).is_ok() {
+        return Ok(());
+    }
+    let Ok(rows) = crate::catalog::stored_models(db, &metadata.kind).await else {
+        return validate_model(metadata, model);
+    };
+    if rows.iter().any(|id| id == model) {
+        Ok(())
+    } else {
+        Err(format!("unknown model '{model}' for {}", metadata.kind))
+    }
+}
+
+/// Blank selects the agent's own default. Builtin harnesses accept any
+/// explicit effort: the live session rejects a value it does not advertise.
+/// Custom agents are checked against their static list.
+pub fn validate_effort(metadata: &AgentMetadata, _model: &str, effort: &str) -> Result<(), String> {
     let effort = effort.trim();
-    if effort.is_empty() {
+    if effort.is_empty() || metadata.builtin {
         return Ok(());
     }
     if metadata.efforts.iter().any(|choice| choice.id == effort) {
         Ok(())
     } else {
         Err(format!("unknown effort '{effort}' for {}", metadata.kind))
+    }
+}
+
+/// Validate a fast-mode selection: empty (the agent default) or one of the
+/// boolean spellings the picker offers. The adapter's live option set is still
+/// the authority at launch; this only catches a typo before a profile is saved.
+pub fn validate_fast(fast: &str) -> Result<(), String> {
+    match fast.trim() {
+        "" | "true" | "false" => Ok(()),
+        other => Err(format!("fast must be 'true' or 'false', got '{other}'")),
     }
 }
 
@@ -441,6 +531,49 @@ fn codex_command(ctx: &AgentLaunchContext<'_>) -> String {
     }
 }
 
+fn spaced(args: String) -> String {
+    if args.is_empty() {
+        String::new()
+    } else {
+        format!(" {args}")
+    }
+}
+
+/// The Opencode TUI is the terminal fallback for the ACP builtin: `--continue`
+/// resumes in an existing worktree, a fresh run preloads the goal via
+/// `--prompt`.
+fn opencode_command(ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
+    let args = spaced(join_args([
+        model_flag(ctx.model).map(|m| format!("--model {}", sh_single_quote(m)))
+    ]));
+    match (mode, ctx.goal_file.or(ctx.primer_file)) {
+        (LaunchMode::Adopt, _) => format!("opencode --continue{args}"),
+        (LaunchMode::Fresh, Some(f)) => {
+            format!(
+                "opencode{args} --prompt \"$(cat {})\"",
+                sh_single_quote_path(f)
+            )
+        }
+        (LaunchMode::Fresh, None) => format!("opencode{args}"),
+    }
+}
+
+/// Cursor's CLI as the terminal fallback: `--continue` resumes, a fresh run
+/// takes the goal positionally. `--model` is passed through verbatim (Cursor
+/// scopes effort inside the model id / bracket parameters).
+fn cursor_agent_command(bin: &str, ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
+    let args = spaced(join_args([
+        model_flag(ctx.model).map(|m| format!("--model {}", sh_single_quote(m)))
+    ]));
+    match (mode, ctx.goal_file.or(ctx.primer_file)) {
+        (LaunchMode::Adopt, _) => format!("{bin} --continue{args}"),
+        (LaunchMode::Fresh, Some(f)) => {
+            format!("{bin}{args} \"$(cat {})\"", sh_single_quote_path(f))
+        }
+        (LaunchMode::Fresh, None) => format!("{bin}{args}"),
+    }
+}
+
 /// The inner launch command for a custom agent: its `setup` stage (if any), then
 /// the stage command for this `mode`. Fresh runs `launch` with the goal file
 /// appended as a positional argument (mirroring the builtin runtimes); adopt runs
@@ -522,6 +655,12 @@ impl AgentType for ClaudeAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
+            modes: BuiltinAgentKind::Claude
+                .acp_modes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -552,6 +691,12 @@ impl AgentType for CodexAgentType {
             builtin: true,
             supports_acp: true,
             protocol: "acp".to_string(),
+            available: None,
+            modes: BuiltinAgentKind::Codex
+                .acp_modes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         }
     }
 
@@ -561,6 +706,88 @@ impl AgentType for CodexAgentType {
 
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
+    }
+}
+
+impl AgentType for OpenCodeAgentType {
+    fn metadata(&self) -> AgentMetadata {
+        AgentMetadata {
+            kind: "opencode".to_string(),
+            label: "Opencode".to_string(),
+            // The picker reads models from the stored catalogue.
+            models: Vec::new(),
+            efforts: Vec::new(),
+            accepts_raw_model: true,
+            supports_hooks: false,
+            builtin: true,
+            supports_acp: true,
+            protocol: "acp".to_string(),
+            available: None,
+            modes: BuiltinAgentKind::OpenCode
+                .acp_modes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        Box::pin(async move {
+            start_terminal(&ctx, "opencode", &opencode_command(&ctx, LaunchMode::Fresh)).await
+        })
+    }
+
+    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        Box::pin(async move {
+            start_terminal(&ctx, "opencode", &opencode_command(&ctx, LaunchMode::Adopt)).await
+        })
+    }
+}
+
+impl AgentType for CursorAgentType {
+    fn metadata(&self) -> AgentMetadata {
+        AgentMetadata {
+            kind: "cursor-agent".to_string(),
+            label: "Cursor".to_string(),
+            // The picker reads models from the stored catalogue.
+            models: Vec::new(),
+            efforts: Vec::new(),
+            accepts_raw_model: true,
+            supports_hooks: false,
+            builtin: true,
+            supports_acp: true,
+            protocol: "acp".to_string(),
+            available: None,
+            modes: BuiltinAgentKind::CursorAgent
+                .acp_modes()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
+
+    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        Box::pin(async move {
+            let bin = cursor_agent_bin().await.unwrap_or("cursor-agent");
+            start_terminal(
+                &ctx,
+                "cursor-agent",
+                &cursor_agent_command(bin, &ctx, LaunchMode::Fresh),
+            )
+            .await
+        })
+    }
+
+    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        Box::pin(async move {
+            let bin = cursor_agent_bin().await.unwrap_or("cursor-agent");
+            start_terminal(
+                &ctx,
+                "cursor-agent",
+                &cursor_agent_command(bin, &ctx, LaunchMode::Adopt),
+            )
+            .await
+        })
     }
 }
 
@@ -582,6 +809,8 @@ impl AgentType for CustomAgentType {
             } else {
                 self.agent.protocol.clone()
             },
+            available: None,
+            modes: Vec::new(),
         }
     }
 
@@ -1033,9 +1262,9 @@ fn loom_bin_path() -> String {
 
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
 /// unless the create request overrides it. A blank/absent override keeps the
-/// declared value. Both builtins may opt into `acp` (claude via
-/// `claude-agent-acp`, codex via `codex-acp`); a terminal-only custom agent has
-/// no ACP adapter, so it is rejected. Returns a key-free reason.
+/// declared value. A runtime with no ACP adapter (`supports_acp == false`, e.g.
+/// a terminal-only custom agent) cannot be forced to `acp`.
+/// Returns a key-free reason.
 pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result<String, String> {
     let declared = if meta.protocol.is_empty() {
         "terminal"
@@ -1054,8 +1283,7 @@ pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result
         return Ok(declared.to_string());
     }
     if req == "acp" {
-        // Both builtins have an adapter; a terminal custom agent does not.
-        return if meta.builtin {
+        return if meta.supports_acp {
             Ok("acp".to_string())
         } else {
             Err(format!(
@@ -1098,6 +1326,7 @@ pub struct AcpLaunchSpec<'a> {
     pub server_addr: &'a str,
     pub model: &'a str,
     pub effort: &'a str,
+    pub fast: &'a str,
     /// The positional opening prompt file (`goal.txt`) — its *content* becomes the
     /// first `session/prompt`. `None` boots the session idle.
     pub goal_file: Option<&'a Path>,
@@ -1106,8 +1335,13 @@ pub struct AcpLaunchSpec<'a> {
     pub primer_file: Option<&'a Path>,
     pub extra_env: &'a [(String, String)],
     pub env_clear: bool,
-    /// The launch permission posture (`bypassPermissions`, `acceptEdits`, …).
+    /// The launch permission posture (`bypassPermissions`, `acceptEdits`, …),
+    /// or the adapter's own id when `mode_from_live` is set.
     pub mode: &'a str,
+    /// `mode` is the adapter's own id, persisted by the live session, and is
+    /// replayed verbatim on a respawn. The adapter is the authority on its
+    /// vocabulary, so it is not translated back through Loom's postures.
+    pub mode_from_live: bool,
     /// Whether Loom installs its standard Weaver orientation hook.
     pub prelude: &'a str,
     /// Stamped restricted-profile posture. Restricted sessions do not load
@@ -1138,13 +1372,20 @@ pub async fn build_acp_launch(
     open: AcpOpen,
 ) -> Result<AcpLaunch> {
     let is_fresh = matches!(open, AcpOpen::Fresh);
-    let is_codex = spec.custom.is_none() && spec.runtime == "codex";
-    let is_claude = spec.custom.is_none() && !is_codex;
+    let builtin_runtime = spec.custom.is_none().then_some(spec.runtime);
+    let is_codex = builtin_runtime == Some("codex");
+    let is_claude = builtin_runtime == Some("claude");
+    let is_opencode = builtin_runtime == Some("opencode");
+    let is_cursor_agent = builtin_runtime == Some("cursor-agent");
     let adapter_cmd = match spec.custom {
         // The `launch` command *is* the adapter; setup runs first, as for a
         // terminal custom agent.
         Some(agent) => join_shell(&[agent.setup.trim(), agent.launch.trim()]),
         None if is_codex => codex_acp_cmd(db).await,
+        None if is_opencode => opencode_acp_cmd(db).await,
+        None if is_cursor_agent => cursor_agent_acp_cmd(db).await,
+        // The `claude` builtin, and any unrecognised builtin, use the claude
+        // adapter — the historical default.
         None => claude_acp_cmd(db).await,
     };
 
@@ -1164,9 +1405,9 @@ pub async fn build_acp_launch(
         .context("invalid session runtime-permission snapshot")?;
     let mcp_snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(spec.mcp_access).context("invalid session MCP policy snapshot")?;
-    if is_codex && goal_text.is_none() {
-        // No appendSystemPrompt analogue: a primer-only launch seeds the primer
-        // positionally, mirroring the terminal path's
+    if (is_codex || is_opencode || is_cursor_agent) && goal_text.is_none() {
+        // No appendSystemPrompt analogue on these adapters: a primer-only
+        // launch seeds the primer positionally, mirroring the terminal path's
         // `goal_file.or(primer_file)`.
         goal_text = primer_text.clone();
     }
@@ -1205,7 +1446,11 @@ pub async fn build_acp_launch(
             "DEFAULT_AUTH_REQUEST",
             r#"{"methodId":"api-key"}"#,
         );
-        let codex_mode = codex_acp_mode(spec.mode);
+        let codex_mode = if spec.mode_from_live {
+            spec.mode.trim().to_string()
+        } else {
+            codex_acp_mode(spec.mode)?
+        };
         additional_directories =
             configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
         push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
@@ -1242,14 +1487,29 @@ pub async fn build_acp_launch(
         new_or_load,
         // Codex boots directly in its mapped mode via `INITIAL_AGENT_MODE`; a
         // post-setup `session/set_mode` would re-send a claude-flavored id it
-        // does not advertise.
-        mode: (!is_codex).then(|| spec.mode.to_string()),
+        // does not advertise. Every other harness takes the id it advertises
+        // through `session/set_mode`.
+        mode: if is_codex {
+            None
+        } else if spec.mode_from_live {
+            Some(spec.mode.trim().to_string()).filter(|mode| !mode.is_empty())
+        } else {
+            launch_mode(spec.runtime, spec.custom, spec.mode)?
+        },
         // Loading must preserve adapter-restored live choices: the user may
-        // have changed either selector after launch.
+        // have changed either selector after launch. A blank selector (the
+        // usual case for opencode/cursor, whose models are chosen live over
+        // ACP) leaves the adapter on its own default.
         initial_model: (is_fresh && !spec.model.trim().is_empty())
             .then(|| spec.model.trim().to_string()),
         initial_effort: (is_fresh && !spec.effort.trim().is_empty())
             .then(|| spec.effort.trim().to_string()),
+        initial_fast: (is_fresh && !spec.fast.trim().is_empty())
+            .then(|| spec.fast.trim().to_string()),
+        harness: spec
+            .custom
+            .map(|_| String::new())
+            .unwrap_or_else(|| spec.runtime.to_string()),
         goal,
         setup_timeout: std::time::Duration::from_secs(30),
     })
@@ -1344,6 +1604,38 @@ async fn codex_acp_cmd(db: &Db) -> String {
         return cmd;
     }
     npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
+}
+
+/// An operator override for an ACP adapter command: an env var wins, then a
+/// config setting.
+async fn acp_cmd_override(db: &Db, env_var: &str, setting: &str) -> Option<String> {
+    if let Ok(cmd) = std::env::var(env_var) {
+        let cmd = cmd.trim();
+        if !cmd.is_empty() {
+            return Some(cmd.to_string());
+        }
+    }
+    weaver_core::config::get(db, setting)
+        .await
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Opencode's built-in ACP server (`opencode acp`); `WEAVER_OPENCODE_ACP_CMD`
+/// or the `acp.opencode_cmd` setting override it.
+async fn opencode_acp_cmd(db: &Db) -> String {
+    acp_cmd_override(db, "WEAVER_OPENCODE_ACP_CMD", "acp.opencode_cmd")
+        .await
+        .unwrap_or_else(|| "opencode acp".to_string())
+}
+
+/// Cursor's built-in ACP server (`cursor-agent acp`, or `cursor agent acp`);
+/// `WEAVER_CURSOR_ACP_CMD` or the `acp.cursor_cmd` setting override it.
+async fn cursor_agent_acp_cmd(db: &Db) -> String {
+    if let Some(cmd) = acp_cmd_override(db, "WEAVER_CURSOR_ACP_CMD", "acp.cursor_cmd").await {
+        return cmd;
+    }
+    format!("{} acp", cursor_agent_bin().await.unwrap_or("cursor-agent"))
 }
 
 /// Apply Loom's Codex policy on top of the shared provider login and any
@@ -1474,17 +1766,41 @@ fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
     cfg
 }
 
+/// The mode id to send through `session/set_mode` for a launch.
+///
+/// A custom agent's mode namespace is the operator's own, so it passes through
+/// as written. A builtin is translated into the id its adapter advertises and
+/// rejected when it has no equivalent, so `plan` cannot silently become a
+/// full-access default.
+fn launch_mode(runtime: &str, custom: Option<&CustomAgent>, mode: &str) -> Result<Option<String>> {
+    if custom.is_some() {
+        return Ok(Some(mode.to_string()));
+    }
+    let Some(kind) = BuiltinAgentKind::parse(runtime) else {
+        return Ok(Some(mode.to_string()));
+    };
+    match acp_mode_for(kind, mode) {
+        Some(mapped) => Ok(Some(mapped.to_string())),
+        None => anyhow::bail!(
+            "{} has no '{mode}' mode (modes: {})",
+            kind.as_str(),
+            kind.acp_modes().join(", ")
+        ),
+    }
+}
+
 /// Map the launch mode onto a codex-acp `INITIAL_AGENT_MODE` id. The create API
 /// speaks the claude-flavored vocabulary; codex's own ids pass through, so an
-/// operator can name `read-only`/`agent`/`agent-full-access` directly.
-fn codex_acp_mode(mode: &str) -> String {
-    match mode.trim() {
-        "bypassPermissions" => "agent-full-access".to_string(),
-        // codex-acp has no distinct auto-approve mode. `agent` supplies the
-        // workspace sandbox; Loom answers its one-shot approval requests.
-        "acceptEdits" | "default" | "auto" | "" => CODEX_AGENT_MODE.to_string(),
-        "plan" => "read-only".to_string(),
-        other => other.to_string(),
+/// operator can name `read-only`/`agent`/`agent-full-access` directly. An id
+/// codex has no equivalent for is rejected rather than silently booting in
+/// `agent` — a different permission posture than the caller asked for.
+fn codex_acp_mode(mode: &str) -> Result<String> {
+    match acp_mode_for(BuiltinAgentKind::Codex, mode) {
+        Some(mapped) => Ok(mapped.to_string()),
+        None => Err(anyhow::anyhow!(
+            "codex has no '{mode}' mode (modes: {})",
+            BuiltinAgentKind::Codex.acp_modes().join(", ")
+        )),
     }
 }
 
@@ -2061,11 +2377,13 @@ impl<'a> AgentManager<'a> {
                 server_addr: "127.0.0.1:0",
                 model: "",
                 effort: "",
+                fast: "",
                 goal_file: None,
                 primer_file: None,
                 extra_env: &launch_policy.extra_env,
                 env_clear: launch_policy.env_clear,
                 mode: launch_policy.mode,
+                mode_from_live: false,
                 prelude: launch_policy.prelude,
                 restricted: launch_policy.restricted,
                 allowed_tools: &launch_policy.allowed_tools,
@@ -2144,6 +2462,7 @@ fn transient_prompt_launch(
     env.retain(|name, _| {
         !name.starts_with("WEAVER_")
             && !name.starts_with("LOOM_")
+            && !crate::env_policy::is_boot_only_env(name)
             && !matches!(
                 name.as_str(),
                 "GH_TOKEN"
@@ -2165,6 +2484,7 @@ fn transient_prompt_launch(
     launch.mode = Some("plan".to_string());
     launch.initial_model = None;
     launch.initial_effort = None;
+    launch.initial_fast = None;
     if let NewOrLoad::New {
         meta: Some(meta), ..
     } = &mut launch.new_or_load
@@ -2360,40 +2680,134 @@ mod tests {
     }
 
     #[test]
-    fn codex_catalog_replaces_stale_fallback_choices() {
-        let mut metadata = CODEX_AGENT_TYPE.metadata();
-        apply_codex_catalog(
-            &mut metadata,
-            br#"{"models":[
-                {"slug":"gpt-next","display_name":"GPT Next","visibility":"list",
-                 "supported_reasoning_levels":[{"effort":"low"},{"effort":"ultra"}]},
-                {"slug":"hidden","display_name":"Hidden","visibility":"hide",
-                 "supported_reasoning_levels":[{"effort":"medium"}]}
-            ]}"#,
-        );
-        assert_eq!(
-            metadata
-                .models
-                .iter()
-                .map(|choice| choice.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["gpt-next"]
-        );
-        assert_eq!(
-            metadata
-                .efforts
-                .iter()
-                .map(|choice| (choice.id.as_str(), choice.label.as_str()))
-                .collect::<Vec<_>>(),
-            vec![("low", "Low"), ("ultra", "Ultra")]
-        );
-    }
-
-    #[test]
     fn claude_accepts_versioned_model_names() {
         let metadata = CLAUDE_AGENT_TYPE.metadata();
 
         assert!(validate_model(&metadata, "claude-opus-4-8").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_stored_catalogue_model_saves_though_the_static_list_omits_it() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let metadata = CODEX_AGENT_TYPE.metadata();
+        // Codex has a fixed list, so a model the probe discovered is not in it.
+        assert!(validate_model(&metadata, "gpt-7-nova").is_err());
+        sqlx::query(
+            "INSERT INTO harness_model_catalog (harness, model_id, label)
+             VALUES ('codex', 'gpt-7-nova', 'GPT-7 Nova')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert!(validate_model_of(&db, &metadata, "gpt-7-nova")
+            .await
+            .is_ok());
+        // The static list still governs models the store does not list.
+        assert!(validate_model_of(&db, &metadata, "gpt-99-imaginary")
+            .await
+            .is_err());
+        // A raw-model harness ignores both lists entirely.
+        assert!(
+            validate_model_of(&db, &CLAUDE_AGENT_TYPE.metadata(), "anything")
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_effort_does_not_gate_builtins_on_the_store() {
+        let opencode = OPENCODE_AGENT_TYPE.metadata();
+        assert!(validate_effort(&opencode, "glm-flash", "not-in-any-list").is_ok());
+        assert!(validate_effort(&opencode, "glm-flash", "").is_ok());
+
+        let mut custom = meta_for("helper", "terminal", false);
+        custom.builtin = false;
+        custom.efforts = vec![AgentChoice::leaf("low", "Low")];
+        assert!(validate_effort(&custom, "", "low").is_ok());
+        assert!(validate_effort(&custom, "", "high").is_err());
+    }
+
+    #[test]
+    fn new_builtin_harnesses_are_registered() {
+        for kind in ["opencode", "cursor-agent"] {
+            assert!(
+                builtin_agent_type(kind).is_some(),
+                "{kind} should resolve to a builtin"
+            );
+            assert!(
+                builtin_metadata().iter().any(|m| m.kind == kind),
+                "{kind} should appear in the picker list"
+            );
+        }
+        assert!(OPENCODE_AGENT_TYPE.metadata().supports_acp);
+        assert!(CURSOR_AGENT_TYPE.metadata().supports_acp);
+        assert!(OPENCODE_AGENT_TYPE.metadata().models.is_empty());
+        assert!(CURSOR_AGENT_TYPE.metadata().models.is_empty());
+    }
+
+    #[test]
+    fn new_harness_launch_commands() {
+        let primer = Path::new("/x/primer.txt");
+        let goal = Path::new("/x/goal.txt");
+
+        // Cursor: `--model` verbatim (the exact advertised bracket string); a
+        // fresh run takes the goal positionally, falling back to the primer
+        // when there is no goal.
+        let ctx = test_ctx(Some(goal), Some(primer), "grok-4.6[effort=high]", "");
+        assert_eq!(
+            cursor_agent_command("cursor-agent", &ctx, LaunchMode::Fresh),
+            "cursor-agent --model 'grok-4.6[effort=high]' \"$(cat '/x/goal.txt')\""
+        );
+        assert_eq!(
+            cursor_agent_command("cursor agent", &ctx, LaunchMode::Adopt),
+            "cursor agent --continue --model 'grok-4.6[effort=high]'"
+        );
+
+        let oc = test_ctx(None, None, "opencode/gpt-5.4", "");
+        assert_eq!(
+            opencode_command(&oc, LaunchMode::Fresh),
+            "opencode --model 'opencode/gpt-5.4'"
+        );
+        assert_eq!(
+            opencode_command(&oc, LaunchMode::Adopt),
+            "opencode --continue --model 'opencode/gpt-5.4'"
+        );
+    }
+
+    #[test]
+    fn a_builtin_without_an_acp_adapter_cannot_be_forced_to_acp() {
+        let mut terminal_only = meta_for("terminal-only", "terminal", true);
+        terminal_only.supports_acp = false;
+        assert!(resolve_protocol(&terminal_only, Some("acp")).is_err());
+        assert_eq!(
+            resolve_protocol(&terminal_only, Some("terminal")).unwrap(),
+            "terminal"
+        );
+        // The ACP builtins still opt in.
+        assert_eq!(
+            resolve_protocol(&meta_for("opencode", "acp", true), Some("terminal")).unwrap(),
+            "terminal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_executable_file_rejects_directories_and_unset_execute_bits() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(!is_executable_file(&dir.path().join("missing")));
+
+        let subdir = dir.path().join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+        assert!(!is_executable_file(&subdir));
+
+        let plain = dir.path().join("plain");
+        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
+        assert!(!is_executable_file(&plain));
+
+        let script = dir.path().join("script");
+        write_executable(&script, "#!/bin/sh\n");
+        assert!(is_executable_file(&script));
     }
 
     fn custom_agent(name: &str, setup: &str, launch: &str, resume: &str) -> CustomAgent {
@@ -2606,6 +3020,8 @@ mod tests {
             mode: Some("plan".to_string()),
             initial_model: Some("expensive".to_string()),
             initial_effort: Some("high".to_string()),
+            initial_fast: None,
+            harness: String::new(),
             goal: Some("real goal".to_string()),
             setup_timeout: Duration::from_secs(30),
         };
@@ -2667,6 +3083,8 @@ mod tests {
             mode: Some("bypassPermissions".to_string()),
             initial_model: Some("opus".to_string()),
             initial_effort: Some("high".to_string()),
+            initial_fast: None,
+            harness: String::new(),
             goal: Some("live goal".to_string()),
             setup_timeout: Duration::from_secs(30),
         };
@@ -2849,6 +3267,8 @@ mod tests {
             builtin,
             supports_acp: builtin || protocol == "acp",
             protocol: protocol.to_string(),
+            available: None,
+            modes: Vec::new(),
         }
     }
 
@@ -3062,22 +3482,184 @@ mod tests {
         // overridden. Codex uses its workspace-write `agent` sandbox mode while
         // Loom owns its one-shot approval decisions.
         assert_eq!(DEFAULT_ACP_MODE, "auto");
-        assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE), "agent");
+        assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE).unwrap(), "agent");
     }
 
     #[test]
     fn codex_acp_mode_maps_the_claude_vocabulary_and_passes_codex_ids_through() {
-        assert_eq!(codex_acp_mode("bypassPermissions"), "agent-full-access");
-        assert_eq!(codex_acp_mode("acceptEdits"), "agent");
-        assert_eq!(codex_acp_mode("default"), "agent");
+        assert_eq!(
+            codex_acp_mode("bypassPermissions").unwrap(),
+            "agent-full-access"
+        );
+        assert_eq!(codex_acp_mode("acceptEdits").unwrap(), "agent");
+        assert_eq!(codex_acp_mode("default").unwrap(), "agent");
         // Loom-owned auto-approval is configured separately; the sandbox remains
         // `agent`.
-        assert_eq!(codex_acp_mode("auto"), "agent");
-        assert_eq!(codex_acp_mode(""), "agent");
-        assert_eq!(codex_acp_mode("plan"), "read-only");
+        assert_eq!(codex_acp_mode("auto").unwrap(), "agent");
+        assert_eq!(codex_acp_mode("").unwrap(), "agent");
+        assert_eq!(codex_acp_mode("plan").unwrap(), "read-only");
         // Codex's own ids are honoured verbatim.
-        assert_eq!(codex_acp_mode("read-only"), "read-only");
-        assert_eq!(codex_acp_mode("agent-full-access"), "agent-full-access");
+        assert_eq!(codex_acp_mode("read-only").unwrap(), "read-only");
+        assert_eq!(
+            codex_acp_mode("agent-full-access").unwrap(),
+            "agent-full-access"
+        );
+        // An id codex has no equivalent for is rejected rather than silently
+        // booting in a different permission posture.
+        assert!(codex_acp_mode("nonsense").is_err());
+    }
+
+    #[test]
+    fn opencode_and_cursor_map_onto_the_modes_their_adapters_advertise() {
+        // Both advertise exactly two modes; neither has accepted-edits or bypass.
+        for kind in [BuiltinAgentKind::OpenCode, BuiltinAgentKind::CursorAgent] {
+            assert_eq!(acp_mode_for(kind, "plan"), Some("plan"));
+            assert_eq!(acp_mode_for(kind, "default"), acp_mode_for(kind, "auto"));
+            assert_eq!(acp_mode_for(kind, "acceptEdits"), None);
+            assert_eq!(acp_mode_for(kind, "bypassPermissions"), None);
+            assert_eq!(
+                kind.acp_modes(),
+                vec!["auto", "default", "plan"],
+                "{} must offer only what it can honour",
+                kind.as_str()
+            );
+        }
+        // The default posture is the one each adapter uses natively.
+        assert_eq!(
+            acp_mode_for(BuiltinAgentKind::OpenCode, "default"),
+            Some("build")
+        );
+        assert_eq!(
+            acp_mode_for(BuiltinAgentKind::CursorAgent, "default"),
+            Some("agent")
+        );
+    }
+
+    #[test]
+    fn every_harness_offers_the_postures_it_can_map() {
+        for kind in BuiltinAgentKind::ALL {
+            for mode in kind.acp_modes() {
+                assert!(
+                    acp_mode_for(kind, mode).is_some(),
+                    "{} advertises {mode} without a mapping",
+                    kind.as_str()
+                );
+            }
+        }
+        assert_eq!(BuiltinAgentKind::Claude.acp_modes().len(), 5);
+    }
+
+    /// A respawn feeds `Session.current_mode` — the adapter's id, not a Loom
+    /// posture — back through `launch_mode`. Rejecting those ids made every
+    /// opencode (`build`) and cursor (`agent`/`ask`) relay respawn fail.
+    #[test]
+    fn launch_mode_replays_a_persisted_live_mode_id() {
+        for (runtime, live) in [
+            ("opencode", "build"),
+            ("opencode", "plan"),
+            ("cursor-agent", "agent"),
+            ("cursor-agent", "ask"),
+            ("codex", "read-only"),
+            ("claude", "bypassPermissions"),
+        ] {
+            assert_eq!(
+                launch_mode(runtime, None, live).unwrap(),
+                Some(live.to_string()),
+                "{runtime} must replay its persisted '{live}'"
+            );
+        }
+        // A posture the harness cannot express is still rejected rather than
+        // silently downgraded to a different permission posture.
+        assert!(launch_mode("opencode", None, "bypassPermissions").is_err());
+        assert!(launch_mode("cursor-agent", None, "acceptEdits").is_err());
+    }
+
+    /// The reported failure: a respawn replays the adapter's persisted mode id
+    /// (`build`) through `build_acp_launch`, which used to reject it before the
+    /// adapter was even started.
+    #[tokio::test]
+    async fn build_acp_launch_replays_opencode_s_persisted_mode() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let launch = build_acp_launch(
+            &db,
+            &AcpLaunchSpec {
+                session_id: "session-1",
+                branch_id: "branch-1",
+                runtime: "opencode",
+                work_dir: work_dir.path(),
+                server_addr: "127.0.0.1:7878",
+                model: "",
+                effort: "",
+                fast: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: false,
+                mode: "build",
+                mode_from_live: false,
+                prelude: "none",
+                restricted: false,
+                allowed_tools: "[]",
+                mcp_access:
+                    r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
+                custom: None,
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        .expect("a live session's own mode id must survive a respawn");
+        assert_eq!(launch.mode.as_deref(), Some("build"));
+    }
+
+    /// An adapter can advertise a mode Loom has never heard of — an Opencode
+    /// primary agent from `OPENCODE_CONFIG_CONTENT`, say. A respawn replays the
+    /// persisted id verbatim rather than failing on Loom's own allowlist.
+    #[tokio::test]
+    async fn build_acp_launch_replays_an_advertised_mode_loom_does_not_know() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let launch = build_acp_launch(
+            &db,
+            &AcpLaunchSpec {
+                session_id: "session-1",
+                branch_id: "branch-1",
+                runtime: "opencode",
+                work_dir: work_dir.path(),
+                server_addr: "127.0.0.1:7878",
+                model: "",
+                effort: "",
+                fast: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: false,
+                mode: "review-agent",
+                mode_from_live: true,
+                prelude: "none",
+                restricted: false,
+                allowed_tools: "[]",
+                mcp_access:
+                    r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
+                custom: None,
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        .expect("an adapter-advertised mode must replay verbatim");
+        assert_eq!(launch.mode.as_deref(), Some("review-agent"));
+        // Without the live flag the same id is a posture Loom cannot express.
+        assert!(launch_mode("opencode", None, "review-agent").is_err());
+    }
+
+    #[test]
+    fn fast_accepts_only_the_boolean_spellings() {
+        for ok in ["", "true", "false", " true "] {
+            assert!(validate_fast(ok).is_ok(), "rejected '{ok}'");
+        }
+        for bad in ["yes", "on", "TRUE", "1"] {
+            assert!(validate_fast(bad).is_err(), "accepted '{bad}'");
+        }
     }
 
     #[test]
@@ -3090,9 +3672,9 @@ mod tests {
         assert!(auto_approves_permissions("agent"));
         // codex full access round-trips through the launch mapping into the id
         // the gate recognizes.
-        assert!(auto_approves_permissions(&codex_acp_mode(
-            "bypassPermissions"
-        )));
+        assert!(auto_approves_permissions(
+            &codex_acp_mode("bypassPermissions").unwrap()
+        ));
         // Everything else must still prompt.
         for mode in ["auto", "acceptEdits", "default", "plan", "read-only", ""] {
             assert!(
@@ -3100,6 +3682,32 @@ mod tests {
                 "{mode} must not auto-approve"
             );
         }
+    }
+
+    #[test]
+    fn cursor_agent_mode_is_not_codex_agent_mode() {
+        // Codex's `agent` routes one-shot approvals to Loom; Cursor's `agent`
+        // prompts the client for every tool call. The same id must not turn
+        // Cursor's ordinary mode into a no-prompt posture.
+        use crate::agent_kind::{auto_approves_permissions_for, BuiltinAgentKind};
+        assert!(auto_approves_permissions_for(
+            Some(BuiltinAgentKind::Codex),
+            "agent"
+        ));
+        assert!(!auto_approves_permissions_for(
+            Some(BuiltinAgentKind::CursorAgent),
+            "agent"
+        ));
+        assert!(!auto_approves_permissions_for(
+            Some(BuiltinAgentKind::OpenCode),
+            "build"
+        ));
+        // An unknown harness keeps the historical reading.
+        assert!(auto_approves_permissions_for(None, "agent"));
+        assert!(auto_approves_permissions_for(
+            Some(BuiltinAgentKind::Claude),
+            "bypassPermissions"
+        ));
     }
 
     #[test]
@@ -3179,11 +3787,13 @@ mod tests {
                 server_addr: "127.0.0.1:7878",
                 model: "",
                 effort: "",
+                fast: "",
                 goal_file: None,
                 primer_file: None,
                 extra_env: &extra_env,
                 env_clear: true,
                 mode: "default",
+                mode_from_live: false,
                 prelude: "none",
                 restricted: true,
                 allowed_tools: r#"["Read(./**)","mcp__loom__github_issue_edit"]"#,

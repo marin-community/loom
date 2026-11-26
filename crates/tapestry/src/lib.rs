@@ -65,6 +65,12 @@ pub struct LaunchOptions<'a> {
     /// Start the supervisor and its child from an empty environment. The
     /// supplied `env` is then the complete child environment.
     pub env_clear: bool,
+    /// Names to drop from the environment the supervisor would otherwise
+    /// inherit. Applied only when `env_clear` is false, where the child
+    /// inherits the launcher's ambient environment: boot-only variables such
+    /// as a deploy secret the server consumes at startup must never reach a
+    /// session process.
+    pub strip_env: &'a [&'a str],
     pub cols: u16,
     pub rows: u16,
     /// Which backend to run. [`Mode::Pty`] (the default) keeps the historical
@@ -113,6 +119,7 @@ pub(crate) async fn spawn_derived(
         script: &launch.script,
         env: &env,
         env_clear: true,
+        strip_env: &[],
         cols: launch.cols,
         rows: launch.rows,
         mode: Mode::Pty,
@@ -141,7 +148,14 @@ fn encode_launch_spec_with_ambient(
 ) -> Result<Vec<u8>> {
     let mut env = BTreeMap::new();
     if !opts.env_clear {
-        env.extend(ambient);
+        // The spec is built from the launcher's ambient environment, so the
+        // strip has to happen here — removing the name from the supervisor's
+        // own process environment never reaches the child.
+        env.extend(
+            ambient
+                .into_iter()
+                .filter(|(name, _)| !opts.strip_env.contains(&name.as_str())),
+        );
     }
     env.extend(
         opts.env
@@ -236,6 +250,10 @@ pub async fn spawn_detached(opts: &LaunchOptions<'_>) -> Result<()> {
         let socket_dir = paths::run_dir();
         cmd.env_clear();
         cmd.env("WEAVER_TAPESTRY_DIR", socket_dir);
+    } else {
+        for name in opts.strip_env {
+            cmd.env_remove(name);
+        }
     }
     // `-` tells the supervisor to read its JSON spec from stdin (see below); the
     // spec never appears on argv.
@@ -351,6 +369,7 @@ mod tests {
             script: "agent --run",
             env: &env,
             env_clear: true,
+            strip_env: &[],
             cols: 100,
             rows: 40,
             mode: Mode::Relay,
@@ -376,6 +395,7 @@ mod tests {
             script: "true",
             env: &env,
             env_clear: false,
+            strip_env: &[],
             cols: 80,
             rows: 24,
             mode: Mode::Pty,
@@ -410,6 +430,7 @@ mod tests {
             script: "true",
             env: &[],
             env_clear: true,
+            strip_env: &[],
             cols: 80,
             rows: 24,
             mode: Mode::Pty,

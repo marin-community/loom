@@ -63,6 +63,12 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
             "name '{name}' is reserved: GitHub credentials are managed by Loom"
         ));
     }
+    if loom_ctx::env_policy::is_boot_only_env(name) {
+        return Err(format!(
+            "name '{name}' can only be set for Loom's own boot provisioning; \
+             sessions must not inherit it"
+        ));
+    }
     Ok(())
 }
 
@@ -156,6 +162,13 @@ mod tests {
         assert!(validate_name("WEAVER_ANYTHING").is_err());
         assert!(validate_name("GH_TOKEN").is_err());
         assert!(validate_name("GITHUB_TOKEN").is_err());
+    }
+
+    #[test]
+    fn validate_name_rejects_boot_only_variables() {
+        // The server consumes it at boot; a session or repo variable would
+        // hand the whole credential store to every session launched there.
+        assert!(validate_name("OPENCODE_CREDENTIALS_JSON").is_err());
     }
 
     #[tokio::test]

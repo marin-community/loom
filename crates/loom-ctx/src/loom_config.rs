@@ -57,8 +57,28 @@ pub struct LoomConfig {
     pub github_client_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_api_key: Option<String>,
+    /// Long-lived token from `claude setup-token`. Claude uses
+    /// `anthropic_api_key` when both are set, and does not refresh this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_code_oauth_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_auth_token: Option<String>,
+    /// Opencode's own config, delivered as the `OPENCODE_CONFIG_CONTENT`
+    /// environment variable — the one config channel opencode actually reads
+    /// (its v2 credential store is a database, not `auth.json`). API keys can
+    /// stay out of the JSON via opencode's `{env:NAME}` interpolation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_config_content: Option<String>,
+    /// Opencode credentials in the `opencode auth export` JSON format,
+    /// imported into opencode's shared credential store once per boot by the
+    /// server — never exported into session environments, and left untouched
+    /// when the store already carries them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode_credentials_json: Option<String>,
     /// Slack app-level token (`xapp-…`, needs `connections:write`) — opens the
     /// Socket Mode websocket. With both this and `slack_bot_token` set, loom
     /// connects to Slack and the `/marinbot` trigger goes live.
@@ -99,6 +119,8 @@ pub struct LoomConfig {
     /// Sources with spaces work; commas separate pairs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_skills: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<String>,
 }
 
 /// One field's identity in the shared `loom config` contract: its stable
@@ -185,10 +207,40 @@ pub static FIELDS: &[FieldSpec] = &[
         set_fn: |c, v| c.anthropic_api_key = Some(v),
     },
     FieldSpec {
+        env_name: "CLAUDE_CODE_OAUTH_TOKEN",
+        secret: true,
+        get_fn: |c| c.claude_code_oauth_token.as_deref(),
+        set_fn: |c, v| c.claude_code_oauth_token = Some(v),
+    },
+    FieldSpec {
         env_name: "OPENAI_API_KEY",
         secret: true,
         get_fn: |c| c.openai_api_key.as_deref(),
         set_fn: |c, v| c.openai_api_key = Some(v),
+    },
+    FieldSpec {
+        env_name: "CURSOR_API_KEY",
+        secret: true,
+        get_fn: |c| c.cursor_api_key.as_deref(),
+        set_fn: |c, v| c.cursor_api_key = Some(v),
+    },
+    FieldSpec {
+        env_name: "CURSOR_AUTH_TOKEN",
+        secret: true,
+        get_fn: |c| c.cursor_auth_token.as_deref(),
+        set_fn: |c, v| c.cursor_auth_token = Some(v),
+    },
+    FieldSpec {
+        env_name: "OPENCODE_CONFIG_CONTENT",
+        secret: true,
+        get_fn: |c| c.opencode_config_content.as_deref(),
+        set_fn: |c, v| c.opencode_config_content = Some(v),
+    },
+    FieldSpec {
+        env_name: "OPENCODE_CREDENTIALS_JSON",
+        secret: true,
+        get_fn: |c| c.opencode_credentials_json.as_deref(),
+        set_fn: |c, v| c.opencode_credentials_json = Some(v),
     },
     FieldSpec {
         env_name: "LOOM_SLACK_APP_TOKEN",
@@ -249,6 +301,12 @@ pub static FIELDS: &[FieldSpec] = &[
         secret: false,
         get_fn: |c| c.install_skills.as_deref(),
         set_fn: |c, v| c.install_skills = Some(v),
+    },
+    FieldSpec {
+        env_name: "LOOM_AGENTS",
+        secret: false,
+        get_fn: |c| c.agents.as_deref(),
+        set_fn: |c, v| c.agents = Some(v),
     },
 ];
 
@@ -474,7 +532,12 @@ mod tests {
                 "LOOM_GITHUB_WEBHOOK_SECRET",
                 "LOOM_GITHUB_CLIENT_SECRET",
                 "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
+                "CURSOR_API_KEY",
+                "CURSOR_AUTH_TOKEN",
+                "OPENCODE_CONFIG_CONTENT",
+                "OPENCODE_CREDENTIALS_JSON",
                 "LOOM_SLACK_APP_TOKEN",
                 "LOOM_SLACK_BOT_TOKEN",
             ]

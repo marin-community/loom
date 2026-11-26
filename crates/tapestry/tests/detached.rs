@@ -100,6 +100,7 @@ async fn env_clear_supervisor_keeps_the_default_socket_root() {
         script: "exec sleep 60",
         env: &[],
         env_clear: true,
+        strip_env: &[],
         cols: 80,
         rows: 24,
         mode: Mode::Pty,
@@ -144,6 +145,7 @@ async fn pty_and_relay_supervisors_derive_shells_with_their_exact_environment() 
             script: "exec sleep 60",
             env: &explicit,
             env_clear: false,
+            strip_env: &[],
             cols: 80,
             rows: 24,
             mode,
@@ -200,6 +202,55 @@ async fn pty_and_relay_supervisors_derive_shells_with_their_exact_environment() 
     std::env::remove_var("TAPESTRY_OWNER_AMBIENT");
 }
 
+/// `strip_env` drops a name the child would otherwise inherit. Loom's
+/// boot-only credential payload is stripped exactly this way, so a regression
+/// here would put a whole credential store into every session environment.
+#[tokio::test]
+#[serial]
+async fn strip_env_removes_an_inherited_variable_from_the_child() {
+    let home = TempDir::new().unwrap();
+    std::env::set_var("WEAVER_HOME", home.path());
+    std::env::set_var("TAPESTRY_STRIP_MARKER", "present");
+    let bin = std::path::Path::new(env!("CARGO_BIN_EXE_tapestry"));
+    let name = format!("tap-strip-{}", std::process::id());
+    tapestry::spawn_detached(&LaunchOptions {
+        name: &name,
+        cwd: &std::env::temp_dir(),
+        script: "printf 'marker:%s\\n' \"${TAPESTRY_STRIP_MARKER-unset}\"; exec sleep 60",
+        env: &[],
+        env_clear: false,
+        strip_env: &["TAPESTRY_STRIP_MARKER"],
+        cols: 80,
+        rows: 24,
+        mode: Mode::Pty,
+        segment_max_bytes: None,
+        supervisor_bin: Some(bin),
+    })
+    .await
+    .unwrap();
+
+    let mut screen = String::new();
+    for _ in 0..200 {
+        screen = Client::connect(&name)
+            .await
+            .unwrap()
+            .capture(0)
+            .await
+            .unwrap();
+        if screen.contains("marker:") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        screen.contains("marker:unset"),
+        "strip_env must drop the inherited name: {screen:?}"
+    );
+    let _ = Client::connect(&name).await.unwrap().kill().await;
+    std::env::remove_var("TAPESTRY_STRIP_MARKER");
+    std::env::remove_var("WEAVER_HOME");
+}
+
 /// Installing a new loom replaces the `tapestry` binary underneath every
 /// supervisor already running. `current_exe()` then reports a path that no
 /// longer exists (Linux appends ` (deleted)`), so a supervisor that re-execs
@@ -225,6 +276,7 @@ async fn derives_shells_after_its_own_binary_is_replaced() {
         script: "exec sleep 60",
         env: &[],
         env_clear: false,
+        strip_env: &[],
         cols: 80,
         rows: 24,
         mode: Mode::Pty,

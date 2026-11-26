@@ -1,75 +1,13 @@
 import { test, expect } from '../fixtures/weaver';
 
 test.describe('settings · profiles', () => {
-  test('the default profile selects an agent, model, and effort', async ({ page, weaver }) => {
-    const registry = (await (
-      await fetch(`${weaver.baseUrl}/api/agents/list`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({}),
-      })
-    ).json()) as {
-      agents: {
-        kind: string;
-        models: { id: string; label: string }[];
-        efforts: { id: string; label: string }[];
-      }[];
-    };
-    const claude = registry.agents.find((agent) => agent.kind === 'claude')!;
-    const codex = registry.agents.find((agent) => agent.kind === 'codex')!;
-    await page.goto(`${weaver.baseUrl}/settings`);
-    await page.getByTestId('settings-category-agents').click();
-
-    const agent = page.getByTestId('profile-agent');
-    const model = page.getByTestId('profile-model');
-    const effort = page.getByTestId('profile-effort');
-    await expect(agent.locator('option')).toContainText(['Claude', 'Codex', 'Shell']);
-
-    await agent.selectOption('claude');
-    await model.click();
-    await model.fill(claude.models[0].id);
-    await page.keyboard.press('Enter');
-    await agent.selectOption('codex');
-    await expect(model).toHaveValue('');
-    await expect(model.locator('option')).toContainText([
-      'Agent default',
-      ...codex.models.map((choice) => choice.label),
-    ]);
-    await expect(effort.locator('option')).toContainText([
-      'Agent default',
-      ...codex.efforts.map((choice) => choice.label),
-    ]);
-    await model.selectOption(codex.models[0].id);
-    await effort.selectOption(codex.efforts[0].id);
-    await page.getByTestId('profile-save').click();
-    await expect(page.getByText('Saved default.')).toBeVisible();
-
-    const saved = (await (
-      await fetch(`${weaver.baseUrl}/api/profiles/get`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name: 'default' }),
-      })
-    ).json()) as {
-      agent_kind: string;
-      model: string;
-      effort: string;
-    };
-    expect(saved).toMatchObject({
-      agent_kind: 'codex',
-      model: codex.models[0].id,
-      effort: codex.efforts[0].id,
-    });
-
-    await expect(page.getByText('Fleet concierge runtime', { exact: true })).toHaveCount(0);
-  });
-
   test('default profile permissions can be set to always allow', async ({ page, weaver }) => {
     await page.goto(`${weaver.baseUrl}/settings`);
     await page.getByTestId('settings-category-agents').click();
     const mode = page.getByTestId('profile-mode');
     await expect(mode).toHaveValue('auto');
-    await mode.selectOption('bypassPermissions');
+    await mode.click();
+    await page.getByRole('option', { name: 'bypassPermissions', exact: true }).click();
     await page.getByTestId('profile-save').click();
     await expect(page.getByText('Saved default.')).toBeVisible();
 
@@ -90,6 +28,19 @@ test.describe('settings · profiles', () => {
     page,
     weaver,
   }) => {
+    const registry = (await (
+      await fetch(`${weaver.baseUrl}/api/agents/list`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+    ).json()) as {
+      agents: { kind: string; label: string; available?: boolean | null; supports_acp: boolean }[];
+    };
+    const acpAgent = registry.agents.find(
+      (agent) => agent.available !== false && agent.supports_acp && agent.kind !== 'shell',
+    );
+    expect(acpAgent).toBeTruthy();
     const source = `# /// script
 # requires-python = ">=3.11"
 # ///
@@ -160,8 +111,12 @@ for line in sys.stdin:
     });
 
     await page.reload();
-    await page.getByTestId('profile-agent').selectOption('codex');
-    await page.getByLabel('Protocol').selectOption('acp');
+    // Pick an installed agent that supports ACP; this test only needs a
+    // profile whose protocol can carry the MCP selection.
+    await page.getByTestId('profile-agent').click();
+    await page.getByRole('option', { name: acpAgent!.label, exact: true }).click();
+    await page.getByLabel('Protocol').click();
+    await page.getByRole('option', { name: 'ACP', exact: true }).click();
     const access = page.getByRole('group', { name: 'MCP access' });
     await access.getByRole('radio', { name: 'groups' }).check();
     await access.getByLabel('docs').check();

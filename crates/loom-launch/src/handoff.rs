@@ -60,13 +60,59 @@ impl From<anyhow::Error> for HandoffError {
 
 type Result<T> = std::result::Result<T, HandoffError>;
 
-fn legacy_handoff_mode(requested: &Option<String>, current: &str) -> String {
-    requested
+fn legacy_handoff_mode(
+    requested: &Option<String>,
+    session: &Session,
+    target: &str,
+) -> Result<String> {
+    let requested = requested
         .as_deref()
         .map(str::trim)
-        .filter(|mode| !mode.is_empty())
-        .unwrap_or(current)
-        .to_string()
+        .filter(|mode| !mode.is_empty());
+    handoff_mode_for(
+        requested.unwrap_or(&session.launch_mode),
+        target,
+        &session.agent_kind,
+    )
+}
+
+/// Translate a mode for a handoff target.
+///
+/// A Loom posture passes through when the target can express it. A live
+/// session stores its adapter's own id, so a handoff to a different harness
+/// translates it back to a Loom posture first — otherwise Codex's `agent`
+/// would be handed to Claude as a mode it has never advertised. A posture the
+/// target cannot express asks for an explicit mode rather than silently
+/// leaving the target on a different permission posture.
+fn handoff_mode_for(mode: &str, target: &str, source: &str) -> Result<String> {
+    let mode = mode.trim();
+    if mode.is_empty() {
+        return Ok(String::new());
+    }
+    let (Some(target_kind), Some(source_kind)) = (
+        crate::agent_kind::BuiltinAgentKind::parse(target),
+        crate::agent_kind::BuiltinAgentKind::parse(source),
+    ) else {
+        // A custom agent's vocabulary is the operator's own, and an unknown
+        // source cannot tell us what its id meant.
+        return Ok(mode.to_string());
+    };
+    if source_kind == target_kind || target_kind.acp_modes().contains(&mode) {
+        return Ok(mode.to_string());
+    }
+    let posture = crate::agent_kind::loom_mode_for(source_kind, mode).ok_or_else(|| {
+        HandoffError::bad_request(format!(
+            "{source} mode '{mode}' has no Loom posture to hand off with; set an explicit mode \
+             for the target"
+        ))
+    })?;
+    if crate::agent_kind::acp_mode_for(target_kind, posture).is_none() {
+        return Err(HandoffError::bad_request(format!(
+            "{target} cannot express the source's '{posture}' posture; set an explicit mode \
+             for the target"
+        )));
+    }
+    Ok(posture.to_string())
 }
 
 fn handoff_selection(req: &sessions::handoff::Input, session: &Session) -> Result<LaunchSelection> {
@@ -94,7 +140,7 @@ fn handoff_selection(req: &sessions::handoff::Input, session: &Session) -> Resul
             effort: req.effort.clone(),
             // Absent or blank mode falls back to the live session's permission
             // posture, for the flattened handoff form.
-            mode: Some(legacy_handoff_mode(&req.mode, &session.launch_mode)),
+            mode: Some(legacy_handoff_mode(&req.mode, session, target)?),
             ..Default::default()
         },
     })
@@ -188,6 +234,7 @@ struct HandoffPlan {
     target: String,
     model: String,
     effort: String,
+    fast: String,
     mode: String,
     class: String,
     profile: String,
@@ -294,8 +341,10 @@ async fn legacy_handoff_plan(
         .map(str::trim)
         .unwrap_or_default()
         .to_string();
-    crate::agent::validate_model(&metadata, &model).map_err(HandoffError::bad_request)?;
-    crate::agent::validate_effort(&metadata, &effort).map_err(HandoffError::bad_request)?;
+    crate::agent::validate_model_of(&st.db, &metadata, &model)
+        .await
+        .map_err(HandoffError::bad_request)?;
+    crate::agent::validate_effort(&metadata, &model, &effort).map_err(HandoffError::bad_request)?;
     let protocol =
         crate::agent::resolve_protocol(&metadata, None).map_err(HandoffError::bad_request)?;
     if protocol != "acp" {
@@ -303,7 +352,7 @@ async fn legacy_handoff_plan(
             "agent '{target}' does not resolve to the ACP protocol required for handoff"
         )));
     }
-    let mode = legacy_handoff_mode(&req.mode, &session.launch_mode);
+    let mode = legacy_handoff_mode(&req.mode, session, target)?;
     if !matches!(
         mode.as_str(),
         "auto" | "default" | "acceptEdits" | "plan" | "bypassPermissions"
@@ -346,10 +395,14 @@ async fn legacy_handoff_plan(
             .policy
             .instructions
     };
+    let fast = crate::launch::deserialize_snapshot(&session.launch_snapshot)
+        .map(|snapshot| snapshot.view.fast)
+        .unwrap_or_default();
     Ok(HandoffPlan {
         target: target.to_string(),
         model: model.clone(),
         effort: effort.clone(),
+        fast,
         mode: mode.clone(),
         class: session.class.clone(),
         profile: session.profile.clone(),
@@ -493,6 +546,7 @@ async fn handoff_session_inner(
             target: resolved.view.agent.clone(),
             model: resolved.view.model.clone(),
             effort: resolved.view.effort.clone(),
+            fast: resolved.view.fast.clone(),
             mode: resolved.view.mode.clone(),
             class: resolved.view.class.clone(),
             profile: resolved.profile.name.clone(),
@@ -698,11 +752,13 @@ async fn handoff_session_inner(
             server_addr: &st.addr,
             model: &model,
             effort: &effort,
+            fast: &plan.fast,
             goal_file: None,
             primer_file: None,
             extra_env: &extra_env,
             env_clear: plan.env_clear,
             mode: &mode,
+            mode_from_live: false,
             prelude: &plan.prelude,
             restricted: plan.restricted,
             allowed_tools: &handoff_policy.allowed_tools,
@@ -966,18 +1022,60 @@ async fn handoff_session_inner(
 
 #[cfg(test)]
 mod tests {
-    use super::legacy_handoff_mode;
+    use super::handoff_mode_for;
 
     #[test]
-    fn legacy_handoff_inherits_current_mode_when_omitted_or_blank() {
-        assert_eq!(legacy_handoff_mode(&None, "acceptEdits"), "acceptEdits");
+    fn a_loom_posture_passes_through_to_the_target() {
         assert_eq!(
-            legacy_handoff_mode(&Some(" ".to_string()), "acceptEdits"),
+            handoff_mode_for("acceptEdits", "claude", "claude").unwrap(),
             "acceptEdits"
         );
         assert_eq!(
-            legacy_handoff_mode(&Some(" plan ".to_string()), "acceptEdits"),
+            handoff_mode_for(" plan ", "opencode", "claude").unwrap(),
             "plan"
         );
+        assert_eq!(handoff_mode_for("", "claude", "codex").unwrap(), "");
+    }
+
+    /// The live session persists its adapter's id; handing it to a different
+    /// harness must translate it to a posture the target speaks.
+    #[test]
+    fn a_source_adapter_id_becomes_a_target_posture() {
+        assert_eq!(
+            handoff_mode_for("agent", "claude", "codex").unwrap(),
+            "default"
+        );
+        assert_eq!(
+            handoff_mode_for("read-only", "claude", "codex").unwrap(),
+            "plan"
+        );
+        assert_eq!(
+            handoff_mode_for("read-only", "opencode", "codex").unwrap(),
+            "plan"
+        );
+        assert_eq!(
+            handoff_mode_for("build", "claude", "opencode").unwrap(),
+            "default"
+        );
+        // Same harness: the id it advertises is already the answer.
+        assert_eq!(
+            handoff_mode_for("build", "opencode", "opencode").unwrap(),
+            "build"
+        );
+    }
+
+    #[test]
+    fn an_untranslatable_source_mode_asks_for_an_explicit_one() {
+        // Cursor's `ask` has no Loom posture.
+        match handoff_mode_for("ask", "claude", "cursor-agent").unwrap_err() {
+            crate::handoff::HandoffError::BadRequest(message) => {
+                assert!(message.contains("set an explicit mode"), "{message}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        // Codex full access translates to a posture Opencode cannot express.
+        assert!(handoff_mode_for("agent-full-access", "opencode", "codex").is_err());
+        // A plain unknown id is rejected too.
+        assert!(handoff_mode_for("nonsense", "claude", "opencode").is_err());
     }
 }

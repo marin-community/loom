@@ -711,7 +711,11 @@ pub(crate) fn default_app_name(base_url: &str) -> String {
 
 /// `loom setup secrets` — prompt for the paste-once agent secrets and store
 /// them as operator environment variables (`crate::agent_env`), exported into
-/// every session loom launches from then on.
+/// every session loom launches from then on, and write them into `loom.toml`
+/// so `loom config render-env` carries them to a container deploy.
+/// `OPENCODE_CREDENTIALS_JSON` lands in `loom.toml` alone: the server imports
+/// it into Opencode's shared credential store at boot, and it must not become
+/// a per-profile variable.
 pub(crate) async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
     use std::io::IsTerminal;
     if !std::io::stdin().is_terminal() {
@@ -733,39 +737,53 @@ pub(crate) async fn cmd_setup_secrets(opts: SecretsOpts) -> Result<()> {
         .collect();
 
     println!("Paste-once secrets for the default profile (leave blank to skip).");
-    let anthropic = prompt_secret(
-        "ANTHROPIC_API_KEY",
-        existing_names.contains("ANTHROPIC_API_KEY"),
-    )?;
-    let openai = prompt_secret("OPENAI_API_KEY", existing_names.contains("OPENAI_API_KEY"))?;
-
-    if anthropic.is_none() && openai.is_none() {
+    let secrets: &[(&str, &str, bool)] = &[
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY", true),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", true),
+        ("OPENAI_API_KEY", "OPENAI_API_KEY", true),
+        ("CURSOR_API_KEY", "CURSOR_API_KEY", true),
+        ("CURSOR_AUTH_TOKEN", "CURSOR_AUTH_TOKEN", true),
+        (
+            "OPENCODE_CONFIG_CONTENT",
+            "OPENCODE_CONFIG_CONTENT (opencode.json as one line)",
+            true,
+        ),
+        (
+            "OPENCODE_CREDENTIALS_JSON",
+            "OPENCODE_CREDENTIALS_JSON (opencode auth export JSON as one line)",
+            false,
+        ),
+    ];
+    let mut entered: Vec<(&str, String, bool)> = Vec::new();
+    for (name, prompt, profile_env) in secrets {
+        if let Some(value) = prompt_secret(prompt, existing_names.contains(*name))? {
+            entered.push((*name, value, *profile_env));
+        }
+    }
+    if entered.is_empty() {
         println!("nothing entered — existing values kept unchanged");
         return Ok(());
     }
 
     let mut stored = Vec::new();
-    if let Some(v) = &anthropic {
-        crate::agent_env::set(&db, "ANTHROPIC_API_KEY", v).await?;
-        stored.push("ANTHROPIC_API_KEY");
+    for (name, value, profile_env) in &entered {
+        if *profile_env {
+            crate::agent_env::set(&db, name, value).await?;
+            stored.push(*name);
+        }
     }
-    if let Some(v) = &openai {
-        crate::agent_env::set(&db, "OPENAI_API_KEY", v).await?;
-        stored.push("OPENAI_API_KEY");
+    if !stored.is_empty() {
+        println!();
+        println!(
+            "Stored {} on the default profile — future sessions using that profile get them \
+             (Settings → Agents & profiles in the web UI, or `loom settings env list`).",
+            stored.join(", ")
+        );
     }
-    println!();
-    println!(
-        "Stored {} on the default profile — future sessions using that profile get them \
-         (Settings → Agents & profiles in the web UI, or `loom settings env list`).",
-        stored.join(", ")
-    );
-    let mut updates: Vec<(&str, &str)> = Vec::new();
-    if let Some(v) = &anthropic {
-        updates.push(("ANTHROPIC_API_KEY", v.as_str()));
-    }
-    if let Some(v) = &openai {
-        updates.push(("OPENAI_API_KEY", v.as_str()));
-    }
+    let updates: Vec<(&str, &str)> = entered
+        .iter()
+        .map(|(name, value, _)| (*name, value.as_str()))
+        .collect();
     crate::loom_config::upsert(&opts.config.config, &updates)
         .context("writing the paste-once secrets into loom.toml")?;
     println!(
