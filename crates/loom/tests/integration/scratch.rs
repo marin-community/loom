@@ -321,3 +321,35 @@ async fn reused_worktree_launch_and_live_upload_share_one_inventory_boundary() {
         .count();
     assert_eq!(files, 20);
 }
+
+/// A plain launch seeds the agent's gitignored `.agent-scratch/` slot — the
+/// home of the agent's own throwaway work — while the user's `scratch/` stays
+/// absent until an attachment creates it.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_launch_seeds_the_agent_slot_and_leaves_scratch_alone() {
+    let ts = TestServer::start().await;
+    let ws = ts
+        .client
+        .post(
+            "/api/sessions/launch",
+            json!({
+                "goal": "scratch seed test",
+                "cwd": ts.cwd(),
+                "agent": "shell",
+            }),
+        )
+        .await
+        .unwrap();
+    let work_dir = Path::new(ws["work_dir"].as_str().unwrap());
+    let agent = work_dir.join(".agent-scratch");
+    assert!(agent.is_dir(), ".agent-scratch/ exists from launch");
+    assert_eq!(
+        std::fs::read_to_string(agent.join(".gitignore")).unwrap(),
+        "*\n"
+    );
+    assert!(
+        !work_dir.join("scratch").exists(),
+        "scratch/ is created by attachments, not by launch"
+    );
+}

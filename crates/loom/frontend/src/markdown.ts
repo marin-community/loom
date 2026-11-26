@@ -13,6 +13,7 @@ import type Token from 'markdown-it/lib/token.mjs';
 import type { IssueRefStatus } from './types';
 import { operationPath } from './api';
 import { isLocalHref } from './lib/localLinks';
+import { classifyImageSource } from './lib/markdownImages';
 
 /** Where to resolve image sources: relative paths use the session's raw
  *  worktree endpoint; `artifact:<name>` uses the stored artifact's raw image
@@ -32,31 +33,8 @@ export interface RenderContext {
 }
 
 // ---------------------------------------------------------------------------
-// Path + URL helpers for relative image resolution
+// URL helpers for image resolution
 // ---------------------------------------------------------------------------
-
-/** True for links we must leave untouched: absolute URLs, protocol-relative,
- *  root-absolute, fragments, and anything with a scheme (mailto:, data:, …). */
-export function isExternal(url: string): boolean {
-  return (
-    /^[a-z][a-z0-9+.-]*:/i.test(url) || // scheme:  http:  data:  mailto:
-    url.startsWith('//') ||
-    url.startsWith('/') ||
-    url.startsWith('#')
-  );
-}
-
-/** Resolve `rel` against directory `dir` (both `/`-separated, repo-relative),
- *  collapsing `.`/`..` segments. Returns a clean repo-relative path. */
-export function resolvePath(dir: string, rel: string): string {
-  const stack = dir ? dir.split('/') : [];
-  for (const part of rel.split('/')) {
-    if (part === '' || part === '.') continue;
-    if (part === '..') stack.pop();
-    else stack.push(part);
-  }
-  return stack.join('/');
-}
 
 /** Raw endpoint for an image artifact, optionally pinned to one revision. The
  *  browser's image loader wants bytes, so this is `artifacts.raw` (`io =
@@ -67,29 +45,35 @@ export function artifactImageUrl(sessionId: string, name: string, rev?: number):
   return rev == null ? `${path}?${query}` : `${path}?${query}&rev=${rev}`;
 }
 
+/** Raw endpoint for an image at a host-absolute path. Agents embed host paths
+ *  in their prose (`![shot](/tmp/shot.png)`, `file:///…`) that a browser
+ *  cannot fetch; loom serves the bytes instead, sniffed server-side to a
+ *  supported raster format. */
+export function hostImageUrl(sessionId: string, path: string): string {
+  const query = `session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(path)}`;
+  return `${operationPath('sessions.image')}?${query}`;
+}
+
 /** Map a markdown image source to a viewable URL. `artifact:<name>` resolves
- *  against loom's artifact store; other relative paths point at the worktree's
- *  raw-bytes endpoint, while external links pass through unchanged. */
+ *  against loom's artifact store; host-absolute paths against the session's
+ *  image endpoint; other relative paths against the worktree's raw-bytes
+ *  endpoint. External links pass through unchanged. The classification itself
+ *  lives in `lib/markdownImages.ts`. */
 export function resolveUrl(ctx: RenderContext, url: string): string {
-  if (url.startsWith('artifact:')) {
-    const name = url.slice('artifact:'.length);
-    if (name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name)) {
-      return artifactImageUrl(ctx.sessionId, name);
-    }
-  }
-  if (!url || isExternal(url)) return url;
   const dir = ctx.filePath.includes('/')
     ? ctx.filePath.slice(0, ctx.filePath.lastIndexOf('/'))
     : '';
-  let relative: string;
-  try {
-    // Markdown URLs are encoded; the raw operation expects a filesystem path.
-    relative = decodeURIComponent(url.split(/[?#]/, 1)[0]);
-  } catch {
-    return url;
+  const source = classifyImageSource(dir, url);
+  switch (source.kind) {
+    case 'artifact':
+      return artifactImageUrl(ctx.sessionId, source.name);
+    case 'host':
+      return hostImageUrl(ctx.sessionId, source.path);
+    case 'worktree':
+      return `${operationPath('sessions.raw')}?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(source.path)}`;
+    case 'external':
+      return source.url;
   }
-  const path = resolvePath(dir, relative);
-  return `${operationPath('sessions.raw')}?session=${encodeURIComponent(ctx.sessionId)}&path=${encodeURIComponent(path)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,8 +133,9 @@ async function getMarkdownIt(): Promise<MarkdownIt> {
       }),
     });
 
-    // Artifact-backed image sources point at loom's raw artifact endpoint;
-    // other relative sources point at the worktree's raw-bytes endpoint.
+    // Artifact-backed image sources point at loom's raw artifact endpoint,
+    // host-absolute sources at the session's image endpoint, and other
+    // relative sources at the worktree's raw-bytes endpoint.
     const defaultImage =
       md.renderer.rules.image ??
       ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
@@ -323,10 +308,12 @@ export async function parseMarkdown(src: string, ctx: RenderContext): Promise<To
  *  and task-list plugins produce as `html_inline`. Same policy as the old
  *  whole-document sanitise — external links open in a new tab with the opener
  *  neutralised, while in-page anchors, the smartdoc `data-*` links, and hrefs on
- *  this loom server stay same-tab. The link hook is added and removed around
- *  each call so it never bleeds into another DOMPurify user (e.g. MermaidBlock's
- *  SVG sanitise). */
-export type Sanitizer = (html: string) => string;
+ *  this loom server stay same-tab — and `<img src>` inside the HTML resolves
+ *  through the same context the markdown tokens use, so raw-HTML images fetch
+ *  from loom's endpoints instead of an unresolvable path. The hooks are added
+ *  and removed around each call so they never bleed into another DOMPurify
+ *  user (e.g. MermaidBlock's SVG sanitise). */
+export type Sanitizer = (html: string, ctx: RenderContext) => string;
 
 let sanitizerPromise: Promise<Sanitizer> | null = null;
 export function loadSanitizer(): Promise<Sanitizer> {
@@ -344,17 +331,30 @@ export function loadSanitizer(): Promise<Sanitizer> {
         node.setAttribute('rel', 'noopener noreferrer');
       }
     };
-    return (html: string) => {
+    return (html: string, ctx: RenderContext) => {
+      // Created inside the call so it captures this render's context; added
+      // and removed around the sanitize pass like the link hook, so it never
+      // bleeds into another DOMPurify user.
+      const imgHook = (node: Element) => {
+        if (node.tagName !== 'IMG') return;
+        const src = node.getAttribute('src');
+        if (src) node.setAttribute('src', resolveUrl(ctx, src));
+      };
       DOMPurify.addHook('afterSanitizeAttributes', linkHook);
+      DOMPurify.addHook('afterSanitizeAttributes', imgHook);
       try {
         // Defaults already allow the tags/attrs the plugins emit (`a`, `span`,
-        // `input[type=checkbox]`, `label`, `class`, `id`); `target` plus the
+        // `input[type=checkbox]`, `label`, `img`, `class`, `id`); `target` plus the
         // smartdoc `data-*` hooks keep the new-tab and SPA-link interception.
         return DOMPurify.sanitize(html, {
           ADD_ATTR: ['target', 'data-issue', 'data-status', 'data-artifact'],
         });
       } finally {
-        DOMPurify.removeHook('afterSanitizeAttributes');
+        // removeHook pops only the last hook when no function is passed, so
+        // each hook is removed by name — a bare call here would leak one
+        // `linkHook` per render into every later sanitize, Mermaid's included.
+        DOMPurify.removeHook('afterSanitizeAttributes', linkHook);
+        DOMPurify.removeHook('afterSanitizeAttributes', imgHook);
       }
     };
   })();

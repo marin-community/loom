@@ -8,6 +8,7 @@ description = "GitHub integration, repository registry, and runtime lifecycle."
 test-support = []
 
 [dependencies]
+loom-ctx = { path = "../loom-ctx" }
 loom-editor = { path = "../loom-editor" }
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }

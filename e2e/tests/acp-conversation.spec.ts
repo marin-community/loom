@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { test, expect } from '../fixtures/weaver';
 import type { Session, WeaverFixture } from '../fixtures/weaver';
 import { join } from 'path';
-import { unlinkSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'fs';
 
 // The Conversation surface for an ACP session (`protocol='acp'`): a live,
 // journal-backed transcript rendered as typeset dialogue — serif prose for the
@@ -1914,5 +1914,62 @@ test.describe('acp conversation', () => {
     await expect
       .poll(() => returned.evaluate((el) => el.scrollTop), { timeout: 5_000 })
       .toBeGreaterThan(before * 0.6);
+  });
+  // Agents embed absolute paths in their prose (`![mockup](/abs/shot.png)`);
+  // the conversation view maps them to the session's image endpoint, which is
+  // confined to the session's own worktree. A source that is not there yet
+  // (an agent announcing a shot before writing it) degrades to a card naming
+  // the path — with a retry that picks the bytes up once they land.
+  test('agent prose renders worktree images inline and retries late writes', async ({
+    page,
+    weaver,
+  }) => {
+    const s = await openAcp(page, weaver, {
+      goal: 'say:ready',
+      name: 'inline-worktree-images',
+    });
+    const shot = join(s.work_dir, '.agent-scratch', 'option-a.png');
+    const late = join(s.work_dir, '.agent-scratch', 'late.png');
+    const png = readFileSync(join(__dirname, '../../crates/loom/frontend/src/favicon-32.png'));
+    try {
+      writeFileSync(shot, png);
+      await expect(page.getByText('ready', { exact: true })).toBeVisible();
+
+      // Option A's bytes exist; the late shot does not yet.
+      await page.getByTestId('acp-composer-input').fill(
+        `say:Two renders: ![option A](${shot}) and ![the late one](${late})`,
+      );
+      await page.getByTestId('acp-composer-send').click();
+      const conv = page.getByTestId('acp-conversation');
+
+      // The absolute worktree path resolves to the session's image endpoint…
+      const img = conv.locator('img[alt="option A"]').first();
+      await expect(img).toHaveAttribute(
+        'src',
+        `/api/sessions/image?session=${s.id}&path=${encodeURIComponent(shot)}`,
+      );
+      // …and the served bytes decode: the image really displays.
+      await expect
+        .poll(() => img.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+        .toBeGreaterThan(0);
+
+      // A path with nothing behind it yet names itself instead of showing
+      // the broken-image icon.
+      const card = conv.getByTestId('markdown-image-fallback').first();
+      await expect(card).toContainText(late);
+      await expect(card).toContainText('the late one unavailable');
+
+      // The bytes land; one retry remounts the <img> and loads them.
+      writeFileSync(late, png);
+      await conv.getByTestId('markdown-image-retry').first().click();
+      const recovered = conv.locator('img[alt="the late one"]').first();
+      await expect
+        .poll(() => recovered.evaluate((el) => (el as HTMLImageElement).naturalWidth))
+        .toBeGreaterThan(0);
+    } finally {
+      for (const file of [shot, late]) {
+        if (existsSync(file)) unlinkSync(file);
+      }
+    }
   });
 });

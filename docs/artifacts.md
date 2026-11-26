@@ -180,7 +180,11 @@ of image extensions in Loom.
 
 The file viewer shares Markdown, sandboxed HTML, and image previews with the
 artifact viewer, and also displays plain text. Markdown images and
-links resolve relative to the file. HTML previews accept self-contained pages,
+links resolve relative to the file; an absolute spelling is served through
+the session's image endpoint when it names a file inside that session's own
+worktree, raster formats only — anything else degrades to a card naming the
+source.
+HTML previews accept self-contained pages,
 as HTML artifacts do. Text previews are limited to 2 MiB; binary and larger text
 files offer a download. File links show current worktree contents on load or
 Reload, with no artifact revisions or comments. They require the same session

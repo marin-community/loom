@@ -172,6 +172,41 @@
   max-width: 100%;
   background: var(--surface);
 }
+/* An inline image whose source could not be served: the browser's broken-image
+   icon names nothing, so the card carries the alt text and the source path. */
+.markdown-body .markdown-image-fallback {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: baseline;
+  gap: 0.45em;
+  padding: 0.1em 0.5em;
+  border: 1px dashed var(--line);
+  border-radius: 0.3rem;
+  background: var(--input);
+  color: var(--muted);
+  font-size: 0.85em;
+}
+.markdown-body .markdown-image-fallback code {
+  max-width: 28em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.markdown-body .markdown-image-retry {
+  flex: none;
+  padding: 0 0.35em;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.85em;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.markdown-body .markdown-image-retry:hover,
+.markdown-body .markdown-image-retry:focus-visible {
+  color: var(--fg);
+}
 
 /* Chat density — a conversation surface (`chat-prose` on its scroll root)
    reads denser than a document page: tighter leading, smaller block gaps,

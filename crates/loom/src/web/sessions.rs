@@ -703,6 +703,9 @@ async fn recover(st: &AppState, session: &Session, _branch: &Branch) -> Result<(
         } else {
             tracing::debug!(session = %session.id, "worktree still present, skipping rebuild");
         }
+        // The rebuilt (or pre-feature) worktree needs the agent's gitignored
+        // slot; the seeding logs and skips on failure, so recovery proceeds.
+        crate::scratch::ensure_agent_scratch(&work_dir).await;
 
         crate::lifecycle::transition_step(st, session, branch, "adopting", "Resuming agent")
             .await?;
@@ -845,6 +848,35 @@ fn rel_path(raw: &str) -> ApiResult<String> {
         ));
     }
     Ok(raw.to_owned())
+}
+
+/// Upper bound on one served host image, so a path pointing at something huge
+/// cannot be slurped into memory whole.
+const MAX_HOST_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Validate the absolute spelling of a worktree path (for
+/// [`image_session_bytes`]). Only the shape is checked here; confinement,
+/// existence, size, and image-ness are checked after reading.
+fn host_image_path(raw: &str) -> ApiResult<String> {
+    if raw.is_empty() {
+        return Err(AppError::bad_request("path is required"));
+    }
+    if !raw.starts_with('/') || raw.contains('\\') || raw.contains('\0') {
+        return Err(AppError::bad_request("path must be absolute"));
+    }
+    Ok(raw.to_owned())
+}
+
+/// Sniff a raster image's content type from its magic bytes via `infer`.
+/// The mime allow-list is the boundary: only inert rasters are ever served.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    let kind = infer::get(bytes)?;
+    match kind.mime_type() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" => {
+            Some(kind.mime_type())
+        }
+        _ => None,
+    }
 }
 
 async fn worktree_file(work_dir: &str, path: &str) -> ApiResult<PathBuf> {
@@ -2188,6 +2220,124 @@ pub(super) async fn raw_session_bytes(
         .into_response())
 }
 
+/// `sessions.image` — an image file's bytes for inline images in agent-authored
+/// markdown, addressed by an absolute path. The path is confined to the
+/// requesting session's own worktree — the same boundary `sessions.raw` holds —
+/// so the endpoint grants no reach beyond what the session already has; it only
+/// accepts the absolute spelling of a worktree path. Only bytes that sniff as a
+/// supported raster are served, so the response is always inert image content.
+///
+/// Like [`raw_session_bytes`], the authorization already ran in
+/// [`super::encodings`]; what is left here is the bytes.
+pub(super) async fn image_session_bytes(
+    st: &AppState,
+    input: &ops::image::Input,
+    if_none_match: Option<&header::HeaderValue>,
+) -> ApiResult<Response> {
+    let (session, _) = require_session(&st.db, &input.session).await?;
+    let path = host_image_path(&input.path)?;
+    // Canonicalize resolves symlinks on both sides, so a link planted inside
+    // the worktree still counts as wherever it lands.
+    let root = tokio::fs::canonicalize(&session.work_dir).await?;
+    let file = tokio::fs::canonicalize(&path)
+        .await
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => AppError::not_found("image"),
+            std::io::ErrorKind::PermissionDenied => {
+                AppError::new(StatusCode::FORBIDDEN, "image is not readable")
+            }
+            _ => error.into(),
+        })?;
+    if !file.starts_with(&root) {
+        return Err(AppError::bad_request(
+            "path is outside the session worktree",
+        ));
+    }
+    // Open once and read through the handle — its metadata is the post-open
+    // truth, and the bounded read caps a file grown mid-flight. `O_NONBLOCK`
+    // keeps a FIFO from parking the thread; `O_NOFOLLOW` catches a symlink
+    // raced in since the canonicalize.
+    let handle = tokio::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(&file)
+        .await
+        .map_err(|error| {
+            // `O_NOFOLLOW` firing means a symlink was planted between the
+            // canonicalize and this open — the same refusal as a non-file.
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                return AppError::bad_request("path is not a regular file");
+            }
+            match error.kind() {
+                std::io::ErrorKind::NotFound => AppError::not_found("image"),
+                std::io::ErrorKind::PermissionDenied => {
+                    AppError::new(StatusCode::FORBIDDEN, "image is not readable")
+                }
+                _ => error.into(),
+            }
+        })?;
+    let meta = handle.metadata().await?;
+    if !meta.is_file() {
+        return Err(AppError::bad_request("path is not a regular file"));
+    }
+    if meta.len() > MAX_HOST_IMAGE_BYTES {
+        return Err(AppError::bad_request("image exceeds the size limit"));
+    }
+    // Long transcripts re-enter these URLs as the list virtualizes; the tag
+    // changes when the file does, so a rewrite is picked up on reload. The
+    // comparison happens before the read, so a re-entry costs one open and a
+    // stat, not the whole file.
+    let etag = format!("\"{:x}-{:x}\"", meta.len(), meta_mtime_nanos(&meta));
+    if if_none_match
+        .map(|value| value.as_bytes() == etag.as_bytes())
+        .unwrap_or(false)
+    {
+        return Ok((
+            [
+                (header::ETAG, etag.as_str()),
+                (header::CACHE_CONTROL, "private, no-cache"),
+            ],
+            StatusCode::NOT_MODIFIED,
+        )
+            .into_response());
+    }
+    let mut bytes = Vec::with_capacity(meta.len().min(1024 * 1024) as usize);
+    use tokio::io::AsyncReadExt as _;
+    handle
+        .take(MAX_HOST_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_HOST_IMAGE_BYTES {
+        return Err(AppError::bad_request("image exceeds the size limit"));
+    }
+    let mime = sniff_image(&bytes).ok_or_else(|| AppError::not_found("image"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CONTENT_DISPOSITION, "inline"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (
+                header::HeaderName::from_static("cross-origin-resource-policy"),
+                "same-origin",
+            ),
+            (header::ETAG, etag.as_str()),
+            (header::CACHE_CONTROL, "private, no-cache"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// The mtime of a file's metadata, as nanoseconds since the epoch — the
+/// freshness half of the image ETag.
+fn meta_mtime_nanos(meta: &std::fs::Metadata) -> u128 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+}
+
 async fn op_url(context: OperationContext, input: ops::url::Input) -> ApiResult<SessionUrlView> {
     let st = &context.state;
     let (session, _) = require_session(&st.db, &input.session).await?;
@@ -2704,4 +2854,59 @@ async fn op_title_generation_set(
     crate::metadata_assist::set_title_enabled(&st.db, &session.id, input.enabled).await?;
     let (session, branch) = require_session(&st.db, &session.id).await?;
     session_view(&st.db, &session, &branch).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniffs_only_supported_raster_magic() {
+        assert_eq!(sniff_image(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(sniff_image(b"\xFF\xD8\xFF\xE0junk"), Some("image/jpeg"));
+        assert_eq!(sniff_image(b"GIF89a1"), Some("image/gif"));
+        assert_eq!(
+            sniff_image(b"RIFF\x24\x00\x00\x00WEBPVP8 "),
+            Some("image/webp")
+        );
+        // infer's BMP matcher is the two-byte `BM` check: any `BM`-prefixed
+        // bytes sniff as image/bmp.
+        let bmp = [
+            b'B', b'M', 0x36, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0x36, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(sniff_image(&bmp), Some("image/bmp"));
+        assert_eq!(sniff_image(b"BM\x36\x00"), Some("image/bmp"));
+        assert_eq!(sniff_image(b"BM"), Some("image/bmp"));
+        // Formats infer detects but the allow-list omits stay refused.
+        assert_eq!(sniff_image(b"\x00\x00\x01\x00icon"), None); // ICO
+                                                                // Anything a browser could treat as active content — or nothing at
+                                                                // all — is refused, not guessed from the extension.
+        assert_eq!(
+            sniff_image(b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"),
+            None
+        );
+        assert_eq!(sniff_image(b"%PDF-1.4 not really"), None);
+        assert_eq!(sniff_image(b""), None);
+        assert_eq!(sniff_image(b"RIFF\x24\x00\x00\x00"), None); // truncated before the form tag
+    }
+
+    /// A polyglot — raster magic followed by an HTML/script payload — is still
+    /// sniffed as inert image bytes: the content type is fixed by the magic,
+    /// and `nosniff` pins it, so a browser never reinterprets the tail as
+    /// markup however it is fetched.
+    #[test]
+    fn a_raster_polyglot_sniffs_as_inert_image_bytes() {
+        let polyglot: Vec<u8> = b"\x89PNG\r\n\x1a\n<script>alert(1)</script><img src=x>".to_vec();
+        assert_eq!(sniff_image(&polyglot), Some("image/png"));
+    }
+
+    #[test]
+    fn host_paths_must_be_absolute_and_unambiguous() {
+        assert!(host_image_path("/tmp/shot.png").is_ok());
+        assert!(host_image_path("").is_err());
+        assert!(host_image_path("shot.png").is_err());
+        assert!(host_image_path("relative/../../shot.png").is_err());
+        assert!(host_image_path("C:\\shot.png").is_err());
+        assert!(host_image_path("/tmp\0shot.png").is_err());
+    }
 }

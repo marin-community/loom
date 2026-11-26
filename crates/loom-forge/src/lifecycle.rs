@@ -1631,6 +1631,8 @@ pub async fn create_warm_session(
     git::worktree_add(&repo_root, &work_dir, &branch_name, &base)
         .await
         .map_err(|e| anyhow!(Refusal::Invalid(e.to_string())))?;
+    // Warm launches skip provisioning, so seed the agent slot here; failures only log.
+    loom_ctx::scratch::ensure_agent_scratch(&work_dir).await;
 
     let branch = branch_mod::upsert(&st.db, &repo_root_str, &branch_name, &base).await?;
     branch_mod::set_title(

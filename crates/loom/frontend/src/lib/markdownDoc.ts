@@ -60,7 +60,9 @@ export function useMarkdownDoc(
         loadSanitizer(),
       ]);
       if (mine !== runId) return;
-      ctx.value = { ...renderContext(), sanitize };
+      // The sanitiser resolves raw-HTML `<img src>` against this document's
+      // context, so HTML islands fetch from the same endpoints as token images.
+      ctx.value = { ...renderContext(), sanitize: (html) => sanitize(html, renderContext()) };
       tokens.value = toks;
       error.value = '';
       await nextTick();

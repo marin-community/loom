@@ -134,6 +134,24 @@ For local image resource links, Loom captures supported raster images up to
 10 MiB from the session worktree or the system temporary directory at tool
 completion. If capture fails, the tool detail explains why a preview is unavailable.
 
+Inline images in agent-authored Markdown resolve through Loom rather than the
+browser: a relative path reads the session's worktree, `artifact:<name>` reads
+the artifact store, and an absolute path is served by the session's image
+endpoint when — and only when — it names a file inside the session's own
+worktree, in a supported raster format by magic bytes. A source Loom cannot
+serve (a path outside the worktree, a file that is already gone) degrades to
+a card naming the path instead of the browser's broken-image icon, with a
+retry for the common case of an agent announcing a shot before writing it.
+Ephemeral chat images belong in the session's `.agent-scratch/` directory,
+which exists and is gitignored from launch: write `shot.png` there with any
+tool and embed it as `![alt](.agent-scratch/shot.png)` — it renders inline,
+stays out of code review, and is torn down with the session's worktree. The
+sibling `scratch/` directory is the user's slot: the reference files attached
+to a session, budgeted, listed with the composer, and readable by the agent.
+The two are kept apart by convention — nothing stops a misbehaving agent from
+writing in either, but everything loom teaches and serves treats them as
+separate.
+
 An in-place model handoff pauses conversation input and shows the server-owned
 handoff stage until the incoming provider is ready. The same transition appears
 in the session header and fleet, so leaving the open Details popover does not
