@@ -1594,6 +1594,7 @@ pub async fn create_warm_session(
     let agent = resolved.view.agent;
     let model = resolved.view.model;
     let effort = resolved.view.effort;
+    let fast = resolved.view.fast;
     let protocol = resolved.view.protocol;
     let mode = resolved.view.mode;
     let class = resolved.view.class;
@@ -1745,11 +1746,13 @@ pub async fn create_warm_session(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
                 extra_env: &extra_env,
                 env_clear: launch_profile.env_clear,
                 mode: &mode,
+                mode_from_live: false,
                 prelude: &launch_profile.prelude,
                 restricted: launch_profile.restricted,
                 allowed_tools: &stamped_allowed_tools,
@@ -1849,6 +1852,12 @@ pub async fn require_session_profile_lifetime(
         ))));
     }
     Ok(profile)
+}
+
+fn snapshot_fast(session: &Session) -> String {
+    crate::launch::deserialize_snapshot(&session.launch_snapshot)
+        .map(|snapshot| snapshot.view.fast)
+        .unwrap_or_default()
 }
 
 pub fn stamped_custom_agent(session: &Session) -> Result<Option<custom_agents::CustomAgent>> {
@@ -2084,6 +2093,7 @@ pub async fn adopt_terminal_into_acp(
     } else {
         agent::AcpOpen::Fresh
     };
+    let fast = snapshot_fast(session);
     let launch = agent::build_acp_launch(
         &st.db,
         &agent::AcpLaunchSpec {
@@ -2094,12 +2104,14 @@ pub async fn adopt_terminal_into_acp(
             server_addr: &st.addr,
             model: &session.model,
             effort: &session.effort,
+            fast: &fast,
             goal_file: goal_file.as_deref(),
             primer_file: primer_file.as_deref(),
             extra_env: &extra_env,
             env_clear: session.policy_env_clear,
             // Terminal rows carry no mode; on adoption they take the acp default.
             mode: agent::DEFAULT_ACP_MODE,
+            mode_from_live: false,
             prelude: &session.policy_prelude,
             restricted: session.policy_restricted,
             allowed_tools: &session.policy_allowed_tools,
@@ -2157,6 +2169,25 @@ pub async fn settle_reattached_session(st: &AppState, session_id: &str, branch_i
     }
 }
 
+/// Whether the adapter itself advertised this mode id, per the metadata the
+/// live session persisted. An advertised id is replayed verbatim on respawn:
+/// the adapter is the authority on its own vocabulary, and a mode it added
+/// (an Opencode primary agent, say) must survive without Loom listing it.
+async fn adapter_advertises_mode(st: &AppState, session: &Session, mode: &str) -> bool {
+    let Ok(Some(raw)) = session_mod::get_acp_metadata(&st.db, &session.id).await else {
+        return false;
+    };
+    let Ok(metadata) = serde_json::from_str::<Value>(&raw) else {
+        return false;
+    };
+    metadata
+        .get("modes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(mode))
+}
+
 /// Adopt an ACP session: respawn its relay + adapter and reopen the conversation.
 /// When the relay supervisor is still alive but loom has no task for it (a crashed
 /// task), re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
@@ -2196,11 +2227,12 @@ pub async fn adopt_acp(
         rotate_session_token(&st.db, session, &mut extra_env).await?;
         let runtime = session.agent_kind.clone();
         let (primer_file, goal_file) = resume_prompt_files(st, session, branch).await;
-        let mode = session
-            .current_mode
-            .clone()
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| agent::DEFAULT_ACP_MODE.to_string());
+        let persisted_mode = session.current_mode.clone().filter(|m| !m.is_empty());
+        let mode_from_live = match &persisted_mode {
+            Some(mode) => adapter_advertises_mode(st, session, mode).await,
+            None => false,
+        };
+        let mode = persisted_mode.unwrap_or_else(|| agent::DEFAULT_ACP_MODE.to_string());
         // A respawned relay has a fresh spool (seq 1..) and no in-flight turn —
         // reset the persisted cursor + inflight so a later attach replays cleanly.
         session_mod::set_ack_seq(&st.db, &session.id, 0).await.ok();
@@ -2213,6 +2245,7 @@ pub async fn adopt_acp(
             Some(id) => agent::AcpOpen::Load(id.to_string()),
             None => agent::AcpOpen::Fresh,
         };
+        let fast = snapshot_fast(session);
         let launch = agent::build_acp_launch(
             &st.db,
             &agent::AcpLaunchSpec {
@@ -2223,11 +2256,13 @@ pub async fn adopt_acp(
                 server_addr: &st.addr,
                 model: &session.model,
                 effort: &session.effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: primer_file.as_deref(),
                 extra_env: &extra_env,
                 env_clear: session.policy_env_clear,
                 mode: &mode,
+                mode_from_live,
                 prelude: &session.policy_prelude,
                 restricted: session.policy_restricted,
                 allowed_tools: &session.policy_allowed_tools,

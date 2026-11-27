@@ -2,10 +2,12 @@
 
 pub mod acp;
 pub mod agent;
+pub mod catalog;
 pub mod custom_agents;
 pub mod mcp;
 pub mod skills;
 
+pub use loom_ctx::env_policy;
 pub use loom_store::profile_data as profile;
 pub use loom_store::Ctx;
 pub use loom_store::{

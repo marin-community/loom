@@ -566,6 +566,7 @@ mod tests {
             script: "agent --secret super-secret",
             env,
             env_clear: true,
+            strip_env: &[],
             cols: 80,
             rows: 24,
             mode: tapestry::Mode::Relay,

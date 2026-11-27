@@ -102,6 +102,19 @@ pub fn response_line(id: &Value, result: Value) -> Vec<u8> {
     line(&msg)
 }
 
+/// Serialize a client→agent error response answering an agent request `id`.
+pub fn error_line(id: &Value, code: i64, message: &str) -> Vec<u8> {
+    let msg = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": code, "message": message },
+    });
+    line(&msg)
+}
+
+/// JSON-RPC `METHOD_NOT_FOUND`.
+pub const METHOD_NOT_FOUND: i64 = -32601;
+
 fn line(v: &Value) -> Vec<u8> {
     let mut bytes = serde_json::to_vec(v).unwrap_or_default();
     bytes.push(b'\n');
@@ -475,10 +488,10 @@ pub enum SteeringResult {
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// `initialize` params.
-pub fn initialize_params() -> Value {
+pub fn initialize_params(harness: &str) -> Value {
     serde_json::json!({
         "protocolVersion": PROTOCOL_VERSION,
-        "clientCapabilities": {},
+        "clientCapabilities": super::probe::client_capabilities(harness),
     })
 }
 
@@ -894,12 +907,20 @@ mod tests {
 
     #[test]
     fn builds_request_and_response_lines() {
-        let line = request_line(1, method::INITIALIZE, initialize_params());
+        let line = request_line(1, method::INITIALIZE, initialize_params("claude"));
         assert!(line.ends_with(b"\n"));
         let v: Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
         assert_eq!(v["method"], "initialize");
         assert_eq!(v["id"], 1);
         assert_eq!(v["params"]["protocolVersion"], 1);
+        assert!(v["params"]["clientCapabilities"].get("_meta").is_none());
+
+        let cursor = request_line(1, method::INITIALIZE, initialize_params("cursor-agent"));
+        let cursor: Value = serde_json::from_slice(&cursor[..cursor.len() - 1]).unwrap();
+        assert_eq!(
+            cursor["params"]["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
+            true
+        );
 
         let resource = json!({
             "type": "resource_link",

@@ -384,6 +384,11 @@ pub async fn reconcile_managed_sessions(state: &AppState) {
 }
 
 pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
+    // The Opencode credential payload is a boot input. Take it out of the
+    // process environment before any task or child process can inherit it;
+    // provisioning receives the value explicitly.
+    let opencode_credentials = std::env::var(crate::catalog::CREDENTIALS_ENV).ok();
+    std::env::remove_var(crate::catalog::CREDENTIALS_ENV);
     // Mint (or reuse) the machine-local token so loom's own same-host
     // subprocesses authenticate even when loopback trust is off. Best-effort:
     // a failure here must not stop the server coming up.
@@ -391,6 +396,12 @@ pub async fn serve(state: AppState, listener: TcpListener) -> Result<()> {
         Ok(_) => tracing::debug!("machine-local token ready"),
         Err(e) => tracing::warn!("could not prepare the machine-local token: {e}"),
     }
+    // Discover each installed harness's models in the background. Serving and
+    // launch never wait on this; the picker reads whatever rows already exist.
+    weaver_core::spawn_boxed(Box::pin(crate::catalog::run(
+        state.db.clone(),
+        opencode_credentials,
+    )));
     weaver_core::spawn_boxed(Box::pin(monitor::run(state.clone())));
     weaver_core::spawn_boxed(Box::pin(repair_acp_sessions_loop(state.clone())));
     weaver_core::spawn_boxed(Box::pin(reap_expired_github_authorizations(state.clone())));

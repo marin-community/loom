@@ -319,6 +319,7 @@ fn legacy_launch_selection(req: &sessions::launch::Input) -> LaunchSelection {
             // distinct from omission (which inherits the profile).
             model: selected(&req.model),
             effort: selected(&req.effort),
+            fast: None,
             protocol: selected(&req.protocol),
             mode: nonempty(&req.mode),
             class: nonempty(&req.class),
@@ -466,6 +467,7 @@ async fn create_inner(
     let agent = resolved.view.agent.clone();
     let model = resolved.view.model.clone();
     let effort = resolved.view.effort.clone();
+    let fast = resolved.view.fast.clone();
     let protocol = resolved.view.protocol.clone();
     let mode = resolved.view.mode.clone();
     let class = resolved.view.class.clone();
@@ -626,11 +628,13 @@ async fn create_inner(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: None,
                 primer_file: None,
                 extra_env: &extra_env,
                 env_clear: launch_profile.env_clear,
                 mode: &mode,
+                mode_from_live: false,
                 // A disposable handshake needs no repository hook mutation.
                 prelude: "none",
                 restricted: launch_profile.restricted,
@@ -659,6 +663,7 @@ async fn create_inner(
         validation_env.retain(|name, _| {
             !name.starts_with("WEAVER_")
                 && !name.starts_with("LOOM_")
+                && !crate::env_policy::is_boot_only_env(name)
                 && !matches!(name.as_str(), "GH_TOKEN" | "GITHUB_TOKEN")
         });
         validation_launch.env = validation_env.into_iter().collect();
@@ -1099,11 +1104,13 @@ async fn create_inner(
                 server_addr: &st.addr,
                 model: &model,
                 effort: &effort,
+                fast: &fast,
                 goal_file: goal_file.as_deref(),
                 primer_file: None,
                 extra_env: &extra_env,
                 env_clear: launch_profile.env_clear,
                 mode: &mode,
+                mode_from_live: false,
                 prelude: &launch_profile.prelude,
                 restricted: launch_profile.restricted,
                 allowed_tools: &stamped_allowed_tools,

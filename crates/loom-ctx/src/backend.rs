@@ -218,12 +218,14 @@ async fn new_session_with_placement(
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning terminal session");
     let script = session_script(name, script, memory_max_gb);
     let supervisor_bin = tapestry_bin();
+    let env = crate::env_policy::without_boot_only(env);
     let options = tapestry::LaunchOptions {
         name,
         cwd,
         script: &script,
-        env,
+        env: &env,
         env_clear,
+        strip_env: crate::env_policy::BOOT_ONLY_ENV,
         cols: 80,
         rows: 24,
         mode: tapestry::Mode::Pty,
@@ -261,12 +263,14 @@ pub async fn new_relay_session(
 ) -> Result<()> {
     tracing::info!(session = %name, cwd = %cwd.display(), memory_max_gb, "spawning relay session");
     let supervisor_bin = tapestry_bin();
+    let env = crate::env_policy::without_boot_only(env);
     let options = tapestry::LaunchOptions {
         name,
         cwd,
         script,
-        env,
+        env: &env,
         env_clear,
+        strip_env: crate::env_policy::BOOT_ONLY_ENV,
         cols: 80,
         rows: 24,
         mode: tapestry::Mode::Relay,

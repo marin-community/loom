@@ -980,6 +980,12 @@ const ENGINE_TOKEN_GRACE_SECS: i64 = 60;
 /// token; GitHub state reaches builtins through Loom's API snapshots.
 const WATCH_SCRIPT_STRIPPED_ENV: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "CURSOR_API_KEY",
+    "CURSOR_AUTH_TOKEN",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_CREDENTIALS_JSON",
     "CLAUDECODE",
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_EXECPATH",
@@ -1417,6 +1423,27 @@ fn iso(dt: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every credential a builtin harness reads must be stripped from a watch
+    /// script's environment. A new harness credential that is not listed here
+    /// would otherwise reach operator-authored scripts.
+    #[test]
+    fn every_harness_credential_is_stripped_from_watch_scripts() {
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CURSOR_API_KEY",
+            "CURSOR_AUTH_TOKEN",
+            "OPENCODE_CONFIG_CONTENT",
+            "OPENCODE_CREDENTIALS_JSON",
+        ] {
+            assert!(
+                WATCH_SCRIPT_STRIPPED_ENV.contains(&key),
+                "{key} is a harness credential but watch scripts inherit it"
+            );
+        }
+    }
 
     #[test]
     fn parse_round_result_is_lenient_but_requires_an_object() {

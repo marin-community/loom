@@ -33,10 +33,27 @@ owner_github = "your-github-login"
 
 # Paste-once agent secrets — `loom setup secrets` prompts for these (hidden
 # input) instead of you typing them in cleartext here. anthropic_api_key feeds
-# the Claude runtime, openai_api_key the Codex runtime; set only the ones you
-# use (either can also be an interactive `claude` / `codex login` instead).
+# the Claude runtime, openai_api_key the Codex runtime, cursor_api_key the
+# cursor-agent runtime; set only the ones you use (each can also be an
+# interactive `claude` / `codex login` / `cursor-agent login` instead).
+# claude_code_oauth_token is the long-lived token from `claude setup-token`.
+# Claude uses anthropic_api_key when both are set, and does not refresh the token.
 # anthropic_api_key = ""
+# claude_code_oauth_token = ""
 # openai_api_key = ""
+# cursor_api_key = ""
+# cursor_auth_token = ""  # long-lived Cursor session token, as an alternative to cursor_api_key
+
+# Opencode's config, delivered as the OPENCODE_CONFIG_CONTENT environment
+# variable opencode itself reads (inline JSON; no file is written). Only
+# relevant if opencode is in `agents` below.
+# opencode_config_content = '{"provider":{"lunaroute":{"npm":"@opencode/ai/providers/openai-compatible"}}}'
+
+# Opencode's credentials in the `opencode auth export` JSON format. The server
+# imports them into Opencode's shared credential store once at boot and never
+# exports the value into sessions; a store that already matches is left alone.
+# Only relevant if opencode is in `agents` below.
+# opencode_credentials_json = '[{"id":"cred_lunaroute_1","integrationID":"lunaroute","label":"API key","active":true,"value":{"type":"key","key":"lr-your-key"}}]'
 
 # Slack Socket Mode integration (the `/marinbot` / `@marinbot` trigger) —
 # optional; unset leaves it off. Both are secrets: an app-level token
@@ -56,6 +73,7 @@ owner_github = "your-github-login"
 # host_uid = "1000"                    # HOST_UID: uid the image runs as
 # host_gid = "1000"                    # HOST_GID: gid the image runs as
 # image = "loom:latest"                # LOOM_IMAGE: override the image tag
+# agents = "claude,codex"              # LOOM_AGENTS: which runtimes to install (default shown); add opencode, cursor-agent to enable them
 
 # Optional tool installs the entrypoint runs on every server boot, after the
 # pinned Claude/Codex runtime installs — fail-soft, unset by default. The

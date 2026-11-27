@@ -5,6 +5,7 @@ edition = "2021"
 description = "Loom's agent runtimes, ACP client, and trusted MCP mechanisms."
 
 [dependencies]
+loom-ctx = { path = "../loom-ctx" }
 loom-store = { path = "../loom-store" }
 weaver-core = { path = "../weaver-core" }
 weaver-api = { path = "../weaver-api" }

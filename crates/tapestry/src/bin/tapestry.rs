@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
                 script,
                 env: &[],
                 env_clear: false,
+                strip_env: &[],
                 cols: 80,
                 rows: 24,
                 mode: tapestry::Mode::Pty,
