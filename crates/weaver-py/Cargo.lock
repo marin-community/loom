@@ -1564,6 +1564,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "weaver-runtime",
 ]
 
 [[package]]
@@ -1576,6 +1577,16 @@ dependencies = [
  "serde",
  "tokio",
  "weaver-api",
+]
+
+[[package]]
+name = "weaver-runtime"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "tokio",
 ]
 
 [[package]]

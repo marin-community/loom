@@ -1132,7 +1132,15 @@ pub struct AcpLaunchSpec<'a> {
 /// takes the primer as its opening prompt like the terminal path. A custom
 /// acp agent runs its `launch` command verbatim (setup stage first) as the
 /// adapter, with no `_meta`.
-pub async fn build_acp_launch(
+pub fn build_acp_launch<'a>(
+    db: &'a Db,
+    spec: &'a AcpLaunchSpec<'_>,
+    open: AcpOpen,
+) -> BoxFut<'a, Result<AcpLaunch>> {
+    Box::pin(build_acp_launch_inner(db, spec, open))
+}
+
+async fn build_acp_launch_inner(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
     open: AcpOpen,

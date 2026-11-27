@@ -8,6 +8,7 @@ name = "weaver_core"
 path = "src/lib.rs"
 
 [dependencies]
+weaver-runtime = { path = "../weaver-runtime" }
 # Domain types embedded in wire DTOs need a derivable schema so the registry can
 # describe operations that carry them.
 schemars = "1"
@@ -22,10 +23,6 @@ serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
 tokio = { version = "1", features = ["rt", "macros", "fs", "process", "sync"] }
 tracing = "0.1"
-
-# libproc and sysctl, which stand in for Linux's /proc in process_identity.
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

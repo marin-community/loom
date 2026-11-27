@@ -38,7 +38,8 @@ and the rule for placing a new module.
 | Path | What's in it |
 |---|---|
 | `crates/weaver-core/` | legacy-named internal domain crate: branches, issues, events, db/migrations, git, config, artifacts, reviews, repository configuration, transcripts, and agent helpers. No commands and no routes of its own — the loom crates link it as a library. |
-| `crates/weaver-api/` | legacy-named typed Loom REST client + DTOs (`Client`, `*View`/`*Req` types, `endpoint::default_client()` for resolving `$WEAVER_API`/`$LOOM_TOKEN`). Zero server deps (no `axum`, no sqlite driver); it is the cross-process API seam. |
+| `crates/weaver-runtime/` | machine-local state path, process identity, and type-erased task spawning shared by Loom and Tapestry, without storage dependencies |
+| `crates/weaver-api/` | typed Loom REST client and wire types. The operation registry also supplies the frontend type generator. DTOs that use `weaver-core` domain types bring SQLite into the API build. |
 | `crates/smartdoc/` | the markdown-convention layer: parse references (`#N`, `artifact:<name>`), project live status into the render. Dependency-free of weaver. See [artifacts.md](artifacts.md). |
 | `crates/loom/src/cli/` | everything behind the `loom` command line: `clap_bind.rs` (the whole of Loom's clap knowledge, driven by an operation's operand list), `dispatch.rs` (invoke a declared operation and render it), `host/` (operator commands that run before there is a server), `commands/` (operator commands that talk to one), `agent/` (what an agent runs inside a session) |
 | `crates/loom/src/web/` | axum routes, request/response types, SSE — **the HTTP API** (incl. the auth middleware + login/token/user handlers) |

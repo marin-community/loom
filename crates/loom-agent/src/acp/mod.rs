@@ -66,7 +66,7 @@ use crate::db::{now_iso, Db};
 use crate::session;
 use crate::Ctx;
 use weaver_api::{AcpCost, AcpUsage};
-use weaver_core::tags;
+use weaver_core::{tags, BoxFut};
 use wire::{
     method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
     SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
@@ -1326,20 +1326,25 @@ impl AcpRegistry {
 /// Spawn a fresh ACP session: create the relay running `launch.adapter_cmd`,
 /// `initialize`, open (or load) the ACP session, store its id on the session row,
 /// send the goal as the first prompt when present, then run the session task.
-pub async fn start(state: &AcpCtx, session_id: &str, launch: AcpLaunch) -> Result<()> {
-    start_inner(state, session_id, launch, None).await
+pub fn start<'a>(
+    state: &'a AcpCtx,
+    session_id: &'a str,
+    launch: AcpLaunch,
+) -> BoxFut<'a, Result<()>> {
+    // Keep the handshake and task machinery in loom-agent when callers await it.
+    Box::pin(start_inner(state, session_id, launch, None))
 }
 
 /// Start a fresh provider against an existing loom session. The opening prompt
 /// carries the provider-neutral history to the adapter, while `handoff` is the
 /// compact block journaled in its place.
-pub async fn start_handoff(
-    state: &AcpCtx,
-    session_id: &str,
+pub fn start_handoff<'a>(
+    state: &'a AcpCtx,
+    session_id: &'a str,
     launch: AcpLaunch,
     handoff: Value,
-) -> Result<()> {
-    start_inner(state, session_id, launch, Some(handoff)).await
+) -> BoxFut<'a, Result<()>> {
+    Box::pin(start_inner(state, session_id, launch, Some(handoff)))
 }
 
 async fn start_inner(
@@ -1451,7 +1456,11 @@ async fn start_inner(
 /// the persisted ack cursor, re-adopt the in-flight request state and the block
 /// cursor from the journal, and run the session task. Un-acked frames replay and
 /// re-ingest idempotently.
-pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
+pub fn attach<'a>(state: &'a AcpCtx, session_id: &'a str) -> BoxFut<'a, Result<()>> {
+    Box::pin(attach_inner(state, session_id))
+}
+
+async fn attach_inner(state: &AcpCtx, session_id: &str) -> Result<()> {
     let session = session::get(&state.db, session_id)
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;

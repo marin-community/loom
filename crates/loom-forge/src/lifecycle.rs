@@ -52,6 +52,7 @@ use weaver_core::branch as branch_mod;
 use weaver_core::branch::{Branch, TitleProvenance};
 use weaver_core::tags;
 use weaver_core::watch::Watch;
+use weaver_core::BoxFut;
 
 pub async fn delete_session_row(st: &AppState, session_id: &str) -> Result<()> {
     if let Some(revision) = session_mod::delete(&st.db, session_id).await? {
@@ -896,7 +897,11 @@ pub async fn suspend_locked(
 /// marker is already published — this process owns the marker, so no
 /// reconciliation would ever release it, and the session would refuse every
 /// transition until a server restart.
-pub async fn wake(st: &AppState, session: &Session) -> Result<Session> {
+pub fn wake<'a>(st: &'a AppState, session: &'a Session) -> BoxFut<'a, Result<Session>> {
+    Box::pin(wake_inner(st, session))
+}
+
+async fn wake_inner(st: &AppState, session: &Session) -> Result<Session> {
     // Re-read rather than trust the caller's snapshot: a row handed over just
     // before a suspend's CAS would otherwise pass through as awake.
     let mut session = session_mod::get(&st.db, &session.id)
@@ -1280,7 +1285,11 @@ pub async fn raise_attention(st: &AppState, session: &session_mod::Session, why:
 /// both archive and adopt, so this runs at startup *and* on the monitor's
 /// retention cadence: a session must never need a server restart to become
 /// operable again.
-pub async fn reconcile_interrupted_transitions(state: &AppState) {
+pub fn reconcile_interrupted_transitions(state: &AppState) -> BoxFut<'_, ()> {
+    Box::pin(reconcile_interrupted_transitions_inner(state))
+}
+
+async fn reconcile_interrupted_transitions_inner(state: &AppState) {
     let sessions = match session_mod::list(&state.db).await {
         Ok(sessions) => sessions,
         Err(error) => {
@@ -2162,7 +2171,17 @@ pub async fn settle_reattached_session(st: &AppState, session_id: &str, branch_i
 /// task), re-attach ([`crate::acp::attach`]). When the relay is gone, respawn
 /// it and reopen via `session/load` (the adapter advertised `loadSession` and we
 /// have its id), falling back to a fresh session re-oriented from the goal file.
-pub async fn adopt_acp(
+pub fn adopt_acp<'a>(
+    st: &'a AppState,
+    session: &'a Session,
+    branch: &'a Branch,
+    reason: &'a str,
+    custom_agent: Option<&'a custom_agents::CustomAgent>,
+) -> BoxFut<'a, Result<()>> {
+    Box::pin(adopt_acp_inner(st, session, branch, reason, custom_agent))
+}
+
+async fn adopt_acp_inner(
     st: &AppState,
     session: &Session,
     branch: &Branch,
