@@ -35,6 +35,14 @@ pub struct GithubContext {
     pub run_attempt: String,
 }
 
+pub fn github_automation_subject(
+    repository_id: &str,
+    workflow_ref: &str,
+    oidc_sub: &str,
+) -> String {
+    format!("github:{repository_id}:{workflow_ref}:{oidc_sub}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FederationContext {
     pub provider: String,
@@ -586,9 +594,10 @@ pub async fn federate(db: &Db, token: &str) -> Result<AutomationTokenView> {
             {
                 bail!("verified OIDC claims do not match the federation mapping");
             }
-            let subject = format!(
-                "github:{}:{}:{}",
-                verified.repository_id, verified.workflow_ref, verified.sub
+            let subject = github_automation_subject(
+                &verified.repository_id,
+                &verified.workflow_ref,
+                &verified.sub,
             );
             let github = GithubContext {
                 repository_id: verified.repository_id,

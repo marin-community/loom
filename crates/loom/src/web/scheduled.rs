@@ -76,16 +76,6 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing agent target"))?;
     let subject = format!("watch:{}", watch.id);
     let profiles = vec![agent.profile.clone()];
-    let principal = crate::auth::Principal {
-        username: subject.clone(),
-        github_login: None,
-        via: crate::auth::AuthVia::Loopback,
-        grant: crate::auth::Grant::Automation {
-            subject: subject.clone(),
-            profiles: profiles.clone(),
-        },
-        automation_context: None,
-    };
     let prompt = format!("{}\n\nScheduled watch context: occurrence={}, scheduled_at={}, deadline_at={}, trigger={}. Complete this task using as many tool calls as needed, then report your result without waiting for another message. Persistent memory is available through `loom watch state`; use its version for writes. Allowed Slack channels: {}. Use `loom branches slack post` with a stable action key when sending a message.\n", agent.prompt, occurrence.id, occurrence.scheduled_at, occurrence.deadline_at, occurrence.trigger_reason, agent.slack_channels.join(", "));
     let request = weaver_api::operations::runs::create::Input {
         profile: agent.profile,
@@ -98,8 +88,13 @@ async fn launch(state: &AppState, occurrence: &Occurrence) -> Result<()> {
             json!({"repo": agent.repo, "goal": prompt, "title": format!("Watch {}", watch.name)}),
         )?,
     };
-    let launch =
-        super::automation::create_run_core(state, &principal, request, subject, profiles, true);
+    let launch = super::automation::create_run_core(
+        state,
+        request,
+        subject,
+        profiles,
+        super::automation::RunCaller::Watch,
+    );
     tokio::pin!(launch);
     let remaining = (chrono::DateTime::parse_from_rfc3339(&occurrence.deadline_at)?
         .with_timezone(&Utc)
@@ -593,11 +588,10 @@ mod tests {
         .unwrap();
         let error = super::super::automation::create_run_core(
             &state,
-            &principal,
             input,
             "external".into(),
             vec!["watch".into()],
-            false,
+            super::super::automation::RunCaller::Api(&principal),
         )
         .await
         .err()

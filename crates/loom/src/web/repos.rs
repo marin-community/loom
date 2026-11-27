@@ -36,11 +36,9 @@ use weaver_api::operations::sessions;
 /// misconfiguration GitHub should surface as a failed delivery). Two further
 /// non-2xx cases past that are deliberate, not no-ops: a delivery with no
 /// `X-GitHub-Delivery` GUID is malformed (**400** — without it idempotency is
-/// impossible), and a failure to record the delivery is transient (**5xx**, so
-/// GitHub *should* retry). Every *business-logic* outcome — a non-trigger
-/// request, a replay, an unauthorized requester, a non-allowlisted repo, a
-/// rate-limited repo — returns **200**, so GitHub does not retry a delivery we
-/// deliberately ignored.
+/// impossible), and a store failure returns **5xx** for operator redelivery.
+/// Eligible automations are durably queued before returning **202**.
+/// Deliveries that do not match a trigger are acknowledged with **200**.
 pub(super) async fn github_webhook(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -62,9 +60,6 @@ pub(super) async fn github_webhook(
         return (StatusCode::UNAUTHORIZED, "invalid signature").into_response();
     }
 
-    // The body is now trusted (GitHub-signed). Every *business-logic* outcome
-    // past here is a 200 no-op via `ok()`; the only non-2xx exceptions below are
-    // a malformed delivery (no GUID → 400) and a transient store error (→ 5xx).
     let ok = || (StatusCode::OK, "ok").into_response();
 
     // 2. Idempotency: dedupe on the delivery GUID. A genuine GitHub delivery
@@ -77,6 +72,20 @@ pub(super) async fn github_webhook(
         tracing::warn!("github webhook missing X-GitHub-Delivery");
         return (StatusCode::BAD_REQUEST, "missing delivery id").into_response();
     };
+    let event_kind = headers
+        .get("x-github-event")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    if event_kind == "pull_request" {
+        return match super::github_rules::enqueue(&st.db, delivery, &body).await {
+            Ok(true) => (StatusCode::ACCEPTED, "automation queued").into_response(),
+            Ok(false) => ok(),
+            Err(error) => {
+                tracing::error!(delivery, %error, "could not queue GitHub rule delivery");
+                (StatusCode::INTERNAL_SERVER_ERROR, "delivery store error").into_response()
+            }
+        };
+    }
     match github_trigger::record_delivery(&st.db, delivery).await {
         Ok(true) => {}
         Ok(false) => {
@@ -92,10 +101,6 @@ pub(super) async fn github_webhook(
     // 3. Normalize new requests, body edits, and submitted reviews. Other event
     //    kinds and actions (including deletes and setup pings) are acknowledged
     //    and ignored.
-    let event_kind = headers
-        .get("x-github-event")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
     let event = match github_trigger::TriggerEvent::parse(event_kind, &body) {
         Ok(Some(event)) => event,
         Ok(None) => return ok(),

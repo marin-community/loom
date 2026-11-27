@@ -35,6 +35,8 @@ pub const DEFAULT_GITHUB_ARCHIVE_ON_MERGE: bool = true;
 pub const DEFAULT_GITHUB_TRIGGER_PHRASE: &str = "@loom";
 /// Immutable GitHub user ids allowed to trigger Loom without a Loom account.
 pub const GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY: &str = "github.trigger_allowed_user_ids";
+pub const GITHUB_PULL_REQUEST_RULES_KEY: &str = "github.pull_request_rules";
+pub const DEFAULT_GITHUB_PULL_REQUEST_RULES: &str = "[]";
 /// Named launch profile selected by GitHub-triggered sessions.
 pub const DEFAULT_GITHUB_PROFILE: &str = "default";
 /// GitHub organizations whose active members receive renewable Loom access.
@@ -231,6 +233,15 @@ pub const REGISTRY: &[SettingSpec] = &[
             applied together. The profile must exist when a trigger launches.",
         kind: SettingKind::String,
         default: DEFAULT_GITHUB_PROFILE,
+        group: "GitHub",
+        options: &[],
+    },
+    SettingSpec {
+        key: GITHUB_PULL_REQUEST_RULES_KEY,
+        label: "GitHub pull request rules",
+        description: "JSON array of GitHub pull request rules and their Loom launch templates. An empty array disables rule dispatch.",
+        kind: SettingKind::Text,
+        default: DEFAULT_GITHUB_PULL_REQUEST_RULES,
         group: "GitHub",
         options: &[],
     },
@@ -869,6 +880,9 @@ pub fn validate(key: &str, value: &str) -> std::result::Result<(), String> {
         }
         GITHUB_TRIGGER_ALLOWED_USER_IDS_KEY => {
             parse_github_trigger_allowed_user_ids(value).map(|_| ())?;
+        }
+        GITHUB_PULL_REQUEST_RULES_KEY => {
+            crate::github_rules::parse(value).map(|_| ())?;
         }
         "slack.prompt_instructions" if value.len() > MAX_SLACK_PROMPT_INSTRUCTIONS_BYTES => {
             return Err(format!(
