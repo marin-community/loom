@@ -1,4 +1,21 @@
+import { join } from 'node:path';
+
 import { test, expect } from '../fixtures/weaver';
+
+const HEADERS = { 'content-type': 'application/json' };
+// The fake ACP adapter other specs use; defining our own agent keeps this
+// test independent of whichever custom agents a shared worker happens to
+// have from another spec (and avoids duplicate option labels).
+const FAKE_AGENT = join(
+  __dirname,
+  '..',
+  '..',
+  'crates',
+  'loom',
+  'tests',
+  'fixtures',
+  'fake-acp-agent.mjs',
+);
 
 test.describe('settings · profiles', () => {
   test('default profile permissions can be set to always allow', async ({ page, weaver }) => {
@@ -28,18 +45,36 @@ test.describe('settings · profiles', () => {
     page,
     weaver,
   }) => {
+    // This test only needs a profile whose protocol can carry the MCP
+    // selection. Define its own ACP agent rather than borrowing another
+    // spec's custom agent: workers share a server, and two of them are
+    // labelled "ACP fake", which makes a label lookup ambiguous.
+    const defined = await fetch(`${weaver.baseUrl}/api/agents/custom/create`, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({
+        name: 'acp-mcp-probe',
+        label: 'ACP MCP probe',
+        setup: '',
+        launch: `node ${FAKE_AGENT}`,
+        resume: '',
+        reports_status: false,
+        protocol: 'acp',
+      }),
+    });
+    if (!defined.ok && defined.status !== 409)
+      throw new Error(`defining the MCP probe agent failed: ${await defined.text()}`);
+
     const registry = (await (
       await fetch(`${weaver.baseUrl}/api/agents/list`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: HEADERS,
         body: JSON.stringify({}),
       })
     ).json()) as {
       agents: { kind: string; label: string; available?: boolean | null; supports_acp: boolean }[];
     };
-    const acpAgent = registry.agents.find(
-      (agent) => agent.available !== false && agent.supports_acp && agent.kind !== 'shell',
-    );
+    const acpAgent = registry.agents.find((agent) => agent.kind === 'acp-mcp-probe');
     expect(acpAgent).toBeTruthy();
     const source = `# /// script
 # requires-python = ">=3.11"
@@ -114,7 +149,13 @@ for line in sys.stdin:
     // Pick an installed agent that supports ACP; this test only needs a
     // profile whose protocol can carry the MCP selection.
     await page.getByTestId('profile-agent').click();
-    await page.getByRole('option', { name: acpAgent!.label, exact: true }).click();
+    await page
+      .getByRole('option', {
+        name: acpAgent!.label,
+        description: 'acp-mcp-probe',
+        exact: true,
+      })
+      .click();
     await page.getByLabel('Protocol').click();
     await page.getByRole('option', { name: 'ACP', exact: true }).click();
     const access = page.getByRole('group', { name: 'MCP access' });
