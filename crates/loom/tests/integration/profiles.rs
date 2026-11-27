@@ -29,7 +29,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn interactive_shell_profile(name: &str) -> serde_json::Value {
+pub(super) fn interactive_shell_profile(name: &str) -> serde_json::Value {
     json!({
         "name": name,
         "description": "launch test",

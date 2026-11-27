@@ -17,6 +17,52 @@ every delivery is verified cryptographically (HMAC), and the requester is
 authorized — against the [approved-user allowlist](#who-can-trigger) — before
 anything is launched.
 
+## Deployment-defined pull request runs
+
+Subscribe the GitHub App to **Pull request** events to use
+`github.pull_request_rules`. Put the setting in the deployment manifest as a
+JSON string containing an array of rules. For example:
+
+```json
+[
+  {
+    "name": "maintainer-review",
+    "repository_id": 12345,
+    "target": {"profile": "maintainer-review"},
+    "events": [
+      {"actions": ["opened", "ready_for_review", "reopened"]},
+      {"actions": ["unlabeled"], "label": "reviewed"}
+    ],
+    "excluded_labels": ["reviewed"],
+    "allowed_bots": ["example-reviewer[bot]"],
+    "run": {
+      "title": "Review #{number}",
+      "goal": "Review PR #{number} at {head}.",
+      "idempotency_key": "review:{number}:{head}",
+      "channel": "review:{number}"
+    }
+  }
+]
+```
+
+The target names an automation profile. Loom checks the
+PR's current state and head using its GitHub App. The PR must be open, belong
+to the repository, and be ready for review. Its author needs write access
+or must be a bot named by the rule. Event selectors match the delivery's
+action and optional event label. Excluded labels apply to the current PR.
+
+Launch templates can use `{number}` and `{head}`. Loom uses the resolved commit
+as the session base. An optional channel routes subsequent runs to the same
+conversation. During migration from Actions, use a target with a federation
+instead of a profile. The federation must bind one profile to a trusted
+pull request workflow in the same repository. For repositories using GitHub's
+default pull request OIDC subject, match the workflow's key and channel to
+deduplicate during the overlap.
+
+An eligible delivery returns **202** after Loom saves it for background
+dispatch. An unmatched or repeated delivery returns **200**. Set the rules
+to an empty array to disable this dispatch path.
+
 ## How it works
 
 GitHub delivers `issues/opened`, `issues/edited`, `issue_comment/created`,
@@ -291,8 +337,8 @@ Apps → New GitHub App**:
 - **Organization permissions:**
   - **Members** — Read-only (verify active membership when
     `auth.github_organizations` is set).
-- **Subscribe to events** — **Issues**, **Issue comment**, and **Pull request
-  review**.
+- **Subscribe to events** — **Issues**, **Issue comment**, **Pull request**, and **Pull
+  request review**.
 - After creating it, **generate a private key** (downloads a `.pem`) and note the
   **App ID**.
 

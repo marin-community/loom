@@ -339,6 +339,180 @@ async fn post_event(
     req.send().await.unwrap()
 }
 
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_webhook_launches_the_configured_run_once_across_transports() {
+    const REPO: &str = "acme/widgets";
+    const WORKFLOW: &str = "acme/widgets/.github/workflows/review.yml@refs/heads/main";
+    let remotes = tempfile::tempdir().unwrap();
+    let url = make_bare_remote(remotes.path());
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(remotes.path().join("work"))
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let sha = String::from_utf8(head.stdout).unwrap();
+    let sha = sha.trim();
+    let repo = json!({ "id": 99, "full_name": REPO });
+    std::env::set_var("LOOM_GITHUB_WEBHOOK_SECRET", SECRET);
+    let ts = TestServer::start_with_pull_request_app(json!({
+        "number": 42,
+        "state": "open",
+        "draft": false,
+        "user": { "login": "writer", "id": 281, "type": "User" },
+        "base": { "sha": sha, "repo": repo },
+        "head": { "sha": sha, "repo": repo },
+        "labels": [],
+    }))
+    .await;
+    ts.client
+        .post("/api/repos/register", json!({ "repo": url }))
+        .await
+        .unwrap();
+    let mut profile = super::profiles::interactive_shell_profile("review");
+    profile["class"] = json!("automation");
+    profile["strict"] = json!(true);
+    profile["env_clear"] = json!(true);
+    profile["github_repositories"] = json!([REPO]);
+    ts.client
+        .post("/api/profiles/create", profile)
+        .await
+        .unwrap();
+    let mapping = loom::automation::federation_add(
+        &ts.state.db,
+        &serde_json::from_value(json!({
+            "name": "review",
+            "provider": "github",
+            "issuer": "https://token.actions.githubusercontent.com",
+            "audience": "loom",
+            "repository_id": "99",
+            "workflow_ref": WORKFLOW,
+            "event_name": "pull_request_target",
+            "service_tag": "review",
+            "profiles": ["review"],
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let routes = json!([{
+        "name": "remark",
+        "repository_id": 99,
+        "target": {"federation": mapping.name},
+        "events": [{"actions": ["unlabeled"], "label": "reviewed"}],
+        "excluded_labels": ["reviewed"],
+        "run": {
+            "title": "Check #{number}",
+            "goal": "Inspect {head} for #{number}",
+            "idempotency_key": "check:{number}:{head}"
+        },
+    }]);
+    ts.client
+        .post(
+            "/api/deployment/reconcile",
+            json!({ "settings": { "github.pull_request_rules": routes.to_string() } }),
+        )
+        .await
+        .unwrap();
+
+    let mut event = json!({
+        "action": "unlabeled",
+        "label": {"name": "unrelated"},
+        "number": 42,
+        "repository": repo,
+        "pull_request": {"draft": false, "head": {"sha": sha, "repo": repo}},
+    });
+    let ignored_body = serde_json::to_vec(&event).unwrap();
+    let ignored = post_event(
+        &ts,
+        "pull_request",
+        "unrelated-label",
+        Some(sign(SECRET, &ignored_body)),
+        &ignored_body,
+    )
+    .await;
+    assert_eq!(ignored.status(), reqwest::StatusCode::OK);
+
+    event["label"]["name"] = json!("reviewed");
+    let body = serde_json::to_vec(&event).unwrap();
+    let rejected = post_event(&ts, "pull_request", "review-delivery", None, &body).await;
+    assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let signature = sign(SECRET, &body);
+    let accepted = post_event(
+        &ts,
+        "pull_request",
+        "review-delivery",
+        Some(signature.clone()),
+        &body,
+    )
+    .await;
+    assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    let replay = post_event(
+        &ts,
+        "pull_request",
+        "review-delivery",
+        Some(signature),
+        &body,
+    )
+    .await;
+    assert_eq!(replay.status(), reqwest::StatusCode::OK);
+
+    let run = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let runs = loom::runs::list_for(&ts.state.db, None).await.unwrap();
+            if let Some(run) = runs.into_iter().find(|run| run.status != "creating") {
+                break run;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the webhook should launch without an Actions job");
+    assert_eq!(run.status, "running");
+    let request: serde_json::Value = serde_json::from_str(&run.request_json).unwrap();
+    assert_eq!(request["session"]["base"], sha);
+    assert_eq!(request["session"]["github_issue"], 42);
+    assert_eq!(request["session"]["title"], "Check #42");
+    assert_eq!(request["session"]["goal"], format!("Inspect {sha} for #42"));
+    assert_eq!(request["idempotency_key"], format!("check:42:{sha}"));
+
+    let actions_subject = "github:99:acme/widgets/.github/workflows/review.yml@refs/heads/main:repo:acme/widgets:pull_request";
+    let token = loom::automation::mint(
+        &ts.state.db,
+        actions_subject,
+        mapping.profiles,
+        60,
+        Some(loom::automation::FederationContext {
+            provider: "github".into(),
+            service_tag: mapping.service_tag,
+            github: Some(loom::automation::GithubContext {
+                repository_id: "99".into(),
+                repository: REPO.into(),
+                workflow_ref: WORKFLOW.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    let duplicate: serde_json::Value = reqwest::Client::new()
+        .post(format!("http://{}/api/runs/create", ts.addr))
+        .bearer_auth(token.token)
+        .json(&request)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(duplicate["id"], run.id);
+    assert_eq!(session_count(&ts).await, 1);
+}
+
 /// How many sessions the fleet listing shows.
 async fn session_count(ts: &TestServer) -> usize {
     ts.client

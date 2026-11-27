@@ -11,6 +11,7 @@ pub mod discussion;
 pub mod events;
 pub mod git;
 pub mod github;
+pub mod github_rules;
 pub mod issue;
 pub mod migrations;
 pub mod occurrence;

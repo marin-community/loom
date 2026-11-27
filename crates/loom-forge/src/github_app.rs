@@ -190,6 +190,41 @@ pub struct VerifiedOrganizationMembership {
     pub organization: GithubOrganization,
 }
 
+#[derive(serde::Deserialize)]
+pub struct PullRequestSnapshot {
+    pub state: String,
+    pub draft: bool,
+    pub user: PullRequestAuthor,
+    pub head: PullRequestRef,
+    pub base: PullRequestRef,
+    pub labels: Vec<PullRequestLabel>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PullRequestAuthor {
+    pub id: i64,
+    pub login: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PullRequestRef {
+    pub sha: String,
+    pub repo: Option<PullRequestRepository>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PullRequestRepository {
+    pub id: i64,
+    pub full_name: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct PullRequestLabel {
+    pub name: String,
+}
+
 impl GithubThreadKind {
     fn resource(self) -> &'static str {
         match self {
@@ -271,7 +306,7 @@ impl GithubApp {
             .to_vec())
     }
 
-    async fn repo_request(
+    async fn repo_response(
         &self,
         repo: &RepoSlug,
         method: reqwest::Method,
@@ -296,11 +331,73 @@ impl GithubApp {
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request
+        request
             .send()
             .await
-            .with_context(|| format!("{action} on GitHub"))?;
+            .with_context(|| format!("{action} on GitHub"))
+    }
+
+    async fn repo_request(
+        &self,
+        repo: &RepoSlug,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        action: &str,
+    ) -> Result<reqwest::Response> {
+        let response = self.repo_response(repo, method, path, body, action).await?;
         check_status(response, action).await
+    }
+
+    pub async fn pull_request_snapshot(
+        &self,
+        repo: &RepoSlug,
+        number: i64,
+    ) -> Result<PullRequestSnapshot> {
+        self.repo_request(
+            repo,
+            reqwest::Method::GET,
+            &format!("pulls/{number}"),
+            None,
+            "fetching the pull request",
+        )
+        .await?
+        .json()
+        .await
+        .context("decoding the pull request")
+    }
+
+    pub async fn pull_request_author_can_write(
+        &self,
+        repo: &RepoSlug,
+        user: &PullRequestAuthor,
+    ) -> Result<bool> {
+        #[derive(serde::Deserialize)]
+        struct Permission {
+            permission: String,
+            user: Option<GithubUserResponse>,
+        }
+        let action = "checking the pull request author's repository access";
+        let response = self
+            .repo_response(
+                repo,
+                reqwest::Method::GET,
+                &format!("collaborators/{}/permission", user.login),
+                None,
+                action,
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        let permission: Permission = check_status(response, action).await?.json().await?;
+        Ok(permission
+            .user
+            .is_some_and(|resolved| resolved.id == user.id)
+            && matches!(
+                permission.permission.as_str(),
+                "write" | "maintain" | "admin"
+            ))
     }
 
     /// Fetch one issue or pull request for a restricted session and return the
@@ -888,21 +985,15 @@ impl GithubApi for GithubApp {
 
     async fn pr_head(&self, repo: &str, number: i64) -> Result<PrHead> {
         let slug = crate::repo::parse_slug(repo).map_err(|e| anyhow!(e))?;
-        let token = self.token_for_repo(&slug.owner, &slug.name).await?;
-        let url = format!(
-            "{}/repos/{}/{}/pulls/{number}",
-            self.api_base, slug.owner, slug.name
-        );
         let resp = self
-            .http
-            .get(&url)
-            .header(reqwest::header::ACCEPT, GH_ACCEPT)
-            .header("X-GitHub-Api-Version", GH_API_VERSION)
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("fetching the pull request")?;
-        let resp = check_status(resp, "fetching the pull request").await?;
+            .repo_request(
+                &slug,
+                reqwest::Method::GET,
+                &format!("pulls/{number}"),
+                None,
+                "fetching the pull request",
+            )
+            .await?;
         let body: serde_json::Value = resp.json().await.context("parsing pull request json")?;
         let head_ref = body["head"]["ref"]
             .as_str()
@@ -1119,6 +1210,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         updates: Mutex<Vec<Value>>,
         reactions: Mutex<Vec<Value>>,
         last_comment_auth: Mutex<Option<String>>,
+        pull_request_snapshot: Mutex<Option<Value>>,
     }
 
     impl MockState {
@@ -1132,6 +1224,7 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
                 updates: Mutex::new(Vec::new()),
                 reactions: Mutex::new(Vec::new()),
                 last_comment_auth: Mutex::new(None),
+                pull_request_snapshot: Mutex::new(None),
             })
         }
     }
@@ -1288,6 +1381,29 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
         }))
     }
 
+    async fn mock_pull_request(
+        State(state): State<Arc<MockState>>,
+        Path((owner, name, number)): Path<(String, String, i64)>,
+    ) -> Json<Value> {
+        let requested = state.pull_request_snapshot.lock().unwrap().clone();
+        match requested.filter(|pull| pull["number"] == number) {
+            Some(pull) => Json(pull),
+            None => mock_issue(Path((owner, name, number))).await,
+        }
+    }
+
+    async fn mock_pull_author_permission(
+        State(state): State<Arc<MockState>>,
+        Path((_, _, login)): Path<(String, String, String)>,
+    ) -> Result<Json<Value>, StatusCode> {
+        let pull = state.pull_request_snapshot.lock().unwrap();
+        let user = pull.as_ref().map(|pull| &pull["user"]);
+        let user = user
+            .filter(|user| user["login"] == login)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        Ok(Json(json!({ "permission": "write", "user": user })))
+    }
+
     async fn mock_edit_thread(
         Path((owner, name, number)): Path<(String, String, i64)>,
         Json(body): Json<Value>,
@@ -1332,7 +1448,11 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
             )
             .route(
                 "/repos/{owner}/{name}/pulls/{number}",
-                get(mock_issue).patch(mock_edit_thread),
+                get(mock_pull_request).patch(mock_edit_thread),
+            )
+            .route(
+                "/repos/{owner}/{name}/collaborators/{login}/permission",
+                get(mock_pull_author_permission),
             )
             .route(
                 "/repos/{owner}/{name}/issues/{number}/labels",
@@ -1380,7 +1500,13 @@ MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBALB1n9OQb2v0gQ0F0G0t0Q0G0t0Q0G0t
     }
 
     pub async fn configured_test_app(db: Db) -> GithubApp {
-        let base = spawn_mock(MockState::new(3600)).await;
+        configured_review_test_app(db, None).await
+    }
+
+    pub async fn configured_review_test_app(db: Db, pull: Option<Value>) -> GithubApp {
+        let state = MockState::new(3600);
+        *state.pull_request_snapshot.lock().unwrap() = pull;
+        let base = spawn_mock(state).await;
         configured_app_for_db(db, base).await
     }
 
