@@ -25,6 +25,8 @@ use super::{
     AppState,
 };
 
+// Match the public route's Axum body limit so the parser stays bounded if reused.
+const MAX_WEBHOOK_BODY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IN_FLIGHT: usize = 8;
 const MAX_ATTEMPTS: i64 = 5;
 // Exceed the automation reservation's five-minute stale interval so a
@@ -84,6 +86,9 @@ fn delivery_from_payload(payload: &Value) -> Option<Delivery> {
 
 /// Store the PR identity and event action needed to resolve the current head.
 pub(super) async fn enqueue(db: &Db, id: &str, body: &[u8]) -> Result<bool> {
+    if body.len() > MAX_WEBHOOK_BODY_BYTES {
+        bail!("GitHub webhook body exceeds the pull request payload limit");
+    }
     let payload: Value = match serde_json::from_slice(body) {
         Ok(payload) => payload,
         Err(error) => {
