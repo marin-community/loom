@@ -72,7 +72,7 @@ fn branch_slug(branch: &Branch) -> String {
 /// A custom agent or bare shell has none, so its missing transcript is expected,
 /// not a problem to warn about.
 fn produces_transcript(agent_kind: &str) -> bool {
-    crate::agent_kind::is_builtin_agent_kind(agent_kind)
+    matches!(agent_kind, "claude" | "codex")
 }
 
 /// Whether `agent_kind` could have a Codex transcript. Only Codex is worth the

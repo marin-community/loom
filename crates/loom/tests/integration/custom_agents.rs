@@ -29,6 +29,13 @@ async fn agents_list_merges_builtins_and_custom() {
     let claude = find(agents, "claude").expect("claude is builtin");
     assert_eq!(claude["builtin"], true);
     assert!(find(agents, "codex").is_some(), "codex is builtin");
+    let antigravity = find(agents, "antigravity").expect("antigravity is builtin");
+    assert_eq!(antigravity["builtin"], true);
+    assert_eq!(antigravity["protocol"], "acp");
+    let models = antigravity["models"].as_array().unwrap();
+    for id in ["gemini-4-neon", "gemini-4-carbon"] {
+        assert!(models.iter().any(|model| model["id"] == id));
+    }
     // The fixture seeds "shell" as a custom agent, so it shows up as non-builtin.
     let shell = find(agents, "shell").expect("fixture seeds a custom shell agent");
     assert_eq!(shell["builtin"], false);

@@ -20,7 +20,7 @@ use loom_store::agent_kind::BuiltinAgentKind;
 /// CLI error message prints them. Extending [`BuiltinAgentKind`] forces a new
 /// arm in the exhaustive `skills_dir_for` match below; grow this list
 /// alongside it (the unit test ties every entry to a builtin kind).
-pub const SUPPORTED_HARNESSES: &[&str] = &["claude", "codex"];
+pub const SUPPORTED_HARNESSES: &[&str] = &["claude", "codex", "antigravity"];
 
 /// One installed harness and the directory it reads user-level skills from.
 #[derive(Debug, Clone)]
@@ -145,7 +145,12 @@ pub async fn installed_skill_targets() -> Vec<SkillTarget> {
         // harness installed, and the picker hides the rest. Installing for
         // what is actually on PATH keeps that contract and avoids reporting
         // success for a directory no harness will ever read.
-        if !binary_on_path(name).await {
+        let bin = if kind == BuiltinAgentKind::Antigravity {
+            "agy"
+        } else {
+            name
+        };
+        if !binary_on_path(bin).await {
             continue;
         }
         targets.push(SkillTarget {
@@ -176,12 +181,13 @@ fn env_dir(name: &str) -> Option<PathBuf> {
 /// inputs are parameters so tests need not race env access.
 ///
 /// Sources: Claude Code (personal `~/.claude/skills/`) and the Codex CLI
-/// (`~/.codex/skills/`, overridable via `CODEX_HOME`). The two read no
-/// shared directory, so each harness's own canonical location is written.
+/// (`~/.codex/skills/`, overridable via `CODEX_HOME`) and Antigravity CLI
+/// (`~/.gemini/antigravity-cli/skills/`).
 fn skills_dir_for(kind: BuiltinAgentKind, home: &Path, codex_home: Option<&Path>) -> PathBuf {
     match kind {
         BuiltinAgentKind::Claude => home.join(".claude").join("skills"),
         BuiltinAgentKind::Codex => codex_home.unwrap_or(&home.join(".codex")).join("skills"),
+        BuiltinAgentKind::Antigravity => home.join(".gemini/antigravity-cli/skills"),
     }
 }
 
@@ -632,6 +638,7 @@ mod tests {
     async fn installed_skill_targets_follow_path_detection() {
         let bin = tempfile::tempdir().unwrap();
         for name in SUPPORTED_HARNESSES {
+            let name = if *name == "antigravity" { "agy" } else { name };
             let path = bin.path().join(name);
             std::fs::write(&path, "#!/bin/sh\n").unwrap();
             make_executable(&path);
@@ -650,7 +657,11 @@ mod tests {
 
         let targets = installed_skill_targets().await;
         let names: Vec<&str> = targets.iter().map(|t| t.harness).collect();
-        assert_eq!(names, ["claude", "codex"]);
+        assert_eq!(names, ["claude", "codex", "antigravity"]);
+        assert_eq!(
+            targets[2].skills_dir,
+            home.path().join(".gemini/antigravity-cli/skills")
+        );
         assert_eq!(
             targets[0].skills_dir,
             home.path().join(".claude/skills"),
@@ -661,7 +672,7 @@ mod tests {
         std::fs::remove_file(bin.path().join("codex")).unwrap();
         let targets = installed_skill_targets().await;
         let names: Vec<&str> = targets.iter().map(|t| t.harness).collect();
-        assert_eq!(names, ["claude"]);
+        assert_eq!(names, ["claude", "antigravity"]);
         drop(restore);
     }
 

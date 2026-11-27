@@ -49,7 +49,7 @@ pub struct AgentMetadata {
     pub efforts: Vec<AgentChoice>,
     pub accepts_raw_model: bool,
     pub supports_hooks: bool,
-    /// True for the code-shipped `claude`/`codex`; false for an operator-defined
+    /// True for a code-shipped runtime; false for an operator-defined
     /// custom agent (which the UI may edit or delete).
     pub builtin: bool,
     /// Whether this runtime can be driven through ACP. Kept separate from its
@@ -83,6 +83,7 @@ pub trait AgentType: Sync {
 
 pub struct ClaudeAgentType;
 pub struct CodexAgentType;
+pub struct AntigravityAgentType;
 
 /// A [`CustomAgent`] row wrapped as an [`AgentType`]: its stages drive the launch
 /// script, and its metadata is derived from the stored fields.
@@ -143,25 +144,39 @@ const CODEX_EFFORT_CHOICES: &[(&str, &str)] = &[
     ("xhigh", "X-High"),
 ];
 
+const ANTIGRAVITY_MODEL_CHOICES: &[(&str, &str)] = &[
+    ("gemini-4-neon", "Gemini 4 Neon"),
+    ("gemini-4-carbon", "Gemini 4 Carbon"),
+    ("gemini-4-argon", "Gemini 4 Argon"),
+    ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+    ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+];
+
 static CLAUDE_AGENT_TYPE: ClaudeAgentType = ClaudeAgentType;
 static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
+static ANTIGRAVITY_AGENT_TYPE: AntigravityAgentType = AntigravityAgentType;
 
-/// The builtin agent for `kind`, if it names one (`claude`/`codex`). Custom
+/// The builtin agent for `kind`, if it names one. Custom
 /// agents live in the database and are resolved by [`resolve`]; this covers only
 /// the code-shipped runtimes, which need no DB lookup.
 pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
     match BuiltinAgentKind::parse(kind)? {
         BuiltinAgentKind::Claude => Some(&CLAUDE_AGENT_TYPE),
         BuiltinAgentKind::Codex => Some(&CODEX_AGENT_TYPE),
+        BuiltinAgentKind::Antigravity => Some(&ANTIGRAVITY_AGENT_TYPE),
     }
 }
 
 /// The builtin agents' metadata, in picker order.
 pub fn builtin_metadata() -> Vec<AgentMetadata> {
-    [&CLAUDE_AGENT_TYPE as &dyn AgentType, &CODEX_AGENT_TYPE]
-        .into_iter()
-        .map(AgentType::metadata)
-        .collect()
+    [
+        &CLAUDE_AGENT_TYPE as &dyn AgentType,
+        &CODEX_AGENT_TYPE,
+        &ANTIGRAVITY_AGENT_TYPE,
+    ]
+    .into_iter()
+    .map(AgentType::metadata)
+    .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -561,6 +576,30 @@ impl AgentType for CodexAgentType {
 
     fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
         Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
+    }
+}
+
+impl AgentType for AntigravityAgentType {
+    fn metadata(&self) -> AgentMetadata {
+        AgentMetadata {
+            kind: "antigravity".to_string(),
+            label: "Antigravity".to_string(),
+            models: AgentChoice::list(ANTIGRAVITY_MODEL_CHOICES),
+            efforts: AgentChoice::list(EFFORT_CHOICES),
+            accepts_raw_model: true,
+            supports_hooks: false,
+            builtin: true,
+            supports_acp: true,
+            protocol: "acp".to_string(),
+        }
+    }
+
+    fn create<'a>(&'a self, _ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        Box::pin(async { anyhow::bail!("Antigravity requires the ACP protocol") })
+    }
+
+    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
+        self.create(ctx)
     }
 }
 
@@ -1033,9 +1072,8 @@ fn loom_bin_path() -> String {
 
 /// Resolve the execution backend for a launch: the agent's declared `protocol`
 /// unless the create request overrides it. A blank/absent override keeps the
-/// declared value. Both builtins may opt into `acp` (claude via
-/// `claude-agent-acp`, codex via `codex-acp`); a terminal-only custom agent has
-/// no ACP adapter, so it is rejected. Returns a key-free reason.
+/// declared value. Claude and Codex also support terminal launches.
+/// Returns a key-free reason.
 pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result<String, String> {
     let declared = if meta.protocol.is_empty() {
         "terminal"
@@ -1054,8 +1092,7 @@ pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result
         return Ok(declared.to_string());
     }
     if req == "acp" {
-        // Both builtins have an adapter; a terminal custom agent does not.
-        return if meta.builtin {
+        return if meta.supports_acp {
             Ok("acp".to_string())
         } else {
             Err(format!(
@@ -1064,9 +1101,7 @@ pub fn resolve_protocol(meta: &AgentMetadata, requested: Option<&str>) -> Result
             ))
         };
     }
-    // Declared acp, requested terminal: only a builtin has a terminal launch
-    // path; an acp custom agent has no terminal command to run.
-    if meta.builtin {
+    if meta.builtin && matches!(meta.kind.as_str(), "claude" | "codex") {
         Ok("terminal".to_string())
     } else {
         Err(format!(
@@ -1129,7 +1164,8 @@ pub struct AcpLaunchSpec<'a> {
 /// and maps the same inputs onto its env contract (`CODEX_CONFIG`,
 /// `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST`); Codex's `agent` mode routes
 /// approvals to Loom instead of its own model reviewer, and, being hookless,
-/// takes the primer as its opening prompt like the terminal path. A custom
+/// takes the primer as its opening prompt like the terminal path. Antigravity
+/// runs the CLI's native ACP server and uses ACP session selectors. A custom
 /// acp agent runs its `launch` command verbatim (setup stage first) as the
 /// adapter, with no `_meta`.
 pub async fn build_acp_launch(
@@ -1138,14 +1174,29 @@ pub async fn build_acp_launch(
     open: AcpOpen,
 ) -> Result<AcpLaunch> {
     let is_fresh = matches!(open, AcpOpen::Fresh);
-    let is_codex = spec.custom.is_none() && spec.runtime == "codex";
-    let is_claude = spec.custom.is_none() && !is_codex;
-    let adapter_cmd = match spec.custom {
+    let builtin = if spec.custom.is_none() {
+        BuiltinAgentKind::parse(spec.runtime)
+    } else {
+        None
+    };
+    let is_codex = builtin == Some(BuiltinAgentKind::Codex);
+    let is_claude = builtin == Some(BuiltinAgentKind::Claude);
+    let antigravity = builtin == Some(BuiltinAgentKind::Antigravity);
+    let adapter_cmd = match (builtin, spec.custom) {
         // The `launch` command *is* the adapter; setup runs first, as for a
         // terminal custom agent.
-        Some(agent) => join_shell(&[agent.setup.trim(), agent.launch.trim()]),
-        None if is_codex => codex_acp_cmd(db).await,
-        None => claude_acp_cmd(db).await,
+        (_, Some(agent)) => join_shell(&[agent.setup.trim(), agent.launch.trim()]),
+        (Some(BuiltinAgentKind::Codex), None) => codex_acp_cmd(db).await,
+        (Some(BuiltinAgentKind::Claude), None) => claude_acp_cmd(db).await,
+        (Some(BuiltinAgentKind::Antigravity), None) => {
+            anyhow::ensure!(
+                !spec.restricted,
+                "Antigravity does not support restricted profiles"
+            );
+            validate_launch_mode(spec.runtime, spec.mode).map_err(|error| anyhow!(error))?;
+            antigravity_acp_cmd(db).await
+        }
+        (None, None) => anyhow::bail!("unknown ACP runtime '{}'", spec.runtime),
     };
 
     if is_claude && spec.prelude == "weaver" && !spec.restricted {
@@ -1164,7 +1215,7 @@ pub async fn build_acp_launch(
         .context("invalid session runtime-permission snapshot")?;
     let mcp_snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(spec.mcp_access).context("invalid session MCP policy snapshot")?;
-    if is_codex && goal_text.is_none() {
+    if (is_codex || antigravity) && goal_text.is_none() {
         // No appendSystemPrompt analogue: a primer-only launch seeds the primer
         // positionally, mirroring the terminal path's
         // `goal_file.or(primer_file)`.
@@ -1234,6 +1285,7 @@ pub async fn build_acp_launch(
 
     Ok(AcpLaunch {
         adapter_cmd,
+        antigravity,
         cwd: spec.work_dir.to_path_buf(),
         env,
         env_clear: spec.env_clear,
@@ -1243,7 +1295,13 @@ pub async fn build_acp_launch(
         // Codex boots directly in its mapped mode via `INITIAL_AGENT_MODE`; a
         // post-setup `session/set_mode` would re-send a claude-flavored id it
         // does not advertise.
-        mode: (!is_codex).then(|| spec.mode.to_string()),
+        mode: match (builtin, spec.mode) {
+            (Some(BuiltinAgentKind::Codex), _) => None,
+            (Some(BuiltinAgentKind::Antigravity), "acceptEdits") => {
+                Some("accept-edits".to_string())
+            }
+            _ => Some(spec.mode.to_string()),
+        },
         // Loading must preserve adapter-restored live choices: the user may
         // have changed either selector after launch.
         initial_model: (is_fresh && !spec.model.trim().is_empty())
@@ -1253,6 +1311,13 @@ pub async fn build_acp_launch(
         goal,
         setup_timeout: std::time::Duration::from_secs(30),
     })
+}
+
+pub fn validate_launch_mode(agent: &str, mode: &str) -> Result<(), String> {
+    if agent == "antigravity" && mode == "bypassPermissions" {
+        return Err("Antigravity does not support the bypassPermissions launch mode".to_string());
+    }
+    Ok(())
 }
 
 /// Append `(key, value)` unless `key` is already present (an operator override
@@ -1344,6 +1409,16 @@ async fn codex_acp_cmd(db: &Db) -> String {
         return cmd;
     }
     npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
+}
+
+async fn antigravity_acp_cmd(db: &Db) -> String {
+    if let Some(cmd) = weaver_core::config::get(db, "acp.antigravity_cmd")
+        .await
+        .filter(|cmd| !cmd.trim().is_empty())
+    {
+        return cmd;
+    }
+    "exec agy acp --process-per-session".to_string()
 }
 
 /// Apply Loom's Codex policy on top of the shared provider login and any
@@ -2588,6 +2663,7 @@ mod tests {
     fn transient_acp_prompt_keeps_the_adapter_but_drops_session_authority() {
         let incoming = AcpLaunch {
             adapter_cmd: "configured-acp-adapter".to_string(),
+            antigravity: false,
             cwd: PathBuf::from("/worktree"),
             env: vec![
                 ("ANTHROPIC_API_KEY".to_string(), "provider".to_string()),
@@ -2637,6 +2713,7 @@ mod tests {
     fn transient_claude_prompt_removes_live_session_options() {
         let incoming = AcpLaunch {
             adapter_cmd: "configured-acp-adapter".to_string(),
+            antigravity: false,
             cwd: PathBuf::from("/worktree"),
             env: vec![
                 (
@@ -2858,6 +2935,7 @@ mod tests {
         let codex = meta_for("codex", "terminal", true);
         let acp_custom = meta_for("my-acp", "acp", false);
         let term_custom = meta_for("aider", "terminal", false);
+        let antigravity = ANTIGRAVITY_AGENT_TYPE.metadata();
 
         // No override → declared.
         assert_eq!(resolve_protocol(&claude, None).unwrap(), "terminal");
@@ -2878,6 +2956,7 @@ mod tests {
         assert!(resolve_protocol(&term_custom, Some("acp")).is_err());
         // An acp-only custom agent has no terminal fallback.
         assert!(resolve_protocol(&acp_custom, Some("terminal")).is_err());
+        assert!(resolve_protocol(&antigravity, Some("terminal")).is_err());
 
         // An unknown protocol name is rejected.
         assert!(resolve_protocol(&claude, Some("grpc")).is_err());

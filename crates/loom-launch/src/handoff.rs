@@ -312,6 +312,7 @@ async fn legacy_handoff_plan(
             "invalid handoff mode '{mode}'"
         )));
     }
+    crate::agent::validate_launch_mode(target, &mode).map_err(HandoffError::bad_request)?;
     let lifetime = crate::profile::get_including_retired(&st.db, &session.profile)
         .await?
         .ok_or_else(|| {

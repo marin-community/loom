@@ -588,6 +588,21 @@ loom mcp add /engineering/search/docs --label "Docs search" \
   --file server.py --tests test_mcp.py
 ```
 
+Install a current Antigravity CLI with `agy` on the Loom runtime's PATH. Sign in
+on that host with `agy acp --login` or configure an Antigravity credential.
+Select **Antigravity** in the launch picker or create a profile.
+[Install Antigravity](https://antigravity.google/download) ·
+[Authentication](https://antigravity.google/docs/ide/extensions/acp#authentication)
+
+```sh
+loom profile add neon --agent antigravity --model gemini-4-neon --effort high
+```
+
+The launch picker offers Gemini 4 Neon, Carbon, Argon, Hydrogen, and Gemini 3.8
+Flash. The signed-in account determines the available models and thinking levels.
+Antigravity uses ACP and supports Default, Accept Edits, Plan, and Auto where
+the account offers it. Loom uses Default when Antigravity does not offer Auto.
+
 Strict profiles reject one-launch overrides. Environment-cleared profiles start
 from a minimal baseline plus explicit ambient, profile, and repository values.
 Environment reads expose names and source metadata, never literal secret values.

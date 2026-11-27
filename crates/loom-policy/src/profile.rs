@@ -248,6 +248,7 @@ async fn validate_input(
     ) {
         bail!("invalid profile mode '{mode}'");
     }
+    crate::agent::validate_launch_mode(agent_kind, &mode).map_err(|error| anyhow!(error))?;
     if protocol != "acp"
         && (input.mcp_access.mode != "none"
             || input
