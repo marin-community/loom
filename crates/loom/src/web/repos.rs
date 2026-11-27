@@ -37,7 +37,7 @@ use weaver_api::operations::sessions;
 /// non-2xx cases past that are deliberate, not no-ops: a delivery with no
 /// `X-GitHub-Delivery` GUID is malformed (**400** — without it idempotency is
 /// impossible), and a store failure returns **5xx** for operator redelivery.
-/// Eligible automations are durably queued before returning **202**.
+/// Matching pull request rules are durably queued before returning **202**.
 /// Deliveries that do not match a trigger are acknowledged with **200**.
 pub(super) async fn github_webhook(
     State(st): State<AppState>,
