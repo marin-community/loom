@@ -105,7 +105,7 @@ async fn start_new_with_env(
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd: cwd.clone(),
         env,
         env_clear: false,
@@ -127,7 +127,7 @@ fn transient_launch(ts: &TestServer, env: Vec<(String, String)>) -> AcpLaunch {
     AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd: cwd.clone(),
         env,
         env_clear: false,
@@ -152,7 +152,7 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![(
             "FAKE_ACP_IGNORE_METHOD".to_string(),
@@ -238,7 +238,7 @@ async fn transient_setup_failure_preserves_the_acp_session_id() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd,
         env: vec![(
             "FAKE_ACP_UNAVAILABLE_ATTEMPTS".to_string(),
@@ -749,7 +749,7 @@ async fn launch_model_and_effort_replace_adapter_config_defaults() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![],
         env_clear: false,
@@ -786,7 +786,7 @@ async fn load_preserves_adapter_restored_model_and_effort() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
-        antigravity: false,
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![],
         env_clear: false,

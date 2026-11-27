@@ -61,6 +61,7 @@ use serde_json::{json, Value};
 use tapestry::RelayEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::agent_kind::BuiltinAgentKind;
 use crate::chat::{self, kind, ChatBlockView};
 use crate::db::{now_iso, Db};
 use crate::session;
@@ -135,8 +136,8 @@ pub enum NewOrLoad {
 pub struct AcpLaunch {
     /// The shell command the relay runs to launch the adapter over stdio.
     pub adapter_cmd: String,
-    /// Whether to reconcile launch selectors with Antigravity's account catalog.
-    pub antigravity: bool,
+    /// The runtime that owns this adapter's provider-specific behavior.
+    pub builtin: Option<BuiltinAgentKind>,
     /// The relay child's working directory.
     pub cwd: PathBuf,
     /// Out-of-band environment for the adapter process (delivered over the
@@ -687,7 +688,8 @@ fn launch_config_value(
         return None;
     }
     let mut value = desired.to_string();
-    if launch.antigravity && kind == "model" && !details.available.contains(&value) {
+    let antigravity = launch.builtin == Some(BuiltinAgentKind::Antigravity);
+    if antigravity && kind == "model" && !details.available.contains(&value) {
         // Some account catalogs expose a model family and a separate thinking
         // level. Others expose one model id per thinking level.
         let levels = ["high", "medium", "low", "xhigh", "max"];
@@ -704,7 +706,7 @@ fn launch_config_value(
             }
         }
     }
-    if launch.antigravity && kind == "effort" {
+    if antigravity && kind == "effort" {
         if let (Some(model), Some(current)) =
             (launch.initial_model.as_deref(), current_model(options))
         {
@@ -728,7 +730,7 @@ fn launch_config_value(
 
 fn launch_mode<'a>(launch: &'a AcpLaunch, available: &[String]) -> Option<&'a str> {
     let mode = launch.mode.as_deref()?.trim();
-    if launch.antigravity
+    if launch.builtin == Some(BuiltinAgentKind::Antigravity)
         && mode == "auto"
         && !available.iter().any(|id| id == "auto")
         && available.iter().any(|id| id == "default")
@@ -1416,7 +1418,9 @@ async fn start_inner(
     let session = session::get(&state.db, session_id)
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;
-    if launch.antigravity && matches!(launch.new_or_load, NewOrLoad::Load { .. }) {
+    if launch.builtin == Some(BuiltinAgentKind::Antigravity)
+        && matches!(launch.new_or_load, NewOrLoad::Load { .. })
+    {
         // agy can restore the conversation with account defaults after a
         // process restart. Reapply the last acknowledged session choices.
         let metadata = Task::load_persisted_metadata(&state.db, session_id).await?;

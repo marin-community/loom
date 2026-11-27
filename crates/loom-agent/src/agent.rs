@@ -1285,7 +1285,7 @@ pub async fn build_acp_launch(
 
     Ok(AcpLaunch {
         adapter_cmd,
-        antigravity,
+        builtin,
         cwd: spec.work_dir.to_path_buf(),
         env,
         env_clear: spec.env_clear,
@@ -2663,7 +2663,7 @@ mod tests {
     fn transient_acp_prompt_keeps_the_adapter_but_drops_session_authority() {
         let incoming = AcpLaunch {
             adapter_cmd: "configured-acp-adapter".to_string(),
-            antigravity: false,
+            builtin: None,
             cwd: PathBuf::from("/worktree"),
             env: vec![
                 ("ANTHROPIC_API_KEY".to_string(), "provider".to_string()),
@@ -2713,7 +2713,7 @@ mod tests {
     fn transient_claude_prompt_removes_live_session_options() {
         let incoming = AcpLaunch {
             adapter_cmd: "configured-acp-adapter".to_string(),
-            antigravity: false,
+            builtin: None,
             cwd: PathBuf::from("/worktree"),
             env: vec![
                 (
