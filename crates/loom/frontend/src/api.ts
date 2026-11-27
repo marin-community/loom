@@ -242,13 +242,12 @@ export const regenerateSessionTitle = (id: string) =>
   invokeOperation('sessions.title.regenerate', { session: id });
 export const setSessionTitleGeneration = (id: string, enabled: boolean) =>
   invokeOperation('sessions.title.generation.set', { enabled, session: id });
-/** The stored cue, if one has been generated — a pure read. */
+/** Read the cached session update. */
 export const getResumptionCue = (id: string) =>
   invokeOperation('sessions.resumption_cue.get', { session: id });
-/** Generate the cue when it is missing or stale (`force` regenerates it
- *  unconditionally) — the separate write half of the pair above. */
-export const ensureResumptionCue = (id: string, force = false) =>
-  invokeOperation('sessions.resumption_cue.ensure', { force, session: id });
+/** Request a session update once the inactivity threshold has elapsed. */
+export const ensureResumptionCue = (id: string) =>
+  invokeOperation('sessions.resumption_cue.ensure', { force: false, session: id });
 
 // --- Session layout ---------------------------------------------------------
 

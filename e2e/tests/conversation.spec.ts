@@ -177,42 +177,62 @@ async function dropHiddenScrollOffset(conv: ReturnType<Page['getByTestId']>) {
 }
 
 test.describe('conversation view', () => {
-  test('offers a plain-language catch-up without exposing resumption internals', async ({
-    page,
-    weaver,
-  }) => {
-    const session = await weaver.seedSession({
-      goal: 'demo',
-      name: 'catch-up',
-    });
+  test('shows a compact status update on return after inactivity', async ({ page, weaver }) => {
+    const session = await weaver.seedSession({ goal: 'Add a dark-mode toggle', name: 'dark-mode' });
     await weaver.seedConversation(session, demoLog());
-    // The stored read and the on-demand generation are two operations now, so
-    // the path — not the method — says which one the page asked for.
+    await weaver.hook(session, 'idle');
+    const update = 'The dark-mode toggle now persists across reloads. The pull request is next.';
+    const generatedAt = new Date().toISOString();
+    let status = 'not_due';
+    const generationRequests: unknown[] = [];
     await page.route('**/api/sessions/resumption_cue/*', async (route) => {
-      const operands = route.request().postDataJSON() as { session?: string };
-      if (operands?.session !== session.id) return route.fallback();
-      const generated = new URL(route.request().url()).pathname.endsWith('/ensure');
+      const operands = route.request().postDataJSON();
+      if (operands.session !== session.id) return route.fallback();
+      const ensure = new URL(route.request().url()).pathname.endsWith('/ensure');
+      if (ensure) {
+        generationRequests.push(operands);
+        status = 'generated';
+      }
       await route.fulfill({
         json: {
-          status: generated ? 'generated' : 'not_due',
-          source_cursor: generated ? 'cursor-1' : null,
-          text: generated ? 'The sorting work is ready for review.' : null,
-          generated_at: generated ? '2026-07-30T12:00:00Z' : null,
+          status: ensure ? 'generating' : status,
+          source_cursor: 'cursor-1',
+          text: !ensure && status === 'generated' ? update : null,
+          generated_at: !ensure && status === 'generated' ? generatedAt : null,
           evidence: [],
         },
       });
     });
 
     await page.goto(`${weaver.baseUrl}/s/${session.id}`);
-    await page.locator('[data-tab="conversation"]').click();
-    const catchUp = page.getByTestId('generate-resumption-cue');
-    await expect(catchUp).toHaveText('Catch me up');
-    await expect(page.getByText(/resumption cue/i)).toHaveCount(0);
-    await catchUp.click();
-    await expect(page.getByLabel('Session catch-up')).toContainText('Where you left off');
-    await expect(page.getByLabel('Session catch-up')).toContainText(
-      'The sorting work is ready for review.',
-    );
+    const conversation = page.locator('[data-tab="conversation"]');
+    const terminal = page.locator('[data-tab="terminal"]');
+    const statusLine = page.getByRole('region', { name: 'Session update' });
+    const read = page.waitForResponse('**/api/sessions/resumption_cue/get');
+    await conversation.click();
+    await read;
+    await expect(page.getByText('Opening the PR.')).toBeVisible();
+    await expect(statusLine).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Catch me up' })).toHaveCount(0);
+    expect(generationRequests).toEqual([]);
+    await page.screenshot({ path: test.info().outputPath('conversation-recent.png') });
+
+    await terminal.click();
+    status = 'due';
+    await conversation.click();
+    await expect(statusLine).toContainText(update);
+    expect(generationRequests).toEqual([{ session: session.id, force: false }]);
+    await page.screenshot({ path: test.info().outputPath('conversation-status-update.png') });
+
+    await terminal.click();
+    await conversation.click();
+    await expect(statusLine).toContainText(update);
+    expect(generationRequests).toHaveLength(1);
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(statusLine).toBeVisible();
+    expect(await statusLine.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.screenshot({ path: test.info().outputPath('conversation-status-update-mobile.png') });
   });
 
   // A chat opens at its newest exchange — the transcript scrolls to its foot on

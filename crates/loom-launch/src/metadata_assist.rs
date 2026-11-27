@@ -30,7 +30,7 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(45);
 const PREPARATION_TIMEOUT: Duration = Duration::from_secs(10);
 const TITLE_GOAL_CHARS: usize = 4_000;
 const CUE_SOURCE_CHARS: usize = 12_000;
-const CUE_OUTPUT_CHARS: usize = 1_200;
+const CUE_OUTPUT_CHARS: usize = 240;
 const HISTORY_RECORDS: usize = 24;
 const CUE_ARTIFACTS: usize = 24;
 const ARTIFACT_LABEL_CHARS: usize = 120;
@@ -552,10 +552,10 @@ async fn generate_title(
 fn sanitize_cue(input: &str) -> Option<String> {
     let plain: String = input
         .chars()
-        .filter(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        .filter(|ch| !ch.is_control() || ch.is_whitespace())
         .collect();
-    let trimmed = plain.trim();
-    (!trimmed.is_empty()).then(|| take_chars(trimmed, CUE_OUTPUT_CHARS))
+    let line = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!line.is_empty()).then(|| take_chars(&line, CUE_OUTPUT_CHARS))
 }
 
 fn recent_artifacts(mut artifacts: Vec<Artifact>) -> Vec<Artifact> {
@@ -610,7 +610,8 @@ fn cue_identity_from(
         .map(|artifact| (artifact.id, artifact.name.clone(), artifact.rev))
         .collect::<Vec<_>>();
     let cursor = CueCursor {
-        source: serialized_fingerprint(source)?,
+        // Recaps generated with the old prompt are too long for the status line.
+        source: serialized_fingerprint(&("status-line", source))?,
         history: last.cursor.clone(),
         fingerprint: serialized_fingerprint(&(
             &inputs.page.source,
@@ -712,10 +713,11 @@ async fn prepare_cue(db: &Db, snapshot: &MetadataRead) -> Result<Option<Prepared
     let secrets = known_secret_values(db, &snapshot.session, &snapshot.branch).await?;
     let prompt = redact_known_secrets(
         format!(
-            "Write a compact on-return cue for this work session. Cover current intent, \
-             completed work, blockers, changed/current artifacts, and the likely next step. \
-             Use only the evidence below; say when a category is unknown. Maximum 160 words. \
-             Do not present the cue as authoritative state.\n\nGoal:\n{}\n\n\
+            "Write a plain-text status update for someone returning to this work session. \
+             In one or two short sentences, lead with the latest concrete outcome, then \
+             mention a blocker or next action if the evidence supports it. If the work is \
+             blocked, lead with what needs attention. Use only the evidence below. \
+             Omit headings, lists, and background. Maximum {CUE_OUTPUT_CHARS} characters.\n\nGoal:\n{}\n\n\
              Recent source-linked conversation:\n{}\nArtifacts:\n{}",
             take_chars(&snapshot.branch.goal, TITLE_GOAL_CHARS),
             recent_transcript(&inputs.page),
@@ -745,11 +747,7 @@ fn inactivity_elapsed(last_activity_at: Option<&str>, threshold_secs: i64) -> bo
 }
 
 async fn cue_inactivity_threshold(db: &Db) -> i64 {
-    config::get(db, CUE_INACTIVITY_KEY)
-        .await
-        .and_then(|value| value.parse::<i64>().ok())
-        .unwrap_or(3_600)
-        .max(0)
+    config::get_int(db, CUE_INACTIVITY_KEY, 28_800).await.max(0)
 }
 
 async fn cue_is_due(db: &Db, session: &Session) -> bool {
@@ -1074,16 +1072,24 @@ mod tests {
         assert_eq!(take_tail_chars("abcdef", 4), "…def");
         assert_eq!(
             sanitize_cue("\0  Continue\nnext  "),
-            Some("Continue\nnext".into())
+            Some("Continue next".into())
         );
     }
 
-    #[test]
-    fn inactivity_is_bounded_by_the_configured_threshold() {
-        let recent = Utc::now().to_rfc3339();
-        assert!(!inactivity_elapsed(Some(&recent), 60));
-        let old = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
-        assert!(inactivity_elapsed(Some(&old), 60));
+    #[tokio::test]
+    async fn inactivity_is_bounded_by_the_configured_threshold() {
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let seven_hours_ago = (Utc::now() - chrono::Duration::hours(7)).to_rfc3339();
+        let eight_hours_ago = (Utc::now() - chrono::Duration::hours(8)).to_rfc3339();
+        let default = cue_inactivity_threshold(&db).await;
+        assert!(!inactivity_elapsed(Some(&seven_hours_ago), default));
+        assert!(inactivity_elapsed(Some(&eight_hours_ago), default));
+
+        config::apply(&db, &[(CUE_INACTIVITY_KEY.into(), Some("3600".into()))])
+            .await
+            .unwrap();
+        let configured = cue_inactivity_threshold(&db).await;
+        assert!(inactivity_elapsed(Some(&seven_hours_ago), configured));
         assert!(!inactivity_elapsed(None, 0));
     }
 
