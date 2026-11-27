@@ -163,12 +163,13 @@ stable multi-selection and atomic bulk triage. Destructive actions use
 focus-managed in-app confirmation with explicit scope and retryable inline
 errors; the SPA never delegates that work to browser prompts.
 
-On return after configured inactivity, Loom may prepare a short source-linked
-resumption cue from bounded conversation and immutable artifact inputs. Reading
-the cue is model-free; explicit ensure/force actions control generation. Cue and
-title assistance run with a cleared environment, no tools, and no MCP. Restricted
-session content is excluded unless the operator explicitly enables it, and
-source fingerprints prevent stale generated text from overwriting newer state.
+When you return to a conversation after eight hours of inactivity by default,
+Loom can show a one- or two-sentence status update about where the work stands
+and what needs attention next. Loom reuses it while its conversation and
+artifact sources match. Status and title assistance run with a cleared
+environment, no tools, and no MCP. Restricted session content is excluded
+unless the operator explicitly enables it, and source fingerprints prevent
+stale generated text from overwriting newer state.
 
 `loom sessions url` prints a session's dashboard URL — the link to hand a person,
 resolved against loom's externally-visible address (the `auth.base_url` setting,

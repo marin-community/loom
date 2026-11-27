@@ -185,7 +185,7 @@ PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64 npm test
     `session_acp_metadata` (the latest provider-advertised composer controls,
     retained when its live task exits or Loom restarts),
     `session_metadata_assistance` (per-session generated-title enable/status and
-    the cached resumption cue keyed by a bounded conversation/content +
+    the cached session status update keyed by a bounded conversation/content +
     immutable-artifact fingerprint),
     and the auth tables `users` (the approved-operator allowlist, seeded with
     the owner), `api_tokens` (hashed bearer tokens), and `auth_sessions`

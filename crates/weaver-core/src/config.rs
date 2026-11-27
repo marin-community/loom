@@ -725,9 +725,9 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "metadata.resumption_cues",
-        label: "Generate resumption cues",
-        description: "Allow explicit or inactivity-based on-return cues in Conversation. \
-            Cues are cached by their conversation and artifact cursor.",
+        label: "Generate session status updates",
+        description: "Show a short status update when you return to an inactive conversation. \
+            Loom reuses the update until its sources change.",
         kind: SettingKind::Bool,
         default: "true",
         group: "Metadata",
@@ -735,11 +735,11 @@ pub const REGISTRY: &[SettingSpec] = &[
     },
     SettingSpec {
         key: "metadata.resumption_inactivity_secs",
-        label: "Cue inactivity (seconds)",
-        description: "Minimum session inactivity before an on-return cue is due. Explicit \
-            Generate requests do not wait for this threshold.",
+        label: "Status update inactivity (seconds)",
+        description: "How long a session must be inactive before Loom generates a status update \
+            on return.",
         kind: SettingKind::Int,
-        default: "3600",
+        default: "28800",
         group: "Metadata",
         options: &[],
     },
