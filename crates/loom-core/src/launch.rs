@@ -296,6 +296,7 @@ pub async fn resolve(
     ) {
         bail!("invalid launch mode '{mode}'");
     }
+    crate::agent::validate_launch_mode(&agent, &mode).map_err(|error| anyhow!(error))?;
 
     let (class, class_source) = match nonempty(&overrides.class) {
         Some(value) => (value.to_string(), "launch_override"),

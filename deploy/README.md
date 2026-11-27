@@ -543,10 +543,10 @@ unlike the pinned runtimes above. Set them as `loom.toml` fields —
   `$HOME` in a command silently resolves to the wrong home.
 - **`LOOM_INSTALL_SKILLS`** — comma-separated `name=source` pairs. For each,
   the entrypoint runs `loom skills install <name> <source>`, which detects
-  which harnesses are *actually installed* (the same PATH checks the agent
-  picker uses) and copies the payload into each one's user-level skills
-  directory: `~/.claude/skills/<name>/` (Claude) and `~/.codex/skills/<name>/`
-  (Codex, honoring `CODEX_HOME`). A file source lands as `<name>/SKILL.md`; a
+  which harnesses are on PATH and copies the payload into their user-level
+  skills directories. Those are `~/.claude/skills/<name>/` (Claude), `~/.codex/skills/<name>/`
+  (Codex, honoring `CODEX_HOME`), or `~/.gemini/antigravity-cli/skills/<name>/`
+  (Antigravity). A file source lands as `<name>/SKILL.md`; a
   directory source keeps its inner layout. Identical content is skipped, so
   re-running every boot is a no-op.
 

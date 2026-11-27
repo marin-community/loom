@@ -105,6 +105,7 @@ async fn start_new_with_env(
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd: cwd.clone(),
         env,
         env_clear: false,
@@ -126,6 +127,7 @@ fn transient_launch(ts: &TestServer, env: Vec<(String, String)>) -> AcpLaunch {
     AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd: cwd.clone(),
         env,
         env_clear: false,
@@ -150,6 +152,7 @@ async fn silent_setup_stage_times_out_and_cleans_provider_state() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![(
             "FAKE_ACP_IGNORE_METHOD".to_string(),
@@ -235,6 +238,7 @@ async fn transient_setup_failure_preserves_the_acp_session_id() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd,
         env: vec![(
             "FAKE_ACP_UNAVAILABLE_ATTEMPTS".to_string(),
@@ -745,6 +749,7 @@ async fn launch_model_and_effort_replace_adapter_config_defaults() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![],
         env_clear: false,
@@ -781,6 +786,7 @@ async fn load_preserves_adapter_restored_model_and_effort() {
     let launch = AcpLaunch {
         additional_directories: Vec::new(),
         adapter_cmd: agent_cmd(),
+        builtin: None,
         cwd: cwd.clone(),
         env: vec![],
         env_clear: false,
@@ -6401,6 +6407,98 @@ async fn builtin_codex_launches_over_codex_acp() {
         .find(|b| b["kind"] == "agent_message")
         .expect("the goal turn replied");
     assert_eq!(reply["payload"]["text"], "codex online");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn antigravity_launch_applies_the_account_model_catalog() {
+    let ts = TestServer::start().await;
+    for (models, model, effort, mode, expected_model, expected_mode) in [
+        (
+            "gemini-3.8-flash,gemini-4-neon",
+            "gemini-4-neon",
+            "high",
+            "acceptEdits",
+            "gemini-4-neon",
+            "accept-edits",
+        ),
+        (
+            "gemini-3.8-flash,gemini-4-carbon-high,gemini-4-carbon-low",
+            "gemini-4-carbon",
+            "low",
+            "auto",
+            "gemini-4-carbon-low",
+            "default",
+        ),
+    ] {
+        weaver_core::config::apply(
+            &ts.state.db,
+            &[(
+                "acp.antigravity_cmd".to_string(),
+                Some(format!(
+                    "FAKE_ACP_MODES=default,accept-edits,plan FAKE_ACP_MODELS={models} {}",
+                    agent_cmd()
+                )),
+            )],
+        )
+        .await
+        .unwrap();
+        let created = ts
+            .client
+            .post(
+                "/api/sessions/launch",
+                json!({
+                    "title": model, "goal": "say:antigravity online", "cwd": ts.cwd(),
+                    "agent": "antigravity", "model": model, "effort": effort, "mode": mode
+                }),
+            )
+            .await
+            .expect("Antigravity launches over ACP");
+        assert_eq!(created["protocol"], "acp");
+        let id = created["id"].as_str().unwrap();
+        let chat = poll_chat(&ts, id, Duration::from_secs(20), |blocks| {
+            blocks.iter().any(|block| block["kind"] == "turn_end")
+        })
+        .await;
+        let options = chat["metadata"]["config_options"].as_array().unwrap();
+        assert!(options
+            .iter()
+            .any(|option| { option["id"] == "model" && option["currentValue"] == expected_model }));
+        if expected_model == model {
+            assert!(options.iter().any(|option| {
+                option["id"] == "thought_level" && option["currentValue"] == effort
+            }));
+        }
+        let stored = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+        assert_eq!(stored.current_mode.as_deref(), Some(expected_mode));
+        assert!(chat["blocks"].as_array().unwrap().iter().any(|block| {
+            block["kind"] == "agent_message" && block["payload"]["text"] == "antigravity online"
+        }));
+        if expected_model == model {
+            let suspended = ts
+                .client
+                .post("/api/sessions/suspend", json!({ "session": id }))
+                .await
+                .expect("Antigravity suspends");
+            assert_eq!(suspended["suspended"], true);
+            assert!(!backend::has_session(&stored.term_session).await);
+            ts.client
+                .post("/api/sessions/wake", json!({ "session": id }))
+                .await
+                .expect("Antigravity wakes");
+            let woke = ts
+                .client
+                .post("/api/sessions/chat", json!({ "session": id }))
+                .await
+                .unwrap();
+            assert_eq!(
+                woke["metadata"]["config_options"],
+                chat["metadata"]["config_options"]
+            );
+            let stored = session_mod::get(&ts.state.db, id).await.unwrap().unwrap();
+            assert_eq!(stored.current_mode.as_deref(), Some(expected_mode));
+        }
+    }
 }
 
 /// J. Phase 6, the codex launch mapping: `build_acp_launch` resolves the

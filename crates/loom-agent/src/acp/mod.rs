@@ -61,6 +61,7 @@ use serde_json::{json, Value};
 use tapestry::RelayEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::agent_kind::BuiltinAgentKind;
 use crate::chat::{self, kind, ChatBlockView};
 use crate::db::{now_iso, Db};
 use crate::session;
@@ -135,6 +136,8 @@ pub enum NewOrLoad {
 pub struct AcpLaunch {
     /// The shell command the relay runs to launch the adapter over stdio.
     pub adapter_cmd: String,
+    /// The runtime that owns this adapter's provider-specific behavior.
+    pub builtin: Option<BuiltinAgentKind>,
     /// The relay child's working directory.
     pub cwd: PathBuf,
     /// Out-of-band environment for the adapter process (delivered over the
@@ -431,20 +434,18 @@ impl AcpPromptClient {
             ("model", launch.initial_model.as_deref()),
             ("effort", launch.initial_effort.as_deref()),
         ] {
-            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
-                continue;
-            };
             let Some(details) = config_option_details(&options, kind) else {
                 // Some adapters apply launch selectors out of band and do not
                 // advertise a matching ACP control. session/new is authoritative
                 // for those runtimes, just as it is during the durable handshake.
                 continue;
             };
-            if details.current.as_deref() == Some(desired) {
+            let Some(desired) = launch_config_value(launch, &options, kind, &details, desired)
+            else {
                 continue;
-            }
+            };
             options = self
-                .set_config_option(&details.id, Value::String(desired.to_string()))
+                .set_config_option(&details.id, Value::String(desired.clone()))
                 .await
                 .with_context(|| {
                     if details.available.is_empty() {
@@ -458,20 +459,18 @@ impl AcpPromptClient {
                 })?;
         }
 
-        if let Some(mode) = launch
-            .mode
-            .as_deref()
-            .map(str::trim)
-            .filter(|mode| !mode.is_empty())
-        {
-            if let Some(modes) = &opened.modes {
-                let available = mode_ids(&modes.available_modes);
-                if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
-                    bail!(
-                        "launch mode '{mode}' is not available (available modes: {})",
-                        available.join(", ")
-                    );
-                }
+        let available = mode_ids(
+            opened
+                .modes
+                .as_ref()
+                .map_or(&[], |modes| modes.available_modes.as_slice()),
+        );
+        if let Some(mode) = launch_mode(launch, &available) {
+            if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
+                bail!(
+                    "launch mode '{mode}' is not available (available modes: {})",
+                    available.join(", ")
+                );
             }
             self.request(
                 method::SESSION_SET_MODE,
@@ -667,10 +666,78 @@ fn is_config_option_kind(option: &Value, kind: &str) -> bool {
     let category = option.get("category").and_then(Value::as_str).unwrap_or("");
     match kind {
         "model" => category == "model" || id == "model",
-        "effort" => category == "thought_level" || id == "effort" || id.contains("reasoning"),
+        "effort" => {
+            category == "thought_level"
+                || matches!(id, "effort" | "thought_level")
+                || id.contains("reasoning")
+        }
         "mode" => category == "mode" || id == "mode",
         _ => false,
     }
+}
+
+fn launch_config_value(
+    launch: &AcpLaunch,
+    options: &[Value],
+    kind: &str,
+    details: &ConfigOptionDetails,
+    desired: Option<&str>,
+) -> Option<String> {
+    let desired = desired?.trim();
+    if desired.is_empty() {
+        return None;
+    }
+    let mut value = desired.to_string();
+    let antigravity = launch.builtin == Some(BuiltinAgentKind::Antigravity);
+    if antigravity && kind == "model" && !details.available.contains(&value) {
+        // Some account catalogs expose a model family and a separate thinking
+        // level. Others expose one model id per thinking level.
+        let levels = ["high", "medium", "low", "xhigh", "max"];
+        for level in levels.into_iter().filter(|level| {
+            launch
+                .initial_effort
+                .as_deref()
+                .is_none_or(|requested| requested == *level)
+        }) {
+            let combined = format!("{desired}-{level}");
+            if details.available.contains(&combined) {
+                value = combined;
+                break;
+            }
+        }
+    }
+    if antigravity && kind == "effort" {
+        if let (Some(model), Some(current)) =
+            (launch.initial_model.as_deref(), current_model(options))
+        {
+            if current
+                .strip_prefix(model)
+                .and_then(|suffix| suffix.strip_prefix('-'))
+                == Some(desired)
+            {
+                return None;
+            }
+        }
+        if desired == "xhigh"
+            && !details.available.contains(&value)
+            && details.available.iter().any(|level| level == "extra")
+        {
+            value = "extra".to_string();
+        }
+    }
+    (details.current.as_deref() != Some(&value)).then_some(value)
+}
+
+fn launch_mode<'a>(launch: &'a AcpLaunch, available: &[String]) -> Option<&'a str> {
+    let mode = launch.mode.as_deref()?.trim();
+    if launch.builtin == Some(BuiltinAgentKind::Antigravity)
+        && mode == "auto"
+        && !available.iter().any(|id| id == "auto")
+        && available.iter().any(|id| id == "default")
+    {
+        return Some("default");
+    }
+    (!mode.is_empty()).then_some(mode)
 }
 
 fn config_option_details(config_options: &[Value], kind: &str) -> Option<ConfigOptionDetails> {
@@ -1345,12 +1412,22 @@ pub async fn start_handoff(
 async fn start_inner(
     state: &AcpCtx,
     session_id: &str,
-    launch: AcpLaunch,
+    mut launch: AcpLaunch,
     handoff: Option<Value>,
 ) -> Result<()> {
     let session = session::get(&state.db, session_id)
         .await?
         .ok_or_else(|| anyhow!("session {session_id} not found"))?;
+    if launch.builtin == Some(BuiltinAgentKind::Antigravity)
+        && matches!(launch.new_or_load, NewOrLoad::Load { .. })
+    {
+        // agy can restore the conversation with account defaults after a
+        // process restart. Reapply the last acknowledged session choices.
+        let metadata = Task::load_persisted_metadata(&state.db, session_id).await?;
+        launch.initial_model = current_model(&metadata.config_options);
+        launch.initial_effort = config_option_details(&metadata.config_options, "effort")
+            .and_then(|details| details.current);
+    }
     let relay_name = session.term_session.clone();
 
     let env: Vec<(&str, &str)> = launch
@@ -2222,42 +2299,17 @@ impl Task {
             ("model", launch.initial_model.as_deref()),
             ("effort", launch.initial_effort.as_deref()),
         ] {
-            let Some(desired) = desired.map(str::trim).filter(|value| !value.is_empty()) else {
-                continue;
-            };
             let option = {
                 let metadata = self.metadata.lock().unwrap();
-                metadata.config_options.iter().find_map(|option| {
-                    let id = option.get("id").and_then(Value::as_str)?;
-                    let category = option.get("category").and_then(Value::as_str);
-                    let matches = match kind {
-                        "model" => category == Some("model") || id == "model",
-                        "effort" => {
-                            category == Some("thought_level")
-                                || id == "effort"
-                                || id.contains("reasoning")
-                        }
-                        _ => false,
-                    };
-                    matches.then(|| {
-                        (
-                            id.to_string(),
-                            option
-                                .get("currentValue")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                        )
-                    })
+                let options = &metadata.config_options;
+                config_option_details(options, kind).and_then(|details| {
+                    launch_config_value(launch, options, kind, &details, desired)
+                        .map(|value| (details.id, value))
                 })
             };
-            let Some((config_id, current)) = option else {
-                // Older/custom adapters may not expose this selector. The
-                // launch channel still owns the runtime value in that case.
+            let Some((config_id, desired)) = option else {
                 continue;
             };
-            if current.as_deref() == Some(desired) {
-                continue;
-            }
 
             let id = self.next_id();
             self.stream
@@ -2267,7 +2319,7 @@ impl Task {
                     wire::set_config_option_params(
                         &self.acp_session_id,
                         &config_id,
-                        Value::String(desired.to_string()),
+                        Value::String(desired.clone()),
                     ),
                 ))
                 .await?;
@@ -2440,7 +2492,8 @@ impl Task {
 
         self.reconcile_initial_config(launch, cmd_rx).await?;
 
-        if let Some(mode) = &launch.mode {
+        let modes = mode_ids(&self.metadata.lock().unwrap().modes);
+        if let Some(mode) = launch_mode(launch, &modes) {
             let id = self.next_id();
             self.stream
                 .write(&wire::request_line(
@@ -2455,7 +2508,7 @@ impl Task {
             if result.is_none() {
                 bail!("session/set_mode failed: {error:?}");
             }
-            self.current_mode = Some(mode.clone());
+            self.current_mode = Some(mode.to_string());
         }
         if let Some(mode) = &self.current_mode {
             session::set_current_mode(&self.db, &self.session_id, mode).await?;

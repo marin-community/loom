@@ -17,6 +17,7 @@ pub const DEFAULT_ACP_MODE: &str = weaver_core::config::DEFAULT_AGENT_MODE;
 pub enum BuiltinAgentKind {
     Claude,
     Codex,
+    Antigravity,
 }
 
 impl BuiltinAgentKind {
@@ -24,6 +25,7 @@ impl BuiltinAgentKind {
         match kind {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "antigravity" => Some(Self::Antigravity),
             _ => None,
         }
     }

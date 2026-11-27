@@ -2,7 +2,7 @@
 //!
 //! A custom agent lets the user wire up a coding agent loom doesn't ship — by
 //! naming the shell commands loom runs at each launch stage — so it appears in
-//! the agent list beside the builtin `claude`/`codex` without a code change. The
+//! the agent list beside the builtins without a code change. The
 //! builtin agents keep their bespoke launch logic in [`crate::agent`]; a custom
 //! agent is pure data: a name, a label, and a command per stage.
 //!
@@ -22,12 +22,6 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::db::{now_iso, Db};
-
-/// The builtin agent names a custom agent may not shadow. The retired
-/// `concierge` name stays reserved because legacy session rows use it. `shell` is
-/// deliberately *not* reserved — it is no longer a builtin, so a user may define
-/// it themselves.
-pub const RESERVED_NAMES: &[&str] = &["claude", "codex", "concierge"];
 
 /// The execution backends a custom agent may declare (the `protocol` column).
 /// `terminal` runs its `launch` command in a PTY; `acp` runs its `launch`
@@ -63,7 +57,7 @@ pub struct CustomAgent {
 /// Validate a custom agent's name. It is an id — referenced by the agent list and
 /// stored as a session's `agent_kind` — so keep it to a clean, URL- and
 /// log-friendly slug: a leading letter, then letters, digits, hyphens, or
-/// underscores. The builtin names in [`RESERVED_NAMES`] are rejected so a custom
+/// underscores. Builtin names are rejected so a custom
 /// agent can't shadow (or masquerade as) a real runtime. The error is a key-free
 /// reason so callers can prefix it with their own context.
 pub fn validate_name(name: &str) -> std::result::Result<(), String> {
@@ -80,7 +74,8 @@ pub fn validate_name(name: &str) -> std::result::Result<(), String> {
             "name may contain only letters, digits, hyphens, and underscores, got '{name}'"
         ));
     }
-    if RESERVED_NAMES.contains(&name) {
+    // Legacy sessions still use the retired concierge name.
+    if name == "concierge" || crate::agent_kind::is_builtin_agent_kind(name) {
         return Err(format!(
             "name '{name}' is reserved for a builtin agent — pick another name"
         ));
@@ -230,6 +225,7 @@ mod tests {
         // Builtin runtimes and retired role names are reserved.
         assert!(validate_name("claude").is_err());
         assert!(validate_name("codex").is_err());
+        assert!(validate_name("antigravity").is_err());
         assert!(validate_name("concierge").is_err());
     }
 
