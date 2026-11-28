@@ -211,6 +211,11 @@ const LOOM_MIGRATIONS: &[(i64, &str, &str)] = &[
         "harness-model-catalog",
         include_str!("../migrations/0041_harness_model_catalog.sql"),
     ),
+    (
+        42,
+        "input-request-id-text",
+        include_str!("../migrations/0042_input_request_id_text.sql"),
+    ),
 ];
 
 const LOOM_STREAM: Stream = Stream::new("loom_schema_migrations", LOOM_MIGRATIONS);

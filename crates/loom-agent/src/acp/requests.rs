@@ -188,6 +188,41 @@ pub fn cancel(session_id: &str) -> CancelNotification {
     }
 }
 
+/// `initialize` for the live session — the response stays raw because the
+/// harness extensions the durable handshake reads (steering support, the
+/// claudeCode prompt-queueing flag) are not part of the typed schema.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
+#[request(method = "initialize", response = serde_json::Value)]
+pub struct InitializeRequest {
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: u16,
+    #[serde(rename = "clientCapabilities")]
+    pub client_capabilities: Value,
+}
+
+/// `initialize` with the same shape the hand-rolled wire builder produced.
+pub fn initialize(client_capabilities: Value) -> InitializeRequest {
+    InitializeRequest {
+        protocol_version: 1,
+        client_capabilities,
+    }
+}
+
+/// `session/update` — the whole params object, raw, for the durable task's
+/// tolerant DTOs to parse.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcNotification)]
+#[notification(method = "session/update")]
+pub struct SessionUpdateNotification(pub Value);
+
+/// `session/request_permission` — the params object raw, answered with the
+/// typed permission response the protocol defines.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonRpcRequest)]
+#[request(
+    method = "session/request_permission",
+    response = agent_client_protocol::v1::schema::RequestPermissionResponse
+)]
+pub struct PermissionRequest(pub Value);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +303,32 @@ mod tests {
             serde_json::json!({"sessionId": "s1"})
         );
         assert_eq!(cancel.method(), "session/cancel");
+    }
+}
+
+#[cfg(test)]
+mod response_shape_tests {
+    use agent_client_protocol::v1::schema::{
+        RequestPermissionOutcome, RequestPermissionResponse, SelectedPermissionOutcome,
+    };
+    use serde_json::json;
+
+    /// The typed permission responses serialize to exactly the shapes the
+    /// hand-rolled wire builders produced, which real adapters accept.
+    #[test]
+    fn permission_responses_keep_the_hand_rolled_shapes() {
+        let selected = RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+            SelectedPermissionOutcome::new("allow-once".to_string()),
+        ));
+        assert_eq!(
+            serde_json::to_value(&selected).unwrap(),
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } })
+        );
+
+        let cancelled = RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
+        assert_eq!(
+            serde_json::to_value(&cancelled).unwrap(),
+            json!({ "outcome": { "outcome": "cancelled" } })
+        );
     }
 }
