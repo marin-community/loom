@@ -2383,6 +2383,127 @@ mod tests {
         assert_eq!(launch.mode.as_deref(), Some("build"));
     }
 
+    /// The Opencode builtin runs every ACP session against its own data home
+    /// (credentials especially); a restricted session is scoped but never
+    /// seeded with the deploy's store.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn an_opencode_launch_runs_against_its_own_data_home() {
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("WEAVER_HOME", value),
+                    None => std::env::remove_var("WEAVER_HOME"),
+                }
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(shared.path().join("opencode")).unwrap();
+        std::fs::write(shared.path().join("opencode/opencode.db"), b"deploy").unwrap();
+        let _home = EnvGuard(std::env::var_os("WEAVER_HOME"));
+        std::env::set_var("WEAVER_HOME", home.path());
+        let _shared = EnvGuard(std::env::var_os("XDG_DATA_HOME"));
+        std::env::set_var("XDG_DATA_HOME", shared.path());
+
+        let db = crate::db::connect_in_memory().await.unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let launch = build_acp_launch(
+            &db,
+            &AcpLaunchSpec {
+                session_id: "acp-opencode-7",
+                branch_id: "branch-1",
+                runtime: "opencode",
+                work_dir: work_dir.path(),
+                server_addr: "127.0.0.1:7878",
+                model: "",
+                effort: "",
+                fast: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: false,
+                mode: "build",
+                mode_from_live: false,
+                prelude: "none",
+                restricted: false,
+                allowed_tools: "[]",
+                mcp_access:
+                    r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
+                custom: None,
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        .expect("the opencode launch builds");
+        let scoped = |session: &str| home.path().join("opencode-data").join(session);
+        assert_eq!(
+            launch
+                .env
+                .iter()
+                .find(|(name, _)| name == "XDG_DATA_HOME")
+                .map(|(_, value)| value.as_str()),
+            Some(scoped("acp-opencode-7").display().to_string().as_str()),
+            "the adapter runs against its own data home"
+        );
+        assert!(
+            scoped("acp-opencode-7")
+                .join("opencode/opencode.db")
+                .is_file(),
+            "the deploy store seeds the session's home"
+        );
+
+        let restricted = build_acp_launch(
+            &db,
+            &AcpLaunchSpec {
+                session_id: "acp-opencode-restricted",
+                branch_id: "branch-1",
+                runtime: "opencode",
+                work_dir: work_dir.path(),
+                server_addr: "127.0.0.1:7878",
+                model: "",
+                effort: "",
+                fast: "",
+                goal_file: None,
+                primer_file: None,
+                extra_env: &[],
+                env_clear: false,
+                mode: "build",
+                mode_from_live: false,
+                prelude: "none",
+                restricted: true,
+                allowed_tools: "[]",
+                mcp_access:
+                    r#"{"selection":{"mode":"none","groups":[]},"capability_sets":[],"custom_servers":[]}"#,
+                custom: None,
+            },
+            AcpOpen::Fresh,
+        )
+        .await
+        .expect("the restricted opencode launch builds");
+        assert_eq!(
+            restricted
+                .env
+                .iter()
+                .find(|(name, _)| name == "XDG_DATA_HOME")
+                .map(|(_, value)| value.as_str()),
+            Some(
+                scoped("acp-opencode-restricted")
+                    .display()
+                    .to_string()
+                    .as_str()
+            ),
+            "a restricted session is still scoped"
+        );
+        assert!(
+            !scoped("acp-opencode-restricted")
+                .join("opencode/opencode.db")
+                .exists(),
+            "the deploy's credentials must not reach a restricted adapter"
+        );
+    }
+
     /// An adapter can advertise a mode Loom has never heard of — an Opencode
     /// primary agent from `OPENCODE_CONFIG_CONTENT`, say. A respawn replays the
     /// persisted id verbatim rather than failing on Loom's own allowlist.
