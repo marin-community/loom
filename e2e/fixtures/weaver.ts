@@ -8,6 +8,21 @@ import { join, resolve } from 'path';
 const WEAVER_ROOT = join(__dirname, '..', '..');
 const CARGO_TARGET_DIR = resolve(WEAVER_ROOT, process.env.CARGO_TARGET_DIR ?? 'target');
 const LOOM_BINARY = join(CARGO_TARGET_DIR, 'debug', 'loom');
+const FAKE_ACP_AGENT = join(
+  WEAVER_ROOT,
+  'crates',
+  'loom',
+  'tests',
+  'fixtures',
+  'fake-acp-agent.mjs',
+);
+
+/** The suite's scripted ACP adapter, which every builtin harness's ACP command
+ *  is pinned to (see the worker env below) so catalogue probes are
+ *  deterministic. */
+function fakeAcpAgentCmd(): string {
+  return `node ${FAKE_ACP_AGENT}`;
+}
 const FRONTEND_DIR = join(WEAVER_ROOT, 'crates', 'loom', 'frontend');
 const DIST_INDEX = join(WEAVER_ROOT, 'crates', 'loom', 'static', 'dist', 'index.html');
 
@@ -405,10 +420,17 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
         WEAVER_TAPESTRY_DIR: join(weaverHome, 'sock'),
         WEAVER_TAPESTRY_BIN: join(CARGO_TARGET_DIR, 'debug', 'tapestry'),
         LOOM_RUNNER: 'local',
-        // Keep the model lists deterministic: a background probe landing
-        // mid-test would swap the catalogue a spec just read. The catalogue has
-        // its own Rust coverage.
-        LOOM_CATALOG_DISABLED: '1',
+        // The catalogue stays deterministic with probes ENABLED because every
+        // builtin's ACP command is pinned to the suite's fake adapter: a boot
+        // or explicit probe always catalogues the same fake models, on
+        // machines with real harness CLIs and without (an explicit refresh
+        // runs the override regardless of availability). The model-picker
+        // journey (catalog-picker.spec.ts) depends on this; nothing else
+        // asserts the builtin catalogues.
+        WEAVER_CLAUDE_ACP_CMD: fakeAcpAgentCmd(),
+        WEAVER_CODEX_ACP_CMD: fakeAcpAgentCmd(),
+        WEAVER_OPENCODE_ACP_CMD: fakeAcpAgentCmd(),
+        WEAVER_CURSOR_ACP_CMD: fakeAcpAgentCmd(),
         RUST_LOG: 'loom=warn,weaver_core=warn',
         // Seed an operator: loom refuses to boot with no owner configured, and
         // loopback trust authenticates every test request as this primary user
