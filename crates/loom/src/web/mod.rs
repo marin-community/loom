@@ -187,11 +187,13 @@ use weaver_core::tags;
 pub struct AppError {
     status: StatusCode,
     message: String,
-    details: Option<Value>,
+    details: Option<Box<Value>>,
     /// Extra keys merged into the body alongside `error` (top-level, not
     /// nested under `details`) — for callers whose response body is a flat
     /// object, e.g. the artifact write-conflict `{ "error", "latest" }`.
-    fields: Option<Value>,
+    /// Boxed: `Value` is a large enum, and two inline copies push this
+    /// struct past the size every `ApiResult` return carries.
+    fields: Option<Box<Value>>,
     /// For an internal error built from an `anyhow::Error`: the full cause chain
     /// (and backtrace, when `RUST_BACKTRACE` is set), logged server-side so an
     /// operator sees *why* — the client still gets only the concise `message`.
@@ -228,13 +230,13 @@ impl AppError {
         }
     }
     fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
     /// Merge `fields` (must be a JSON object) into the response body
     /// top-level, alongside `error`.
     fn with_fields(mut self, fields: Value) -> Self {
-        self.fields = Some(fields);
+        self.fields = Some(Box::new(fields));
         self
     }
     pub fn message(&self) -> &str {
@@ -266,11 +268,13 @@ impl IntoResponse for AppError {
         }
         let mut body = json!({ "error": self.message });
         if let Some(details) = self.details {
-            body["details"] = details;
+            body["details"] = *details;
         }
-        if let Some(Value::Object(fields)) = self.fields {
-            if let Value::Object(map) = &mut body {
-                map.extend(fields);
+        if let Some(fields) = self.fields {
+            if let Value::Object(fields) = *fields {
+                if let Value::Object(map) = &mut body {
+                    map.extend(fields);
+                }
             }
         }
         (self.status, Json(body)).into_response()

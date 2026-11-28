@@ -1294,67 +1294,72 @@ mod tests {
     /// `loom/artifacts/write@v1` can tell that `write`'s tool definition
     /// changed under it. Re-pin only with a reason, and check whether tool
     /// *membership* moved too.
+    ///
+    /// Re-pinned wholesale when the `agent-client-protocol` crate was adopted
+    /// for the ACP client: its schema crate requires serde_json's
+    /// `preserve_order`, so serialized tool definitions keep insertion order
+    /// instead of sorted keys — same data, different bytes.
     fn builtin_capability_digests_are_stable() {
         let expected = [
             (
                 "loom/github/comment@v1",
-                "sha256:b05d602bb199e3ca1a0b8c807ecb3b84a0a1f7b673a080455b1822368a4b907e",
+                "sha256:2288eb1a38f059ff7c5fc205897ab2b1f34a26a571adee45f21c008bad460889",
             ),
             (
                 "loom/context/read@v1",
-                "sha256:323c94d22bc51696bdedb4a84e4c04f174a46501beb2eb1ea8e19ca6ce349316",
+                "sha256:2f0e25cd43dffee9213e0cf7f7c67ab913a6da638ff50824ef44d495b1ab822a",
             ),
             (
                 "loom/channels/read@v1",
-                "sha256:f4d4f6a80605a8784b068dc286bfcccef63f55c0b451c00f9ac301d111f43cc0",
+                "sha256:8867dca2e1e89e9263d81740d6796311e2e11bb6f091febbdf102bf06d93c5a2",
             ),
             (
                 "loom/channels/write@v1",
-                "sha256:1b4861c1299557e09ae666883f0fe58a9f26f50503c4ab6ed7c5ff87c9889aa5",
+                "sha256:0120daf72375205d91a45c490df29906782f0a676132d217a100e2b48db25531",
             ),
             (
                 "loom/artifacts/read@v1",
-                "sha256:0d30a77b6ce8298c95eb36217e6c0217c0e8b15756fad577659a3d8eab94795b",
+                "sha256:17fc1db1bdd48f097864d847fbda40cedc91025f0c4263d545cded3deb8882fc",
             ),
             (
                 "loom/artifacts/write@v1",
-                "sha256:997581be29ecee9edb3f3254b31717a4d5d9343423add8f1c5b132555fb2b8e7",
+                "sha256:cb2ac980422002d10d422cb124263158a392fe43fee2c26ca82af002b4ec48c3",
             ),
             (
                 "loom/issues/read@v1",
-                "sha256:37e9afd58241a3dc68edde6a4521b02afdd0f445d4eae6910da54fea05763803",
+                "sha256:2e3d42587479469f630bf892d35114f646ba16861511bfad5fea5cc53121def3",
             ),
             (
                 "loom/issues/write@v1",
-                "sha256:1d3b61b7ef1f3e4f49ff403c1228cc2cab45c18d9108bb7cf1a76073701816fa",
+                "sha256:7ca522b485a7e362f816faa1cb733822b06a99372ba3d7f764f65efb19537d6d",
             ),
             (
                 "loom/sessions/read@v1",
-                "sha256:a40d58bf4a0a8f0e22205a8379938c00b00d73941290a106df18411d0b78850f",
+                "sha256:4e3cfe3c43894c6f7e15d8da462a665e968c741793a4ec62512c650a9f6c63ee",
             ),
             (
                 "loom/sessions/write@v1",
-                "sha256:021c51cdef86f5a7a718295d78417769756dc22f1a826636afa56e654a7d679d",
+                "sha256:eeb2c7f3c853d27cd89c1f621dc8d0a74fdbaf1ab6ca10b7fb579d60b78b7a54",
             ),
             (
                 "loom/messaging/post@v1",
-                "sha256:b1a99d38ccdeb0f3e8bd2c05836f93354d56dba594096fa875672c22aa042f8e",
+                "sha256:cedb0656368e942070acdf479e3afd9dcbf92a30eb7042de778321d719b48e2b",
             ),
             (
                 "loom/messaging/slack@v1",
-                "sha256:89d1f86e4c28cf1c73287493609abbf347ff99a257e611107e62067840b854f4",
+                "sha256:404a1548bb4e7546d8c17ab2ffe537db56fa23ffe618bd853d7dae1756373eb5",
             ),
             (
                 "loom/permissions/read@v1",
-                "sha256:2e789d878d398cc3711aa398c64bb312d449237ff3bd2c15a414239fd68058c7",
+                "sha256:c5fc9df982725829741919b3e2c46a7d710c4b1d6b8e1a4c8bd6569f4d8d3d62",
             ),
             (
                 "loom/permissions/request@v1",
-                "sha256:e2d2e7c103d995b9d8a9374f77ba4e5f03d6ad34c26fd8478ff8c4ae3df1479d",
+                "sha256:2b541e41ff32c3c1aeec4c449b8ffd9b18572e5100d42b18eb711c933749b651",
             ),
             (
                 "loom/watches/state@v1",
-                "sha256:582d00d9cb42f724a9559e2ad080ac221a264fabd94dbed5e985f129655c1bb1",
+                "sha256:8cc3e9fe02eab1135facd90968c8f0d87e667786232f0bd2002e34906a60bc1f",
             ),
         ]
         .into_iter()

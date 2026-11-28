@@ -8,7 +8,6 @@
 //! subscription, a JSON-RPC id map, the delta-consolidation buffers, the
 //! [journal](crate::chat) writer, and a per-session [`broadcast`] the `/chat/stream`
 //! SSE route tails.
-//!
 //! ## Journal blocks
 //!
 //! The task consolidates streaming chunks in memory and writes one journal block
@@ -46,8 +45,9 @@
 //! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 
-mod images;
-pub(crate) mod probe;
+pub mod images;
+pub mod probe;
+pub mod requests;
 mod wire;
 
 use std::collections::{HashMap, HashSet};

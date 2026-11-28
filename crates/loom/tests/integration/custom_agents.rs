@@ -491,3 +491,63 @@ async fn a_catalogued_model_effort_and_mode_save_and_resolve() {
         "unexpected error: {err}"
     );
 }
+
+/// The live-probe journey against the scripted fake ACP agent: a refresh
+/// opens a real probe session over the adapter's stdio, and the models it
+/// advertises reach the picker with their per-model effort and fast choices.
+#[serial]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_catalogue_probe_stores_the_adapters_models() {
+    let ts = TestServer::start().await;
+    let client = &ts.client;
+
+    // The suite disables catalogue probes so no test consults the host's real
+    // harnesses; this one points the claude probe at the fake adapter.
+    let _catalog = crate::acp::EnvVarSet::set("LOOM_CATALOG_DISABLED", "");
+    let _adapter = crate::acp::EnvVarSet::set(
+        "WEAVER_CLAUDE_ACP_CMD",
+        &crate::fixtures::fake_acp_agent_cmd(),
+    );
+
+    let res = client
+        .post(
+            "/api/agents/catalog/refresh",
+            json!({ "harness": "claude" }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res["started"], true, "the refresh must start");
+
+    // The refresh runs in the background; poll until the catalogued model is
+    // served (claude's static list is non-empty from the first response).
+    let mut deep = None;
+    for _ in 0..100 {
+        let agents = client.post("/api/agents/list", json!({})).await.unwrap();
+        let found = find(&agents["agents"], "claude").expect("claude is builtin");
+        deep = found["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["id"] == "fake-deep").cloned());
+        if deep.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let deep = deep.expect("the fake adapter's model is catalogued");
+    assert_eq!(deep["label"], "Fake deep");
+    assert!(
+        deep["efforts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["id"] == "high"),
+        "the per-model effort choices ride the catalogued model"
+    );
+    assert!(
+        deep["fast"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == "true"),
+        "the fast toggle rides the catalogued model"
+    );
+}

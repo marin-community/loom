@@ -25,6 +25,8 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
+agent-client-protocol = "5.6.1"
+tokio-util = { version = "0.7.20", features = ["compat"] }
 
 [dev-dependencies]
 serial_test = "3"

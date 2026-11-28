@@ -165,6 +165,7 @@ function configOptions() {
       id: "fast-mode",
       name: "Fast",
       description: "Use the faster service tier",
+      category: "model_config",
       type: "boolean",
       currentValue: fastMode,
     },
