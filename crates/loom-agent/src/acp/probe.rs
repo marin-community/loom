@@ -203,9 +203,9 @@ async fn probe_session(
     // The request channel closed with the session; the connection ends here.
 }
 
-/// The capabilities a probe advertises: no fs, no terminal — only the
-/// harness's initialize `_meta` when it opted into one.
-fn client_capabilities(meta: Option<&Value>) -> ClientCapabilities {
+/// The capabilities a probe or transient session advertises: no fs, no
+/// terminal — only the harness's initialize `_meta` when it opted into one.
+pub(crate) fn client_capabilities(meta: Option<&Value>) -> ClientCapabilities {
     let mut capabilities = ClientCapabilities::new();
     if let Some(meta) = meta.and_then(Value::as_object) {
         capabilities = capabilities.meta(meta.clone());

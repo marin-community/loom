@@ -25,7 +25,9 @@ pub mod paths;
 pub mod protocol;
 pub mod supervisor;
 
-pub use client::{Attach, AttachInput, AttachOutput, Client, RelayEvent, RelayStream};
+pub use client::{
+    Attach, AttachInput, AttachOutput, Client, RelayEvent, RelayEvents, RelayStream, RelayWriter,
+};
 pub use supervisor::{run as supervise, SupervisorConfig};
 
 use anyhow::{Context, Result};

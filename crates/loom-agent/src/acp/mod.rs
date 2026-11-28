@@ -47,6 +47,7 @@
 
 pub mod images;
 pub mod probe;
+pub mod relay;
 pub mod requests;
 mod wire;
 
@@ -55,6 +56,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::{
+    InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse,
+};
+use agent_client_protocol::Client as AcpClient;
 use anyhow::{anyhow, bail, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -291,7 +298,11 @@ pub async fn validate_launch(
 
     let operation = async {
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-        AcpPromptClient::new(stream).validate(&launch).await
+        let output = Arc::new(std::sync::Mutex::new((String::new(), false)));
+        transient_connection(stream, output, |cx| async move {
+            validate_on(cx, &launch).await
+        })
+        .await
     };
     let result = match tokio::time::timeout(timeout, operation).await {
         Ok(result) => result,
@@ -347,9 +358,12 @@ pub async fn prompt_once(
 
     let operation = async {
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-        AcpPromptClient::new(stream)
-            .run(&launch, prompt, model, effort)
-            .await
+        let output = Arc::new(std::sync::Mutex::new((String::new(), false)));
+        let collector = output.clone();
+        transient_connection(stream, output, move |cx| async move {
+            prompt_on(cx, &launch, prompt, model, effort, &collector).await
+        })
+        .await
     };
     let result = match tokio::time::timeout(timeout, operation).await {
         Ok(result) => result,
@@ -368,17 +382,80 @@ pub async fn prompt_once(
     }
 }
 
-struct AcpPromptClient {
+/// Open the crate's connection over a transient relay and run `operate` on it.
+///
+/// The relay is acked automatically — a transient session has nothing durable
+/// to protect — and an adapter permission request is cancelled (a one-shot
+/// prompt has no one to ask); every other adapter-initiated request is
+/// answered by the engine's method-not-found default. Agent message chunks
+/// arriving as `session/update` notifications stream into `output`.
+async fn transient_connection<F, Fut, T>(
     stream: tapestry::RelayStream,
-    next_id: u64,
+    output: Arc<std::sync::Mutex<(String, bool)>>,
+    operate: F,
+) -> Result<T>
+where
+    F: FnOnce(agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T>> + Send,
+{
+    let (transport, handle) = relay::connect(stream, relay::AckMode::Auto);
+    let collector = output.clone();
+    let connect = AcpClient
+        .v1()
+        .on_receive_request(
+            async |request: RequestPermissionRequest, responder, _cx| {
+                let _ = request;
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notification: agent_client_protocol::v1::schema::SessionNotification,
+                        _cx| {
+                use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
+                if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                    if let ContentBlock::Text(text) = chunk.content {
+                        let mut buf = collector.lock().unwrap();
+                        if buf.0.len() + text.text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
+                            buf.0.push_str(&text.text);
+                        } else {
+                            buf.1 = true;
+                        }
+                    }
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(transport, async move |cx| {
+            operate(cx).await.map_err(|error| {
+                agent_client_protocol::Error::new(
+                    agent_client_protocol::ErrorCode::INTERNAL_ERROR,
+                    format!("{error:#}"),
+                )
+            })
+        });
+    let outcome = connect.await.map_err(|error| anyhow!("{error}"));
+    match (&outcome, handle.exit_status()) {
+        (Err(error), Some(status)) => {
+            bail!("{error}; ACP prompt adapter exited with status {status:?}")
+        }
+        _ => outcome,
+    }
+}
+
+/// What a freshly opened transient session advertised.
+struct TransientSession {
     session_id: String,
-    output: String,
-    output_oversized: bool,
+    options: Vec<Value>,
+    modes: Option<wire::SessionModeState>,
 }
 
 fn validate_mcp_capabilities(
     launch: &AcpLaunch,
-    capabilities: &wire::AgentCapabilities,
+    capabilities: &agent_client_protocol::v1::schema::AgentCapabilities,
 ) -> Result<()> {
     let needs_http = launch
         .mcp_servers
@@ -390,277 +467,230 @@ fn validate_mcp_capabilities(
     Ok(())
 }
 
-impl AcpPromptClient {
-    fn new(stream: tapestry::RelayStream) -> Self {
-        Self {
-            stream,
-            next_id: 0,
-            session_id: String::new(),
-            output: String::new(),
-            output_oversized: false,
-        }
-    }
+/// Initialize the connection and open one `session/new` for `launch`.
+async fn open_new_session(
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+) -> Result<TransientSession> {
+    let harness_meta = crate::catalog::selectors::initialize_meta(&launch.harness);
+    let initialized = cx
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                crate::acp::probe::client_capabilities(harness_meta.as_ref()),
+            ),
+        )
+        .block_task()
+        .await
+        .context("ACP initialize failed")?;
+    validate_mcp_capabilities(launch, &initialized.agent_capabilities)?;
+    let (cwd, meta) = match &launch.new_or_load {
+        NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
+        NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
+    };
+    let opened = cx
+        .send_request(requests::new_session(
+            &cwd.to_string_lossy(),
+            &launch.mcp_servers,
+            &launch.additional_directories,
+            meta,
+        ))
+        .block_task()
+        .await
+        .context("ACP session/new failed")?;
+    let opened: wire::NewSessionResult =
+        serde_json::from_value(opened).context("invalid ACP session/new response")?;
+    Ok(TransientSession {
+        session_id: opened.session_id,
+        options: opened.config_options.unwrap_or_default(),
+        modes: opened.modes,
+    })
+}
 
-    async fn open_new_session(&mut self, launch: &AcpLaunch) -> Result<wire::NewSessionResult> {
-        let initialized = self
-            .request(method::INITIALIZE, wire::initialize_params(&launch.harness))
-            .await?;
-        let initialized: wire::InitializeResult =
-            serde_json::from_value(initialized).context("invalid ACP initialize response")?;
-        validate_mcp_capabilities(launch, &initialized.agent_capabilities)?;
-        let (cwd, meta) = match &launch.new_or_load {
-            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
-            NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
+/// Select a config option and return the refreshed option set.
+async fn set_config_option(
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+    id: &str,
+    value: Value,
+) -> Result<Vec<Value>> {
+    let result = cx
+        .send_request(requests::set_config_option(session_id, id, value))
+        .block_task()
+        .await
+        .with_context(|| format!("ACP session/set_config_option failed for '{id}'"))?;
+    let result: wire::SetConfigOptionResult =
+        serde_json::from_value(result).context("invalid ACP session/set_config_option response")?;
+    Ok(result.config_options)
+}
+
+/// A launch validation pass: the same selectors the durable session would
+/// apply, checked against the live adapter before the session is created.
+async fn validate_on(
+    cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+) -> Result<()> {
+    let opened = open_new_session(&cx, launch).await?;
+    let mut options = opened.options;
+
+    // `validate` only runs for a fresh session (asserted above).
+    for (kind, desired) in launch_config_steps(launch) {
+        let Some(selector) = launch_selector(kind) else {
+            continue;
         };
-        let opened = self
-            .request(
-                method::SESSION_NEW,
-                wire::new_session_params(
-                    &cwd.to_string_lossy(),
-                    &launch.mcp_servers,
-                    &launch.additional_directories,
-                    meta,
-                ),
-            )
-            .await?;
-        let opened: wire::NewSessionResult =
-            serde_json::from_value(opened).context("invalid ACP session/new response")?;
-        self.session_id.clone_from(&opened.session_id);
-        Ok(opened)
+        let Some(matched) = crate::catalog::selectors::find(&options, selector) else {
+            // Some adapters apply launch selectors out of band and do not
+            // advertise a matching ACP control. session/new is authoritative
+            // for those runtimes, just as it is during the durable handshake.
+            continue;
+        };
+        if matched.current.as_deref() == Some(desired.as_str()) {
+            continue;
+        }
+        let Some(raw) = crate::catalog::selectors::raw_value(&options, selector, &desired) else {
+            bail!(
+                "launch {kind} '{desired}' is not an available value{}",
+                advertised_suffix(&options, &matched.id, kind)
+            );
+        };
+        options = set_config_option(&cx, &opened.session_id, &matched.id, raw)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to select launch {kind} '{desired}'{}",
+                    advertised_suffix(&options, &matched.id, kind)
+                )
+            })?;
     }
 
-    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
-        let opened = self.open_new_session(launch).await?;
-        let mut options = opened.config_options.unwrap_or_default();
-
-        // `validate` only runs for a fresh session (asserted above).
-        for (kind, desired) in launch_config_steps(launch) {
-            let Some(selector) = launch_selector(kind) else {
-                continue;
-            };
-            let Some(matched) = crate::catalog::selectors::find(&options, selector) else {
-                // Some adapters apply launch selectors out of band and do not
-                // advertise a matching ACP control. session/new is authoritative
-                // for those runtimes, just as it is during the durable handshake.
-                continue;
-            };
-            if matched.current.as_deref() == Some(desired.as_str()) {
-                continue;
-            }
-            let Some(raw) = crate::catalog::selectors::raw_value(&options, selector, &desired)
-            else {
+    if let Some(mode) = launch
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    {
+        if let Some(modes) = &opened.modes {
+            let available = mode_ids(&modes.available_modes);
+            if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
                 bail!(
-                    "launch {kind} '{desired}' is not an available value{}",
-                    advertised_suffix(&options, &matched.id, kind)
+                    "launch mode '{mode}' is not available (available modes: {})",
+                    available.join(", ")
                 );
-            };
-            options = self
-                .set_config_option(&matched.id, raw)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to select launch {kind} '{desired}'{}",
-                        advertised_suffix(&options, &matched.id, kind)
-                    )
-                })?;
-        }
-
-        if let Some(mode) = launch
-            .mode
-            .as_deref()
-            .map(str::trim)
-            .filter(|mode| !mode.is_empty())
-        {
-            if let Some(modes) = &opened.modes {
-                let available = mode_ids(&modes.available_modes);
-                if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
-                    bail!(
-                        "launch mode '{mode}' is not available (available modes: {})",
-                        available.join(", ")
-                    );
-                }
             }
-            self.request(
-                method::SESSION_SET_MODE,
-                wire::set_mode_params(&self.session_id, mode),
-            )
+        }
+        cx.send_request(requests::set_mode(&opened.session_id, mode))
+            .block_task()
             .await
             .with_context(|| format!("failed to select launch mode '{mode}'"))?;
-        }
-        Ok(())
     }
+    Ok(())
+}
 
-    async fn run(
-        mut self,
-        launch: &AcpLaunch,
-        prompt: &str,
-        model: AcpPromptModel<'_>,
-        effort: AcpPromptEffort<'_>,
-    ) -> Result<Option<AcpPromptOutput>> {
-        let opened = self.open_new_session(launch).await?;
-        let mut options = opened.config_options.unwrap_or_default();
+/// One prompt through the opened session, collecting the agent's streamed
+/// message as the output.
+async fn prompt_on(
+    cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+    prompt: &str,
+    model: AcpPromptModel<'_>,
+    effort: AcpPromptEffort<'_>,
+    output: &std::sync::Mutex<(String, bool)>,
+) -> Result<Option<AcpPromptOutput>> {
+    let opened = open_new_session(&cx, launch).await?;
+    let mut options = opened.options;
+    let session_id = opened.session_id.clone();
 
-        let model = match model {
-            AcpPromptModel::Default => crate::catalog::selectors::current_model(&options),
-            AcpPromptModel::Exact(value) => {
-                let Some((model_config, model)) =
-                    preferred_config_value(&options, "model", &[value], false)
-                else {
-                    return Ok(None);
-                };
-                options = self
-                    .set_config_option(&model_config, Value::String(model.clone()))
-                    .await?;
-                Some(model)
-            }
-            AcpPromptModel::FirstContaining(preferences) => {
-                let Some((model_config, model)) =
-                    preferred_config_value(&options, "model", preferences, true)
-                else {
-                    return Ok(None);
-                };
-                options = self
-                    .set_config_option(&model_config, Value::String(model.clone()))
-                    .await?;
-                Some(model)
-            }
-        };
-        match effort {
-            AcpPromptEffort::Default => {}
-            AcpPromptEffort::Exact(value) => {
-                let Some((effort_config, effort)) =
-                    preferred_config_value(&options, "effort", &[value], false)
-                else {
-                    return Ok(None);
-                };
-                self.set_config_option(&effort_config, Value::String(effort))
-                    .await?;
-            }
-            AcpPromptEffort::Prefer(value) => {
-                if let Some((effort_config, effort)) =
-                    preferred_config_value(&options, "effort", &[value], false)
-                {
-                    self.set_config_option(&effort_config, Value::String(effort))
-                        .await?;
-                }
-            }
-        }
-        if let Some(mode) = opened
-            .modes
-            .as_ref()
-            .and_then(|modes| preferred_mode(&modes.available_modes))
-        {
-            self.request(
-                method::SESSION_SET_MODE,
-                wire::set_mode_params(&self.session_id, &mode),
+    let model = match model {
+        AcpPromptModel::Default => crate::catalog::selectors::current_model(&options),
+        AcpPromptModel::Exact(value) => {
+            let Some((model_config, model)) =
+                preferred_config_value(&options, "model", &[value], false)
+            else {
+                return Ok(None);
+            };
+            options = set_config_option(
+                &cx,
+                &session_id,
+                &model_config,
+                Value::String(model.clone()),
             )
             .await?;
-        } else if let Some((mode_config, mode)) =
-            preferred_config_value(&options, "mode", &["plan", "read-only"], false)
-        {
-            self.set_config_option(&mode_config, Value::String(mode))
-                .await?;
+            Some(model)
         }
-
-        self.output.clear();
-        self.output_oversized = false;
-        let result = self
-            .request(
-                method::SESSION_PROMPT,
-                wire::prompt_params(&self.session_id, prompt, &[]),
+        AcpPromptModel::FirstContaining(preferences) => {
+            let Some((model_config, model)) =
+                preferred_config_value(&options, "model", preferences, true)
+            else {
+                return Ok(None);
+            };
+            options = set_config_option(
+                &cx,
+                &session_id,
+                &model_config,
+                Value::String(model.clone()),
             )
             .await?;
-        let result: wire::PromptResult =
-            serde_json::from_value(result).context("invalid ACP session/prompt response")?;
-        if result.stop_reason == "cancelled" || self.output_oversized {
-            return Ok(None);
+            Some(model)
         }
-        let text = self.output.trim();
-        if text.is_empty() {
-            return Ok(None);
+    };
+    match effort {
+        AcpPromptEffort::Default => {}
+        AcpPromptEffort::Exact(value) => {
+            let Some((effort_config, effort)) =
+                preferred_config_value(&options, "effort", &[value], false)
+            else {
+                return Ok(None);
+            };
+            set_config_option(&cx, &session_id, &effort_config, Value::String(effort)).await?;
         }
-        Ok(Some(AcpPromptOutput {
-            text: text.to_string(),
-            model,
-        }))
-    }
-
-    async fn set_config_option(&mut self, id: &str, value: Value) -> Result<Vec<Value>> {
-        let result = self
-            .request(
-                method::SESSION_SET_CONFIG_OPTION,
-                wire::set_config_option_params(&self.session_id, id, value),
-            )
-            .await?;
-        let result: wire::SetConfigOptionResult = serde_json::from_value(result)
-            .context("invalid ACP session/set_config_option response")?;
-        Ok(result.config_options)
-    }
-
-    async fn request(&mut self, method_name: &str, params: Value) -> Result<Value> {
-        self.next_id += 1;
-        let request_id = self.next_id;
-        self.stream
-            .write(&wire::request_line(request_id, method_name, params))
-            .await?;
-        loop {
-            match self.stream.recv().await {
-                Some(RelayEvent::Frame { seq, payload }) => {
-                    let incoming: Incoming = serde_json::from_slice(&payload)
-                        .context("invalid JSON-RPC frame from ACP prompt adapter")?;
-                    if incoming.kind() == IncomingKind::Response
-                        && incoming.id.as_ref().and_then(Value::as_u64) == Some(request_id)
-                    {
-                        self.stream.ack(seq).await?;
-                        if let Some(error) = incoming.error {
-                            bail!("ACP {method_name} failed: {error}");
-                        }
-                        return incoming
-                            .result
-                            .ok_or_else(|| anyhow!("ACP {method_name} returned no result"));
-                    }
-                    self.handle_incoming(incoming).await?;
-                    self.stream.ack(seq).await?;
-                }
-                Some(RelayEvent::Exit { status }) => {
-                    bail!("ACP prompt adapter exited with status {status:?}")
-                }
-                None => bail!("ACP prompt relay closed"),
-            }
-        }
-    }
-
-    async fn handle_incoming(&mut self, incoming: Incoming) -> Result<()> {
-        match incoming.kind() {
-            IncomingKind::Notification
-                if incoming.method.as_deref() == Some(method::SESSION_UPDATE) =>
+        AcpPromptEffort::Prefer(value) => {
+            if let Some((effort_config, effort)) =
+                preferred_config_value(&options, "effort", &[value], false)
             {
-                let notification: SessionNotification =
-                    serde_json::from_value(incoming.params.unwrap_or(Value::Null))?;
-                if let SessionUpdate::AgentMessageChunk { content } = notification.update {
-                    if let Some(text) = content.text() {
-                        if self.output.len() + text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
-                            self.output.push_str(text);
-                        } else {
-                            self.output_oversized = true;
-                        }
-                    }
-                }
+                set_config_option(&cx, &session_id, &effort_config, Value::String(effort)).await?;
             }
-            IncomingKind::Request
-                if incoming.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) =>
-            {
-                let id = incoming
-                    .id
-                    .ok_or_else(|| anyhow!("ACP permission request had no id"))?;
-                self.stream
-                    .write(&wire::response_line(&id, wire::permission_cancelled()))
-                    .await?;
-            }
-            _ => {}
         }
-        Ok(())
     }
+    if let Some(mode) = opened
+        .modes
+        .as_ref()
+        .and_then(|modes| preferred_mode(&modes.available_modes))
+    {
+        cx.send_request(requests::set_mode(&session_id, &mode))
+            .block_task()
+            .await?;
+    } else if let Some((mode_config, mode)) =
+        preferred_config_value(&options, "mode", &["plan", "read-only"], false)
+    {
+        set_config_option(&cx, &session_id, &mode_config, Value::String(mode)).await?;
+    }
+
+    let result = cx
+        .send_request(requests::prompt(&session_id, prompt, &[]))
+        .block_task()
+        .await
+        .context("ACP session/prompt failed")?;
+    let result: wire::PromptResult =
+        serde_json::from_value(result).context("invalid ACP session/prompt response")?;
+    let (text, oversized) = {
+        let mut buf = output.lock().unwrap();
+        if buf.0.len() > ONE_SHOT_OUTPUT_MAX_BYTES {
+            buf.1 = true;
+        }
+        let text = buf.0.clone();
+        buf.0.clear();
+        (text, buf.1)
+    };
+    if result.stop_reason == "cancelled" || oversized {
+        return Ok(None);
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(AcpPromptOutput {
+        text: text.to_string(),
+        model,
+    }))
 }
 
 /// The parenthetical the launch error uses when the adapter listed choices.
@@ -2330,7 +2360,15 @@ impl Task {
         let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
         let init: wire::InitializeResult =
             serde_json::from_value(res).context("invalid ACP initialize response")?;
-        validate_mcp_capabilities(launch, &init.agent_capabilities)?;
+        // The live handshake still reads the raw initialize response; the
+        // transient path checks the typed one in `validate_mcp_capabilities`.
+        let needs_http = launch
+            .mcp_servers
+            .iter()
+            .any(|server| server["type"] == "http");
+        if needs_http && !init.agent_capabilities.mcp_capabilities.http {
+            bail!("the ACP agent does not advertise remote HTTP MCP support");
+        }
         self.load_session_cap = init.agent_capabilities.load_session;
         self.metadata.lock().unwrap().steering_supported = init.meta.steering.supported;
         self.metadata.lock().unwrap().prompt_queueing_supported =
