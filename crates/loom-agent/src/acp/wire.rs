@@ -1,60 +1,21 @@
-//! The ACP wire format loom speaks over the relay: a thin JSON-RPC 2.0 envelope
-//! plus minimal serde structs for the Agent Client Protocol messages loom
-//! consumes and produces.
+//! Tolerant serde DTOs for the ACP messages loom consumes, plus the method
+//! names it labels durable records with.
 //!
-//! These are hand-rolled rather than pulled from the `agent-client-protocol`
-//! crate: that crate is a full builder/runtime SDK (its own transport,
-//! `Client.builder()`, session runners) and its schema types are `#[non_exhaustive]`
-//! builder structs that fight direct serde use. The field names and serde
-//! conventions here are copied verbatim from that crate's `schema` module (v1),
-//! and pinned by the serialization tests below against the exact wire shapes the
-//! real adapters emit — so a captured `claude-agent-acp` / `codex-acp` message
-//! deserializes here unchanged. Unknown update/content variants degrade rather
-//! than fail (`#[serde(other)]`), keeping loom resilient to adapter additions.
+//! The `agent-client-protocol` crate owns the connection — transport,
+//! request/response correlation, dispatch — and loom's outgoing requests are
+//! declared in `super::requests`. What stays here is the *incoming* payload
+//! layer: the crate's schema types are strictly typed and drop or reject what
+//! an adapter actually sent (harness config options and update variants are
+//! not standardized across adapters — see `catalog::selectors`), so the DTOs
+//! below parse leniently. Field names and serde conventions are copied
+//! verbatim from the crate's `schema` module (v1) and pinned by the tests
+//! below against captured `claude-agent-acp` / `codex-acp` messages, so a
+//! real adapter frame deserializes here unchanged. Unknown update/content
+//! variants degrade rather than fail (`#[serde(other)]`), keeping loom
+//! resilient to adapter additions.
 
 use serde::Deserialize;
 use serde_json::Value;
-
-/// A parsed inbound JSON-RPC message (one relay frame = one newline-delimited
-/// JSON object). Classified by which fields are present:
-/// - `method` + `id`  → an agent→client **request** (only `session/request_permission`).
-/// - `method`, no `id` → an agent→client **notification** (`session/update`, …).
-/// - `id`, no `method` → a **response** to one of loom's requests.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Incoming {
-    /// Request/response id (number or string). Echoed verbatim when we answer an
-    /// agent request, so it is carried as a raw [`Value`].
-    #[serde(default)]
-    pub id: Option<Value>,
-    #[serde(default)]
-    pub method: Option<String>,
-    #[serde(default)]
-    pub params: Option<Value>,
-    #[serde(default)]
-    pub result: Option<Value>,
-    #[serde(default)]
-    pub error: Option<Value>,
-}
-
-impl Incoming {
-    /// Classify this message.
-    pub fn kind(&self) -> IncomingKind {
-        match (&self.method, &self.id) {
-            (Some(_), Some(_)) => IncomingKind::Request,
-            (Some(_), None) => IncomingKind::Notification,
-            (None, Some(_)) => IncomingKind::Response,
-            (None, None) => IncomingKind::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum IncomingKind {
-    Request,
-    Notification,
-    Response,
-    Unknown,
-}
 
 /// Method names (verbatim from the ACP schema).
 pub mod method {
@@ -63,62 +24,8 @@ pub mod method {
     pub const SESSION_LOAD: &str = "session/load";
     pub const SESSION_PROMPT: &str = "session/prompt";
     pub const SESSION_STEERING: &str = "_session/steering";
-    pub const SESSION_CANCEL: &str = "session/cancel";
     pub const SESSION_SET_MODE: &str = "session/set_mode";
     pub const SESSION_SET_CONFIG_OPTION: &str = "session/set_config_option";
-    pub const SESSION_UPDATE: &str = "session/update";
-    pub const SESSION_REQUEST_PERMISSION: &str = "session/request_permission";
-}
-
-/// Serialize a client→agent request line (`{jsonrpc, id, method, params}` + `\n`).
-pub fn request_line(id: u64, method: &str, params: Value) -> Vec<u8> {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    line(&msg)
-}
-
-/// Serialize a client→agent notification line (no id).
-pub fn notification_line(method: &str, params: Value) -> Vec<u8> {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": params,
-    });
-    line(&msg)
-}
-
-/// Serialize a client→agent response line answering an agent request `id` (echoed
-/// verbatim) with `result`.
-pub fn response_line(id: &Value, result: Value) -> Vec<u8> {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "result": result,
-    });
-    line(&msg)
-}
-
-/// Serialize a client→agent error response answering an agent request `id`.
-pub fn error_line(id: &Value, code: i64, message: &str) -> Vec<u8> {
-    let msg = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": code, "message": message },
-    });
-    line(&msg)
-}
-
-/// JSON-RPC `METHOD_NOT_FOUND`.
-pub const METHOD_NOT_FOUND: i64 = -32601;
-
-fn line(v: &Value) -> Vec<u8> {
-    let mut bytes = serde_json::to_vec(v).unwrap_or_default();
-    bytes.push(b'\n');
-    bytes
 }
 
 // ---------------------------------------------------------------------------
@@ -480,144 +387,10 @@ pub enum SteeringResult {
     Failed,
 }
 
-// ---------------------------------------------------------------------------
-// Request params builders (client → agent)
-// ---------------------------------------------------------------------------
-
-/// The ACP protocol version loom speaks (serialized as a bare integer).
-pub const PROTOCOL_VERSION: u16 = 1;
-
-/// `initialize` params.
-pub fn initialize_params(harness: &str) -> Value {
-    serde_json::json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "clientCapabilities": super::probe::client_capabilities(harness),
-    })
-}
-
-/// `session/new` params. `meta` is the optional `_meta` object (adapter options
-/// such as `{"claudeCode":{"options":{...}}}`).
-pub fn new_session_params(
-    cwd: &str,
-    mcp_servers: &[Value],
-    additional_directories: &[String],
-    meta: Option<&Value>,
-) -> Value {
-    let mut v = serde_json::json!({ "cwd": cwd, "mcpServers": mcp_servers });
-    if !additional_directories.is_empty() {
-        v["additionalDirectories"] = serde_json::json!(additional_directories);
-    }
-    if let Some(meta) = meta {
-        v["_meta"] = meta.clone();
-    }
-    v
-}
-
-/// `session/load` params.
-pub fn load_session_params(
-    session_id: &str,
-    cwd: &str,
-    mcp_servers: &[Value],
-    additional_directories: &[String],
-    meta: Option<&Value>,
-) -> Value {
-    let mut value =
-        serde_json::json!({ "sessionId": session_id, "cwd": cwd, "mcpServers": mcp_servers });
-    if !additional_directories.is_empty() {
-        value["additionalDirectories"] = serde_json::json!(additional_directories);
-    }
-    if let Some(meta) = meta {
-        value["_meta"] = meta.clone();
-    }
-    value
-}
-
-/// `session/prompt` params carrying text plus validated resource-link blocks.
-pub fn prompt_params(session_id: &str, text: &str, resources: &[Value]) -> Value {
-    let mut prompt = vec![serde_json::json!({ "type": "text", "text": text })];
-    prompt.extend(resources.iter().cloned());
-    serde_json::json!({
-        "sessionId": session_id,
-        "prompt": prompt,
-    })
-}
-
-/// `session/cancel` notification params.
-pub fn cancel_params(session_id: &str) -> Value {
-    serde_json::json!({ "sessionId": session_id })
-}
-
-/// `session/set_mode` params.
-pub fn set_mode_params(session_id: &str, mode_id: &str) -> Value {
-    serde_json::json!({ "sessionId": session_id, "modeId": mode_id })
-}
-
-/// `session/set_config_option` params. ACP configuration values are typed: most
-/// composer controls are select strings, while flags such as Codex fast mode are
-/// booleans.
-pub fn set_config_option_params(session_id: &str, config_id: &str, value: Value) -> Value {
-    serde_json::json!({ "sessionId": session_id, "configId": config_id, "value": value })
-}
-
-/// A `session/request_permission` response selecting an option.
-pub fn permission_selected(option_id: &str) -> Value {
-    serde_json::json!({ "outcome": { "outcome": "selected", "optionId": option_id } })
-}
-
-/// A `session/request_permission` response reporting the turn was cancelled.
-pub fn permission_cancelled() -> Value {
-    serde_json::json!({ "outcome": { "outcome": "cancelled" } })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn classifies_inbound_messages() {
-        let notif: Incoming = serde_json::from_value(json!({
-            "jsonrpc":"2.0","method":"session/update","params":{}
-        }))
-        .unwrap();
-        assert_eq!(notif.kind(), IncomingKind::Notification);
-
-        let req: Incoming = serde_json::from_value(json!({
-            "jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{}
-        }))
-        .unwrap();
-        assert_eq!(req.kind(), IncomingKind::Request);
-        assert_eq!(req.id, Some(json!(7)));
-
-        let resp: Incoming = serde_json::from_value(json!({
-            "jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}
-        }))
-        .unwrap();
-        assert_eq!(resp.kind(), IncomingKind::Response);
-    }
-
-    #[test]
-    fn load_session_restates_adapter_metadata() {
-        let meta = serde_json::json!({
-            "claudeCode": { "options": { "settingSources": [], "tools": ["Read"] } }
-        });
-        let servers = vec![json!({
-            "name": "loom",
-            "command": "/usr/bin/loom",
-            "args": ["mcp", "serve"],
-            "env": [],
-        })];
-        let params = load_session_params("session-1", "/worktree", &servers, &[], Some(&meta));
-        assert_eq!(params["sessionId"], "session-1");
-        assert_eq!(params["_meta"], meta);
-        assert_eq!(params["mcpServers"], json!(servers));
-
-        let fresh = new_session_params("/worktree", &servers, &[], None);
-        assert_eq!(fresh["mcpServers"], json!(servers));
-        assert!(fresh.get("_meta").is_none());
-        assert!(fresh.get("additionalDirectories").is_none());
-        assert!(params.get("additionalDirectories").is_none());
-    }
 
     #[test]
     fn deserializes_agent_message_chunk() {
@@ -903,38 +676,5 @@ mod tests {
         assert!(init.agent_capabilities.load_session);
         assert!(init.agent_capabilities.meta.claude_code.prompt_queueing);
         assert!(init.meta.steering.supported);
-    }
-
-    #[test]
-    fn builds_request_and_response_lines() {
-        let line = request_line(1, method::INITIALIZE, initialize_params("claude"));
-        assert!(line.ends_with(b"\n"));
-        let v: Value = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
-        assert_eq!(v["method"], "initialize");
-        assert_eq!(v["id"], 1);
-        assert_eq!(v["params"]["protocolVersion"], 1);
-        assert!(v["params"]["clientCapabilities"].get("_meta").is_none());
-
-        let cursor = request_line(1, method::INITIALIZE, initialize_params("cursor-agent"));
-        let cursor: Value = serde_json::from_slice(&cursor[..cursor.len() - 1]).unwrap();
-        assert_eq!(
-            cursor["params"]["clientCapabilities"]["_meta"]["parameterizedModelPicker"],
-            true
-        );
-
-        let resource = json!({
-            "type": "resource_link",
-            "name": "src/main.rs",
-            "uri": "file:///repo/src/main.rs",
-        });
-        let params = prompt_params("sess-1", "review this", &[resource]);
-        assert_eq!(params["prompt"][1]["type"], "resource_link");
-        assert_eq!(params["prompt"][1]["name"], "src/main.rs");
-
-        let resp = response_line(&json!(7), permission_selected("allow-once"));
-        let v: Value = serde_json::from_slice(&resp[..resp.len() - 1]).unwrap();
-        assert_eq!(v["id"], 7);
-        assert_eq!(v["result"]["outcome"]["outcome"], "selected");
-        assert_eq!(v["result"]["outcome"]["optionId"], "allow-once");
     }
 }

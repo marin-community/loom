@@ -194,16 +194,10 @@ fn models_to_fetch(
 }
 
 pub async fn credential_fingerprint(db: &Db, harness: &str) -> String {
-    let keys: &[&str] = match harness {
-        "cursor-agent" => &["CURSOR_API_KEY", "CURSOR_AUTH_TOKEN"],
-        // A credential rotation is applied by the boot import and by the
-        // per-pass list/prune; the payload itself is stripped from the
-        // environment before this runs, so it cannot be fingerprinted here.
-        "opencode" => &["OPENCODE_CONFIG_CONTENT"],
-        "claude" => &["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
-        "codex" => &["OPENAI_API_KEY"],
-        _ => &[],
+    let Some(builtin) = crate::harnesses::builtin_for_id(harness) else {
+        return String::new();
     };
+    let keys: &[&str] = builtin.credential_names();
     let stored = crate::agent_env::pairs(db).await.unwrap_or_default();
     let mut material = String::new();
     for key in keys {

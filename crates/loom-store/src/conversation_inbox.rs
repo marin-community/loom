@@ -47,7 +47,7 @@ pub struct InboxItem {
     pub source_channel_id: Option<String>,
     pub source_message_id: Option<String>,
     #[sqlx(default)]
-    pub input_request_id: Option<i64>,
+    pub input_request_id: Option<String>,
     #[sqlx(default)]
     pub input_turn: Option<i64>,
     #[sqlx(default)]
@@ -379,7 +379,7 @@ pub async fn prepare_input_delivery(
     db: &crate::db::Db,
     item: &InboxItem,
     session: &str,
-    request_id: u64,
+    request_id: &str,
     turn: i64,
     method: &str,
 ) -> Result<bool> {
@@ -391,7 +391,7 @@ pub async fn prepare_input_delivery(
            )",
         crate::session::turn_fence_predicate()
     ))
-    .bind(request_id as i64)
+    .bind(request_id)
     .bind(turn)
     .bind(method)
     .bind(&item.delivery_key)
@@ -956,7 +956,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(
-                prepare_input_delivery(&db, &item, "acp-review", 7, 1, "session/prompt")
+                prepare_input_delivery(&db, &item, "acp-review", "7", 1, "session/prompt")
                     .await
                     .unwrap()
             );

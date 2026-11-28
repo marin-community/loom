@@ -333,6 +333,15 @@ pub struct RelayStream {
 }
 
 impl RelayStream {
+    /// Split into the write half (frame writes and acks) and the event
+    /// stream, so one task can pump events while the connection writes.
+    /// Keeping the halves in one struct would force a lock held across every
+    /// `recv` — see [`Self::recv`]'s wait — blocking all writes behind it.
+    pub fn split(self) -> (RelayWriter, RelayEvents) {
+        let RelayStream { wr, ev_rx } = self;
+        (RelayWriter { wr }, RelayEvents { ev_rx })
+    }
+
     /// The next relay event, or `None` once the stream ends (the socket closed).
     pub async fn recv(&mut self) -> Option<RelayEvent> {
         self.ev_rx.recv().await
@@ -349,5 +358,38 @@ impl RelayStream {
     /// frames; the relay writes them through untouched).
     pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
         protocol::write_frame(&mut self.wr, &req::write(bytes.to_vec())).await
+    }
+}
+
+/// The write half of a [`RelayStream`]: frame writes and spool acks.
+pub struct RelayWriter {
+    wr: OwnedWriteHalf,
+}
+
+impl RelayWriter {
+    /// Append raw bytes to the child's stdin (send complete newline-terminated
+    /// frames; the relay writes them through untouched).
+    pub async fn write(&mut self, bytes: &[u8]) -> Result<()> {
+        protocol::write_frame(&mut self.wr, &req::write(bytes.to_vec())).await
+    }
+
+    /// Advance the retention watermark: everything up to and including `seq`
+    /// has been durably processed, so the supervisor may drop fully-acked
+    /// spool segments.
+    pub async fn ack(&mut self, seq: u64) -> Result<()> {
+        protocol::write_frame(&mut self.wr, &req::ack(seq)).await
+    }
+}
+
+/// The read half of a [`RelayStream`]: the relay's spooled frames, replayed
+/// then live, then a terminal `Exit`.
+pub struct RelayEvents {
+    ev_rx: mpsc::Receiver<RelayEvent>,
+}
+
+impl RelayEvents {
+    /// The next relay event, or `None` once the stream ends.
+    pub async fn recv(&mut self) -> Option<RelayEvent> {
+        self.ev_rx.recv().await
     }
 }

@@ -38,10 +38,11 @@ pub struct MatchedOption {
 const TRUE_ALIASES: &[&str] = &["true", "on", "1", "yes"];
 const FALSE_ALIASES: &[&str] = &["false", "off", "0", "no"];
 
-/// Cursor opts into separate per-model options. Without this, the adapter
-/// bundles effort and fast into the model id and no selector appears.
+/// Extra `initialize` `_meta` the harness opts into, if any (Cursor's
+/// parameterized model picker; without it the adapter bundles effort and fast
+/// into the model id and no selector appears).
 pub fn initialize_meta(harness: &str) -> Option<Value> {
-    (harness == "cursor-agent").then(|| serde_json::json!({ "parameterizedModelPicker": true }))
+    crate::harnesses::builtin_for_id(harness).and_then(|h| h.initialize_meta())
 }
 
 /// Loom does not offer a reasoning/thinking toggle, so Cursor's is not parsed
@@ -52,7 +53,11 @@ pub fn classify(option: &Value) -> Option<Selector> {
     match option.get("category").and_then(Value::as_str) {
         Some("model") => Some(Selector::Model),
         Some("thought_level") if id != "thinking" => Some(Selector::Effort),
+        // Claude bundles the toggle into its shared model-config bucket, so
+        // only the fast ids there claim it; Codex gives the toggle its own
+        // `speed` category (2.8.0), where the whole category is the toggle.
         Some("model_config") if is_fast_id(id) => Some(Selector::Fast),
+        Some("speed") => Some(Selector::Fast),
         Some("mode") => Some(Selector::Mode),
         _ => None,
     }
@@ -324,12 +329,31 @@ mod tests {
             Some(json!("on"))
         );
 
+        // codex-acp 2.8.0 spells the toggle `fast-mode` in a `speed`
+        // category with on/off select values.
         let codex = options(json!([
-            {"id":"fast-mode","category":"model_config","type":"boolean"}
+            {"id":"fast-mode","category":"speed","type":"select","currentValue":"on","options":[
+                {"value":"off","name":"Off"},{"value":"on","name":"On"}
+            ]}
         ]));
-        assert_eq!(normalize(&codex).fast.len(), 2);
+        // The choice order mirrors the wire (off first).
+        assert_eq!(normalize(&codex).fast[0].id, "false");
+        assert_eq!(normalize(&codex).fast[1].id, "true");
+        assert_eq!(
+            find(&codex, Selector::Fast).unwrap().current.as_deref(),
+            Some("true")
+        );
         assert_eq!(
             raw_value(&codex, Selector::Fast, "false"),
+            Some(json!("off"))
+        );
+
+        let codex_boolean = options(json!([
+            {"id":"fast-mode","category":"model_config","type":"boolean"}
+        ]));
+        assert_eq!(normalize(&codex_boolean).fast.len(), 2);
+        assert_eq!(
+            raw_value(&codex_boolean, Selector::Fast, "false"),
             Some(Value::Bool(false))
         );
 

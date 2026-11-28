@@ -20,16 +20,12 @@ async fn env_vars(db: &Db) -> ApiResult<Vec<AgentEnvVarView>> {
 /// A harness credential lives in the default profile's environment. Changing it
 /// is a full catalogue refresh for the harness that reads that credential.
 pub(super) fn invalidate_catalog_if_credential(db: &crate::db::Db, name: &str) {
-    let harness = match name {
-        "CURSOR_API_KEY" | "CURSOR_AUTH_TOKEN" => "cursor-agent",
-        "ANTHROPIC_API_KEY" | "CLAUDE_CODE_OAUTH_TOKEN" => "claude",
-        "OPENAI_API_KEY" => "codex",
-        "OPENCODE_CONFIG_CONTENT" => "opencode",
-        _ => return,
+    let Some(harness) = loom_agent::harnesses::harness_of_credential(name) else {
+        return;
     };
     let _ = crate::catalog::spawn_refresh(
         db.clone(),
-        Some(harness.to_string()),
+        Some(harness.kind().as_str().to_string()),
         crate::catalog::Trigger::Credential,
     );
 }

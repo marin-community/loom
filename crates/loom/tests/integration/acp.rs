@@ -29,18 +29,13 @@ fn editable_text(chat: &Value) -> Option<&str> {
         .as_str()
 }
 
-/// The relay command that launches the scripted fake ACP agent over stdio.
-fn agent_cmd() -> String {
-    crate::fixtures::fake_acp_agent_cmd()
-}
-
 /// Set an env var for the test's duration, restoring the prior value on drop.
-struct EnvVarSet {
+pub(crate) struct EnvVarSet {
     name: &'static str,
     prev: Option<std::ffi::OsString>,
 }
 impl EnvVarSet {
-    fn set(name: &'static str, value: &str) -> Self {
+    pub(crate) fn set(name: &'static str, value: &str) -> Self {
         let prev = std::env::var_os(name);
         std::env::set_var(name, value);
         Self { name, prev }
@@ -53,6 +48,11 @@ impl Drop for EnvVarSet {
             None => std::env::remove_var(self.name),
         }
     }
+}
+
+/// The relay command that launches the scripted fake ACP agent over stdio.
+fn agent_cmd() -> String {
+    crate::fixtures::fake_acp_agent_cmd()
 }
 
 /// Insert a fresh (branch, session) pair directly — the session row `acp::start`

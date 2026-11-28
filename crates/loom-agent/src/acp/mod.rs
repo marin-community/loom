@@ -8,7 +8,6 @@
 //! subscription, a JSON-RPC id map, the delta-consolidation buffers, the
 //! [journal](crate::chat) writer, and a per-session [`broadcast`] the `/chat/stream`
 //! SSE route tails.
-//!
 //! ## Journal blocks
 //!
 //! The task consolidates streaming chunks in memory and writes one journal block
@@ -46,8 +45,10 @@
 //! `(session_id, turn, seq)`, plus upstream-id guards for tool calls and turn
 //! ends), so a replay after a loom restart re-ingests without duplicating.
 
-mod images;
-pub(crate) mod probe;
+pub mod images;
+pub mod probe;
+pub mod relay;
+pub mod requests;
 mod wire;
 
 use std::collections::{HashMap, HashSet};
@@ -55,11 +56,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::v1::schema::{
+    InitializeRequest, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse,
+};
+use agent_client_protocol::Client as AcpClient;
 use anyhow::{anyhow, bail, Context, Result};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tapestry::RelayEvent;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::chat::{self, kind, ChatBlockView};
@@ -69,8 +75,8 @@ use crate::Ctx;
 use weaver_api::{AcpCost, AcpUsage};
 use weaver_core::tags;
 use wire::{
-    method, Incoming, IncomingKind, PermissionOption, RequestPermissionParams, SessionNotification,
-    SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation,
+    method, PermissionOption, RequestPermissionParams, SessionNotification, SessionUpdate,
+    ToolCall, ToolCallContent, ToolCallLocation,
 };
 
 /// Persisting the relay cursor on every streaming delta would turn a restart
@@ -98,16 +104,41 @@ const CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const GOAL_TURN_GRACE: Duration = crate::conversation_inbox::NORMAL_INTERRUPT_DELAY;
 
 /// Whether an adapter's setup error is the transient "not ready yet" class.
-fn retryable_setup_error(error: &Value) -> bool {
-    let text = error.to_string();
-    text.contains("ServiceUnavailableError")
-        || text.contains("Location plugins did not finish activating")
+fn retryable_setup_error(error: &str) -> bool {
+    error.contains("ServiceUnavailableError")
+        || error.contains("Location plugins did not finish activating")
 }
 
 fn retryable_setup_error_anyhow(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
-    text.contains("ServiceUnavailableError")
-        || text.contains("Location plugins did not finish activating")
+    retryable_setup_error(&text)
+}
+
+/// The in-flight prompt (request id + turn) mirrored on the session row, as a
+/// reattached task needs to recognize the replayed turn-end response.
+fn inflight_prompt_of(session: &session::Session) -> Option<(String, i64)> {
+    let value = session.acp_inflight.as_ref()?;
+    let inflight: Value = serde_json::from_str(value).ok()?;
+    Some((
+        durable_request_id(inflight.get("prompt_id")?)?,
+        inflight.get("turn")?.as_i64()?,
+    ))
+}
+
+/// The engine-assigned request id, exactly as the wire renders it, which
+/// durable records store and the relay pump matches for adoption.
+fn request_id_string(id: &agent_client_protocol::RawJsonRpcId) -> String {
+    id.to_string()
+}
+
+/// A request id from a durable record: a UUID string from this engine, or a
+/// number written by a loom that predates the crate.
+fn durable_request_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(id) => Some(id.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -291,7 +322,11 @@ pub async fn validate_launch(
 
     let operation = async {
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-        AcpPromptClient::new(stream).validate(&launch).await
+        let output = Arc::new(std::sync::Mutex::new((String::new(), false)));
+        transient_connection(stream, output, |cx| async move {
+            validate_on(cx, &launch).await
+        })
+        .await
     };
     let result = match tokio::time::timeout(timeout, operation).await {
         Ok(result) => result,
@@ -347,9 +382,12 @@ pub async fn prompt_once(
 
     let operation = async {
         let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-        AcpPromptClient::new(stream)
-            .run(&launch, prompt, model, effort)
-            .await
+        let output = Arc::new(std::sync::Mutex::new((String::new(), false)));
+        let collector = output.clone();
+        transient_connection(stream, output, move |cx| async move {
+            prompt_on(cx, &launch, prompt, model, effort, &collector).await
+        })
+        .await
     };
     let result = match tokio::time::timeout(timeout, operation).await {
         Ok(result) => result,
@@ -368,17 +406,85 @@ pub async fn prompt_once(
     }
 }
 
-struct AcpPromptClient {
+/// Open the crate's connection over a transient relay and run `operate` on it.
+///
+/// The relay is acked automatically — a transient session has nothing durable
+/// to protect — and an adapter permission request is cancelled (a one-shot
+/// prompt has no one to ask); every other adapter-initiated request is
+/// answered by the engine's method-not-found default. Agent message chunks
+/// arriving as `session/update` notifications stream into `output`.
+async fn transient_connection<F, Fut, T>(
     stream: tapestry::RelayStream,
-    next_id: u64,
+    output: Arc<std::sync::Mutex<(String, bool)>>,
+    operate: F,
+) -> Result<T>
+where
+    F: FnOnce(agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>) -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T>> + Send,
+{
+    let (transport, handle, _gate) = relay::connect(
+        stream,
+        relay::AckMode::Auto,
+        mpsc::unbounded_channel().0,
+        std::collections::HashSet::new(),
+    );
+    let collector = output.clone();
+    let connect = AcpClient
+        .v1()
+        .on_receive_request(
+            async |request: RequestPermissionRequest, responder, _cx| {
+                let _ = request;
+                responder.respond(RequestPermissionResponse::new(
+                    RequestPermissionOutcome::Cancelled,
+                ))
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notification: agent_client_protocol::v1::schema::SessionNotification,
+                        _cx| {
+                use agent_client_protocol::v1::schema::{ContentBlock, SessionUpdate};
+                if let SessionUpdate::AgentMessageChunk(chunk) = notification.update {
+                    if let ContentBlock::Text(text) = chunk.content {
+                        let mut buf = collector.lock().unwrap();
+                        if buf.0.len() + text.text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
+                            buf.0.push_str(&text.text);
+                        } else {
+                            buf.1 = true;
+                        }
+                    }
+                }
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .connect_with(transport, async move |cx| {
+            operate(cx).await.map_err(|error| {
+                agent_client_protocol::Error::new(
+                    agent_client_protocol::ErrorCode::INTERNAL_ERROR,
+                    format!("{error:#}"),
+                )
+            })
+        });
+    let outcome = connect.await.map_err(|error| anyhow!("{error}"));
+    match (&outcome, handle.exit_status()) {
+        (Err(error), Some(status)) => {
+            bail!("{error}; ACP prompt adapter exited with status {status:?}")
+        }
+        _ => outcome,
+    }
+}
+
+/// What a freshly opened transient session advertised.
+struct TransientSession {
     session_id: String,
-    output: String,
-    output_oversized: bool,
+    options: Vec<Value>,
+    modes: Option<wire::SessionModeState>,
 }
 
 fn validate_mcp_capabilities(
     launch: &AcpLaunch,
-    capabilities: &wire::AgentCapabilities,
+    capabilities: &agent_client_protocol::v1::schema::AgentCapabilities,
 ) -> Result<()> {
     let needs_http = launch
         .mcp_servers
@@ -390,277 +496,230 @@ fn validate_mcp_capabilities(
     Ok(())
 }
 
-impl AcpPromptClient {
-    fn new(stream: tapestry::RelayStream) -> Self {
-        Self {
-            stream,
-            next_id: 0,
-            session_id: String::new(),
-            output: String::new(),
-            output_oversized: false,
-        }
-    }
+/// Initialize the connection and open one `session/new` for `launch`.
+async fn open_new_session(
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+) -> Result<TransientSession> {
+    let harness_meta = crate::catalog::selectors::initialize_meta(&launch.harness);
+    let initialized = cx
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1).client_capabilities(
+                crate::acp::probe::client_capabilities(harness_meta.as_ref()),
+            ),
+        )
+        .block_task()
+        .await
+        .context("ACP initialize failed")?;
+    validate_mcp_capabilities(launch, &initialized.agent_capabilities)?;
+    let (cwd, meta) = match &launch.new_or_load {
+        NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
+        NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
+    };
+    let opened = cx
+        .send_request(requests::new_session(
+            &cwd.to_string_lossy(),
+            &launch.mcp_servers,
+            &launch.additional_directories,
+            meta,
+        ))
+        .block_task()
+        .await
+        .context("ACP session/new failed")?;
+    let opened: wire::NewSessionResult =
+        serde_json::from_value(opened).context("invalid ACP session/new response")?;
+    Ok(TransientSession {
+        session_id: opened.session_id,
+        options: opened.config_options.unwrap_or_default(),
+        modes: opened.modes,
+    })
+}
 
-    async fn open_new_session(&mut self, launch: &AcpLaunch) -> Result<wire::NewSessionResult> {
-        let initialized = self
-            .request(method::INITIALIZE, wire::initialize_params(&launch.harness))
-            .await?;
-        let initialized: wire::InitializeResult =
-            serde_json::from_value(initialized).context("invalid ACP initialize response")?;
-        validate_mcp_capabilities(launch, &initialized.agent_capabilities)?;
-        let (cwd, meta) = match &launch.new_or_load {
-            NewOrLoad::New { cwd, meta } => (cwd, meta.as_ref()),
-            NewOrLoad::Load { .. } => bail!("transient ACP operation requires a fresh session"),
+/// Select a config option and return the refreshed option set.
+async fn set_config_option(
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    session_id: &str,
+    id: &str,
+    value: Value,
+) -> Result<Vec<Value>> {
+    let result = cx
+        .send_request(requests::set_config_option(session_id, id, value))
+        .block_task()
+        .await
+        .with_context(|| format!("ACP session/set_config_option failed for '{id}'"))?;
+    let result: wire::SetConfigOptionResult =
+        serde_json::from_value(result).context("invalid ACP session/set_config_option response")?;
+    Ok(result.config_options)
+}
+
+/// A launch validation pass: the same selectors the durable session would
+/// apply, checked against the live adapter before the session is created.
+async fn validate_on(
+    cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+) -> Result<()> {
+    let opened = open_new_session(&cx, launch).await?;
+    let mut options = opened.options;
+
+    // `validate` only runs for a fresh session (asserted above).
+    for (kind, desired) in launch_config_steps(launch) {
+        let Some(selector) = launch_selector(kind) else {
+            continue;
         };
-        let opened = self
-            .request(
-                method::SESSION_NEW,
-                wire::new_session_params(
-                    &cwd.to_string_lossy(),
-                    &launch.mcp_servers,
-                    &launch.additional_directories,
-                    meta,
-                ),
-            )
-            .await?;
-        let opened: wire::NewSessionResult =
-            serde_json::from_value(opened).context("invalid ACP session/new response")?;
-        self.session_id.clone_from(&opened.session_id);
-        Ok(opened)
+        let Some(matched) = crate::catalog::selectors::find(&options, selector) else {
+            // Some adapters apply launch selectors out of band and do not
+            // advertise a matching ACP control. session/new is authoritative
+            // for those runtimes, just as it is during the durable handshake.
+            continue;
+        };
+        if matched.current.as_deref() == Some(desired.as_str()) {
+            continue;
+        }
+        let Some(raw) = crate::catalog::selectors::raw_value(&options, selector, &desired) else {
+            bail!(
+                "launch {kind} '{desired}' is not an available value{}",
+                advertised_suffix(&options, &matched.id, kind)
+            );
+        };
+        options = set_config_option(&cx, &opened.session_id, &matched.id, raw)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to select launch {kind} '{desired}'{}",
+                    advertised_suffix(&options, &matched.id, kind)
+                )
+            })?;
     }
 
-    async fn validate(mut self, launch: &AcpLaunch) -> Result<()> {
-        let opened = self.open_new_session(launch).await?;
-        let mut options = opened.config_options.unwrap_or_default();
-
-        // `validate` only runs for a fresh session (asserted above).
-        for (kind, desired) in launch_config_steps(launch) {
-            let Some(selector) = launch_selector(kind) else {
-                continue;
-            };
-            let Some(matched) = crate::catalog::selectors::find(&options, selector) else {
-                // Some adapters apply launch selectors out of band and do not
-                // advertise a matching ACP control. session/new is authoritative
-                // for those runtimes, just as it is during the durable handshake.
-                continue;
-            };
-            if matched.current.as_deref() == Some(desired.as_str()) {
-                continue;
-            }
-            let Some(raw) = crate::catalog::selectors::raw_value(&options, selector, &desired)
-            else {
+    if let Some(mode) = launch
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+    {
+        if let Some(modes) = &opened.modes {
+            let available = mode_ids(&modes.available_modes);
+            if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
                 bail!(
-                    "launch {kind} '{desired}' is not an available value{}",
-                    advertised_suffix(&options, &matched.id, kind)
+                    "launch mode '{mode}' is not available (available modes: {})",
+                    available.join(", ")
                 );
-            };
-            options = self
-                .set_config_option(&matched.id, raw)
-                .await
-                .with_context(|| {
-                    format!(
-                        "failed to select launch {kind} '{desired}'{}",
-                        advertised_suffix(&options, &matched.id, kind)
-                    )
-                })?;
-        }
-
-        if let Some(mode) = launch
-            .mode
-            .as_deref()
-            .map(str::trim)
-            .filter(|mode| !mode.is_empty())
-        {
-            if let Some(modes) = &opened.modes {
-                let available = mode_ids(&modes.available_modes);
-                if !available.is_empty() && !available.iter().any(|candidate| candidate == mode) {
-                    bail!(
-                        "launch mode '{mode}' is not available (available modes: {})",
-                        available.join(", ")
-                    );
-                }
             }
-            self.request(
-                method::SESSION_SET_MODE,
-                wire::set_mode_params(&self.session_id, mode),
-            )
+        }
+        cx.send_request(requests::set_mode(&opened.session_id, mode))
+            .block_task()
             .await
             .with_context(|| format!("failed to select launch mode '{mode}'"))?;
-        }
-        Ok(())
     }
+    Ok(())
+}
 
-    async fn run(
-        mut self,
-        launch: &AcpLaunch,
-        prompt: &str,
-        model: AcpPromptModel<'_>,
-        effort: AcpPromptEffort<'_>,
-    ) -> Result<Option<AcpPromptOutput>> {
-        let opened = self.open_new_session(launch).await?;
-        let mut options = opened.config_options.unwrap_or_default();
+/// One prompt through the opened session, collecting the agent's streamed
+/// message as the output.
+async fn prompt_on(
+    cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    launch: &AcpLaunch,
+    prompt: &str,
+    model: AcpPromptModel<'_>,
+    effort: AcpPromptEffort<'_>,
+    output: &std::sync::Mutex<(String, bool)>,
+) -> Result<Option<AcpPromptOutput>> {
+    let opened = open_new_session(&cx, launch).await?;
+    let mut options = opened.options;
+    let session_id = opened.session_id.clone();
 
-        let model = match model {
-            AcpPromptModel::Default => crate::catalog::selectors::current_model(&options),
-            AcpPromptModel::Exact(value) => {
-                let Some((model_config, model)) =
-                    preferred_config_value(&options, "model", &[value], false)
-                else {
-                    return Ok(None);
-                };
-                options = self
-                    .set_config_option(&model_config, Value::String(model.clone()))
-                    .await?;
-                Some(model)
-            }
-            AcpPromptModel::FirstContaining(preferences) => {
-                let Some((model_config, model)) =
-                    preferred_config_value(&options, "model", preferences, true)
-                else {
-                    return Ok(None);
-                };
-                options = self
-                    .set_config_option(&model_config, Value::String(model.clone()))
-                    .await?;
-                Some(model)
-            }
-        };
-        match effort {
-            AcpPromptEffort::Default => {}
-            AcpPromptEffort::Exact(value) => {
-                let Some((effort_config, effort)) =
-                    preferred_config_value(&options, "effort", &[value], false)
-                else {
-                    return Ok(None);
-                };
-                self.set_config_option(&effort_config, Value::String(effort))
-                    .await?;
-            }
-            AcpPromptEffort::Prefer(value) => {
-                if let Some((effort_config, effort)) =
-                    preferred_config_value(&options, "effort", &[value], false)
-                {
-                    self.set_config_option(&effort_config, Value::String(effort))
-                        .await?;
-                }
-            }
-        }
-        if let Some(mode) = opened
-            .modes
-            .as_ref()
-            .and_then(|modes| preferred_mode(&modes.available_modes))
-        {
-            self.request(
-                method::SESSION_SET_MODE,
-                wire::set_mode_params(&self.session_id, &mode),
+    let model = match model {
+        AcpPromptModel::Default => crate::catalog::selectors::current_model(&options),
+        AcpPromptModel::Exact(value) => {
+            let Some((model_config, model)) =
+                preferred_config_value(&options, "model", &[value], false)
+            else {
+                return Ok(None);
+            };
+            options = set_config_option(
+                &cx,
+                &session_id,
+                &model_config,
+                Value::String(model.clone()),
             )
             .await?;
-        } else if let Some((mode_config, mode)) =
-            preferred_config_value(&options, "mode", &["plan", "read-only"], false)
-        {
-            self.set_config_option(&mode_config, Value::String(mode))
-                .await?;
+            Some(model)
         }
-
-        self.output.clear();
-        self.output_oversized = false;
-        let result = self
-            .request(
-                method::SESSION_PROMPT,
-                wire::prompt_params(&self.session_id, prompt, &[]),
+        AcpPromptModel::FirstContaining(preferences) => {
+            let Some((model_config, model)) =
+                preferred_config_value(&options, "model", preferences, true)
+            else {
+                return Ok(None);
+            };
+            options = set_config_option(
+                &cx,
+                &session_id,
+                &model_config,
+                Value::String(model.clone()),
             )
             .await?;
-        let result: wire::PromptResult =
-            serde_json::from_value(result).context("invalid ACP session/prompt response")?;
-        if result.stop_reason == "cancelled" || self.output_oversized {
-            return Ok(None);
+            Some(model)
         }
-        let text = self.output.trim();
-        if text.is_empty() {
-            return Ok(None);
+    };
+    match effort {
+        AcpPromptEffort::Default => {}
+        AcpPromptEffort::Exact(value) => {
+            let Some((effort_config, effort)) =
+                preferred_config_value(&options, "effort", &[value], false)
+            else {
+                return Ok(None);
+            };
+            set_config_option(&cx, &session_id, &effort_config, Value::String(effort)).await?;
         }
-        Ok(Some(AcpPromptOutput {
-            text: text.to_string(),
-            model,
-        }))
-    }
-
-    async fn set_config_option(&mut self, id: &str, value: Value) -> Result<Vec<Value>> {
-        let result = self
-            .request(
-                method::SESSION_SET_CONFIG_OPTION,
-                wire::set_config_option_params(&self.session_id, id, value),
-            )
-            .await?;
-        let result: wire::SetConfigOptionResult = serde_json::from_value(result)
-            .context("invalid ACP session/set_config_option response")?;
-        Ok(result.config_options)
-    }
-
-    async fn request(&mut self, method_name: &str, params: Value) -> Result<Value> {
-        self.next_id += 1;
-        let request_id = self.next_id;
-        self.stream
-            .write(&wire::request_line(request_id, method_name, params))
-            .await?;
-        loop {
-            match self.stream.recv().await {
-                Some(RelayEvent::Frame { seq, payload }) => {
-                    let incoming: Incoming = serde_json::from_slice(&payload)
-                        .context("invalid JSON-RPC frame from ACP prompt adapter")?;
-                    if incoming.kind() == IncomingKind::Response
-                        && incoming.id.as_ref().and_then(Value::as_u64) == Some(request_id)
-                    {
-                        self.stream.ack(seq).await?;
-                        if let Some(error) = incoming.error {
-                            bail!("ACP {method_name} failed: {error}");
-                        }
-                        return incoming
-                            .result
-                            .ok_or_else(|| anyhow!("ACP {method_name} returned no result"));
-                    }
-                    self.handle_incoming(incoming).await?;
-                    self.stream.ack(seq).await?;
-                }
-                Some(RelayEvent::Exit { status }) => {
-                    bail!("ACP prompt adapter exited with status {status:?}")
-                }
-                None => bail!("ACP prompt relay closed"),
-            }
-        }
-    }
-
-    async fn handle_incoming(&mut self, incoming: Incoming) -> Result<()> {
-        match incoming.kind() {
-            IncomingKind::Notification
-                if incoming.method.as_deref() == Some(method::SESSION_UPDATE) =>
+        AcpPromptEffort::Prefer(value) => {
+            if let Some((effort_config, effort)) =
+                preferred_config_value(&options, "effort", &[value], false)
             {
-                let notification: SessionNotification =
-                    serde_json::from_value(incoming.params.unwrap_or(Value::Null))?;
-                if let SessionUpdate::AgentMessageChunk { content } = notification.update {
-                    if let Some(text) = content.text() {
-                        if self.output.len() + text.len() <= ONE_SHOT_OUTPUT_MAX_BYTES {
-                            self.output.push_str(text);
-                        } else {
-                            self.output_oversized = true;
-                        }
-                    }
-                }
+                set_config_option(&cx, &session_id, &effort_config, Value::String(effort)).await?;
             }
-            IncomingKind::Request
-                if incoming.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) =>
-            {
-                let id = incoming
-                    .id
-                    .ok_or_else(|| anyhow!("ACP permission request had no id"))?;
-                self.stream
-                    .write(&wire::response_line(&id, wire::permission_cancelled()))
-                    .await?;
-            }
-            _ => {}
         }
-        Ok(())
     }
+    if let Some(mode) = opened
+        .modes
+        .as_ref()
+        .and_then(|modes| preferred_mode(&modes.available_modes))
+    {
+        cx.send_request(requests::set_mode(&session_id, &mode))
+            .block_task()
+            .await?;
+    } else if let Some((mode_config, mode)) =
+        preferred_config_value(&options, "mode", &["plan", "read-only"], false)
+    {
+        set_config_option(&cx, &session_id, &mode_config, Value::String(mode)).await?;
+    }
+
+    let result = cx
+        .send_request(requests::prompt(&session_id, prompt, &[]))
+        .block_task()
+        .await
+        .context("ACP session/prompt failed")?;
+    let result: wire::PromptResult =
+        serde_json::from_value(result).context("invalid ACP session/prompt response")?;
+    let (text, oversized) = {
+        let mut buf = output.lock().unwrap();
+        if buf.0.len() > ONE_SHOT_OUTPUT_MAX_BYTES {
+            buf.1 = true;
+        }
+        let text = buf.0.clone();
+        buf.0.clear();
+        (text, buf.1)
+    };
+    if result.stop_reason == "cancelled" || oversized {
+        return Ok(None);
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(AcpPromptOutput {
+        text: text.to_string(),
+        model,
+    }))
 }
 
 /// The parenthetical the launch error uses when the adapter listed choices.
@@ -1389,80 +1448,212 @@ async fn start_inner(
     // From this point onward the detached relay exists. Any failure must tear it
     // down and clear partially-persisted provider state before returning, or the
     // caller gets a stuck row plus a relay name handoff cannot safely reuse.
-    let prepared: Result<(Task, mpsc::Receiver<Command>)> = async {
-        // Claim the driver slot before subscribing — see [`attach`].
-        let driver_epoch = session::claim_acp_driver(&state.db, session_id).await?;
-        let stream = crate::backend::subscribe_relay(&relay_name, 0).await?;
-        let mut task = Task::fresh(
-            state,
-            &session,
-            relay_name.clone(),
-            stream,
-            events_tx.clone(),
-        )
-        .await?;
-        task.driver_epoch = driver_epoch;
-        // `session/load` may replay an unanswered permission request and wait
-        // for the client response before returning, so register the task
-        // before setup — otherwise the REST permission route can't reach it
-        // and the handshake deadlocks.
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
-        task.generation = state.acp.register(
-            session_id,
-            AcpHandle {
-                cmd_tx,
-                events_tx: events_tx.clone(),
-                metadata: task.metadata.clone(),
-            },
-        );
-        if let Err(error) = task.handshake(&launch, handoff, &mut cmd_rx).await {
-            let _ = task.registry.remove_own(&task.session_id, task.generation);
+    //
+    // Claim the driver slot before subscribing — see [`attach`].
+    let driver_epoch = match session::claim_acp_driver(&state.db, session_id).await {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            let _ = crate::backend::kill_session_and_wait(&relay_name).await;
             return Err(error);
         }
-        Ok((task, cmd_rx))
-    }
-    .await;
-    let (task, cmd_rx) = match prepared {
-        Ok(prepared) => prepared,
+    };
+    let stream = match crate::backend::subscribe_relay(&relay_name, 0).await {
+        Ok(stream) => stream,
         Err(error) => {
-            let latest = session::get(&state.db, session_id).await.ok().flatten();
-            if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
-                let _ = chat::close_abandoned_turn(&state.db, session_id, turn).await;
-            }
-            let retryable = retryable_setup_error_anyhow(&error);
-            // The abandoned turn claim must not outlive this cleanup even
-            // when the kill below fails: the retry path that would re-attach
-            // reads `acp_inflight` and would otherwise resurrect the
-            // just-closed turn as live, refusing suspend and skipping
-            // auto-suspend forever. Only the claim goes here — the durable
-            // adapter state is settled after the kill below.
-            let _ = session::set_inflight(&state.db, session_id, None).await;
-            if retryable {
-                // An adapter that is still activating is not an invalid
-                // session id: keep it so the next attempt can session/load
-                // instead of opening a fresh conversation and re-sending
-                // the goal. Replay from the beginning of the journal.
-                let _ = session::set_ack_seq(&state.db, session_id, 0).await;
-            }
-            // Kill the relay BEFORE clearing the durable adapter state: a
-            // kill that fails must leave the session attachable
-            // (acp_session_id intact), or the retry wedges on "has no
-            // acp_session_id" with no fresh-open fallback while a healthy
-            // relay keeps running.
-            if let Err(cleanup) = crate::backend::kill_session_and_wait(&relay_name).await {
-                return Err(anyhow!(
-                    "{error}; failed to clean up ACP relay after setup error: {cleanup}"
-                ));
-            }
-            if !retryable {
-                let _ = session::clear_acp_state(&state.db, session_id).await;
-            }
+            let _ = crate::backend::kill_session_and_wait(&relay_name).await;
             return Err(error);
         }
     };
 
-    weaver_core::spawn_boxed(Box::pin(async move { task.run(cmd_rx).await }));
-    Ok(())
+    let (setup_tx, setup_rx) = oneshot::channel::<Result<()>>();
+    let ctx = state.clone();
+    let cleanup_relay_name = relay_name.clone();
+    let cleanup_session_id = session_id.to_string();
+    spawn_engine(
+        stream,
+        relay::AdoptedRequests::new(),
+        move |engine| async move {
+            let mut task = match Task::fresh(
+                &ctx,
+                &session,
+                relay_name.clone(),
+                engine,
+                events_tx.clone(),
+            )
+            .await
+            {
+                Ok(task) => task,
+                Err(error) => {
+                    let _ = setup_tx.send(Err(error));
+                    return;
+                }
+            };
+            task.driver_epoch = driver_epoch;
+            // `session/load` may replay an unanswered permission request and wait
+            // for the client response before returning, so register the task
+            // before setup — otherwise the REST permission route can't reach it
+            // and the handshake deadlocks.
+            let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
+            task.generation = ctx.acp.register(
+                &cleanup_session_id,
+                AcpHandle {
+                    cmd_tx,
+                    events_tx,
+                    metadata: task.metadata.clone(),
+                },
+            );
+            if let Err(error) = task.handshake(&launch, handoff, &mut cmd_rx).await {
+                let _ = task.registry.remove_own(&task.session_id, task.generation);
+                cleanup_setup_failure(&ctx, &cleanup_session_id, &cleanup_relay_name, &error).await;
+                let _ = setup_tx.send(Err(error));
+                return;
+            }
+            let _ = setup_tx.send(Ok(()));
+            task.run(cmd_rx).await;
+        },
+    );
+    match setup_rx.await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("the ACP session task ended during setup")),
+    }
+}
+
+/// Tear down a setup failure exactly as the pre-crate code did: close the
+/// abandoned turn claim, kill the relay, then clear or preserve the durable
+/// adapter state depending on whether the failure is retryable.
+async fn cleanup_setup_failure(
+    ctx: &AcpCtx,
+    session_id: &str,
+    relay_name: &str,
+    error: &anyhow::Error,
+) {
+    let latest = session::get(&ctx.db, session_id).await.ok().flatten();
+    if let Some(turn) = latest.as_ref().and_then(session::acp_inflight_turn) {
+        let _ = chat::close_abandoned_turn(&ctx.db, session_id, turn).await;
+    }
+    let retryable = retryable_setup_error_anyhow(error);
+    // The abandoned turn claim must not outlive this cleanup even when the
+    // kill below fails: the retry path that would re-attach reads
+    // `acp_inflight` and would otherwise resurrect the just-closed turn as
+    // live, refusing suspend and skipping auto-suspend forever. Only the
+    // claim goes here — the durable adapter state is settled after the kill
+    // below.
+    let _ = session::set_inflight(&ctx.db, session_id, None).await;
+    if retryable {
+        // An adapter that is still activating is not an invalid session id:
+        // keep it so the next attempt can session/load instead of opening a
+        // fresh conversation and re-sending the goal. Replay from the
+        // beginning of the journal.
+        let _ = session::set_ack_seq(&ctx.db, session_id, 0).await;
+    }
+    // Kill the relay BEFORE clearing the durable adapter state: a kill that
+    // fails must leave the session attachable (acp_session_id intact), or
+    // the retry wedges on "has no acp_session_id" with no fresh-open
+    // fallback while a healthy relay keeps running.
+    if crate::backend::kill_session_and_wait(relay_name)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if !retryable {
+        let _ = session::clear_acp_state(&ctx.db, session_id).await;
+    }
+}
+
+/// The connection plumbing `spawn_engine` hands the session task: the engine's
+/// client face, the two halves of its event channel, and the relay's task-side
+/// handles. One struct so constructors stay under clippy's arity limit — and
+/// so a new plumbing piece has an obvious home.
+pub(crate) struct Engine {
+    pub(crate) cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    pub(crate) events: (
+        mpsc::UnboundedSender<EngineEvent>,
+        mpsc::UnboundedReceiver<EngineEvent>,
+    ),
+    pub(crate) relay: relay::RelayHandle,
+    pub(crate) gate: relay::RelayGate,
+}
+
+/// Connect the relay as the crate's channel transport with the live session's
+/// handlers, then run `drive` on the connection until it returns. The
+/// permission and session/update handlers forward raw events to the task;
+/// everything else falls through to [`CatchAll`], which releases the frame
+/// gate so the engine's own dispositions cannot stall the relay pump.
+/// `adopted` names the replayed responses of requests a previous task sent.
+fn spawn_engine<F, Fut>(stream: tapestry::RelayStream, adopted: relay::AdoptedRequests, drive: F)
+where
+    F: FnOnce(Engine) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let gate = relay::RelayGate::new();
+    let (engine_tx, engine_rx) = mpsc::unbounded_channel();
+    let (transport, relay_handle, gated) = relay::connect(
+        stream,
+        relay::AckMode::Gated(gate.clone()),
+        engine_tx.clone(),
+        adopted,
+    );
+    let Some(gate) = gated else {
+        unreachable!("gated mode always returns the gate")
+    };
+    let perm_gate = gate.clone();
+    let perm_tx = engine_tx.clone();
+    let update_gate = gate.clone();
+    let update_tx = engine_tx.clone();
+    weaver_core::spawn_boxed(Box::pin(async move {
+        let connect = AcpClient
+            .v1()
+            .on_receive_request(
+                async move |request: requests::PermissionRequest, responder, _cx| {
+                    let seq = perm_gate.frame_seq();
+                    let req_key =
+                        id_key(&serde_json::to_value(responder.raw_id()).unwrap_or(Value::Null));
+                    match serde_json::from_value::<RequestPermissionParams>(request.0) {
+                        Ok(params) => {
+                            let _ = perm_tx.send(EngineEvent::Permission {
+                                seq,
+                                req_key,
+                                params,
+                                responder: Box::new(responder),
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "bad request_permission params");
+                            let _ = responder.respond(cancelled_permission_response());
+                        }
+                    }
+                    perm_gate.mark_processed();
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |notification: requests::SessionUpdateNotification, _cx| {
+                    let _ = update_tx.send(EngineEvent::Update {
+                        seq: update_gate.frame_seq(),
+                        params: notification.0,
+                    });
+                    update_gate.mark_processed();
+                    Ok(())
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .with_handler(CatchAll { gate: gate.clone() })
+            .connect_with(transport, async move |cx| {
+                drive(Engine {
+                    cx,
+                    events: (engine_tx, engine_rx),
+                    relay: relay_handle,
+                    gate,
+                })
+                .await;
+                Ok(())
+            });
+        if let Err(error) = connect.await {
+            tracing::debug!(%error, "acp connection ended");
+        }
+    }));
 }
 
 /// Re-attach to an ACP session whose relay outlived a loom restart: subscribe from
@@ -1489,28 +1680,57 @@ pub async fn attach(state: &AcpCtx, session_id: &str) -> Result<()> {
     let stream = crate::backend::subscribe_relay(&relay_name, cursor).await?;
 
     let (events_tx, _) = broadcast::channel(256);
-    let mut task = Task::recover(
-        state,
-        &session,
-        acp_session_id,
-        relay_name,
-        stream,
-        events_tx.clone(),
-    )
-    .await?;
-    task.driver_epoch = driver_epoch;
+    // Adopt the responses of requests the previous task sent: the engine has
+    // no subscriber for their ids and would drop the replayed frames.
+    let mut adopted = relay::AdoptedRequests::new();
+    if let Some((prompt_id, _)) = inflight_prompt_of(&session) {
+        adopted.insert(prompt_id);
+    }
+    if let Ok(Some(item)) =
+        crate::conversation_inbox::pending_input_delivery(&state.db, session_id).await
+    {
+        if let Some(request_id) = item.input_request_id {
+            adopted.insert(request_id);
+        }
+    }
+    let (setup_tx, setup_rx) = oneshot::channel::<Result<()>>();
+    let ctx = state.clone();
+    let registered_session_id = session_id.to_string();
+    spawn_engine(stream, adopted, move |engine| async move {
+        let mut task = match Task::recover(
+            &ctx,
+            &session,
+            acp_session_id,
+            relay_name.clone(),
+            engine,
+            events_tx.clone(),
+        )
+        .await
+        {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = setup_tx.send(Err(error));
+                return;
+            }
+        };
+        task.driver_epoch = driver_epoch;
 
-    let (cmd_tx, cmd_rx) = mpsc::channel(64);
-    task.generation = state.acp.register(
-        session_id,
-        AcpHandle {
-            cmd_tx,
-            events_tx,
-            metadata: task.metadata.clone(),
-        },
-    );
-    weaver_core::spawn_boxed(Box::pin(async move { task.run(cmd_rx).await }));
-    Ok(())
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        task.generation = ctx.acp.register(
+            &registered_session_id,
+            AcpHandle {
+                cmd_tx,
+                events_tx,
+                metadata: task.metadata.clone(),
+            },
+        );
+        let _ = setup_tx.send(Ok(()));
+        task.run(cmd_rx).await;
+    });
+    match setup_rx.await {
+        Ok(result) => result,
+        Err(_) => Err(anyhow!("the ACP session task ended during setup")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1747,11 +1967,52 @@ impl LiveTool {
     }
 }
 
-/// An unanswered permission request awaiting a client answer: its JSON-RPC id (to
-/// echo in the response) and the frame seq (held un-acked until answered).
+/// An unanswered permission request awaiting a client answer: the responder
+/// the answer goes back through and the frame seq (held un-acked until
+/// answered). The responder is boxed behind a mutex: it is `Send` but not
+/// `Sync`, and the task (which borrows itself into claim-liveness closures
+/// held across awaits) must stay `Sync`.
 struct PendingPerm {
-    jsonrpc_id: Value,
+    responder: std::sync::Mutex<
+        agent_client_protocol::Responder<
+            agent_client_protocol::v1::schema::RequestPermissionResponse,
+            agent_client_protocol::V1,
+        >,
+    >,
     frame_seq: u64,
+}
+
+/// Take the responder out of a pending permission, poison or not.
+fn take_responder(
+    pending: PendingPerm,
+) -> agent_client_protocol::Responder<
+    agent_client_protocol::v1::schema::RequestPermissionResponse,
+    agent_client_protocol::V1,
+> {
+    pending
+        .responder
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A `session/request_permission` response reporting the chosen option.
+fn selected_permission_response(
+    option_id: &str,
+) -> agent_client_protocol::v1::schema::RequestPermissionResponse {
+    agent_client_protocol::v1::schema::RequestPermissionResponse::new(
+        agent_client_protocol::v1::schema::RequestPermissionOutcome::Selected(
+            agent_client_protocol::v1::schema::SelectedPermissionOutcome::new(
+                option_id.to_string(),
+            ),
+        ),
+    )
+}
+
+/// A `session/request_permission` response reporting the turn was cancelled.
+fn cancelled_permission_response() -> agent_client_protocol::v1::schema::RequestPermissionResponse {
+    agent_client_protocol::v1::schema::RequestPermissionResponse::new(
+        agent_client_protocol::v1::schema::RequestPermissionOutcome::Cancelled,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1807,6 +2068,106 @@ impl TaskStopReason {
     }
 }
 
+/// The raw outcome of a request the task sent: the result value, or the wire
+/// error with its JSON-RPC code intact (steering dispositions and retry
+/// classification read the code).
+pub(crate) type RequestOutcome = Result<Value, agent_client_protocol::Error>;
+
+/// Which request a response answers, for the setup phases that await one
+/// request at a time. The run loop routes by request id against durable
+/// state instead: a natively queued prompt's id migrates from the delivery
+/// it was sent as into the in-flight prompt when the queue activates.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum ResponseKind {
+    Initialize,
+    SessionNew,
+    SessionLoad,
+    SetMode,
+    SetConfigOption,
+    /// A `session/prompt` that opened a turn.
+    Prompt {
+        turn: i64,
+    },
+    /// A prompt or steering request carrying an inbox delivery.
+    InputDelivery,
+    /// A replayed response the relay pump adopted for a previous task.
+    Replayed,
+}
+
+/// One event the connection engine forwarded to the session task. The task
+/// consumes these in its select loop exactly where it consumed relay frames
+/// before the crate took over the connection.
+pub(crate) enum EngineEvent {
+    /// A `session/update` notification — params raw, parsed by the
+    /// tolerant DTOs (`wire::SessionNotification`).
+    Update { seq: u64, params: Value },
+    /// A `session/request_permission`, with the durable request key (derived
+    /// from the adapter's JSON-RPC id) and the typed responder the answer
+    /// goes back through.
+    Permission {
+        seq: u64,
+        req_key: String,
+        params: RequestPermissionParams,
+        responder: Box<
+            agent_client_protocol::Responder<
+                agent_client_protocol::v1::schema::RequestPermissionResponse,
+                agent_client_protocol::V1,
+            >,
+        >,
+    },
+    /// The outcome of a request the task sent, stamped with the spool seq of
+    /// the frame that carried it and its engine-assigned id (durable records
+    /// and the reply maps are keyed by it).
+    Response {
+        seq: u64,
+        id: String,
+        kind: ResponseKind,
+        outcome: RequestOutcome,
+    },
+}
+
+/// The chain-end handler: everything the typed handlers did not claim is
+/// finished as far as loom is concerned once the engine answers or drops it,
+/// so it releases the frame gate. Responses are routed to their awaiter
+/// (running any `on_receiving_result` callback) first.
+struct CatchAll {
+    gate: relay::RelayGate,
+}
+
+impl agent_client_protocol::HandleDispatchFrom<agent_client_protocol::Agent> for CatchAll {
+    fn handle_dispatch_from(
+        &mut self,
+        message: agent_client_protocol::Dispatch,
+        _connection: agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    ) -> impl std::future::Future<
+        Output = agent_client_protocol::Result<
+            agent_client_protocol::Handled<agent_client_protocol::Dispatch>,
+        >,
+    > + Send {
+        let gate = self.gate.clone();
+        async move {
+            match message {
+                agent_client_protocol::Dispatch::Response(result, router) => {
+                    router.route_with_result(result)?;
+                    gate.mark_processed();
+                    Ok(agent_client_protocol::Handled::Yes)
+                }
+                other => {
+                    gate.mark_processed();
+                    Ok(agent_client_protocol::Handled::No {
+                        message: other,
+                        retry: false,
+                    })
+                }
+            }
+        }
+    }
+
+    fn describe_chain(&self) -> impl std::fmt::Debug {
+        "loom catch-all"
+    }
+}
+
 struct Task {
     db: Db,
     /// The loom event bus — used to drive the turn-boundary status/idle lifecycle
@@ -1824,20 +2185,30 @@ struct Task {
     relay_name: String,
     acp_session_id: String,
     events_tx: broadcast::Sender<SseEvent>,
-    stream: tapestry::RelayStream,
+    /// The connection to the adapter, driven by the crate's engine. Requests
+    /// go out through it; responses, updates and permission requests arrive
+    /// on `engine_rx`.
+    cx: agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
+    /// The engine's forwarded events: session updates, permission requests,
+    /// and the outcomes of this task's own requests.
+    engine_tx: mpsc::UnboundedSender<EngineEvent>,
+    engine_rx: mpsc::UnboundedReceiver<EngineEvent>,
+    /// The relay-side face: spool acks and the adapter's exit status.
+    relay: relay::RelayHandle,
+    /// The spool-seq tracker the connection's handlers stamp events with.
+    gate: relay::RelayGate,
 
-    next_req_id: u64,
     /// The in-flight `session/prompt` request id + its turn, mirrored on the
     /// session row so a replayed turn-end response is recognized after a restart.
-    inflight_prompt: Option<(u64, i64)>,
+    inflight_prompt: Option<(String, i64)>,
     /// A protected inbox claim stays recoverable until the matching ACP
     /// prompt response proves that the adapter accepted the attempted write.
     inflight_inbox: Option<InflightInbox>,
     inflight_delivery: Option<InflightDelivery>,
     /// A prompt response can race its steer response. Keep its frame unacked
     /// and its turn open until the steer's disposition is known.
-    deferred_prompt_response: Option<(u64, Incoming)>,
-    deferred_queued_response: Option<(u64, Incoming)>,
+    deferred_prompt_response: Option<(u64, RequestOutcome)>,
+    deferred_queued_response: Option<(u64, RequestOutcome)>,
     input_delivery_unavailable_turn: Option<i64>,
 
     current_turn: i64,
@@ -1877,8 +2248,8 @@ struct Task {
     /// must not attest its fingerprint.
     profile: String,
     metadata: Arc<Mutex<AcpMetadata>>,
-    pending_mode: HashMap<u64, PendingMode>,
-    pending_config: HashMap<u64, oneshot::Sender<Result<AcpMetadata>>>,
+    pending_mode: HashMap<String, PendingMode>,
+    pending_config: HashMap<String, oneshot::Sender<Result<AcpMetadata>>>,
     #[allow(dead_code)]
     load_session_cap: bool,
     /// A recovered adapter-owned turn with no prompt response id. Normal turns
@@ -1926,9 +2297,15 @@ impl Task {
         state: &AcpCtx,
         session: &session::Session,
         relay_name: String,
-        stream: tapestry::RelayStream,
+        engine: Engine,
         events_tx: broadcast::Sender<SseEvent>,
     ) -> Result<Self> {
+        let Engine {
+            cx,
+            events: (engine_tx, engine_rx),
+            relay,
+            gate,
+        } = engine;
         // A replacement process cannot answer the retired adapter's requests.
         // Reattachment uses `recover` instead and keeps them replayable.
         if let Some(item) =
@@ -1977,8 +2354,11 @@ impl Task {
             relay_name,
             acp_session_id: String::new(),
             events_tx,
-            stream,
-            next_req_id: 0,
+            cx,
+            engine_tx,
+            engine_rx,
+            relay,
+            gate,
             inflight_prompt: None,
             inflight_inbox: None,
             inflight_delivery: None,
@@ -2019,9 +2399,15 @@ impl Task {
         session: &session::Session,
         acp_session_id: String,
         relay_name: String,
-        stream: tapestry::RelayStream,
+        engine: Engine,
         events_tx: broadcast::Sender<SseEvent>,
     ) -> Result<Self> {
+        let Engine {
+            cx,
+            events: (engine_tx, engine_rx),
+            relay,
+            gate,
+        } = engine;
         let (max_turn, max_seq) = chat::max_turn_seq(&state.db, &session.id)
             .await?
             .unwrap_or((0, -1));
@@ -2043,9 +2429,12 @@ impl Task {
             .and_then(|v| v.get("compaction"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let inflight = inflight_value
-            .as_ref()
-            .and_then(|v| Some((v.get("prompt_id")?.as_u64()?, v.get("turn")?.as_i64()?)));
+        let inflight = inflight_value.as_ref().and_then(|v| {
+            Some((
+                durable_request_id(v.get("prompt_id")?)?,
+                v.get("turn")?.as_i64()?,
+            ))
+        });
         let inbox_claim = inflight_value.as_ref().and_then(|value| {
             Some((
                 value.get("delivery_key")?.as_str()?.to_string(),
@@ -2088,12 +2477,6 @@ impl Task {
                     item,
                     active_claim: None,
                 });
-        let next_req_id = inflight.map_or(0, |(id, _)| id).max(
-            inflight_delivery
-                .as_ref()
-                .and_then(|steer| steer.item.input_request_id)
-                .unwrap_or(0) as u64,
-        );
         Ok(Self {
             db: state.db.clone(),
             bus: state.bus.clone(),
@@ -2106,8 +2489,11 @@ impl Task {
             relay_name,
             acp_session_id,
             events_tx,
-            stream,
-            next_req_id,
+            cx,
+            engine_tx,
+            engine_rx,
+            relay,
+            gate,
             inflight_prompt: inflight,
             inflight_inbox,
             inflight_delivery,
@@ -2145,9 +2531,44 @@ impl Task {
         })
     }
 
-    fn next_id(&mut self) -> u64 {
-        self.next_req_id += 1;
-        self.next_req_id
+    /// Send a request through the crate's connection, routing its response
+    /// back to the task loop as an [`EngineEvent::Response`]. Returns the
+    /// engine-assigned request id, which durable records (the inbox delivery
+    /// row, the mirrored in-flight prompt) store.
+    ///
+    /// The response callback marks its frame processed, which is what lets the
+    /// relay pump stamp the response's spool seq and move on.
+    fn request(
+        &self,
+        kind: ResponseKind,
+        request: impl agent_client_protocol::JsonRpcRequest<Response = Value> + Send + 'static,
+    ) -> Result<String> {
+        let prepared = self.cx.prepare_request(request);
+        let id = request_id_string(prepared.raw_id());
+        let callback_id = id.clone();
+        let tx = self.engine_tx.clone();
+        let gate = self.gate.clone();
+        prepared.on_receiving_result(async move |result| {
+            let _ = tx.send(EngineEvent::Response {
+                seq: gate.frame_seq(),
+                id: callback_id,
+                kind,
+                outcome: result,
+            });
+            gate.mark_processed();
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// Send a notification through the crate's connection.
+    async fn notify(
+        &self,
+        notification: impl agent_client_protocol::JsonRpcNotification + Send + 'static,
+    ) -> Result<()> {
+        self.cx
+            .send_notification(notification)
+            .map_err(|error| anyhow!("{error}"))
     }
 
     fn emit(&self, event: &str, data: Value) {
@@ -2265,17 +2686,13 @@ impl Task {
                 continue;
             }
 
-            let id = self.next_id();
-            self.stream
-                .write(&wire::request_line(
-                    id,
-                    method::SESSION_SET_CONFIG_OPTION,
-                    wire::set_config_option_params(&self.acp_session_id, &matched.id, raw),
-                ))
-                .await?;
+            self.request(
+                ResponseKind::SetConfigOption,
+                requests::set_config_option(&self.acp_session_id, &matched.id, raw),
+            )?;
             let (result, error) = self
                 .recv_until_response(
-                    id,
+                    &ResponseKind::SetConfigOption,
                     method::SESSION_SET_CONFIG_OPTION,
                     launch.setup_timeout,
                     cmd_rx,
@@ -2283,7 +2700,8 @@ impl Task {
                 .await?;
             let result = result.ok_or_else(|| {
                 anyhow!(
-                    "session/set_config_option failed while applying launch {kind} '{desired}': {error:?}"
+                    "session/set_config_option failed while applying launch {kind} '{desired}': {}",
+                    error.map(|e| e.to_string()).unwrap_or_default()
                 )
             })?;
             let updated: wire::SetConfigOptionResult =
@@ -2316,21 +2734,41 @@ impl Task {
         handoff: Option<Value>,
         cmd_rx: &mut mpsc::Receiver<Command>,
     ) -> Result<()> {
-        let id = self.next_id();
-        self.stream
-            .write(&wire::request_line(
-                id,
-                method::INITIALIZE,
-                wire::initialize_params(&launch.harness),
-            ))
-            .await?;
+        let client_capabilities = match crate::catalog::selectors::initialize_meta(&launch.harness)
+        {
+            Some(meta) => serde_json::json!({ "_meta": meta }),
+            None => serde_json::json!({}),
+        };
+        self.request(
+            ResponseKind::Initialize,
+            requests::initialize(client_capabilities),
+        )?;
         let (res, err) = self
-            .recv_until_response(id, method::INITIALIZE, launch.setup_timeout, cmd_rx)
+            .recv_until_response(
+                &ResponseKind::Initialize,
+                method::INITIALIZE,
+                launch.setup_timeout,
+                cmd_rx,
+            )
             .await?;
-        let res = res.ok_or_else(|| anyhow!("initialize failed: {err:?}"))?;
+        let res = res.ok_or_else(|| {
+            anyhow!(
+                "initialize failed: {}",
+                err.map(|e| e.to_string()).unwrap_or_default()
+            )
+        })?;
         let init: wire::InitializeResult =
             serde_json::from_value(res).context("invalid ACP initialize response")?;
-        validate_mcp_capabilities(launch, &init.agent_capabilities)?;
+        // The live handshake reads the raw initialize response: the harness
+        // extensions it consults (steering support, the claudeCode prompt
+        // queueing flag) are not part of the typed schema.
+        let needs_http = launch
+            .mcp_servers
+            .iter()
+            .any(|server| server["type"] == "http");
+        if needs_http && !init.agent_capabilities.mcp_capabilities.http {
+            bail!("the ACP agent does not advertise remote HTTP MCP support");
+        }
         self.load_session_cap = init.agent_capabilities.load_session;
         self.metadata.lock().unwrap().steering_supported = init.meta.steering.supported;
         self.metadata.lock().unwrap().prompt_queueing_supported =
@@ -2338,23 +2776,29 @@ impl Task {
 
         match &launch.new_or_load {
             NewOrLoad::New { cwd, meta } => {
-                let params = wire::new_session_params(
-                    &cwd.to_string_lossy(),
-                    &launch.mcp_servers,
-                    &launch.additional_directories,
-                    meta.as_ref(),
-                );
                 let mut attempts = 0;
                 let (res, err) = loop {
-                    let id = self.next_id();
-                    self.stream
-                        .write(&wire::request_line(id, method::SESSION_NEW, params.clone()))
-                        .await?;
+                    self.request(
+                        ResponseKind::SessionNew,
+                        requests::new_session(
+                            &cwd.to_string_lossy(),
+                            &launch.mcp_servers,
+                            &launch.additional_directories,
+                            meta.as_ref(),
+                        ),
+                    )?;
                     let (res, err) = self
-                        .recv_until_response(id, method::SESSION_NEW, launch.setup_timeout, cmd_rx)
+                        .recv_until_response(
+                            &ResponseKind::SessionNew,
+                            method::SESSION_NEW,
+                            launch.setup_timeout,
+                            cmd_rx,
+                        )
                         .await?;
                     if res.is_none()
-                        && err.as_ref().is_some_and(retryable_setup_error)
+                        && err
+                            .as_ref()
+                            .is_some_and(|e| retryable_setup_error(&e.to_string()))
                         && attempts < SETUP_READINESS_RETRIES
                     {
                         attempts += 1;
@@ -2363,7 +2807,12 @@ impl Task {
                     }
                     break (res, err);
                 };
-                let res = res.ok_or_else(|| anyhow!("session/new failed: {err:?}"))?;
+                let res = res.ok_or_else(|| {
+                    anyhow!(
+                        "session/new failed: {}",
+                        err.map(|e| e.to_string()).unwrap_or_default()
+                    )
+                })?;
                 let ns: wire::NewSessionResult = serde_json::from_value(res)?;
                 self.acp_session_id = ns.session_id.clone();
                 if let Some(m) = ns.modes {
@@ -2392,30 +2841,32 @@ impl Task {
                 // notifications during the load — we already hold it — so suppress
                 // re-journaling for the duration of the call.
                 self.suppress_journal = true;
-                let params = wire::load_session_params(
-                    acp_session_id,
-                    &launch.cwd.to_string_lossy(),
-                    &launch.mcp_servers,
-                    &launch.additional_directories,
-                    meta.as_ref(),
-                );
                 // Full history replays synchronously before the response, so allow more time.
                 let load_timeout = launch.setup_timeout.saturating_mul(4);
                 let mut attempts = 0;
                 let (res, err) = loop {
-                    let id = self.next_id();
-                    self.stream
-                        .write(&wire::request_line(
-                            id,
-                            method::SESSION_LOAD,
-                            params.clone(),
-                        ))
-                        .await?;
+                    self.request(
+                        ResponseKind::SessionLoad,
+                        requests::load_session(
+                            acp_session_id,
+                            &launch.cwd.to_string_lossy(),
+                            &launch.mcp_servers,
+                            &launch.additional_directories,
+                            meta.as_ref(),
+                        ),
+                    )?;
                     let (res, err) = self
-                        .recv_until_response(id, method::SESSION_LOAD, load_timeout, cmd_rx)
+                        .recv_until_response(
+                            &ResponseKind::SessionLoad,
+                            method::SESSION_LOAD,
+                            load_timeout,
+                            cmd_rx,
+                        )
                         .await?;
                     if res.is_none()
-                        && err.as_ref().is_some_and(retryable_setup_error)
+                        && err
+                            .as_ref()
+                            .is_some_and(|e| retryable_setup_error(&e.to_string()))
                         && attempts < SETUP_READINESS_RETRIES
                     {
                         attempts += 1;
@@ -2435,7 +2886,10 @@ impl Task {
                 self.thought_buf = None;
                 self.tools.clear();
                 if res.is_none() {
-                    bail!("session/load failed: {err:?}");
+                    bail!(
+                        "session/load failed: {}",
+                        err.map(|e| e.to_string()).unwrap_or_default()
+                    );
                 }
                 if let Some(load) =
                     res.and_then(|r| serde_json::from_value::<wire::LoadSessionResult>(r).ok())
@@ -2454,19 +2908,23 @@ impl Task {
         self.reconcile_initial_config(launch, cmd_rx).await?;
 
         if let Some(mode) = &launch.mode {
-            let id = self.next_id();
-            self.stream
-                .write(&wire::request_line(
-                    id,
-                    method::SESSION_SET_MODE,
-                    wire::set_mode_params(&self.acp_session_id, mode),
-                ))
-                .await?;
+            self.request(
+                ResponseKind::SetMode,
+                requests::set_mode(&self.acp_session_id, mode),
+            )?;
             let (result, error) = self
-                .recv_until_response(id, method::SESSION_SET_MODE, launch.setup_timeout, cmd_rx)
+                .recv_until_response(
+                    &ResponseKind::SetMode,
+                    method::SESSION_SET_MODE,
+                    launch.setup_timeout,
+                    cmd_rx,
+                )
                 .await?;
             if result.is_none() {
-                bail!("session/set_mode failed: {error:?}");
+                bail!(
+                    "session/set_mode failed: {}",
+                    error.map(|e| e.to_string()).unwrap_or_default()
+                );
             }
             self.current_mode = Some(mode.clone());
         }
@@ -2488,15 +2946,16 @@ impl Task {
         Ok(())
     }
 
-    /// Drive frames until the response to `want` arrives, processing interleaved
-    /// notifications/requests normally. Used only during the synchronous handshake.
+    /// Drive engine events until the response of kind `want` arrives,
+    /// processing interleaved updates/permissions normally. Used only during
+    /// the synchronous handshake.
     async fn recv_until_response(
         &mut self,
-        want: u64,
+        want: &ResponseKind,
         method_name: &str,
         timeout: Duration,
         cmd_rx: &mut mpsc::Receiver<Command>,
-    ) -> Result<(Option<Value>, Option<Value>)> {
+    ) -> Result<(Option<Value>, Option<agent_client_protocol::Error>)> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -2504,33 +2963,27 @@ impl Task {
                 bail!("timed out waiting for ACP {method_name} response after {timeout:?}");
             }
             tokio::select! {
-                event = self.stream.recv() => match event {
-                    Some(RelayEvent::Frame { seq, payload }) => {
+                event = self.engine_rx.recv() => match event {
+                    Some(EngineEvent::Response { seq, kind, outcome, .. }) if &kind == want => {
                         self.highest_seq = seq;
-                        let inc: Incoming = match serde_json::from_slice(&payload) {
-                            Ok(i) => i,
-                            Err(_) => {
-                                self.maybe_ack().await?;
-                                continue;
-                            }
-                        };
-                        if inc.kind() == IncomingKind::Response
-                            && inc.id.as_ref().and_then(Value::as_u64) == Some(want)
-                        {
-                            self.maybe_ack().await?;
-                            return Ok((inc.result, inc.error));
-                        }
-                        self.dispatch_frame(seq, inc).await;
+                        self.maybe_ack().await?;
+                        return Ok(match outcome {
+                            Ok(result) => (Some(result), None),
+                            Err(error) => (None, Some(error)),
+                        });
+                    }
+                    Some(event) => {
+                        self.dispatch_event(event).await;
                         self.maybe_ack().await?;
                     }
-                    Some(RelayEvent::Exit { status }) => {
-                        bail!("agent exited during handshake (status {status:?})")
-                    }
-                    None => bail!("relay closed during handshake"),
+                    None => bail!("acp connection closed during handshake"),
                 },
                 cmd = cmd_rx.recv() => match cmd {
                     Some(cmd) => self.on_setup_command(cmd).await,
                     None => bail!("ACP session setup was stopped"),
+                },
+                _ = self.relay.closed() => {
+                    bail!("relay closed during handshake")
                 },
                 _ = tokio::time::sleep_until(deadline) => {
                     bail!("timed out waiting for ACP {method_name} response after {timeout:?}")
@@ -2608,21 +3061,31 @@ impl Task {
                 break TaskStopReason::JournalFailure;
             }
             tokio::select! {
-                ev = self.stream.recv() => match ev {
-                    Some(RelayEvent::Frame { seq, payload }) => {
-                        self.highest_seq = seq;
+                ev = self.engine_rx.recv() => match ev {
+                    Some(EngineEvent::Response { outcome: Err(_), .. })
+                        if self.relay.is_closed() =>
+                    {
+                        // The engine fails its pending requests when the
+                        // transport dies; those are teardown artifacts, not
+                        // adapter outcomes. Ending the turn on one would
+                        // clear the durable in-flight state the successor
+                        // task needs to recognize the replayed response.
+                        continue;
+                    }
+                    Some(event) => {
                         self.touch_activity().await;
-                        match serde_json::from_slice::<Incoming>(&payload) {
-                            Ok(inc) => self.dispatch_frame(seq, inc).await,
-                            Err(e) => tracing::warn!(session = %self.session_id, error = %e, "unparseable acp frame"),
-                        }
+                        self.dispatch_event(event).await;
                         if self.journal_replay_needed() {
                             break TaskStopReason::JournalFailure;
                         }
                     }
-                    Some(RelayEvent::Exit { status }) => {
-                        break TaskStopReason::AgentExit { status };
-                    }
+                    None => match self.relay.exit_status() {
+                        Some(status) => break TaskStopReason::AgentExit { status },
+                        None => break TaskStopReason::RelayClosed,
+                    },
+                },
+                _ = self.relay.closed() => match self.relay.exit_status() {
+                    Some(status) => break TaskStopReason::AgentExit { status },
                     None => break TaskStopReason::RelayClosed,
                 },
                 cmd = cmd_rx.recv() => match cmd {
@@ -2756,27 +3219,37 @@ impl Task {
         }
     }
 
-    async fn dispatch_frame(&mut self, seq: u64, inc: Incoming) {
-        match inc.kind() {
-            IncomingKind::Notification => {
-                if inc.method.as_deref() == Some(method::SESSION_UPDATE) {
-                    if let Err(e) = self
-                        .handle_notification(seq, inc.params.unwrap_or(Value::Null))
-                        .await
-                    {
-                        tracing::warn!(session = %self.session_id, error = %e, "bad session/update");
-                    }
+    /// Process one engine event: an update, a permission request, or the
+    /// outcome of a request this task sent. Order and per-frame spool seqs
+    /// are preserved by the pump and the handlers.
+    async fn dispatch_event(&mut self, event: EngineEvent) {
+        match event {
+            EngineEvent::Update { seq, params } => {
+                self.highest_seq = seq;
+                if let Err(e) = self.handle_notification(seq, params).await {
+                    tracing::warn!(session = %self.session_id, error = %e, "bad session/update");
                 }
             }
-            IncomingKind::Request => {
-                if inc.method.as_deref() == Some(method::SESSION_REQUEST_PERMISSION) {
-                    if let Err(e) = self.handle_permission(seq, inc).await {
-                        tracing::warn!(session = %self.session_id, error = %e, "bad request_permission");
-                    }
+            EngineEvent::Permission {
+                seq,
+                req_key,
+                params,
+                responder,
+            } => {
+                self.highest_seq = seq;
+                if let Err(e) = self
+                    .handle_permission(seq, req_key, params, responder)
+                    .await
+                {
+                    tracing::warn!(session = %self.session_id, error = %e, "bad request_permission");
                 }
             }
-            IncomingKind::Response => self.handle_response(seq, inc).await,
-            IncomingKind::Unknown => {}
+            EngineEvent::Response {
+                seq, id, outcome, ..
+            } => {
+                self.highest_seq = seq;
+                self.handle_response(seq, id, outcome).await;
+            }
         }
     }
 
@@ -2900,8 +3373,7 @@ impl Task {
                     };
                     self.on_turn_end(
                         self.current_turn,
-                        Some(json!({ "stopReason": reason })),
-                        None,
+                        Ok(json!({ "stopReason": reason })),
                         TurnEndSource::Synthetic,
                     )
                     .await;
@@ -3002,102 +3474,100 @@ impl Task {
 
     // -- responses / turn state machine ------------------------------------
 
-    async fn handle_response(&mut self, seq: u64, inc: Incoming) {
-        let Some(id) = inc.id.as_ref().and_then(Value::as_u64) else {
-            return;
-        };
+    async fn handle_response(&mut self, seq: u64, id: String, outcome: RequestOutcome) {
+        // Routing is by id first: a natively queued prompt's request id
+        // migrates into the in-flight prompt when the queue activates, so a
+        // response's role is what it answers now, not what it was sent as.
         if self
             .inflight_delivery
             .as_ref()
-            .is_some_and(|steer| steer.item.input_request_id == Some(id as i64))
+            .is_some_and(|steer| steer.item.input_request_id.as_deref() == Some(id.as_str()))
         {
             if self
                 .inflight_delivery
                 .as_ref()
                 .is_some_and(is_agent_queued_prompt)
-                && inc.error.is_none()
+                && outcome.is_ok()
             {
-                self.deferred_queued_response = Some((seq, inc));
+                self.deferred_queued_response = Some((seq, outcome));
                 return;
             }
-            if let Err(error) = self.handle_input_delivery_response(inc).await {
+            if let Err(error) = self.handle_input_delivery_response(outcome).await {
                 tracing::error!(session = %self.session_id, %error, "could not settle ACP steering");
                 self.journal_failed = true;
                 return;
             }
             if let Some((_, response)) = self.deferred_prompt_response.take() {
                 if let Some((_, turn)) = self.inflight_prompt {
-                    self.on_turn_end(
-                        turn,
-                        response.result,
-                        response.error,
-                        TurnEndSource::MatchingPromptResponse,
-                    )
-                    .await;
+                    self.on_turn_end(turn, response, TurnEndSource::MatchingPromptResponse)
+                        .await;
                 }
             }
             return;
         }
         if let Some(pending) = self.pending_mode.remove(&id) {
-            let result = if let Some(error) = inc.error {
-                Err(anyhow!("session/set_mode failed: {error}"))
-            } else {
-                if self.current_mode.as_deref() != Some(pending.mode_id.as_str()) {
-                    self.current_mode = Some(pending.mode_id.clone());
-                    let _ = session::set_current_mode(&self.db, &self.session_id, &pending.mode_id)
+            let result = match &outcome {
+                Err(error) => Err(anyhow!("session/set_mode failed: {error}")),
+                Ok(_) => {
+                    if self.current_mode.as_deref() != Some(pending.mode_id.as_str()) {
+                        self.current_mode = Some(pending.mode_id.clone());
+                        let _ =
+                            session::set_current_mode(&self.db, &self.session_id, &pending.mode_id)
+                                .await;
+                        let by = pending.by.map(Value::from).unwrap_or(Value::Null);
+                        self.journal_block(
+                            kind::MODE_CHANGE,
+                            json!({ "mode_id": pending.mode_id, "by": by }),
+                        )
                         .await;
-                    let by = pending.by.map(Value::from).unwrap_or(Value::Null);
-                    self.journal_block(
-                        kind::MODE_CHANGE,
-                        json!({ "mode_id": pending.mode_id, "by": by }),
-                    )
-                    .await;
+                    }
+                    Ok(())
                 }
-                Ok(())
             };
             let _ = pending.reply.send(result);
             return;
         }
         if let Some(reply) = self.pending_config.remove(&id) {
-            let result = if let Some(error) = inc.error {
-                Err(anyhow!("session/set_config_option failed: {error}"))
-            } else {
-                match inc
-                    .result
-                    .and_then(|v| serde_json::from_value::<wire::SetConfigOptionResult>(v).ok())
-                {
-                    Some(updated) => {
-                        self.replace_config_options(updated.config_options, true);
-                        let persisted = self.persist_metadata().await;
-                        if let Some(mode) = &self.current_mode {
-                            let _ =
-                                session::set_current_mode(&self.db, &self.session_id, mode).await;
+            let result = match &outcome {
+                Err(error) => Err(anyhow!("session/set_config_option failed: {error}")),
+                Ok(result) => {
+                    match serde_json::from_value::<wire::SetConfigOptionResult>(result.clone()).ok()
+                    {
+                        Some(updated) => {
+                            self.replace_config_options(updated.config_options, true);
+                            let persisted = self.persist_metadata().await;
+                            if let Some(mode) = &self.current_mode {
+                                let _ = session::set_current_mode(&self.db, &self.session_id, mode)
+                                    .await;
+                            }
+                            match persisted {
+                                Ok(()) => Ok(self.metadata.lock().unwrap().clone()),
+                                Err(error) => Err(error),
+                            }
                         }
-                        match persisted {
-                            Ok(()) => Ok(self.metadata.lock().unwrap().clone()),
-                            Err(error) => Err(error),
-                        }
+                        None => Err(anyhow!(
+                            "session/set_config_option returned an invalid response"
+                        )),
                     }
-                    None => Err(anyhow!(
-                        "session/set_config_option returned an invalid response"
-                    )),
                 }
             };
             let _ = reply.send(result);
             return;
         }
-        if let Some((pid, turn)) = self.inflight_prompt {
+        // The in-flight prompt matches by id: a natively queued prompt's id
+        // arrives stamped as the delivery it was sent as, so route on what it
+        // answers now.
+        if let Some((pid, in_flight_turn)) = self.inflight_prompt.clone() {
             if id == pid {
                 if self.inflight_delivery.as_ref().is_some_and(|delivery| {
                     delivery.item.input_method.as_deref() == Some(method::SESSION_STEERING)
                 }) {
-                    self.deferred_prompt_response = Some((seq, inc));
+                    self.deferred_prompt_response = Some((seq, outcome));
                     return;
                 }
                 self.on_turn_end(
-                    turn,
-                    inc.result,
-                    inc.error,
+                    in_flight_turn,
+                    outcome,
                     TurnEndSource::MatchingPromptResponse,
                 )
                 .await;
@@ -3148,13 +3618,7 @@ impl Task {
         }
     }
 
-    async fn on_turn_end(
-        &mut self,
-        turn: i64,
-        result: Option<Value>,
-        error: Option<Value>,
-        source: TurnEndSource,
-    ) {
+    async fn on_turn_end(&mut self, turn: i64, outcome: RequestOutcome, source: TurnEndSource) {
         // A provider-synthesized turn end is not an adapter acknowledgement:
         // settle before going idle. Reviews can retry or rehome; journaled
         // session updates stay consumed. Stop consumes either kind of input.
@@ -3175,17 +3639,13 @@ impl Task {
                 self.journal_block(kind::TOOL_CALL, t.block_payload()).await;
             }
         }
-        let stop = result
-            .as_ref()
-            .and_then(|r| serde_json::from_value::<wire::PromptResult>(r.clone()).ok())
-            .map(|p| p.stop_reason)
-            .unwrap_or_else(|| {
-                if error.is_some() {
-                    "error".to_string()
-                } else {
-                    "end_turn".to_string()
-                }
-            });
+        let stop = match &outcome {
+            Ok(result) => serde_json::from_value::<wire::PromptResult>(result.clone())
+                .ok()
+                .map(|p| p.stop_reason)
+                .unwrap_or_else(|| "end_turn".to_string()),
+            Err(_) => "error".to_string(),
+        };
         if !chat::has_turn_end(&self.db, &self.session_id, turn)
             .await
             .unwrap_or(false)
@@ -3509,7 +3969,8 @@ impl Task {
         let request_id = delivery
             .item
             .input_request_id
-            .context("queued request id is missing")? as u64;
+            .clone()
+            .context("queued request id is missing")?;
         let outcome = self
             .start_inbox_turn(&delivery.item, delivery.active_claim, Some(request_id))
             .await?;
@@ -3521,11 +3982,10 @@ impl Task {
             "could not journal agent-queued prompt: {outcome:?}"
         );
         self.emit_queue().await;
-        if let Some((_, response)) = self.deferred_queued_response.take() {
+        if let Some((_, outcome)) = self.deferred_queued_response.take() {
             Box::pin(self.on_turn_end(
                 self.current_turn,
-                response.result,
-                response.error,
+                outcome,
                 TurnEndSource::MatchingPromptResponse,
             ))
             .await;
@@ -3539,17 +3999,34 @@ impl Task {
         active_claim: ActiveInboxClaim,
     ) -> Result<bool> {
         let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
-        let id = self.next_id();
         let method = if self.metadata.lock().unwrap().prompt_queueing_supported {
             method::SESSION_PROMPT
         } else {
             method::SESSION_STEERING
         };
+        // Prepare (id assigned, not yet published) so the durable delivery
+        // record is written before the request goes out — the original
+        // ordering, kept so a crash between record and send stays a
+        // recoverable "delivery uncertain" rather than an untracked prompt.
+        let prepared = if method == method::SESSION_PROMPT {
+            self.cx.prepare_request(requests::prompt(
+                &self.acp_session_id,
+                &item.payload,
+                &resources,
+            ))
+        } else {
+            self.cx.prepare_request(requests::steering(
+                &self.acp_session_id,
+                &item.payload,
+                &resources,
+            ))
+        };
+        let id = request_id_string(prepared.raw_id());
         if !crate::conversation_inbox::prepare_input_delivery(
             &self.db,
             &item,
             &self.session_id,
-            id,
+            &id,
             self.current_turn,
             method,
         )
@@ -3563,13 +4040,9 @@ impl Task {
             .await?;
             return Ok(false);
         }
-        item.input_request_id = Some(id as i64);
+        item.input_request_id = Some(id.clone());
         item.input_turn = Some(self.current_turn);
         item.input_method = Some(method.to_string());
-        let mut params = wire::prompt_params(&self.acp_session_id, &item.payload, &resources);
-        if method == method::SESSION_STEERING {
-            params["_meta"] = json!({ "steering": { "idleBehavior": "promptRequired" } });
-        }
         // Once a write is attempted, a transport failure is ambiguous. Retain
         // the durable request rather than cancelling and replaying its input.
         self.inflight_delivery = Some(InflightDelivery {
@@ -3577,33 +4050,37 @@ impl Task {
             active_claim: Some(active_claim),
         });
         self.emit_queue().await;
-        if let Err(error) = self
-            .stream
-            .write(&wire::request_line(id, method, params))
-            .await
-        {
+        let tx = self.engine_tx.clone();
+        let gate = self.gate.clone();
+        if let Err(error) = prepared.on_receiving_result(async move |result| {
+            let _ = tx.send(EngineEvent::Response {
+                seq: gate.frame_seq(),
+                id,
+                kind: ResponseKind::InputDelivery,
+                outcome: result,
+            });
+            gate.mark_processed();
+            Ok(())
+        }) {
             tracing::warn!(session = %self.session_id, %error, "input write unconfirmed; retaining pending delivery");
         }
         Ok(true)
     }
 
-    async fn handle_input_delivery_response(&mut self, response: Incoming) -> Result<()> {
-        let disposition = match response
-            .result
-            .and_then(|result| serde_json::from_value::<wire::SteeringResult>(result).ok())
-        {
-            Some(wire::SteeringResult::Injected | wire::SteeringResult::StartedNewTurn) => {
-                InputDeliveryDisposition::Injected
-            }
-            Some(wire::SteeringResult::PromptRequired) => InputDeliveryDisposition::Rejected,
-            _ if response
-                .error
-                .as_ref()
-                .is_some_and(|error| matches!(error["code"].as_i64(), Some(-32601 | -32602))) =>
-            {
+    async fn handle_input_delivery_response(&mut self, outcome: RequestOutcome) -> Result<()> {
+        let disposition = match outcome {
+            Ok(result) => match serde_json::from_value::<wire::SteeringResult>(result) {
+                Ok(wire::SteeringResult::Injected | wire::SteeringResult::StartedNewTurn) => {
+                    InputDeliveryDisposition::Injected
+                }
+                Ok(wire::SteeringResult::PromptRequired) => InputDeliveryDisposition::Rejected,
+                Ok(wire::SteeringResult::Failed) | Err(_) => InputDeliveryDisposition::Unconfirmed,
+            },
+            // The adapter does not implement the steering extension.
+            Err(error) if matches!(error.code.value(), -32601 | -32602) => {
                 InputDeliveryDisposition::Rejected
             }
-            _ => InputDeliveryDisposition::Unconfirmed,
+            Err(_) => InputDeliveryDisposition::Unconfirmed,
         };
         self.settle_input_delivery(disposition).await
     }
@@ -3718,7 +4195,7 @@ impl Task {
         &mut self,
         item: &crate::conversation_inbox::InboxItem,
         active_claim: Option<ActiveInboxClaim>,
-        queued_request_id: Option<u64>,
+        queued_request_id: Option<String>,
     ) -> Result<crate::conversation_inbox::InboxTurnStartOutcome> {
         let resources: Vec<Value> = serde_json::from_str(&item.resources)?;
         let compaction = item.author.is_some() && is_compaction_prompt(&item.payload);
@@ -3736,9 +4213,27 @@ impl Task {
             self.next_seq
         };
         let effective_mode = self.current_mode.clone();
-        let id = queued_request_id.unwrap_or_else(|| self.next_id());
+        // A queued request reuses the steering id the adapter already holds —
+        // no new request is sent. Otherwise prepare the prompt now (id
+        // assigned, not yet published) so the durable claim below names the
+        // real request id, and a refusal drops the request unsent.
+        let prepared = if queued_request_id.is_none() {
+            Some(self.cx.prepare_request(requests::prompt(
+                &self.acp_session_id,
+                &item.payload,
+                &resources,
+            )))
+        } else {
+            None
+        };
+        let id = queued_request_id.clone().unwrap_or_else(|| {
+            prepared
+                .as_ref()
+                .map(|p| request_id_string(p.raw_id()))
+                .expect("a fresh inbox turn prepares a request")
+        });
         let inflight = json!({
-            "prompt_id": id,
+            "prompt_id": id.clone(),
             "turn": turn,
             "mode": effective_mode,
             "delivery_key": item.delivery_key,
@@ -3747,6 +4242,9 @@ impl Task {
         })
         .to_string();
         let opening_payload = inbox_message_payload(item, &resources);
+        let engine_tx = self.engine_tx.clone();
+        let gate = self.gate.clone();
+        let prompt_turn = turn;
         let outcome = crate::conversation_inbox::start_conversation_inbox_turn(
             &self.db,
             item,
@@ -3761,13 +4259,22 @@ impl Task {
                 if queued_request_id.is_some() {
                     return Ok(());
                 }
-                self.stream
-                    .write(&wire::request_line(
-                        id,
-                        method::SESSION_PROMPT,
-                        wire::prompt_params(&self.acp_session_id, &item.payload, &resources),
-                    ))
-                    .await
+                let id = id.clone();
+                match prepared {
+                    Some(prepared) => prepared
+                        .on_receiving_result(async move |result| {
+                            let _ = engine_tx.send(EngineEvent::Response {
+                                seq: gate.frame_seq(),
+                                id,
+                                kind: ResponseKind::Prompt { turn: prompt_turn },
+                                outcome: result,
+                            });
+                            gate.mark_processed();
+                            Ok(())
+                        })
+                        .map_err(|error| anyhow!("{error}")),
+                    None => Ok(()),
+                }
             },
         )
         .await;
@@ -3901,9 +4408,15 @@ impl Task {
         } else {
             self.current_turn
         };
-        let id = self.next_id();
+        // Prepare (id assigned, not yet published) so the durable turn-start
+        // claim names the real request id, and a refusal drops the request
+        // before it is ever sent.
+        let prepared =
+            self.cx
+                .prepare_request(requests::prompt(&self.acp_session_id, &text, &resources));
+        let id = request_id_string(prepared.raw_id());
         let inflight = json!({
-            "prompt_id": id,
+            "prompt_id": id.clone(),
             "turn": turn,
             "mode": self.current_mode,
             "compaction": compaction_turn,
@@ -3937,14 +4450,22 @@ impl Task {
         );
         self.journal_block(opening_kind, opening_payload).await;
 
-        self.inflight_prompt = Some((id, self.current_turn));
-        self.stream
-            .write(&wire::request_line(
-                id,
-                method::SESSION_PROMPT,
-                wire::prompt_params(&self.acp_session_id, &text, &resources),
-            ))
-            .await?;
+        self.inflight_prompt = Some((id.clone(), self.current_turn));
+        let engine_tx = self.engine_tx.clone();
+        let gate = self.gate.clone();
+        let prompt_turn = self.current_turn;
+        prepared
+            .on_receiving_result(async move |result| {
+                let _ = engine_tx.send(EngineEvent::Response {
+                    seq: gate.frame_seq(),
+                    id,
+                    kind: ResponseKind::Prompt { turn: prompt_turn },
+                    outcome: result,
+                });
+                gate.mark_processed();
+                Ok(())
+            })
+            .map_err(|error| anyhow!("{error}"))?;
         // Turn start ⇒ the `working` lifecycle edge: status `running`, the calm
         // `idle` mark and the agent's `attention` tag cleared. Mirrors what the
         // terminal path's `UserPromptSubmit` hook does (see `crate::monitor`).
@@ -3954,11 +4475,18 @@ impl Task {
 
     // -- permissions --------------------------------------------------------
 
-    async fn handle_permission(&mut self, seq: u64, inc: Incoming) -> Result<()> {
-        let jsonrpc_id = inc.id.clone().unwrap_or(Value::Null);
-        let req_key = id_key(&jsonrpc_id);
-        let params: RequestPermissionParams =
-            serde_json::from_value(inc.params.unwrap_or(Value::Null))?;
+    async fn handle_permission(
+        &mut self,
+        seq: u64,
+        req_key: String,
+        params: RequestPermissionParams,
+        responder: Box<
+            agent_client_protocol::Responder<
+                agent_client_protocol::v1::schema::RequestPermissionResponse,
+                agent_client_protocol::V1,
+            >,
+        >,
+    ) -> Result<()> {
         self.flush_buf().await;
         let restricted = session::get(&self.db, &self.session_id)
             .await?
@@ -3967,23 +4495,11 @@ impl Task {
         match chat::permission_outcome(&self.db, &self.session_id, &req_key).await? {
             chat::PermissionOutcome::Resolved(option_id) => {
                 // Already answered before a crash: re-send the stored answer.
-                let _ = self
-                    .stream
-                    .write(&wire::response_line(
-                        &jsonrpc_id,
-                        wire::permission_selected(&option_id),
-                    ))
-                    .await;
+                let _ = responder.respond(selected_permission_response(&option_id));
                 return Ok(());
             }
             chat::PermissionOutcome::Cancelled => {
-                let _ = self
-                    .stream
-                    .write(&wire::response_line(
-                        &jsonrpc_id,
-                        wire::permission_cancelled(),
-                    ))
-                    .await;
+                let _ = responder.respond(cancelled_permission_response());
                 return Ok(());
             }
             chat::PermissionOutcome::Open => {
@@ -3991,7 +4507,7 @@ impl Task {
                 self.pending_perms.insert(
                     req_key.clone(),
                     PendingPerm {
-                        jsonrpc_id: jsonrpc_id.clone(),
+                        responder: std::sync::Mutex::new(*responder),
                         frame_seq: seq,
                     },
                 );
@@ -4010,7 +4526,7 @@ impl Task {
                 self.pending_perms.insert(
                     req_key.clone(),
                     PendingPerm {
-                        jsonrpc_id: jsonrpc_id.clone(),
+                        responder: std::sync::Mutex::new(*responder),
                         frame_seq: seq,
                     },
                 );
@@ -4026,13 +4542,7 @@ impl Task {
                     .answer_permission(&req_key, &opt, "restricted-profile")
                     .await;
             } else if let Some(pending) = self.pending_perms.remove(&req_key) {
-                let _ = self
-                    .stream
-                    .write(&wire::response_line(
-                        &pending.jsonrpc_id,
-                        wire::permission_cancelled(),
-                    ))
-                    .await;
+                let _ = take_responder(pending).respond(cancelled_permission_response());
                 if let Ok(Some(view)) = chat::cancel_permission(
                     &self.db,
                     &self.session_id,
@@ -4065,13 +4575,7 @@ impl Task {
         by: &str,
     ) -> PermAnswer {
         if let Some(pp) = self.pending_perms.remove(request_id) {
-            let _ = self
-                .stream
-                .write(&wire::response_line(
-                    &pp.jsonrpc_id,
-                    wire::permission_selected(option_id),
-                ))
-                .await;
+            let _ = take_responder(pp).respond(selected_permission_response(option_id));
             if let Ok(Some(view)) =
                 chat::resolve_permission(&self.db, &self.session_id, request_id, option_id, by)
                     .await
@@ -4095,13 +4599,7 @@ impl Task {
             self.settle_input_delivery(InputDeliveryDisposition::Unconfirmed)
                 .await?;
         }
-        let result = self
-            .stream
-            .write(&wire::notification_line(
-                method::SESSION_CANCEL,
-                wire::cancel_params(&self.acp_session_id),
-            ))
-            .await;
+        let result = self.notify(requests::cancel(&self.acp_session_id)).await;
         if result.is_ok() && self.turn_live {
             self.automatic_dispatch_paused = source != TurnEndSource::UpdatePolicyCancellation;
             // The adapter's interrupt notice belongs to the cancelled turn
@@ -4121,8 +4619,7 @@ impl Task {
             // lifecycle after the response or the settle timeout.
             self.on_turn_end(
                 self.current_turn,
-                Some(json!({ "stopReason": "cancelled" })),
-                None,
+                Ok(json!({ "stopReason": "cancelled" })),
                 source,
             )
             .await;
@@ -4137,19 +4634,13 @@ impl Task {
     async fn cancel_pending_permissions(&mut self) {
         let pending: Vec<_> = self.pending_perms.drain().map(|(_, pp)| pp).collect();
         for pp in pending {
-            let _ = self
-                .stream
-                .write(&wire::response_line(
-                    &pp.jsonrpc_id,
-                    wire::permission_cancelled(),
-                ))
-                .await;
+            let _ = take_responder(pp).respond(cancelled_permission_response());
         }
     }
 
     /// Wait up to [`CANCEL_SETTLE_TIMEOUT`] for the cancelled prompt's
-    /// response. Frames keep flowing (notifications and permission requests),
-    /// but the matching response is consumed here so the later synthetic
+    /// response. Events keep flowing (updates and permission requests), but
+    /// the matching response is consumed here so the later synthetic
     /// `on_turn_end` is the only boundary.
     async fn await_cancelled_prompt(&mut self) {
         let Some((want, _)) = self.inflight_prompt.take() else {
@@ -4157,7 +4648,7 @@ impl Task {
         };
         if self.deferred_prompt_response.take().is_some() {
             return;
-        }
+        };
         let deadline = tokio::time::Instant::now() + CANCEL_SETTLE_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -4165,22 +4656,19 @@ impl Task {
                 break;
             }
             tokio::select! {
-                event = self.stream.recv() => match event {
-                    Some(RelayEvent::Frame { seq, payload }) => {
+                event = self.engine_rx.recv() => match event {
+                    Some(EngineEvent::Response { seq, id, outcome, .. })
+                        if id == want =>
+                    {
                         self.highest_seq = seq;
-                        self.touch_activity().await;
-                        if let Ok(inc) = serde_json::from_slice::<Incoming>(&payload) {
-                            let target = inc.kind() == IncomingKind::Response
-                                && inc.id.as_ref().and_then(Value::as_u64) == Some(want);
-                            if target {
-                                break;
-                            }
-                            self.dispatch_frame(seq, inc).await;
-                        }
-                        self.cancel_pending_permissions().await;
-                        let _ = self.maybe_ack().await;
+                        let _ = outcome;
+                        break;
                     }
-                    Some(RelayEvent::Exit { .. }) | None => break,
+                    Some(event) => {
+                        self.touch_activity().await;
+                        self.dispatch_event(event).await;
+                    }
+                    None => break,
                 },
                 _ = tokio::time::sleep_until(deadline) => break,
             }
@@ -4318,17 +4806,11 @@ impl Task {
                 let _ = reply.send(ans);
             }
             Command::SetMode { mode_id, by, reply } => {
-                let id = self.next_id();
-                let write = self
-                    .stream
-                    .write(&wire::request_line(
-                        id,
-                        method::SESSION_SET_MODE,
-                        wire::set_mode_params(&self.acp_session_id, &mode_id),
-                    ))
-                    .await;
-                match write {
-                    Ok(()) => {
+                match self.request(
+                    ResponseKind::SetMode,
+                    requests::set_mode(&self.acp_session_id, &mode_id),
+                ) {
+                    Ok(id) => {
                         self.pending_mode
                             .insert(id, PendingMode { mode_id, by, reply });
                     }
@@ -4342,21 +4824,11 @@ impl Task {
                 value,
                 reply,
             } => {
-                let id = self.next_id();
-                let write = self
-                    .stream
-                    .write(&wire::request_line(
-                        id,
-                        method::SESSION_SET_CONFIG_OPTION,
-                        wire::set_config_option_params(
-                            self.acp_session_id.as_str(),
-                            &config_id,
-                            value,
-                        ),
-                    ))
-                    .await;
-                match write {
-                    Ok(()) => {
+                match self.request(
+                    ResponseKind::SetConfigOption,
+                    requests::set_config_option(&self.acp_session_id, &config_id, value),
+                ) {
+                    Ok(id) => {
                         self.pending_config.insert(id, reply);
                     }
                     Err(error) => {
@@ -4496,7 +4968,7 @@ impl Task {
         }
         let w = self.safe_watermark();
         if w > self.acked {
-            self.stream.ack(w).await?;
+            self.relay.ack(w).await?;
             session::set_ack_seq(&self.db, &self.session_id, w as i64).await?;
             self.acked = w;
         }
