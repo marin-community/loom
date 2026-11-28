@@ -390,7 +390,8 @@ async fn a_catalogued_model_effort_and_mode_save_and_resolve() {
             { "id": "reasoning", "category": "thought_level", "options": [
                 { "value": "high", "name": "High" }
             ] },
-            { "id": "fast-mode", "category": "model_config", "type": "boolean" }
+            { "id": "fast-mode", "category": "speed", "type": "select",
+              "options": [ { "value": "off", "name": "Off" }, { "value": "on", "name": "On" } ] }
         ])
         .to_string(),
     )
@@ -408,7 +409,10 @@ async fn a_catalogued_model_effort_and_mode_save_and_resolve() {
         .find(|m| m["id"] == "gpt-7-nova")
         .expect("the catalogued model reaches the picker");
     assert_eq!(nova["efforts"][0]["id"], "high");
-    assert_eq!(nova["fast"][0]["id"], "true");
+    // The wire order (off first) is preserved; on/off canonicalize to the
+    // booleans the profile stores.
+    assert_eq!(nova["fast"][0]["id"], "false");
+    assert_eq!(nova["fast"][1]["id"], "true");
     // Modes travel with the harness, so the picker offers only what it honours.
     assert!(codex["modes"]
         .as_array()

@@ -448,6 +448,41 @@ mod live_tests {
         .await;
     }
 
+    /// codex-acp 2.8.0 spells the fast toggle `fast-mode` in a `speed`
+    /// category with on/off select values; the picker must classify it and
+    /// canonicalize both directions. Run with
+    /// `cargo test -p loom-agent --lib live_codex_fast -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_codex_fast_mode_round_trips_the_advertised_spelling() {
+        use crate::catalog::selectors::{self, Selector};
+        let mut session = LiveSession::open(
+            "command -v codex-acp >/dev/null 2>&1 && exec codex-acp; exec npx --yes @agentclientprotocol/codex-acp",
+            "codex",
+            &[],
+        )
+        .await
+        .expect("codex-acp is installed");
+        let model = session.handshake().models[0].id.clone();
+        let options = session.fetch_model(&model).await.expect("fetch options");
+        let matched = selectors::find(&options, Selector::Fast)
+            .expect("the speed-category fast toggle is classified");
+        assert_eq!(matched.id, "fast-mode");
+        assert!(
+            matches!(matched.current.as_deref(), Some("true" | "false")),
+            "current value canonicalizes: {:?}",
+            matched.current
+        );
+        for canonical in ["true", "false"] {
+            let raw = selectors::raw_value(&options, Selector::Fast, canonical)
+                .expect("an advertised value maps to each canonical boolean");
+            assert!(
+                raw == serde_json::json!("on") || raw == serde_json::json!("off"),
+                "the advertised spelling is sent, not the canonical one: {raw}"
+            );
+        }
+    }
+
     #[tokio::test]
     #[ignore]
     async fn live_adapter_opencode() {
