@@ -38,10 +38,11 @@ pub struct MatchedOption {
 const TRUE_ALIASES: &[&str] = &["true", "on", "1", "yes"];
 const FALSE_ALIASES: &[&str] = &["false", "off", "0", "no"];
 
-/// Cursor opts into separate per-model options. Without this, the adapter
-/// bundles effort and fast into the model id and no selector appears.
+/// Extra `initialize` `_meta` the harness opts into, if any (Cursor's
+/// parameterized model picker; without it the adapter bundles effort and fast
+/// into the model id and no selector appears).
 pub fn initialize_meta(harness: &str) -> Option<Value> {
-    (harness == "cursor-agent").then(|| serde_json::json!({ "parameterizedModelPicker": true }))
+    crate::harnesses::builtin_for_id(harness).and_then(|h| h.initialize_meta())
 }
 
 /// Loom does not offer a reasoning/thinking toggle, so Cursor's is not parsed

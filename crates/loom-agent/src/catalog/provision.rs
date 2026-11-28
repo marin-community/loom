@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 
 use crate::db::Db;
+use loom_ctx::agent_kind::BuiltinAgentKind;
 
 /// The deploy variable carrying the credential JSON. A loom.toml secret
 /// (`opencode_credentials_json`) that `loom config render-env` writes into the
@@ -45,7 +46,10 @@ pub async fn import_opencode_credentials(db: &Db, configured: Option<&str>) {
     if configured.trim().is_empty() {
         return;
     }
-    if !crate::agent::is_opencode_available().await {
+    if !crate::harnesses::builtin_for(BuiltinAgentKind::OpenCode)
+        .available()
+        .await
+    {
         tracing::warn!(
             "{CREDENTIALS_ENV} is set but the opencode CLI is not installed; \
              credentials not imported"

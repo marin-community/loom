@@ -181,11 +181,9 @@ impl Drop for LiveSession {
 }
 
 pub fn pace_for(harness: &str) -> Duration {
-    if harness == "cursor-agent" {
-        Duration::from_millis(200)
-    } else {
-        Duration::ZERO
-    }
+    crate::harnesses::builtin_for_id(harness)
+        .map(|harness| harness.probe_pace())
+        .unwrap_or(Duration::ZERO)
 }
 
 pub(crate) fn client_capabilities(harness: &str) -> Value {

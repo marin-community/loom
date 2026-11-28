@@ -3,8 +3,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
-use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, HashSet};
+use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -46,7 +46,7 @@ impl AgentChoice {
 
     /// Materialize a builtin's static `(id, label)` table into the owned choices
     /// the metadata carries.
-    fn list(pairs: &[(&str, &str)]) -> Vec<AgentChoice> {
+    pub(crate) fn list(pairs: &[(&str, &str)]) -> Vec<AgentChoice> {
         pairs
             .iter()
             .map(|(id, label)| Self::leaf(*id, *label))
@@ -125,154 +125,26 @@ pub fn custom_metadata(agent: &CustomAgent) -> AgentMetadata {
     CustomAgentType::new(agent.clone()).metadata()
 }
 
-const MODEL_CHOICES: &[(&str, &str)] = &[
-    ("haiku", "Haiku"),
-    ("sonnet", "Sonnet"),
-    ("opus", "Opus"),
-    ("fable", "Fable"),
-];
-
-const CODEX_MODEL_CHOICES: &[(&str, &str)] = &[
-    ("gpt-6-astra", "GPT-6 Astra"),
-    ("gpt-6-sol", "GPT-6 Sol"),
-    ("gpt-6-luna", "GPT-6 Luna"),
-    ("gpt-5.6-sol", "GPT-5.6 Sol"),
-    ("gpt-5.6-terra", "GPT-5.6 Terra"),
-    ("gpt-5.6-luna", "GPT-5.6 Luna"),
-    ("gpt-5.5", "GPT-5.5"),
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.4-mini", "GPT-5.4 Mini"),
-    ("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark"),
-];
-
 pub use crate::agent_kind::{
     acp_mode_for, auto_approves_permissions, BuiltinAgentKind, CODEX_AGENT_MODE, DEFAULT_ACP_MODE,
 };
+pub use crate::harnesses::claude::{
+    claude_projects_dir, latest_claude_session_id, seed_claude_launch_gates,
+};
 
-const EFFORT_CHOICES: &[(&str, &str)] = &[
-    ("low", "Low"),
-    ("medium", "Medium"),
-    ("high", "High"),
-    ("xhigh", "X-High"),
-    ("max", "Max"),
-];
-
-const CODEX_EFFORT_CHOICES: &[(&str, &str)] = &[
-    ("low", "Low"),
-    ("medium", "Medium"),
-    ("high", "High"),
-    ("xhigh", "X-High"),
-];
-
-static CLAUDE_AGENT_TYPE: ClaudeAgentType = ClaudeAgentType;
-static CODEX_AGENT_TYPE: CodexAgentType = CodexAgentType;
-static OPENCODE_AGENT_TYPE: OpenCodeAgentType = OpenCodeAgentType;
-static CURSOR_AGENT_TYPE: CursorAgentType = CursorAgentType;
-
-/// The `AgentType` for a builtin kind. Exhaustive, so a new [`BuiltinAgentKind`]
-/// variant forces an arm here.
-fn builtin_agent_type_for(kind: BuiltinAgentKind) -> &'static dyn AgentType {
-    match kind {
-        BuiltinAgentKind::Claude => &CLAUDE_AGENT_TYPE,
-        BuiltinAgentKind::Codex => &CODEX_AGENT_TYPE,
-        BuiltinAgentKind::OpenCode => &OPENCODE_AGENT_TYPE,
-        BuiltinAgentKind::CursorAgent => &CURSOR_AGENT_TYPE,
-    }
+/// The builtin agents' metadata, in picker order.
+pub fn builtin_metadata() -> Vec<AgentMetadata> {
+    crate::harnesses::all_builtins()
+        .into_iter()
+        .map(|harness| harness.metadata())
+        .collect()
 }
 
 /// The builtin agent for `kind`, if it names one. Custom agents live in the
 /// database and are resolved by [`resolve`]; this covers only the code-shipped
 /// runtimes, which need no DB lookup.
 pub fn builtin_agent_type(kind: &str) -> Option<&'static dyn AgentType> {
-    Some(builtin_agent_type_for(BuiltinAgentKind::parse(kind)?))
-}
-
-/// The builtin agents' metadata, in picker order.
-pub fn builtin_metadata() -> Vec<AgentMetadata> {
-    BuiltinAgentKind::ALL
-        .into_iter()
-        .map(|kind| builtin_agent_type_for(kind).metadata())
-        .collect()
-}
-
-pub async fn is_claude_available() -> bool {
-    binary_on_path("claude").await
-}
-
-pub async fn is_codex_available() -> bool {
-    binary_on_path("codex").await
-}
-
-pub async fn is_opencode_available() -> bool {
-    binary_on_path("opencode").await
-}
-
-pub async fn is_cursor_agent_available() -> bool {
-    cursor_agent_bin().await.is_some()
-}
-
-/// How to invoke Cursor's CLI agent: the Homebrew `cursor-agent` binary when
-/// present, else the `cursor agent` subcommand. `None` when neither is on
-/// `PATH`.
-async fn cursor_agent_bin() -> Option<&'static str> {
-    if binary_on_path("cursor-agent").await {
-        Some("cursor-agent")
-    } else if binary_on_path("cursor").await {
-        Some("cursor agent")
-    } else {
-        None
-    }
-}
-
-/// Whether `bin` resolves to an executable file on `PATH`.
-///
-/// Reports presence, not health: a binary that exists but misbehaves still
-/// counts as available. On Windows every `PATHEXT` suffix is tried, since an
-/// npm-installed CLI ships as `bin.cmd`/`bin.ps1` and never `bin.exe`;
-/// elsewhere the file must be a regular file with an execute bit. The
-/// filesystem walk runs on a blocking thread so a slow `PATH` entry cannot
-/// stall the async runtime.
-async fn binary_on_path(bin: &str) -> bool {
-    let bin = bin.to_string();
-    tokio::task::spawn_blocking(move || {
-        let Some(path) = std::env::var_os("PATH") else {
-            return false;
-        };
-        let names = candidate_names(&bin);
-        std::env::split_paths(&path)
-            .any(|dir| names.iter().any(|name| is_executable_file(&dir.join(name))))
-    })
-    .await
-    .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn candidate_names(bin: &str) -> Vec<String> {
-    let exts = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-    let mut names = vec![bin.to_string()];
-    for ext in exts.split(';').filter(|ext| !ext.is_empty()) {
-        names.push(format!("{bin}{}", ext.to_ascii_lowercase()));
-    }
-    names
-}
-
-#[cfg(not(windows))]
-fn candidate_names(bin: &str) -> [String; 1] {
-    [bin.to_string()]
-}
-
-#[cfg(windows)]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[cfg(not(windows))]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    match std::fs::metadata(path) {
-        Ok(meta) => meta.is_file() && meta.permissions().mode() & 0o111 != 0,
-        Err(_) => false,
-    }
+    crate::harnesses::builtin_for_id(kind).map(|harness| harness as &'static dyn AgentType)
 }
 
 /// A launchable agent resolved from a kind: either a builtin static type or a
@@ -324,25 +196,16 @@ pub async fn agent_metadata(db: &Db) -> Result<Vec<AgentMetadata>> {
     Ok(out)
 }
 
-/// Whether a code-shipped harness binary is on `PATH`.
+/// Whether a code-shipped harness binary can be probed on this machine.
 pub async fn builtin_available_kind(kind: BuiltinAgentKind) -> bool {
-    match kind {
-        BuiltinAgentKind::Claude => is_claude_available().await,
-        BuiltinAgentKind::Codex => is_codex_available().await,
-        BuiltinAgentKind::OpenCode => is_opencode_available().await,
-        BuiltinAgentKind::CursorAgent => is_cursor_agent_available().await,
-    }
+    crate::harnesses::builtin_for(kind).available().await
 }
 
 /// The ACP adapter command for a builtin harness, using the same override
 /// precedence as a live launch.
 pub async fn acp_command_for(db: &Db, kind: &str) -> Option<String> {
-    match BuiltinAgentKind::parse(kind)? {
-        BuiltinAgentKind::Claude => Some(claude_acp_cmd(db).await),
-        BuiltinAgentKind::Codex => Some(codex_acp_cmd(db).await),
-        BuiltinAgentKind::OpenCode => Some(opencode_acp_cmd(db).await),
-        BuiltinAgentKind::CursorAgent => Some(cursor_agent_acp_cmd(db).await),
-    }
+    let harness = crate::harnesses::builtin_for_id(kind)?;
+    Some(harness.acp_command(db.clone()).await)
 }
 /// The metadata for one agent kind, or `None` when it names no agent.
 pub async fn metadata_for(db: &Db, kind: &str) -> Result<Option<AgentMetadata>> {
@@ -438,142 +301,6 @@ pub fn validate_fast(fast: &str) -> Result<(), String> {
     }
 }
 
-fn model_flag(model: &str) -> Option<&str> {
-    let model = model.trim();
-    (!model.is_empty()).then_some(model)
-}
-
-fn effort_flag(effort: &str) -> Option<&str> {
-    let effort = effort.trim();
-    (!effort.is_empty()).then_some(effort)
-}
-
-fn claude_model_arg(model: &str) -> Option<String> {
-    model_flag(model).map(|m| format!("--model {m}"))
-}
-
-fn claude_effort_arg(effort: &str) -> Option<String> {
-    effort_flag(effort).map(|e| format!("--effort {e}"))
-}
-
-fn codex_model_arg(model: &str) -> Option<String> {
-    let model = model.trim();
-    if model.is_empty() {
-        return None;
-    }
-    Some(format!("--model {model}"))
-}
-
-fn codex_effort_arg(effort: &str) -> Option<String> {
-    effort_flag(effort).map(|e| format!("-c model_reasoning_effort=\\\"{e}\\\""))
-}
-
-fn join_args(args: impl IntoIterator<Item = Option<String>>) -> String {
-    args.into_iter().flatten().collect::<Vec<_>>().join(" ")
-}
-
-/// `--effort <level>` for a known level, else empty.
-pub fn effort_args(effort: &str) -> String {
-    claude_effort_arg(effort).unwrap_or_default()
-}
-
-/// `--model <tier>` for a chosen model, else empty.
-pub fn model_args(model: &str) -> String {
-    claude_model_arg(model).unwrap_or_default()
-}
-
-/// Combine per-session model and effort selections for the Claude protocol.
-pub fn combine_args(model: &str, effort: &str) -> String {
-    join_args([claude_model_arg(model), claude_effort_arg(effort)])
-}
-
-fn claude_command(ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
-    let args = join_args([claude_model_arg(ctx.model), claude_effort_arg(ctx.effort)]);
-    let args = if args.is_empty() {
-        String::new()
-    } else {
-        format!(" {args}")
-    };
-    match (mode, ctx.primer_file) {
-        (LaunchMode::Adopt, Some(p)) => {
-            format!(
-                "claude --continue{args} --append-system-prompt-file {}",
-                sh_single_quote_path(p)
-            )
-        }
-        (LaunchMode::Fresh, Some(p)) => {
-            format!(
-                "claude{args} --append-system-prompt-file {}",
-                sh_single_quote_path(p)
-            )
-        }
-        (LaunchMode::Adopt, None) => format!("claude --continue{args}"),
-        (LaunchMode::Fresh, None) => match ctx.goal_file {
-            Some(f) => format!("claude{args} \"$(cat {})\"", sh_single_quote_path(f)),
-            None => format!("claude{args}"),
-        },
-    }
-}
-
-fn codex_command(ctx: &AgentLaunchContext<'_>) -> String {
-    let args = join_args([codex_model_arg(ctx.model), codex_effort_arg(ctx.effort)]);
-    let args = if args.is_empty() {
-        String::new()
-    } else {
-        format!(" {args}")
-    };
-    match ctx.goal_file.or(ctx.primer_file) {
-        Some(f) => format!(
-            "codex --disable apps{args} \"$(cat {})\"",
-            sh_single_quote_path(f)
-        ),
-        None => format!("codex --disable apps{args}"),
-    }
-}
-
-fn spaced(args: String) -> String {
-    if args.is_empty() {
-        String::new()
-    } else {
-        format!(" {args}")
-    }
-}
-
-/// The Opencode TUI is the terminal fallback for the ACP builtin: `--continue`
-/// resumes in an existing worktree, a fresh run preloads the goal via
-/// `--prompt`.
-fn opencode_command(ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
-    let args = spaced(join_args([
-        model_flag(ctx.model).map(|m| format!("--model {}", sh_single_quote(m)))
-    ]));
-    match (mode, ctx.goal_file.or(ctx.primer_file)) {
-        (LaunchMode::Adopt, _) => format!("opencode --continue{args}"),
-        (LaunchMode::Fresh, Some(f)) => {
-            format!(
-                "opencode{args} --prompt \"$(cat {})\"",
-                sh_single_quote_path(f)
-            )
-        }
-        (LaunchMode::Fresh, None) => format!("opencode{args}"),
-    }
-}
-
-/// Cursor's CLI as the terminal fallback: `--continue` resumes, a fresh run
-/// takes the goal positionally. `--model` is passed through verbatim (Cursor
-/// scopes effort inside the model id / bracket parameters).
-fn cursor_agent_command(bin: &str, ctx: &AgentLaunchContext<'_>, mode: LaunchMode) -> String {
-    let args = spaced(join_args([
-        model_flag(ctx.model).map(|m| format!("--model {}", sh_single_quote(m)))
-    ]));
-    match (mode, ctx.goal_file.or(ctx.primer_file)) {
-        (LaunchMode::Adopt, _) => format!("{bin} --continue{args}"),
-        (LaunchMode::Fresh, Some(f)) => {
-            format!("{bin}{args} \"$(cat {})\"", sh_single_quote_path(f))
-        }
-        (LaunchMode::Fresh, None) => format!("{bin}{args}"),
-    }
-}
-
 /// The inner launch command for a custom agent: its `setup` stage (if any), then
 /// the stage command for this `mode`. Fresh runs `launch` with the goal file
 /// appended as a positional argument (mirroring the builtin runtimes); adopt runs
@@ -643,154 +370,6 @@ pub struct AgentLaunchContext<'a> {
     pub memory_max_gb: u64,
 }
 
-impl AgentType for ClaudeAgentType {
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata {
-            kind: "claude".to_string(),
-            label: "Claude".to_string(),
-            models: AgentChoice::list(MODEL_CHOICES),
-            efforts: AgentChoice::list(EFFORT_CHOICES),
-            accepts_raw_model: true,
-            supports_hooks: true,
-            builtin: true,
-            supports_acp: true,
-            protocol: "acp".to_string(),
-            available: None,
-            modes: BuiltinAgentKind::Claude
-                .acp_modes()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
-    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            prepare_claude(&ctx).await;
-            start_terminal(&ctx, "claude", &claude_command(&ctx, LaunchMode::Fresh)).await
-        })
-    }
-
-    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            prepare_claude(&ctx).await;
-            start_terminal(&ctx, "claude", &claude_command(&ctx, LaunchMode::Adopt)).await
-        })
-    }
-}
-
-impl AgentType for CodexAgentType {
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata {
-            kind: "codex".to_string(),
-            label: "Codex".to_string(),
-            models: AgentChoice::list(CODEX_MODEL_CHOICES),
-            efforts: AgentChoice::list(CODEX_EFFORT_CHOICES),
-            accepts_raw_model: false,
-            supports_hooks: false,
-            builtin: true,
-            supports_acp: true,
-            protocol: "acp".to_string(),
-            available: None,
-            modes: BuiltinAgentKind::Codex
-                .acp_modes()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
-    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
-    }
-
-    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move { start_terminal(&ctx, "codex", &codex_command(&ctx)).await })
-    }
-}
-
-impl AgentType for OpenCodeAgentType {
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata {
-            kind: "opencode".to_string(),
-            label: "Opencode".to_string(),
-            // The picker reads models from the stored catalogue.
-            models: Vec::new(),
-            efforts: Vec::new(),
-            accepts_raw_model: true,
-            supports_hooks: false,
-            builtin: true,
-            supports_acp: true,
-            protocol: "acp".to_string(),
-            available: None,
-            modes: BuiltinAgentKind::OpenCode
-                .acp_modes()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
-    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            start_terminal(&ctx, "opencode", &opencode_command(&ctx, LaunchMode::Fresh)).await
-        })
-    }
-
-    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            start_terminal(&ctx, "opencode", &opencode_command(&ctx, LaunchMode::Adopt)).await
-        })
-    }
-}
-
-impl AgentType for CursorAgentType {
-    fn metadata(&self) -> AgentMetadata {
-        AgentMetadata {
-            kind: "cursor-agent".to_string(),
-            label: "Cursor".to_string(),
-            // The picker reads models from the stored catalogue.
-            models: Vec::new(),
-            efforts: Vec::new(),
-            accepts_raw_model: true,
-            supports_hooks: false,
-            builtin: true,
-            supports_acp: true,
-            protocol: "acp".to_string(),
-            available: None,
-            modes: BuiltinAgentKind::CursorAgent
-                .acp_modes()
-                .into_iter()
-                .map(str::to_string)
-                .collect(),
-        }
-    }
-
-    fn create<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            let bin = cursor_agent_bin().await.unwrap_or("cursor-agent");
-            start_terminal(
-                &ctx,
-                "cursor-agent",
-                &cursor_agent_command(bin, &ctx, LaunchMode::Fresh),
-            )
-            .await
-        })
-    }
-
-    fn adopt<'a>(&'a self, ctx: AgentLaunchContext<'a>) -> AgentFuture<'a> {
-        Box::pin(async move {
-            let bin = cursor_agent_bin().await.unwrap_or("cursor-agent");
-            start_terminal(
-                &ctx,
-                "cursor-agent",
-                &cursor_agent_command(bin, &ctx, LaunchMode::Adopt),
-            )
-            .await
-        })
-    }
-}
-
 impl AgentType for CustomAgentType {
     fn metadata(&self) -> AgentMetadata {
         AgentMetadata {
@@ -835,11 +414,11 @@ impl AgentType for CustomAgentType {
 /// reopen). Paths come from the operator's filesystem and are arbitrary, so a
 /// stray `'` must not break out of the quotes. Environment values aren't
 /// quoted here; they ride out of band — see [`wrap_launch_script`].
-fn sh_single_quote(value: &str) -> String {
+pub(crate) fn sh_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn sh_single_quote_path(path: &Path) -> String {
+pub(crate) fn sh_single_quote_path(path: &Path) -> String {
     sh_single_quote(&path.display().to_string())
 }
 
@@ -1135,22 +714,7 @@ pub async fn launch(db: &Db, spec: &LaunchSpec<'_>, mode: LaunchMode) -> Result<
     Ok(())
 }
 
-async fn prepare_claude(ctx: &AgentLaunchContext<'_>) {
-    let loom_bin = loom_bin_path();
-
-    if ctx.prelude == "weaver" {
-        if let Err(e) = install_hooks(ctx.work_dir, &loom_bin, HookMode::Terminal).await {
-            tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
-                "agent hook setup failed; launching without lifecycle hooks");
-        }
-    }
-    if let Err(e) = seed_claude_launch_gates(ctx.work_dir, ctx.model, ctx.effort).await {
-        tracing::warn!(work_dir = %ctx.work_dir.display(), error = %e,
-            "agent launch-gate setup failed; agent may stall on first-run prompts");
-    }
-}
-
-async fn start_terminal(
+pub(crate) async fn start_terminal(
     ctx: &AgentLaunchContext<'_>,
     runtime: &str,
     inner: &str,
@@ -1242,7 +806,7 @@ pub async fn session_env(
 
 /// The `loom` binary path — a sibling of the running executable, falling back
 /// to bare `loom` on `PATH`.
-fn loom_bin_path() -> String {
+pub(crate) fn loom_bin_path() -> String {
     std::env::current_exe()
         .ok()
         .as_deref()
@@ -1356,40 +920,44 @@ pub struct AcpLaunchSpec<'a> {
     pub custom: Option<&'a CustomAgent>,
 }
 
-/// Build the [`AcpLaunch`] for a `protocol='acp'` session. For the builtin
-/// claude this resolves the `claude-agent-acp` adapter, installs the
-/// SessionStart-only hook bundle, and maps model/primer/mode into
-/// `_meta.claudeCode.options`. For the builtin codex it resolves `codex-acp`
-/// and maps the same inputs onto its env contract (`CODEX_CONFIG`,
-/// `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST`); Codex's `agent` mode routes
-/// approvals to Loom instead of its own model reviewer, and, being hookless,
-/// takes the primer as its opening prompt like the terminal path. A custom
-/// acp agent runs its `launch` command verbatim (setup stage first) as the
-/// adapter, with no `_meta`.
+/// Build the [`AcpLaunch`] for a `protocol='acp'` session. Each builtin
+/// harness contributes its facts through [`crate::harnesses::BuiltinHarness`]
+/// — the adapter command, the `_meta` it takes (claude's
+/// `_meta.claudeCode.options`), its env contract (codex's `CODEX_CONFIG`,
+/// `INITIAL_AGENT_MODE`, `DEFAULT_AUTH_REQUEST`), and whether the primer
+/// seeds the opening prompt. A custom acp agent runs its `launch` command
+/// verbatim (setup stage first) as the adapter, with no `_meta`.
 pub async fn build_acp_launch(
     db: &Db,
     spec: &AcpLaunchSpec<'_>,
     open: AcpOpen,
 ) -> Result<AcpLaunch> {
     let is_fresh = matches!(open, AcpOpen::Fresh);
-    let builtin_runtime = spec.custom.is_none().then_some(spec.runtime);
-    let is_codex = builtin_runtime == Some("codex");
-    let is_claude = builtin_runtime == Some("claude");
-    let is_opencode = builtin_runtime == Some("opencode");
-    let is_cursor_agent = builtin_runtime == Some("cursor-agent");
+    let harness = if spec.custom.is_none() {
+        crate::harnesses::builtin_for_id(spec.runtime)
+    } else {
+        None
+    };
     let adapter_cmd = match spec.custom {
         // The `launch` command *is* the adapter; setup runs first, as for a
         // terminal custom agent.
         Some(agent) => join_shell(&[agent.setup.trim(), agent.launch.trim()]),
-        None if is_codex => codex_acp_cmd(db).await,
-        None if is_opencode => opencode_acp_cmd(db).await,
-        None if is_cursor_agent => cursor_agent_acp_cmd(db).await,
         // The `claude` builtin, and any unrecognised builtin, use the claude
         // adapter — the historical default.
-        None => claude_acp_cmd(db).await,
+        None => match harness {
+            Some(harness) => harness.acp_command(db.clone()).await,
+            None => {
+                crate::harnesses::builtin_for(BuiltinAgentKind::Claude)
+                    .acp_command(db.clone())
+                    .await
+            }
+        },
     };
 
-    if is_claude && spec.prelude == "weaver" && !spec.restricted {
+    if harness.is_some_and(|h| h.installs_prelude_hooks())
+        && spec.prelude == "weaver"
+        && !spec.restricted
+    {
         // SessionStart only (see doc comment above); protocol turn edges and
         // the bypass posture make the other hooks redundant under ACP.
         let loom_bin = loom_bin_path();
@@ -1405,26 +973,25 @@ pub async fn build_acp_launch(
         .context("invalid session runtime-permission snapshot")?;
     let mcp_snapshot: weaver_api::McpPolicySnapshot =
         serde_json::from_str(spec.mcp_access).context("invalid session MCP policy snapshot")?;
-    if (is_codex || is_opencode || is_cursor_agent) && goal_text.is_none() {
+    if harness.is_some_and(|h| h.seeds_primer_as_goal()) && goal_text.is_none() {
         // No appendSystemPrompt analogue on these adapters: a primer-only
         // launch seeds the primer positionally, mirroring the terminal path's
         // `goal_file.or(primer_file)`.
         goal_text = primer_text.clone();
     }
-    let meta = if is_claude {
-        claude_acp_meta(
-            spec.model,
-            primer_text.as_deref(),
-            spec.mode,
-            spec.restricted,
-            spec.allowed_tools,
-        )
-    } else {
-        None
+    let contract = crate::harnesses::AcpContract {
+        model: spec.model,
+        effort: spec.effort,
+        mode: spec.mode,
+        mode_from_live: spec.mode_from_live,
+        restricted: spec.restricted,
+        allowed_tools_json: spec.allowed_tools,
+        primer_text: primer_text.as_deref(),
     };
+    let meta = harness.and_then(|h| h.acp_meta(&contract));
 
     let mut env = session_env(spec.server_addr, spec.branch_id, spec.extra_env).await?;
-    push_env_default(&mut env, "LOOM_SESSION_ID", spec.session_id);
+    crate::harnesses::push_env_default(&mut env, "LOOM_SESSION_ID", spec.session_id);
     if let Some(directory) = install_github_cli_adapter(spec.session_id, spec.extra_env).await? {
         prepend_path(&mut env, &directory);
     }
@@ -1439,21 +1006,9 @@ pub async fn build_acp_launch(
         ));
     }
     let mut additional_directories = Vec::new();
-    if is_codex {
+    if let Some(harness) = harness {
         // Adapter-contract env, deferring to any operator-provided value.
-        push_env_default(
-            &mut env,
-            "DEFAULT_AUTH_REQUEST",
-            r#"{"methodId":"api-key"}"#,
-        );
-        let codex_mode = if spec.mode_from_live {
-            spec.mode.trim().to_string()
-        } else {
-            codex_acp_mode(spec.mode)?
-        };
-        additional_directories =
-            configure_codex_acp(&mut env, spec.model, spec.effort, &codex_mode)?;
-        push_env_default(&mut env, "INITIAL_AGENT_MODE", &codex_mode);
+        additional_directories = harness.prepare_acp_env(&mut env, &contract)?;
     }
     let mcp_servers =
         crate::mcp::acp_server_configs(&allowed_tools, Some(&mcp_snapshot), &env).await?;
@@ -1485,11 +1040,11 @@ pub async fn build_acp_launch(
         mcp_servers,
         additional_directories,
         new_or_load,
-        // Codex boots directly in its mapped mode via `INITIAL_AGENT_MODE`; a
-        // post-setup `session/set_mode` would re-send a claude-flavored id it
-        // does not advertise. Every other harness takes the id it advertises
-        // through `session/set_mode`.
-        mode: if is_codex {
+        // A harness that boots in its mode via the launch environment (Codex's
+        // `INITIAL_AGENT_MODE`) skips the post-setup `session/set_mode`, which
+        // would re-send a claude-flavored id it does not advertise. Every
+        // other harness takes the id it advertises.
+        mode: if harness.is_some_and(|h| h.boots_in_acp_mode()) {
             None
         } else if spec.mode_from_live {
             Some(spec.mode.trim().to_string()).filter(|mode| !mode.is_empty())
@@ -1515,257 +1070,6 @@ pub async fn build_acp_launch(
     })
 }
 
-/// Append `(key, value)` unless `key` is already present (an operator override
-/// via extra_env wins over the adapter-contract default).
-fn push_env_default(env: &mut Vec<(String, String)>, key: &str, value: &str) {
-    if !env.iter().any(|(k, _)| k == key) {
-        env.push((key.to_string(), value.to_string()));
-    }
-}
-
-/// Where the claude CLI records its conversations (`~/.claude/projects`).
-pub fn claude_projects_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude").join("projects"))
-}
-
-/// The newest claude conversation recorded for `work_dir` under `projects_dir`:
-/// claude munges the cwd into a directory name (every non-alphanumeric byte
-/// becomes `-`) holding one `<session-id>.jsonl` per conversation. These are
-/// the sessions `claude --continue` resumes, and the ACP adapter loads the same
-/// ids, so an orphaned terminal session can adopt into ACP over its own
-/// history. `None` when nothing is recorded for that directory.
-pub fn latest_claude_session_id(projects_dir: &Path, work_dir: &Path) -> Option<String> {
-    let munged: String = work_dir
-        .display()
-        .to_string()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let mut newest: Option<(std::time::SystemTime, String)> = None;
-    for entry in std::fs::read_dir(projects_dir.join(munged)).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        let Ok(modified) = entry.metadata().and_then(|m| m.modified()) else {
-            continue;
-        };
-        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
-            newest = Some((modified, stem.to_string()));
-        }
-    }
-    newest.map(|(_, id)| id)
-}
-
-/// The default command for an npm-distributed ACP adapter: the installed bin
-/// when present (the deploy pins exact versions onto PATH), else `npx` fetching
-/// the package at launch (the dev-machine path).
-fn npm_adapter_cmd(bin: &str, package: &str) -> String {
-    format!("command -v {bin} >/dev/null 2>&1 && exec {bin}; exec npx --yes {package}")
-}
-
-/// The `claude-agent-acp` adapter command: `WEAVER_CLAUDE_ACP_CMD` (env) wins,
-/// then the `acp.claude_cmd` setting, else the npm default.
-async fn claude_acp_cmd(db: &Db) -> String {
-    if let Ok(cmd) = std::env::var("WEAVER_CLAUDE_ACP_CMD") {
-        let cmd = cmd.trim();
-        if !cmd.is_empty() {
-            return cmd.to_string();
-        }
-    }
-    if let Some(cmd) = weaver_core::config::get(db, "acp.claude_cmd")
-        .await
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return cmd;
-    }
-    npm_adapter_cmd("claude-agent-acp", "@agentclientprotocol/claude-agent-acp")
-}
-
-/// The `codex-acp` adapter command: `WEAVER_CODEX_ACP_CMD` (env) wins, then the
-/// `acp.codex_cmd` setting, else the npm default (the package bundles a
-/// compatible `@openai/codex`).
-async fn codex_acp_cmd(db: &Db) -> String {
-    if let Ok(cmd) = std::env::var("WEAVER_CODEX_ACP_CMD") {
-        let cmd = cmd.trim();
-        if !cmd.is_empty() {
-            return cmd.to_string();
-        }
-    }
-    if let Some(cmd) = weaver_core::config::get(db, "acp.codex_cmd")
-        .await
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return cmd;
-    }
-    npm_adapter_cmd("codex-acp", "@agentclientprotocol/codex-acp")
-}
-
-/// An operator override for an ACP adapter command: an env var wins, then a
-/// config setting.
-async fn acp_cmd_override(db: &Db, env_var: &str, setting: &str) -> Option<String> {
-    if let Ok(cmd) = std::env::var(env_var) {
-        let cmd = cmd.trim();
-        if !cmd.is_empty() {
-            return Some(cmd.to_string());
-        }
-    }
-    weaver_core::config::get(db, setting)
-        .await
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Opencode's built-in ACP server (`opencode acp`); `WEAVER_OPENCODE_ACP_CMD`
-/// or the `acp.opencode_cmd` setting override it.
-async fn opencode_acp_cmd(db: &Db) -> String {
-    acp_cmd_override(db, "WEAVER_OPENCODE_ACP_CMD", "acp.opencode_cmd")
-        .await
-        .unwrap_or_else(|| "opencode acp".to_string())
-}
-
-/// Cursor's built-in ACP server (`cursor-agent acp`, or `cursor agent acp`);
-/// `WEAVER_CURSOR_ACP_CMD` or the `acp.cursor_cmd` setting override it.
-async fn cursor_agent_acp_cmd(db: &Db) -> String {
-    if let Some(cmd) = acp_cmd_override(db, "WEAVER_CURSOR_ACP_CMD", "acp.cursor_cmd").await {
-        return cmd;
-    }
-    format!("{} acp", cursor_agent_bin().await.unwrap_or("cursor-agent"))
-}
-
-/// Apply Loom's Codex policy on top of the shared provider login and any
-/// operator-supplied adapter config.
-///
-/// `agent` mode's on-request approval policy needs Loom in the loop to apply
-/// its deterministic one-shot decisions, so the default reviewer is `user`
-/// unless `CODEX_CONFIG` already names one. Weaver commands still need to
-/// reach Loom from inside that sandbox, so `agent` mode also enables Codex's
-/// network proxy for the control plane and, when GitHub auth is enabled, GitHub.
-fn configure_codex_acp(
-    env: &mut Vec<(String, String)>,
-    model: &str,
-    effort: &str,
-    codex_mode: &str,
-) -> Result<Vec<String>> {
-    let mut config = match env
-        .iter()
-        .rev()
-        .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
-    {
-        Some(value) => serde_json::from_str::<Value>(value).context("invalid CODEX_CONFIG JSON")?,
-        None => Value::Object(codex_acp_config(model, effort)),
-    };
-    let config = config
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("CODEX_CONFIG must be a JSON object"))?;
-    if codex_mode.trim() == CODEX_AGENT_MODE {
-        config
-            .entry("approvals_reviewer".to_string())
-            .or_insert_with(|| json!("user"));
-
-        let sandbox = config
-            .entry("sandbox_workspace_write".to_string())
-            .or_insert_with(|| json!({}));
-        let sandbox = sandbox
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("CODEX_CONFIG.sandbox_workspace_write must be a JSON object"))?;
-        sandbox.insert("network_access".to_string(), json!(true));
-    }
-    let features = config
-        .entry("features".to_string())
-        .or_insert_with(|| json!({}));
-    let features = features
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("CODEX_CONFIG.features must be a JSON object"))?;
-    features.insert("apps".to_string(), json!(false));
-    if codex_mode.trim() == CODEX_AGENT_MODE {
-        let proxy = features
-            .entry("network_proxy".to_string())
-            .or_insert_with(|| json!({}));
-        if proxy.is_boolean() {
-            *proxy = json!({});
-        }
-        let proxy = proxy
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("CODEX_CONFIG.features.network_proxy must be a JSON object"))?;
-        proxy.insert("enabled".to_string(), json!(true));
-        // The Docker control-plane alias resolves to a private address. Domain
-        // allow rules alone do not bypass Codex's separate private-network gate.
-        proxy.insert("allow_local_binding".to_string(), json!(true));
-        let api_host = env
-            .iter()
-            .rev()
-            .find_map(|(name, value)| (name == "WEAVER_API").then_some(value))
-            .map(|value| reqwest::Url::parse(value))
-            .transpose()
-            .context("invalid session WEAVER_API URL")?
-            .and_then(|url| url.host_str().map(str::to_string));
-        let domains = proxy
-            .entry("domains".to_string())
-            .or_insert_with(|| json!({}));
-        let domains = domains.as_object_mut().ok_or_else(|| {
-            anyhow!("CODEX_CONFIG.features.network_proxy.domains must be a JSON object")
-        })?;
-        for host in ["127.0.0.1", "localhost"]
-            .into_iter()
-            .chain(api_host.as_deref())
-        {
-            domains.insert(host.to_string(), json!("allow"));
-        }
-        if env.iter().any(|(name, value)| {
-            name == "LOOM_GITHUB_AUTH_MODE" && matches!(value.as_str(), "broker" | "direct")
-        }) {
-            // Credential brokerage and GitHub transport need separate network
-            // access. Preserve an operator's explicit GitHub deny rule.
-            for host in ["github.com", "api.github.com"] {
-                domains.entry(host.to_string()).or_insert(json!("allow"));
-            }
-        }
-    }
-
-    // The adapter supplies its own sandbox policy on every turn. Configured
-    // writable roots must also travel in the ACP session's additionalDirectories.
-    let mut additional_directories: Vec<String> = config
-        .get("sandbox_workspace_write")
-        .and_then(|sandbox| sandbox.get("writable_roots"))
-        .map(|roots| serde_json::from_value(roots.clone()))
-        .transpose()
-        .context("CODEX_CONFIG.sandbox_workspace_write.writable_roots must be an array of paths")?
-        .unwrap_or_default();
-    anyhow::ensure!(
-        additional_directories
-            .iter()
-            .all(|root| Path::new(root).is_absolute()),
-        "CODEX_CONFIG.sandbox_workspace_write.writable_roots must contain absolute paths"
-    );
-    let mut seen = HashSet::new();
-    additional_directories.retain(|root| seen.insert(root.clone()));
-
-    env.retain(|(name, _)| name != "CODEX_CONFIG");
-    env.push((
-        "CODEX_CONFIG".to_string(),
-        Value::Object(config.clone()).to_string(),
-    ));
-    Ok(additional_directories)
-}
-
-fn codex_acp_config(model: &str, effort: &str) -> Map<String, Value> {
-    let mut cfg = Map::new();
-    let model = model.trim();
-    if !model.is_empty() {
-        cfg.insert("model".to_string(), json!(model));
-    }
-    if let Some(e) = effort_flag(effort) {
-        cfg.insert("model_reasoning_effort".to_string(), json!(e));
-    }
-    cfg
-}
-
 /// The mode id to send through `session/set_mode` for a launch.
 ///
 /// A custom agent's mode namespace is the operator's own, so it passes through
@@ -1784,83 +1088,9 @@ fn launch_mode(runtime: &str, custom: Option<&CustomAgent>, mode: &str) -> Resul
         None => anyhow::bail!(
             "{} has no '{mode}' mode (modes: {})",
             kind.as_str(),
-            kind.acp_modes().join(", ")
+            crate::harnesses::acp_modes(kind).join(", ")
         ),
     }
-}
-
-/// Map the launch mode onto a codex-acp `INITIAL_AGENT_MODE` id. The create API
-/// speaks the claude-flavored vocabulary; codex's own ids pass through, so an
-/// operator can name `read-only`/`agent`/`agent-full-access` directly. An id
-/// codex has no equivalent for is rejected rather than silently booting in
-/// `agent` — a different permission posture than the caller asked for.
-fn codex_acp_mode(mode: &str) -> Result<String> {
-    match acp_mode_for(BuiltinAgentKind::Codex, mode) {
-        Some(mapped) => Ok(mapped.to_string()),
-        None => Err(anyhow::anyhow!(
-            "codex has no '{mode}' mode (modes: {})",
-            BuiltinAgentKind::Codex.acp_modes().join(", ")
-        )),
-    }
-}
-
-/// The `_meta.claudeCode.options` object for the claude adapter — only the
-/// fields that are configured (model, the primer as `appendSystemPrompt`, the
-/// permission mode). `None` when nothing is set.
-fn claude_acp_meta(
-    model: &str,
-    primer: Option<&str>,
-    mode: &str,
-    restricted: bool,
-    allowed_tools_json: &str,
-) -> Option<Value> {
-    let mut options = Map::new();
-    let model = model.trim();
-    if !model.is_empty() {
-        options.insert("model".to_string(), json!(model));
-    }
-    if let Some(p) = primer.map(str::trim).filter(|s| !s.is_empty()) {
-        options.insert("appendSystemPrompt".to_string(), json!(p));
-    }
-    let mode = mode.trim();
-    if !mode.is_empty() {
-        options.insert("permissionMode".to_string(), json!(mode));
-    }
-    let allowed_tools: Vec<String> = serde_json::from_str(allowed_tools_json).unwrap_or_default();
-    if restricted {
-        let mut tools = Vec::<String>::new();
-        for rule in &allowed_tools {
-            let Some(name) = crate::profile::allowed_tool_name(rule) else {
-                continue;
-            };
-            // MCP tools are contributed by the server below. `Read` rules also
-            // govern Claude's built-in Glob/Grep paths, so expose that complete
-            // read-only trio without adding unscoped allow rules.
-            let visible = if name == "Read" {
-                &["Read", "Glob", "Grep"][..]
-            } else if name.starts_with("mcp__") {
-                &[]
-            } else {
-                if !tools.iter().any(|existing| existing == name) {
-                    tools.push(name.to_string());
-                }
-                continue;
-            };
-            for visible_name in visible {
-                if !tools.iter().any(|existing| existing == visible_name) {
-                    tools.push((*visible_name).to_string());
-                }
-            }
-        }
-        options.insert("allowedTools".to_string(), json!(allowed_tools));
-        options.insert("tools".to_string(), json!(tools));
-        options.insert("settingSources".to_string(), json!([]));
-        options.insert("strictMcpConfig".to_string(), json!(true));
-    }
-    if options.is_empty() {
-        return None;
-    }
-    Some(json!({ "claudeCode": { "options": options } }))
 }
 
 /// Read a file's content, or `None` when the path is absent or unreadable.
@@ -1889,181 +1119,6 @@ pub async fn install_hooks(work_dir: &Path, loom_bin: &str, mode: HookMode) -> R
     tokio::fs::write(&path, serde_json::to_string_pretty(&root)?).await?;
     tracing::debug!(path = %path.display(), ?mode, "claude hooks installed");
     Ok(())
-}
-
-/// Pre-clear Claude Code's first-run interactive gates in the agent user's
-/// global `~/.claude.json` so a detached, unattended `claude` runs its task
-/// instead of stalling — or *quitting* — at a prompt no human can answer.
-///
-/// On a fresh, persisted container HOME these gates fire in sequence and each
-/// wedges the session (it sits at "launching" with no `loom status`, worktree
-/// idle). Each gate is state Claude records after a human answers once; we
-/// write the same state ahead of time. Everything here is additive and
-/// idempotent — only missing/false gates are set, existing config is preserved —
-/// so it is safe to re-run before every launch. Gates handled:
-///
-/// * `hasCompletedOnboarding` + `theme` — the first-run theme picker.
-/// * `projects.<repo-root>.hasTrustDialogAccepted` — the workspace-trust dialog.
-///   Claude resolves a git worktree back to its **main repo root** and records
-///   trust there, so trusting the root once covers every worktree under it.
-/// * `customApiKeyResponses.approved` — the "use this `ANTHROPIC_API_KEY`?"
-///   prompt, keyed by the key's last 20 chars; seeded only when that env var is
-///   set (i.e. the agent authenticates by API key).
-/// * `bypassPermissionsModeAccepted` — the one-time "you're in Bypass
-///   Permissions mode" confirmation, **which defaults to *exit***. Seeded only
-///   when this launch runs with a bypass flag, since the dialog only appears
-///   then.
-pub async fn seed_claude_launch_gates(work_dir: &Path, model: &str, effort: &str) -> Result<()> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        tracing::debug!("HOME unset; skipping claude launch-gate seed");
-        return Ok(());
-    };
-    let path = home.join(".claude.json");
-    // Read any existing config, distinguishing "absent" (fine — start fresh) from
-    // "present but unparseable" (bail). On a parse error we must NOT fall back to
-    // `{}` and write: that would clobber a real config that's momentarily
-    // truncated or mid-write (e.g. a concurrent `claude` writing the file).
-    let mut root: Value = match tokio::fs::read_to_string(&path).await {
-        Ok(s) if s.trim().is_empty() => json!({}),
-        Ok(s) => match serde_json::from_str(&s) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e,
-                    "~/.claude.json present but unparseable; skipping launch-gate \
-                     seed rather than overwriting it");
-                return Ok(());
-            }
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-
-    let launch_args = combine_args(model, effort);
-    let bypass = launch_args.contains("--dangerously-skip-permissions")
-        || launch_args.contains("bypassPermissions");
-    // Last 20 chars, long enough to slice (see doc comment above).
-    let api_key_tail = std::env::var("ANTHROPIC_API_KEY")
-        .ok()
-        .filter(|k| k.len() >= 20)
-        .map(|k| k[k.len() - 20..].to_string());
-    let repo_root = match weaver_core::git::repo_root(work_dir).await {
-        Ok(r) => Some(r.to_string_lossy().into_owned()),
-        Err(e) => {
-            tracing::debug!(work_dir = %work_dir.display(), error = %e,
-                "could not resolve repo root for trust seed");
-            None
-        }
-    };
-
-    let seed = GateSeed {
-        bypass,
-        api_key_tail: api_key_tail.as_deref(),
-        repo_root: repo_root.as_deref(),
-    };
-    if !apply_launch_gates(&mut root, &seed) {
-        return Ok(());
-    }
-
-    tokio::fs::write(&path, serde_json::to_string_pretty(&root)?)
-        .await
-        .with_context(|| format!("seeding {}", path.display()))?;
-    // claude writes this file 0600; preserve that posture.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await;
-    }
-    tracing::info!(path = %path.display(), bypass, "seeded claude launch gates");
-    Ok(())
-}
-
-/// The environment-derived inputs for [`apply_launch_gates`], gathered by
-/// [`seed_claude_launch_gates`] so the merge itself is a pure function.
-struct GateSeed<'a> {
-    bypass: bool,
-    /// `ANTHROPIC_API_KEY`'s last 20 chars, if set.
-    api_key_tail: Option<&'a str>,
-    repo_root: Option<&'a str>,
-}
-
-/// Merge the first-run gate state into a parsed `.claude.json` value. Pure,
-/// additive, and idempotent: only missing or `false` keys are written and every
-/// existing value is preserved, so re-running is a no-op and a user's real config
-/// is never clobbered. Returns whether anything changed. Split out from
-/// [`seed_claude_launch_gates`] (which does the env/fs/git I/O) so these merge
-/// paths are unit-testable without touching HOME or a git repo.
-fn apply_launch_gates(root: &mut Value, seed: &GateSeed) -> bool {
-    if !root.is_object() {
-        *root = json!({});
-    }
-    let obj = root.as_object_mut().expect("root is an object");
-    let mut changed = false;
-
-    // 1. Onboarding / theme picker.
-    if obj.get("hasCompletedOnboarding").and_then(Value::as_bool) != Some(true) {
-        obj.insert("hasCompletedOnboarding".into(), json!(true));
-        changed = true;
-    }
-    if !obj.contains_key("theme") {
-        obj.insert("theme".into(), json!("dark"));
-        changed = true;
-    }
-
-    // 2. Bypass-permissions acceptance — only when we launch in that mode.
-    if seed.bypass
-        && obj
-            .get("bypassPermissionsModeAccepted")
-            .and_then(Value::as_bool)
-            != Some(true)
-    {
-        obj.insert("bypassPermissionsModeAccepted".into(), json!(true));
-        changed = true;
-    }
-
-    // 3. Ambient ANTHROPIC_API_KEY approval (keyed by the key's last 20 chars).
-    if let Some(tail) = seed.api_key_tail {
-        let entry = obj
-            .entry("customApiKeyResponses")
-            .or_insert_with(|| json!({"approved": [], "rejected": []}));
-        if !entry.is_object() {
-            *entry = json!({"approved": [], "rejected": []});
-        }
-        let entry = entry.as_object_mut().unwrap();
-        if !entry.get("approved").map(Value::is_array).unwrap_or(false) {
-            entry.insert("approved".into(), json!([]));
-        }
-        let approved = entry.get_mut("approved").unwrap().as_array_mut().unwrap();
-        if !approved.iter().any(|v| v.as_str() == Some(tail)) {
-            approved.push(json!(tail));
-            changed = true;
-        }
-        if !entry.contains_key("rejected") {
-            entry.insert("rejected".into(), json!([]));
-        }
-    }
-
-    // 4. Workspace trust, recorded at the worktree's main repo root.
-    if let Some(repo_root) = seed.repo_root {
-        let projects = obj.entry("projects").or_insert_with(|| json!({}));
-        if !projects.is_object() {
-            *projects = json!({});
-        }
-        let proj = projects
-            .as_object_mut()
-            .unwrap()
-            .entry(repo_root.to_string())
-            .or_insert_with(|| json!({}));
-        if !proj.is_object() {
-            *proj = json!({});
-        }
-        let proj = proj.as_object_mut().unwrap();
-        if proj.get("hasTrustDialogAccepted").and_then(Value::as_bool) != Some(true) {
-            proj.insert("hasTrustDialogAccepted".into(), json!(true));
-            changed = true;
-        }
-    }
-
-    changed
 }
 
 // ---------------------------------------------------------------------------
@@ -2509,6 +1564,10 @@ fn transient_prompt_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harnesses::claude::{claude_command, combine_args, effort_args, model_args};
+    use crate::harnesses::codex::codex_command;
+    use crate::harnesses::cursor::cursor_agent_command;
+    use crate::harnesses::opencode::opencode_command;
     use std::path::Path;
 
     #[cfg(unix)]
@@ -2681,7 +1740,7 @@ mod tests {
 
     #[test]
     fn claude_accepts_versioned_model_names() {
-        let metadata = CLAUDE_AGENT_TYPE.metadata();
+        let metadata = crate::harnesses::claude::HARNESS.metadata();
 
         assert!(validate_model(&metadata, "claude-opus-4-8").is_ok());
     }
@@ -2689,7 +1748,7 @@ mod tests {
     #[tokio::test]
     async fn a_stored_catalogue_model_saves_though_the_static_list_omits_it() {
         let db = crate::db::connect_in_memory().await.unwrap();
-        let metadata = CODEX_AGENT_TYPE.metadata();
+        let metadata = crate::harnesses::codex::HARNESS.metadata();
         // Codex has a fixed list, so a model the probe discovered is not in it.
         assert!(validate_model(&metadata, "gpt-7-nova").is_err());
         sqlx::query(
@@ -2707,16 +1766,18 @@ mod tests {
             .await
             .is_err());
         // A raw-model harness ignores both lists entirely.
-        assert!(
-            validate_model_of(&db, &CLAUDE_AGENT_TYPE.metadata(), "anything")
-                .await
-                .is_ok()
-        );
+        assert!(validate_model_of(
+            &db,
+            &crate::harnesses::claude::HARNESS.metadata(),
+            "anything"
+        )
+        .await
+        .is_ok());
     }
 
     #[test]
     fn validate_effort_does_not_gate_builtins_on_the_store() {
-        let opencode = OPENCODE_AGENT_TYPE.metadata();
+        let opencode = crate::harnesses::opencode::HARNESS.metadata();
         assert!(validate_effort(&opencode, "glm-flash", "not-in-any-list").is_ok());
         assert!(validate_effort(&opencode, "glm-flash", "").is_ok());
 
@@ -2739,10 +1800,16 @@ mod tests {
                 "{kind} should appear in the picker list"
             );
         }
-        assert!(OPENCODE_AGENT_TYPE.metadata().supports_acp);
-        assert!(CURSOR_AGENT_TYPE.metadata().supports_acp);
-        assert!(OPENCODE_AGENT_TYPE.metadata().models.is_empty());
-        assert!(CURSOR_AGENT_TYPE.metadata().models.is_empty());
+        assert!(crate::harnesses::opencode::HARNESS.metadata().supports_acp);
+        assert!(crate::harnesses::cursor::HARNESS.metadata().supports_acp);
+        assert!(crate::harnesses::opencode::HARNESS
+            .metadata()
+            .models
+            .is_empty());
+        assert!(crate::harnesses::cursor::HARNESS
+            .metadata()
+            .models
+            .is_empty());
     }
 
     #[test]
@@ -2788,26 +1855,6 @@ mod tests {
             resolve_protocol(&meta_for("opencode", "acp", true), Some("terminal")).unwrap(),
             "terminal"
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn is_executable_file_rejects_directories_and_unset_execute_bits() {
-        let dir = tempfile::tempdir().unwrap();
-
-        assert!(!is_executable_file(&dir.path().join("missing")));
-
-        let subdir = dir.path().join("subdir");
-        std::fs::create_dir(&subdir).unwrap();
-        assert!(!is_executable_file(&subdir));
-
-        let plain = dir.path().join("plain");
-        std::fs::write(&plain, "#!/bin/sh\n").unwrap();
-        assert!(!is_executable_file(&plain));
-
-        let script = dir.path().join("script");
-        write_executable(&script, "#!/bin/sh\n");
-        assert!(is_executable_file(&script));
     }
 
     fn custom_agent(name: &str, setup: &str, launch: &str, resume: &str) -> CustomAgent {
@@ -3154,108 +2201,6 @@ mod tests {
         assert_eq!(script, "claude --continue; exec \"${SHELL:-/bin/sh}\"");
     }
 
-    fn seed<'a>(
-        bypass: bool,
-        api_key_tail: Option<&'a str>,
-        repo_root: Option<&'a str>,
-    ) -> GateSeed<'a> {
-        GateSeed {
-            bypass,
-            api_key_tail,
-            repo_root,
-        }
-    }
-
-    #[test]
-    fn seeds_all_gates_into_an_empty_config() {
-        let mut root = json!({});
-        assert!(apply_launch_gates(
-            &mut root,
-            &seed(true, Some("KEYTAIL0123456789abc"), Some("/repo"))
-        ));
-        assert_eq!(root["hasCompletedOnboarding"], json!(true));
-        assert_eq!(root["theme"], json!("dark"));
-        assert_eq!(root["bypassPermissionsModeAccepted"], json!(true));
-        assert_eq!(
-            root["customApiKeyResponses"]["approved"],
-            json!(["KEYTAIL0123456789abc"])
-        );
-        assert_eq!(
-            root["projects"]["/repo"]["hasTrustDialogAccepted"],
-            json!(true)
-        );
-    }
-
-    #[test]
-    fn is_idempotent_and_returns_false_on_a_second_pass() {
-        let mut root = json!({});
-        let s = seed(true, Some("KEYTAIL0123456789abc"), Some("/repo"));
-        assert!(apply_launch_gates(&mut root, &s));
-        let after_first = root.clone();
-        // A second pass changes nothing and reports no change.
-        assert!(!apply_launch_gates(&mut root, &s));
-        assert_eq!(root, after_first);
-        // The approved key is not duplicated.
-        assert_eq!(
-            root["customApiKeyResponses"]["approved"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn preserves_existing_user_config() {
-        // A real config the user already has: a chosen theme, an unrelated
-        // approved key, and an unrelated trusted project with extra fields.
-        let mut root = json!({
-            "theme": "light",
-            "hasCompletedOnboarding": true,
-            "customApiKeyResponses": { "approved": ["existing-key"], "rejected": ["nope"] },
-            "projects": { "/other": { "hasTrustDialogAccepted": true, "keep": 1 } },
-        });
-        assert!(apply_launch_gates(
-            &mut root,
-            &seed(false, Some("KEYTAIL0123456789abc"), Some("/repo"))
-        ));
-        // Existing values untouched...
-        assert_eq!(root["theme"], json!("light"));
-        assert_eq!(root["projects"]["/other"]["keep"], json!(1));
-        assert_eq!(root["customApiKeyResponses"]["rejected"], json!(["nope"]));
-        // ...new approved key appended alongside the existing one...
-        assert_eq!(
-            root["customApiKeyResponses"]["approved"],
-            json!(["existing-key", "KEYTAIL0123456789abc"])
-        );
-        // ...new project trusted, and (bypass=false) no bypass key written.
-        assert_eq!(
-            root["projects"]["/repo"]["hasTrustDialogAccepted"],
-            json!(true)
-        );
-        assert!(root.get("bypassPermissionsModeAccepted").is_none());
-    }
-
-    #[test]
-    fn omits_optional_gates_when_inputs_absent() {
-        let mut root = json!({});
-        assert!(apply_launch_gates(&mut root, &seed(false, None, None)));
-        // Onboarding/theme always seed; the env-dependent gates do not.
-        assert_eq!(root["hasCompletedOnboarding"], json!(true));
-        assert!(root.get("bypassPermissionsModeAccepted").is_none());
-        assert!(root.get("customApiKeyResponses").is_none());
-        assert!(root.get("projects").is_none());
-    }
-
-    #[test]
-    fn replaces_a_non_object_root() {
-        // A non-object root is reset rather than panicking.
-        let mut root = json!("not an object");
-        assert!(apply_launch_gates(&mut root, &seed(false, None, None)));
-        assert!(root.is_object());
-        assert_eq!(root["hasCompletedOnboarding"], json!(true));
-    }
-
     fn meta_for(kind: &str, protocol: &str, builtin: bool) -> AgentMetadata {
         AgentMetadata {
             kind: kind.to_string(),
@@ -3332,183 +2277,6 @@ mod tests {
         );
     }
 
-    fn codex_environment_config(env: &[(String, String)]) -> Value {
-        let config = env
-            .iter()
-            .find_map(|(name, value)| (name == "CODEX_CONFIG").then_some(value))
-            .unwrap();
-        serde_json::from_str(config).unwrap()
-    }
-
-    #[test]
-    fn codex_acp_config_carries_only_configured_fields() {
-        assert!(codex_acp_config("", "").is_empty());
-
-        let cfg = codex_acp_config("gpt-5.3-codex", "high");
-        assert_eq!(cfg["model"], "gpt-5.3-codex");
-        assert_eq!(cfg["model_reasoning_effort"], "high");
-
-        let model_only = codex_acp_config("gpt-5.3-codex", " ");
-        assert_eq!(model_only["model"], "gpt-5.3-codex");
-        assert!(model_only.get("model_reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn codex_acp_agent_mode_routes_approvals_to_loom() {
-        let mut env = vec![
-            (
-                "CODEX_CONFIG".to_string(),
-                r#"{"model":"operator","features":{"shell_snapshot":true,"apps":true}}"#
-                    .to_string(),
-            ),
-            (
-                "WEAVER_API".to_string(),
-                "http://control-plane:4321".to_string(),
-            ),
-        ];
-
-        configure_codex_acp(&mut env, "ignored", "high", "agent").unwrap();
-
-        let config = codex_environment_config(&env);
-        assert_eq!(config["model"], "operator");
-        assert_eq!(config["approvals_reviewer"], "user");
-        assert_eq!(config["sandbox_workspace_write"]["network_access"], true);
-        assert_eq!(config["features"]["shell_snapshot"], true);
-        assert_eq!(config["features"]["apps"], false);
-        assert_eq!(config["features"]["network_proxy"]["enabled"], true);
-        assert_eq!(
-            config["features"]["network_proxy"]["allow_local_binding"],
-            true
-        );
-        for host in ["127.0.0.1", "localhost", "control-plane"] {
-            assert_eq!(
-                config["features"]["network_proxy"]["domains"][host],
-                "allow"
-            );
-        }
-        assert!(config["features"]["network_proxy"]["domains"]
-            .get("*")
-            .is_none());
-    }
-
-    #[test]
-    fn codex_acp_github_network_access_follows_the_credential_policy() {
-        for mode in ["broker", "direct", "disabled", ""] {
-            let mut env = vec![("LOOM_GITHUB_AUTH_MODE".to_string(), mode.to_string())];
-            configure_codex_acp(&mut env, "", "", "agent").unwrap();
-            let config = codex_environment_config(&env);
-            let domains = &config["features"]["network_proxy"]["domains"];
-            for host in ["github.com", "api.github.com"] {
-                if matches!(mode, "broker" | "direct") {
-                    assert_eq!(domains[host], "allow", "{mode}: {host}");
-                } else {
-                    assert!(domains.get(host).is_none(), "{mode}: {host}");
-                }
-            }
-            assert!(domains.get("*").is_none());
-        }
-
-        let mut env = vec![
-            ("LOOM_GITHUB_AUTH_MODE".to_string(), "broker".to_string()),
-            (
-                "CODEX_CONFIG".to_string(),
-                json!({"features": {"network_proxy": {"domains": {
-                    "api.github.com": "deny", "packages.example.com": "allow"
-                }}}})
-                .to_string(),
-            ),
-        ];
-        configure_codex_acp(&mut env, "", "", "agent").unwrap();
-        let config = codex_environment_config(&env);
-        let domains = &config["features"]["network_proxy"]["domains"];
-        assert_eq!(domains["api.github.com"], "deny");
-        assert_eq!(domains["packages.example.com"], "allow");
-    }
-
-    #[test]
-    fn codex_acp_rejects_invalid_writable_roots() {
-        for roots in [
-            serde_json::json!("/cache"),
-            serde_json::json!([1]),
-            serde_json::json!(["relative/cache"]),
-            serde_json::json!([""]),
-            Value::Null,
-        ] {
-            let mut env = vec![(
-                "CODEX_CONFIG".to_string(),
-                serde_json::json!({"sandbox_workspace_write": {"writable_roots": roots}})
-                    .to_string(),
-            )];
-            let error = configure_codex_acp(&mut env, "", "", "agent").unwrap_err();
-            assert!(error.to_string().contains("writable_roots"), "{error:#}");
-        }
-    }
-
-    #[test]
-    fn codex_acp_configuration_preserves_explicit_reviewer() {
-        let mut explicit_reviewer = vec![(
-            "CODEX_CONFIG".to_string(),
-            r#"{"approvals_reviewer":"auto_review"}"#.to_string(),
-        )];
-        configure_codex_acp(&mut explicit_reviewer, "", "", "agent").unwrap();
-        let config: Value = serde_json::from_str(&explicit_reviewer[0].1).unwrap();
-        assert_eq!(config["approvals_reviewer"], "auto_review");
-    }
-
-    #[test]
-    fn codex_acp_only_agent_mode_sets_a_default_reviewer() {
-        for mode in ["read-only", "agent-full-access"] {
-            let mut env = Vec::new();
-            configure_codex_acp(&mut env, "", "", mode).unwrap();
-            let config: Value = serde_json::from_str(&env[0].1).unwrap();
-            assert!(
-                config.get("approvals_reviewer").is_none(),
-                "{mode} must not set a default reviewer"
-            );
-            assert!(
-                config.get("sandbox_workspace_write").is_none(),
-                "{mode} must not change sandbox networking"
-            );
-            assert!(
-                config["features"].get("network_proxy").is_none(),
-                "{mode} must not start the sandbox network proxy"
-            );
-        }
-    }
-
-    #[test]
-    fn sessions_boot_in_auto_by_default() {
-        // Every ACP session boots in the provider-neutral `auto` posture unless
-        // overridden. Codex uses its workspace-write `agent` sandbox mode while
-        // Loom owns its one-shot approval decisions.
-        assert_eq!(DEFAULT_ACP_MODE, "auto");
-        assert_eq!(codex_acp_mode(DEFAULT_ACP_MODE).unwrap(), "agent");
-    }
-
-    #[test]
-    fn codex_acp_mode_maps_the_claude_vocabulary_and_passes_codex_ids_through() {
-        assert_eq!(
-            codex_acp_mode("bypassPermissions").unwrap(),
-            "agent-full-access"
-        );
-        assert_eq!(codex_acp_mode("acceptEdits").unwrap(), "agent");
-        assert_eq!(codex_acp_mode("default").unwrap(), "agent");
-        // Loom-owned auto-approval is configured separately; the sandbox remains
-        // `agent`.
-        assert_eq!(codex_acp_mode("auto").unwrap(), "agent");
-        assert_eq!(codex_acp_mode("").unwrap(), "agent");
-        assert_eq!(codex_acp_mode("plan").unwrap(), "read-only");
-        // Codex's own ids are honoured verbatim.
-        assert_eq!(codex_acp_mode("read-only").unwrap(), "read-only");
-        assert_eq!(
-            codex_acp_mode("agent-full-access").unwrap(),
-            "agent-full-access"
-        );
-        // An id codex has no equivalent for is rejected rather than silently
-        // booting in a different permission posture.
-        assert!(codex_acp_mode("nonsense").is_err());
-    }
-
     #[test]
     fn opencode_and_cursor_map_onto_the_modes_their_adapters_advertise() {
         // Both advertise exactly two modes; neither has accepted-edits or bypass.
@@ -3518,7 +2286,7 @@ mod tests {
             assert_eq!(acp_mode_for(kind, "acceptEdits"), None);
             assert_eq!(acp_mode_for(kind, "bypassPermissions"), None);
             assert_eq!(
-                kind.acp_modes(),
+                crate::harnesses::acp_modes(kind),
                 vec!["auto", "default", "plan"],
                 "{} must offer only what it can honour",
                 kind.as_str()
@@ -3538,7 +2306,7 @@ mod tests {
     #[test]
     fn every_harness_offers_the_postures_it_can_map() {
         for kind in BuiltinAgentKind::ALL {
-            for mode in kind.acp_modes() {
+            for mode in crate::harnesses::acp_modes(kind) {
                 assert!(
                     acp_mode_for(kind, mode).is_some(),
                     "{} advertises {mode} without a mapping",
@@ -3546,7 +2314,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(BuiltinAgentKind::Claude.acp_modes().len(), 5);
+        assert_eq!(
+            crate::harnesses::acp_modes(BuiltinAgentKind::Claude).len(),
+            5
+        );
     }
 
     /// A respawn feeds `Session.current_mode` — the adapter's id, not a Loom
@@ -3673,7 +2444,7 @@ mod tests {
         // codex full access round-trips through the launch mapping into the id
         // the gate recognizes.
         assert!(auto_approves_permissions(
-            &codex_acp_mode("bypassPermissions").unwrap()
+            acp_mode_for(BuiltinAgentKind::Codex, "bypassPermissions").unwrap()
         ));
         // Everything else must still prompt.
         for mode in ["auto", "acceptEdits", "default", "plan", "read-only", ""] {
@@ -3708,64 +2479,6 @@ mod tests {
             Some(BuiltinAgentKind::Claude),
             "bypassPermissions"
         ));
-    }
-
-    #[test]
-    fn push_env_default_defers_to_an_existing_key() {
-        let mut env = vec![(
-            "CODEX_CONFIG".to_string(),
-            "{\"model\":\"mine\"}".to_string(),
-        )];
-        push_env_default(&mut env, "CODEX_CONFIG", "{\"model\":\"ours\"}");
-        push_env_default(&mut env, "INITIAL_AGENT_MODE", "agent");
-        assert_eq!(env.len(), 2);
-        assert_eq!(env[0].1, "{\"model\":\"mine\"}");
-        assert_eq!(
-            env[1],
-            ("INITIAL_AGENT_MODE".to_string(), "agent".to_string())
-        );
-    }
-
-    #[test]
-    fn claude_acp_meta_sets_only_configured_fields() {
-        // Nothing configured → no _meta at all.
-        assert!(claude_acp_meta("", None, "", false, "[]").is_none());
-
-        let m =
-            claude_acp_meta("opus", Some("be careful"), "bypassPermissions", false, "[]").unwrap();
-        let opts = &m["claudeCode"]["options"];
-        assert_eq!(opts["model"], "opus");
-        assert_eq!(opts["appendSystemPrompt"], "be careful");
-        assert_eq!(opts["permissionMode"], "bypassPermissions");
-
-        // A blank primer is dropped; model/mode still ride.
-        let m2 = claude_acp_meta("sonnet", Some("  "), "plan", false, "[]").unwrap();
-        let opts2 = &m2["claudeCode"]["options"];
-        assert_eq!(opts2["model"], "sonnet");
-        assert!(opts2.get("appendSystemPrompt").is_none());
-
-        let restricted = claude_acp_meta(
-            "",
-            None,
-            "default",
-            true,
-            r#"["Read(./**)","mcp__loom__github_issue_view","mcp__loom__github_issue_comment"]"#,
-        )
-        .unwrap();
-        let restricted = &restricted["claudeCode"]["options"];
-        assert_eq!(restricted["settingSources"], json!([]));
-        assert_eq!(restricted["strictMcpConfig"], true);
-        assert_eq!(restricted["tools"], json!(["Read", "Glob", "Grep"]));
-        assert_eq!(
-            restricted["allowedTools"],
-            json!([
-                "Read(./**)",
-                "mcp__loom__github_issue_view",
-                "mcp__loom__github_issue_comment"
-            ])
-        );
-        assert!(restricted.get("mcpServers").is_none());
-        assert_eq!(opts2["permissionMode"], "plan");
     }
 
     #[tokio::test]

@@ -260,7 +260,7 @@ async fn validate_input(
                 bail!(
                     "{} has no '{mode}' mode (accepted: {})",
                     kind.as_str(),
-                    kind.acp_modes().join(", ")
+                    crate::agent_kind::acp_modes(kind).join(", ")
                 );
             }
         }

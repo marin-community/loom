@@ -97,7 +97,7 @@ fn handoff_mode_for(mode: &str, target: &str, source: &str) -> Result<String> {
         // source cannot tell us what its id meant.
         return Ok(mode.to_string());
     };
-    if source_kind == target_kind || target_kind.acp_modes().contains(&mode) {
+    if source_kind == target_kind || crate::agent_kind::acp_modes(target_kind).contains(&mode) {
         return Ok(mode.to_string());
     }
     let posture = crate::agent_kind::loom_mode_for(source_kind, mode).ok_or_else(|| {
