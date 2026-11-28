@@ -158,6 +158,20 @@ fn scope_session_data_home(
         // An operator-provided home is a deliberate per-deploy override.
         return Ok(());
     }
+    // Session ids are loom-generated, but the value reaches a path join —
+    // refuse anything that could name outside the weaver home rather than
+    // trust the generator.
+    if session_id.is_empty()
+        || session_id == "."
+        || session_id == ".."
+        || session_id.contains(['/', '\\'])
+    {
+        tracing::warn!(
+            session = %session_id,
+            "the opencode session id is not a safe directory name; its data home is not isolated"
+        );
+        return Ok(());
+    }
     let data = weaver_core::db::weaver_home()
         .join("opencode-data")
         .join(session_id);
