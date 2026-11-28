@@ -1,6 +1,6 @@
 import { test as base, expect } from '@playwright/test';
 import { type ChildProcess, execFileSync, spawn } from 'child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
 
@@ -22,6 +22,23 @@ const FAKE_ACP_AGENT = join(
  *  deterministic. */
 function fakeAcpAgentCmd(): string {
   return `node ${FAKE_ACP_AGENT}`;
+}
+
+/** Stub the harness CLIs onto the worker's PATH. The picker only offers
+ *  harnesses whose binary is installed, so without this the model-picker
+ *  journey (catalog-picker.spec.ts) could pick a harness on a developer
+ *  machine but not in CI. Nothing ever runs a stub: every builtin's ACP
+ *  command is pinned to the fake adapter, and no spec launches a builtin
+ *  terminal session. Returns the directory to prepend to PATH. */
+function stubHarnessBinDir(parent: string): string {
+  const dir = join(parent, 'harness-bin');
+  mkdirSync(dir, { recursive: true });
+  for (const name of ['claude', 'codex', 'opencode', 'cursor-agent']) {
+    const stub = join(dir, name);
+    writeFileSync(stub, '#!/bin/sh\nexit 0\n');
+    chmodSync(stub, 0o755);
+  }
+  return dir;
 }
 const FRONTEND_DIR = join(WEAVER_ROOT, 'crates', 'loom', 'frontend');
 const DIST_INDEX = join(WEAVER_ROOT, 'crates', 'loom', 'static', 'dist', 'index.html');
@@ -399,6 +416,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
   server: [
     async ({}, use, workerInfo) => {
       const tmpDir = mkdtempSync(join(tmpdir(), 'weaver-e2e-'));
+      const harnessBin = stubHarnessBinDir(tmpDir);
       const weaverHome = join(tmpDir, 'home');
       const dbPath = join(tmpDir, 'db.sqlite');
       const repoPath = join(tmpDir, 'repo');
@@ -415,6 +433,7 @@ export const test = base.extend<{ weaver: WeaverFixture }, WorkerFixtures>({
       // alongside it.
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
+        PATH: `${harnessBin}:${process.env.PATH ?? ''}`,
         WEAVER_HOME: weaverHome,
         WEAVER_DB: dbPath,
         WEAVER_TAPESTRY_DIR: join(weaverHome, 'sock'),
